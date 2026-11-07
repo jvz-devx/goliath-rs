@@ -239,7 +239,7 @@ and visibly renders the blue dust wall. Its raw result is `e12-wall-render.json.
 The original moving screenshot was taken after passing the wall and did not
 show the particles. It was discarded, not presented as rendered proof.
 
-![Blue particle wall rendered by the real Horizon client](data/E14/e12-wall-visible.png)
+A screenshot confirms the blue particle wall renders in the real Horizon client. It is kept local, as explained under "Screenshots".
 
 ## Commands and failures kept
 
