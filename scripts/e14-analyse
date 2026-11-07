@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Derive E14's speed, stall and correction measurements without trimming raw trials."""
+
+import argparse
+import gzip
+import json
+import math
+import statistics
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E14'
+
+
+def projected(row, leg):
+    return sum((row['pos'][axis] - leg['start'][axis]) * leg['direction'][i]
+               for i, axis in enumerate((0, 2)))
+
+
+def interpolate(rows, at):
+    if not rows or at < rows[0]['ns'] or at > rows[-1]['ns']:
+        raise ValueError('window is not fully sampled')
+    for left, right in zip(rows, rows[1:]):
+        if left['ns'] <= at <= right['ns']:
+            fraction = (at - left['ns']) / (right['ns'] - left['ns'])
+            return [a + (b - a) * fraction for a, b in zip(left['pos'], right['pos'])]
+    return rows[-1]['pos']
+
+
+def speed(rows, at, width=1_000_000_000):
+    before, after = interpolate(rows, at - width / 2), interpolate(rows, at + width / 2)
+    return math.hypot(after[0] - before[0], after[2] - before[2]) / (width / 1e9)
+
+
+def leg_metrics(run, leg):
+    rows = [row for row in run['frames'] if leg['began_ns'] <= row['ns'] <= leg['ended_ns']]
+    if not rows:
+        raise ValueError('leg has no client frames')
+    halfway = math.hypot(leg['goal'][0] - leg['start'][0], leg['goal'][2] - leg['start'][2]) / 2
+    crossed = next((row['ns'] for row in rows if projected(row, leg) >= halfway), None)
+    if crossed is None:
+        return {'crossed': False, 'frames': len(rows), 'reached': leg['reached']}
+    # Keep the last observed pose for each physics tick. Repeated render frames
+    # of that tick are normal, not a physics stall.
+    ticks = {}
+    for row in rows:
+        ticks[row['tick']] = row
+    ticks = list(ticks.values())
+    window = [row for row in rows if abs(row['ns'] - crossed) <= 500_000_000]
+    tick_window = [row for row in ticks if abs(row['ns'] - crossed) <= 600_000_000]
+    worst_stall = backward = forward_jump = 0
+    still_since = None
+    for previous, current in zip(tick_window, tick_window[1:]):
+        advance = projected(current, leg) - projected(previous, leg)
+        if advance <= 1e-6:
+            still_since = previous['ns'] if still_since is None else still_since
+            worst_stall = max(worst_stall, (current['ns'] - still_since) / 1e6)
+        else:
+            still_since = None
+        backward = max(backward, -advance)
+        forward_jump = max(forward_jump, advance)
+    corrections = [row for row in run.get('wire', []) if row['kind'] == 'correction'
+                   and leg['began_ns'] <= row['ns'] <= leg['ended_ns'] + 100_000_000]
+    worst_correction = 0
+    for packet in corrections:
+        sent = next((row for row in reversed(run['wire']) if row['kind'] == 'sent_position'
+                     and leg['began_ns'] <= row['ns'] < packet['ns']), None)
+        if sent is None:
+            raise ValueError('correction lacks a preceding client-sent position')
+        change = [packet['pos'][axis] if packet['relatives'] & (1 << axis)
+                  else packet['pos'][axis] - sent['pos'][axis] for axis in (0, 2)]
+        worst_correction = max(worst_correction, -sum(a * b for a, b in zip(change, leg['direction'])))
+    frame_gaps = [b['frame'] - a['frame'] - 1 for a, b in zip(window, window[1:])]
+    server_coverage = {}
+    for label, samples in run.get('servers', {}).items():
+        samples = [row for row in samples if abs(row['ns'] - crossed) <= 500_000_000]
+        distinct = sorted(set(row['tick'] for row in samples))
+        server_coverage[label] = sum(max(0, b - a - 1) for a, b in zip(distinct, distinct[1:]))
+    return {'crossed': True, 'reached': leg['reached'], 'crossed_ns': crossed,
+            'frames': len(rows), 'missing_window_frames': sum(frame_gaps),
+            'missing_window_server_ticks': server_coverage,
+            'speed_1s_bps': speed(rows, crossed), 'worst_stall_ms': worst_stall,
+            'backward_step_blocks': backward, 'max_forward_tick_step_blocks': forward_jump,
+            'backward_correction_lower_bound_blocks': worst_correction,
+            'corrections': len(corrections),
+            'max_window_frame_interval_ms': max((b['ns'] - a['ns']) / 1e6
+                for a, b in zip(rows, rows[1:]) if a['ns'] <= crossed + 500_000_000
+                and b['ns'] >= crossed - 500_000_000),
+            'max_leg_frame_interval_ms': max((b['ns'] - a['ns']) / 1e6 for a, b in zip(rows, rows[1:])),
+            'motion_horizontal_1s_mean_blocks_per_tick': sum(math.hypot(row['velocity'][0], row['velocity'][2])
+                                                          for row in window) / len(window),
+            'vertical_range': [min(row['pos'][1] for row in window), max(row['pos'][1] for row in window)]}
+
+
+def analyse(run):
+    result = {'status': run['status'], 'errors': run.get('errors', []), 'trials': [], 'baselines': []}
+    baselines = []
+    for baseline in run['baselines']:
+        try:
+            metrics = leg_metrics(run, baseline)
+        except ValueError as error:
+            metrics = {'error': str(error)}
+        baselines.append((baseline, metrics))
+        result['baselines'].append({'mode': baseline['mode'], 'direction': baseline['direction'], **metrics})
+    for index, leg in enumerate(run['trials']):
+        row = {'index': index, 'mode': leg['mode'], 'source': leg['source'], 'target': leg['target'],
+               'handoffs': leg['generation_after'] - leg['generation_before'],
+               'owner_matches': leg['owner_after'] == leg['target']}
+        try:
+            row.update(leg_metrics(run, leg))
+            baseline, reference = next((baseline, metrics) for baseline, metrics in baselines
+                                       if baseline['mode'] == leg['mode']
+                                       and baseline['direction'] == leg['direction'])
+            if reference.get('crossed') and not row.get('crossed'):
+                # This is a labelled counterfactual approach window, never
+                # a fabricated actual crossing time or passing crossing.
+                expected = leg['began_ns'] + reference['crossed_ns'] - baseline['began_ns']
+                samples = [frame for frame in run['frames'] if leg['began_ns'] <= frame['ns'] <= leg['ended_ns']]
+                try:
+                    row['nominal_crossing_window_speed_bps'] = speed(samples, expected)
+                    row['nominal_crossing_window_speed_ratio'] = row['nominal_crossing_window_speed_bps'] / reference['speed_1s_bps']
+                except ValueError as error:
+                    row['nominal_window_error'] = str(error)
+                row['baseline_speed_1s_bps'] = reference['speed_1s_bps']
+                unchanged = next((frame for frame in samples if all(
+                    math.dist(frame['pos'], following['pos']) < 1e-6
+                    for following in samples[samples.index(frame):])), samples[-1])
+                row['observed_terminal_stall_ms'] = (samples[-1]['ns'] - unchanged['ns']) / 1e6
+                current = samples[-1]['pos']
+                row['missing_underfoot_column'] = [math.floor(current[0]) // 16, math.floor(current[2]) // 16]
+                known = set()
+                for packet in run.get('wire', []):
+                    if packet['ns'] > samples[-1]['ns']:
+                        continue
+                    if packet['kind'] == 'chunk':
+                        known.add(tuple(packet['chunk']))
+                    elif packet['kind'] == 'forget_chunk':
+                        known.discard(tuple(packet['chunk']))
+                row['underfoot_column_received_and_not_forgotten'] = tuple(row['missing_underfoot_column']) in known
+            if not reference.get('crossed') or not row.get('crossed'):
+                raise ValueError('wall or no-wall walk never reached its middle')
+            row['baseline_speed_1s_bps'] = reference['speed_1s_bps']
+            row['speed_ratio'] = row['speed_1s_bps'] / reference['speed_1s_bps']
+            row['extra_stall_ms'] = row['worst_stall_ms'] - reference['worst_stall_ms']
+            row['baseline_stall_ms'] = reference['worst_stall_ms']
+            row['excess_forward_tick_step_blocks'] = row['max_forward_tick_step_blocks'] - reference['max_forward_tick_step_blocks']
+            row['timing_unresolved'] = max(row['max_window_frame_interval_ms'], reference['max_window_frame_interval_ms']) > 100
+            row['pass'] = (row['reached'] and row['owner_matches'] and row['handoffs'] >= 1
+                           and row['speed_ratio'] >= .95
+                           and row['backward_correction_lower_bound_blocks'] <= .1
+                           and not row['missing_window_frames']
+                           and not any(row['missing_window_server_ticks'].values())
+                           and not row['timing_unresolved'])
+        except (ValueError, StopIteration) as error:
+            row['error'] = str(error)
+            row['pass'] = False
+        result['trials'].append(row)
+    valid = [row for row in result['trials'] if 'speed_ratio' in row and not row.get('timing_unresolved')]
+    result['summary'] = {'attempts': len(result['trials']), 'measured': len(valid),
+                         'passed': sum(row.get('pass', False) for row in result['trials']),
+                         'worst_speed_ratio': min((row['speed_ratio'] for row in valid), default=None),
+                         'worst_stall_ms': max((row['worst_stall_ms'] for row in valid), default=None),
+                         'worst_extra_stall_ms': max((row['extra_stall_ms'] for row in valid), default=None),
+                         'max_backward_correction_lower_bound_blocks': max(
+                             (row['backward_correction_lower_bound_blocks'] for row in valid), default=None)}
+    result['summary']['blocked_approaches'] = sum(not row.get('crossed', False) for row in result['trials'])
+    result['summary']['worst_observed_terminal_stall_ms'] = max(
+        (row.get('observed_terminal_stall_ms', 0) for row in result['trials']), default=0)
+    result['modes'] = {}
+    for mode in ('walk', 'sprint', 'sprint-jump', 'fly'):
+        rows = [row for row in result['trials'] if row['mode'] == mode]
+        valid_rows = [row for row in rows if 'speed_ratio' in row and not row.get('timing_unresolved')]
+        ratios = [row['speed_ratio'] for row in valid_rows]
+        result['modes'][mode] = {'attempts': len(rows), 'crossed': sum(row.get('crossed', False) for row in rows),
+            'measured': len(valid_rows), 'passed': sum(row.get('pass', False) for row in rows),
+            'speed_ratio_min': min(ratios, default=None),
+            'speed_ratio_median': statistics.median(ratios) if ratios else None,
+            'speed_ratio_max': max(ratios, default=None),
+            'worst_physics_stall_ms': max((row.get('worst_stall_ms', 0) for row in rows), default=0),
+            'worst_window_frame_interval_ms': max((row.get('max_window_frame_interval_ms', 0) for row in rows), default=0),
+            'nominal_blocked_speed_ratio_min': min((row['nominal_crossing_window_speed_ratio'] for row in rows
+                                                   if 'nominal_crossing_window_speed_ratio' in row), default=None)}
+    frames = run.get('frames', [])
+    result['coverage'] = {'client_frames': len(frames), 'missing_client_frames': sum(
+        max(0, b['frame'] - a['frame'] - 1) for a, b in zip(frames, frames[1:])),
+        'server_ticks': {label: {'samples': len(rows), 'missing': sum(
+            max(0, b - a - 1) for a, b in zip(sorted(set(r['tick'] for r in rows)),
+                                             sorted(set(r['tick'] for r in rows))[1:]))}
+                         for label, rows in run.get('servers', {}).items()}}
+    result['coverage']['max_observed_frame_interval_ms'] = max(
+        ((b['ns']-a['ns'])/1e6 for a,b in zip(frames,frames[1:])), default=0)
+    result['coverage']['max_interval_with_one_frame_advanced_ms'] = max(
+        ((b['ns']-a['ns'])/1e6 for a,b in zip(frames,frames[1:]) if b['frame']==a['frame']+1), default=0)
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('files', nargs='*', type=Path)
+    args = parser.parse_args()
+    results = {}
+    for path in args.files or sorted(DATA.glob('*.json.gz')):
+        with gzip.open(path, 'rt') as source:
+            raw = json.load(source)
+        results[path.name] = analyse(raw)
+    (DATA / 'analysis.json').write_text(json.dumps(results, indent=2) + '\n')
+    print(json.dumps({name: result['summary'] for name, result in results.items()}, indent=2))
+
+
+if __name__ == '__main__':
+    main()

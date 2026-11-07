@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Check E14's raw route, owner, resource, binary and privacy evidence independently."""
+
+import gzip
+import json
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E14'
+MODES = ['walk', 'sprint', 'sprint-jump', 'fly']
+ROUTE = ['b', 'c', 'd', 'a', 'd', 'c', 'b', 'a', 'c', 'a', 'd', 'b', 'd', 'a']
+
+
+def read(path):
+    with gzip.open(path, 'rt') as source:
+        return json.load(source)
+
+
+def main():
+    runs = {path.name: read(path) for path in sorted(DATA.glob('*.json.gz'))}
+    expected = [runs['e12-fixed-full-off.json.gz'], runs['e12-fixed-full-on.json.gz']]
+    binaries = expected[0]['binaries']
+    for run in expected:
+        assert len(run['trials']) == 56 and not run['errors']
+        assert run['resources_manifest_unchanged']
+        assert run['binaries'] == binaries
+        source = 'a'
+        for index, trial in enumerate(run['trials']):
+            assert trial['mode'] == MODES[index // 14]
+            assert trial['target'] == ROUTE[index % 14]
+            assert trial['source'] == trial['owner_before'] == source
+            assert trial['owner_after'] == trial['target'] and trial['reached']
+            assert trial['generation_before'] == index
+            assert trial['generation_after'] == index + 1
+            assert trial['began_ns'] < trial['ended_ns']
+            source = trial['target']
+        for mode in MODES:
+            assert len({(trial['source'], trial['target']) for trial in run['trials'] if trial['mode'] == mode}) == 12
+        particles = sum(row['kind'] == 'particle' for row in run['wire'])
+        assert (particles > 0) == run['particles']
+    e10 = []
+    for backend in 'abcd':
+        for particles in (False, True):
+            matches = [run for name, run in runs.items() if name.startswith('e10-matrix-')
+                       and run.get('backend') == backend and run.get('particles') == particles
+                       and run.get('collection_complete') and len(run['trials']) == 12]
+            assert len(matches) == 1, (backend, particles, len(matches))
+            run = matches[0]
+            assert len(run['baselines']) == 12 and all(row['reached'] for row in run['baselines'])
+            assert all(not row['reached'] and row['generation_after'] == row['generation_before']
+                       and row['owner_after'] == backend for row in run['trials'])
+            assert not run['errors'] and run['resources_manifest_unchanged']
+            e10.append(run)
+    for path in DATA.iterdir():
+        if path.suffix not in ('.json', '.gz'):
+            continue
+        text = gzip.decompress(path.read_bytes()).decode() if path.suffix == '.gz' else path.read_text()
+        assert not re.search(r'/Users/|/home/|E14Physics|(?i:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', text), path.name
+    restored = json.loads((DATA / 'restoration.json').read_text())
+    assert restored['status_and_diff_identical'] and restored['all_file_bytes_identical']
+    result = {'status': 'passed', 'actual_e12_crossings': 112, 'e12_mode_and_direction_matrices': 8,
+              'e10_blocked_approaches': sum(len(run['trials']) for run in e10),
+              'e10_successful_no_wall_controls': sum(len(run['baselines']) for run in e10),
+              'same_fixed_binaries_in_both_e12_runs': True, 'restoration_exact': True,
+              'raw_json_privacy_check': 'passed', 'resource_manifests_unchanged': True,
+              'note': 'Evidence integrity passed. Sprint speed acceptance failed; see the report.'}
+    (DATA / 'verification.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == '__main__':
+    main()

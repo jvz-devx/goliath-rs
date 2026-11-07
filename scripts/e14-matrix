@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Run independent E10 tile/direction controls sequentially, respecting quiet breaks."""
+
+import argparse
+import gzip
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--skip-a-off', action='store_true')
+    parser.add_argument('--backends', default='abcd')
+    parser.add_argument('--wall-state', choices=['off', 'on', 'both'], default='both')
+    args = parser.parse_args()
+    results = []
+    for particles in (False, True):
+        if args.wall_state != 'both' and particles != (args.wall_state == 'on'):
+            continue
+        for backend in args.backends:
+            if args.skip_a_off and not particles and backend == 'a':
+                continue
+            if (ROOT / '.local/quiet-request').exists():
+                (ROOT / '.local/quiet-ack-E14').write_text('E14 matrix stopped between runs.\n')
+                print('E14 quiet break before next run', flush=True)
+                return 3
+            suffix = backend + ('-on' if particles else '-off')
+            name = 'e10-matrix-' + suffix
+            existing = ROOT / 'docs/experiments/data/E14' / (name + '.json.gz')
+            completed = False
+            for candidate in [existing, *sorted(existing.parent.glob(name + '-r*.json.gz'))]:
+                if candidate.exists():
+                    with gzip.open(candidate, 'rt') as source:
+                        previous = json.load(source)
+                    completed |= previous.get('collection_complete', False) and len(previous['trials']) == 12
+            if completed:
+                continue
+            if existing.exists():
+                with gzip.open(existing, 'rt') as source:
+                    previous = json.load(source)
+                if previous.get('collection_complete') and len(previous['trials']) == 12:
+                    continue
+                retry = 2
+                while (existing.parent / (name + '-r' + str(retry) + '.json.gz')).exists():
+                    retry += 1
+                name += '-r' + str(retry)
+            command = [sys.executable, '-B', ROOT / 'scripts/e14-physics', '--name', name,
+                       '--matrix', '--backend', backend]
+            if particles:
+                command.append('--particles')
+            result = subprocess.run(command, cwd=ROOT)
+            results.append((suffix, result.returncode))
+            print('E14 matrix run ' + suffix + ' exit ' + str(result.returncode), flush=True)
+            if (ROOT / '.local/quiet-request').exists():
+                return 3
+    print(results, flush=True)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

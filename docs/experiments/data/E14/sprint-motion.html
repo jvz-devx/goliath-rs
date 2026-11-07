@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E14 sprint motion</title>
+<style>
+:root { color-scheme: light dark; }
+body { margin: 0; font-family: var(--font-sans); color: var(--foreground); }
+h2 { font-size: 1rem; font-weight: 500; margin: 0 0 12px; }
+p { color: var(--muted-foreground); margin: 8px 0 0; font-size: .875rem; }
+#e14-motion-chart { width: 100%; }
+#e14-motion-chart svg { width: 100%; height: 300px; display: block; }
+#e14-motion-chart text { fill: var(--foreground); font-family: var(--font-sans); font-size: 12px; }
+.measured { stroke: var(--chart-1); fill: none; stroke-width: 2.5; }
+.reference { stroke: var(--muted-foreground); fill: none; stroke-width: 1; stroke-dasharray: 5 4; }
+.structure { stroke: var(--border); fill: none; stroke-width: 1; }
+.packet { stroke: var(--warning); stroke-width: 1.5; }
+</style>
+</head>
+<body>
+<h2>Sprint loses its speed modifier after the wall</h2>
+<div id="e14-motion-chart" role="img" aria-label="Horizontal motion stays at 100 percent through the wall. A target attribute packet at 176 milliseconds removes the sprint modifier. Motion then falls to 77 percent despite W and Control remaining held."></div>
+<p>E12 particle-on trial 15. Motion is relative to its pre-wall value. The one-second position-rate loss is measured separately.</p>
+<script>
+const root = document.getElementById('e14-motion-chart');
+const observations = [[-333.321,99.99257],[-233.034,99.99779],[-133.171,99.99935],[-33.421,99.99981],[0,99.99990],[100.15,99.99998],[199.924,100],[266.89,89.52308],[299.894,83.80268],[366.953,80.67934],[400.229,78.974],[500.388,77.53449],[600.103,77.10535],[699.812,76.97742],[800.262,76.93928],[900.196,76.92791],[966.905,76.92572]];
+function draw() {
+  const width = root.clientWidth, height = 300;
+  const left=64, right=20, top=48, bottom=48;
+  const xmin=Math.min(...observations.map(p=>p[0])), xmax=Math.max(...observations.map(p=>p[0]));
+  const ymin=Math.min(...observations.map(p=>p[1])), ymax=Math.max(...observations.map(p=>p[1]));
+  const xp=(xmax-xmin)*.05, yp=(ymax-ymin)*.25;
+  const x=value=>left+(value-xmin+xp)/(xmax-xmin+2*xp)*(width-left-right);
+  const y=value=>height-bottom-(value-ymin+yp)/(ymax-ymin+2*yp)*(height-top-bottom);
+  const ticks=width<480?[0,500,1000]:[-250,0,250,500,750,1000];
+  const packet=x(175.641);
+  root.innerHTML=`<svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
+    <rect class="structure" x="${left}" y="${top}" width="${width-left-right}" height="${height-top-bottom}"/>
+    ${[80,90,100].map(value=>`<path class="structure" d="M${left} ${y(value)}H${width-right}"/><text x="${left-9}" y="${y(value)+4}" text-anchor="end">${value}%</text>`).join('')}
+    ${ticks.map(value=>`<text x="${x(value)}" y="${height-bottom+22}" text-anchor="middle">${value}</text>`).join('')}
+    <path class="reference" d="M${x(xmin)} ${y(100)}H${x(xmax)}"/>
+    <path class="measured" d="${observations.map((point,index)=>(index?'L':'M')+x(point[0])+','+y(point[1])).join(' ')}"/>
+    <path class="packet" d="M${packet} ${top}V${height-bottom}"/>
+    <text x="${Math.min(packet+8,width-165)}" y="22">+176 ms: modifier removed</text>
+    <text x="${x(0)-7}" y="${height-bottom-9}" text-anchor="end">wall</text>
+    <text x="${x(966.905)-3}" y="${y(76.92572)-12}" text-anchor="end">76.9%</text>
+    <text x="${left}" y="${top-10}">Horizontal motion</text>
+    <text x="${(left+width-right)/2}" y="${height-4}" text-anchor="middle">Time after crossing (ms)</text>
+  </svg>`;
+}
+new ResizeObserver(draw).observe(root);
+draw();
+</script>
+</body>
+</html>

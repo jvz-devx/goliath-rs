@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Plant measurement failures in E14's independent trajectory analyser."""
+
+import copy
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import unittest
+import struct
+from e14_support import attributes
+
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('e14_analysis', str(ROOT / 'scripts/e14-analyse'))
+spec = importlib.util.spec_from_loader('e14_analysis', loader)
+analysis = importlib.util.module_from_spec(spec)
+loader.exec_module(analysis)
+
+
+def fixture(stall=0):
+    frames = []
+    legs = []
+    servers = {'a': []}
+    for baseline, began, shift in ((True, 1_000_000_000, 64), (False, 10_000_000_000, 0)):
+        end = began + 3_500_000_000
+        legs.append(dict(mode='walk', source='a', target='b', baseline=baseline,
+                         start=[6 + shift, -60, 6], goal=[-6 + shift, -60, 6],
+                         direction=[-1, 0], began_ns=began, ended_ns=end, reached=True,
+                         generation_before=0, generation_after=0 if baseline else 1,
+                         owner_before='a', owner_after='a' if baseline else 'b'))
+        for i in range(71):
+            elapsed = i * .05
+            delay = min(max(elapsed - 1.2, 0), stall) if not baseline else 0
+            frames.append(dict(ns=began + i * 50_000_000, frame=len(frames), tick=len(frames),
+                               pos=[6 + shift - 4 * (elapsed - delay), -60, 6], velocity=[-.2, 0, 0]))
+            servers['a'].append(dict(ns=began + i * 50_000_000, tick=len(frames)))
+    return dict(status='complete', frames=frames, baselines=[legs[0]], trials=[legs[1]],
+                servers=servers, wire=[], errors=[])
+
+
+class Measurements(unittest.TestCase):
+    def test_attribute_observer_keeps_sprint_modifier(self):
+        packet = b'\x07\x01\x05' + struct.pack('>d', .1) + b'\x01\x13minecraft:sprinting' + struct.pack('>d', .3) + b'\x02'
+        target, values = attributes(packet)
+        self.assertEqual(target, 7)
+        self.assertEqual(values, [{'attribute': 5, 'base': .1,
+                                  'modifiers': [{'id': 'minecraft:sprinting', 'amount': .3, 'operation': 2}]}])
+
+    def test_identical_no_wall_speed_passes(self):
+        result = analysis.analyse(fixture())
+        self.assertEqual(result['summary']['passed'], 1)
+        self.assertAlmostEqual(result['trials'][0]['speed_ratio'], 1)
+
+    def test_three_hundred_ms_physics_stall_fails(self):
+        row = analysis.analyse(fixture(.3))['trials'][0]
+        self.assertFalse(row['pass'])
+        # The 1 s window follows the delayed crossing. It contains the final
+        # 200 ms of this 300 ms stall, so travel is 3.2 instead of 4 blocks.
+        self.assertAlmostEqual(row['speed_ratio'], .8, places=5)
+        self.assertGreaterEqual(row['worst_stall_ms'], 250)
+
+    def test_backward_server_correction_fails(self):
+        run = fixture()
+        run['wire'] = [dict(kind='sent_position', ns=11_400_000_000, pos=[.4, -60, 6]),
+                       dict(kind='correction', ns=11_410_000_000, pos=[.6, -60, 6], relatives=0)]
+        row = analysis.analyse(run)['trials'][0]
+        self.assertFalse(row['pass'])
+        self.assertAlmostEqual(row['backward_correction_lower_bound_blocks'], .2)
+
+    def test_missing_render_frame_fails(self):
+        run = fixture()
+        run['frames'] = [row for row in run['frames'] if row['ns'] != 11_500_000_000]
+        row = analysis.analyse(run)['trials'][0]
+        self.assertFalse(row['pass'])
+        self.assertEqual(row['missing_window_frames'], 1)
+
+    def test_missing_server_tick_fails(self):
+        run = fixture()
+        run['servers']['a'] = [row for row in run['servers']['a'] if row['ns'] != 11_500_000_000]
+        row = analysis.analyse(run)['trials'][0]
+        self.assertFalse(row['pass'])
+        self.assertEqual(row['missing_window_server_ticks']['a'], 1)
+
+    def test_large_native_frame_gap_is_not_an_exact_speed_measurement(self):
+        run = fixture()
+        for row in run['frames']:
+            if row['ns'] >= 11_300_000_000:
+                row['ns'] += 200_000_000
+        result = analysis.analyse(run)
+        self.assertTrue(result['trials'][0]['timing_unresolved'])
+        self.assertFalse(result['trials'][0]['pass'])
+        self.assertEqual(result['summary']['attempts'], 1)
+        self.assertEqual(result['summary']['measured'], 0)
+
+    def test_no_crossing_is_not_dropped(self):
+        run = fixture()
+        for row in run['frames']:
+            if row['ns'] >= 10_000_000_000:
+                row['pos'][0] = 6
+        result = analysis.analyse(run)
+        self.assertEqual(len(result['trials']), 1)
+        self.assertFalse(result['trials'][0]['pass'])
+        self.assertEqual(result['trials'][0]['nominal_crossing_window_speed_ratio'], 0)
+        self.assertNotIn('speed_ratio', result['trials'][0])
+
+    def test_short_window_cannot_pass(self):
+        run = fixture()
+        run['trials'][0]['ended_ns'] = 11_700_000_000
+        row = analysis.analyse(run)['trials'][0]
+        self.assertFalse(row['pass'])
+        self.assertIn('not fully sampled', row['error'])
+
+    def test_failed_sample_stays_beside_good_sample(self):
+        run = fixture()
+        run['trials'].append(copy.deepcopy(run['trials'][0]))
+        run['trials'][1]['owner_after'] = 'a'
+        result = analysis.analyse(run)
+        self.assertEqual(result['summary']['attempts'], 2)
+        self.assertEqual(result['summary']['passed'], 1)
+
+
+if __name__ == '__main__':
+    unittest.main()

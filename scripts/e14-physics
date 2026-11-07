@@ -1,0 +1,428 @@
+#!/usr/bin/env python3
+"""E14: drive plain Horizon physics through the unchanged four-tile cluster launcher."""
+
+import argparse
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+
+from e14_support import Control, Observer, Sampler, client_state, server_state
+
+ROOT = Path(__file__).resolve().parent.parent
+RUNS = ROOT / '.local/runs'
+DATA = ROOT / 'docs/experiments/data/E14'
+BINS = ROOT / '.local/bin/horizon-e14-client'
+RESOURCES = Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'
+TILES = {'a': (0, 0), 'b': (-1, 0), 'c': (-1, -1), 'd': (0, -1)}
+ROUTE = ['b', 'c', 'd', 'a', 'd', 'c', 'b', 'a', 'c', 'a', 'd', 'b', 'd', 'a']
+NAME = 'E14Physics'
+UUID = bytearray(hashlib.md5(('OfflinePlayer:' + NAME).encode()).digest())
+UUID[6] = (UUID[6] & 15) | 48
+UUID[8] = (UUID[8] & 63) | 128
+UUID_HEX = bytes(UUID).hex()
+UUID_TEXT = '-'.join((UUID_HEX[:8], UUID_HEX[8:12], UUID_HEX[12:16], UUID_HEX[16:20], UUID_HEX[20:]))
+
+
+class Quiet(Exception):
+    pass
+
+
+def quiet():
+    if (ROOT / '.local/quiet-request').exists():
+        raise Quiet('quiet request at a natural break')
+
+
+def clean_text(text):
+    text = text.replace(str(ROOT), '$REPO').replace(str(Path.home()), '$HOME').replace(NAME, '<fixture>')
+    return re.sub(r'(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', '<id>', text)
+
+
+def save(name, value):
+    DATA.mkdir(parents=True, exist_ok=True)
+    raw = clean_text(json.dumps(value, separators=(',', ':'), allow_nan=False)) + '\n'
+    path = DATA / name
+    if path.exists():
+        raise RuntimeError('refusing to replace raw E14 evidence: ' + path.name)
+    if name.endswith('.gz'):
+        with gzip.open(path, 'wt') as output:
+            output.write(raw)
+    else:
+        path.write_text(raw)
+
+
+def isolated(folder):
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('HORIZON_', 'XDG_', 'GOLIATH_', 'E2_'))}
+    for key in ('HORIZON_HOME', 'HORIZON_LAUNCHER_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME',
+                'XDG_CACHE_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'HORIZON_LAUNCHER_TRASH',
+                'HORIZON_LAUNCHER_CLIPBOARD', 'HORIZON_LAUNCHER_DESKTOP'):
+        path = folder / key.lower()
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        env[key] = str(path)
+    env.update(HORIZON_NO_AUDIO='1', HORIZON_NO_DISCORD='1', HORIZON_NO_HEARTBEAT='1',
+               HORIZON_LAUNCHER_NO_SELF_UPDATE='1')
+    return env
+
+
+def complete_lines(path):
+    return path.read_text(errors='replace').rpartition('\n')[0].splitlines() if path.exists() else []
+
+
+def wait_until(test, seconds, description):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        value = test()
+        if value:
+            return value
+        time.sleep(.02)
+    raise RuntimeError('timeout: ' + description)
+
+
+def module(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    result = importlib.util.module_from_spec(spec)
+    loader.exec_module(result)
+    return result
+
+
+class Run:
+    def __init__(self, folder, particles, backend='a', variant='e10', snapshot=None):
+        self.folder, self.particles, self.backend = folder, particles, backend
+        self.variant = variant
+        self.cluster_bins = snapshot.resolve() if snapshot else ROOT / ('.local/bin/goliath-' + variant)
+        self.snapshot = snapshot
+        self.cluster = self.proxy = self.client_pid = None
+        self.control = self.observer = self.frames = None
+        self.servers, self.samples = {}, {}
+        self.files = []
+        self.result = {'particles': particles, 'backend': backend, 'variant': variant,
+                       'trials': [], 'baselines': [], 'errors': []}
+
+    def start(self):
+        quiet()
+        self.result['binaries'] = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in (
+            ('plain-client', BINS / 'horizon-client'), ('horizon-ctl', BINS / 'horizon-ctl'),
+            ('cluster-engine', self.cluster_bins / 'horizon-client'),
+            ('cluster-proxy', self.cluster_bins / 'meridian'),
+            ('cluster-store', self.cluster_bins / 'goliath-store'))}
+        if self.variant == 'e12':
+            self.result['ready'] = (self.cluster_bins / 'READY').read_text()
+        self.result['launcher_sha256'] = hashlib.sha256((ROOT / 'scripts/goliath-cluster').read_bytes()).hexdigest()
+        self.result['resources_manifest_sha256'] = hashlib.sha256((RESOURCES / 'horizon-resources.json').read_bytes()).hexdigest()
+        log = self.folder / 'cluster.log'
+        output = log.open('w')
+        self.files.append(output)
+        command = [sys.executable, '-B', ROOT / 'scripts/goliath-cluster', 'start'] if self.variant == 'e10' else [
+            sys.executable, '-B', ROOT / 'scripts/e14-cluster', '--bins', self.cluster_bins] if self.snapshot else [
+            sys.executable, '-B', ROOT / 'scripts/e12-m2', 'start', '--name', 'e14-composition', '--edge', '512']
+        cluster_env = {key: value for key, value in os.environ.items() if not key.startswith('E12_')}
+        self.cluster = subprocess.Popen(command, cwd=ROOT, env=cluster_env,
+                                        stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+
+        def ready():
+            for line in complete_lines(log):
+                match = re.search(r'Cluster ready on 127\.0\.0\.1:(\d+); state (.+)', line)
+                if match:
+                    return int(match[1]), Path(match[2])
+            if self.cluster.poll() is not None:
+                raise RuntimeError('cluster exited: ' + '\n'.join(complete_lines(log)[-12:]))
+            return None
+
+        self.port, self.state_path = wait_until(ready, 180, 'cluster startup')
+        self.cluster_root = self.state_path.parent
+        self.state = json.loads(self.state_path.read_text())
+        self.store_wire = module('e14_store', ROOT / 'scripts/e5-store.py')
+        self.address = (self.state['store'].split(':')[0], int(self.state['store'].split(':')[1]))
+        for label, tile in self.state['tiles'].items():
+            endpoint = json.loads(Path(tile['endpoint']).read_text())
+            self.servers[label] = Control(endpoint)
+            self.samples[label] = Sampler(endpoint, 'player-export ' + UUID_TEXT, server_state, .006)
+        if self.particles or self.backend != 'a':
+            # Only this run's generated configuration changes, never the launcher or source.
+            config = (self.cluster_root / 'meridian.toml').read_text()
+            listener = socket_port()
+            config = config.replace(f'listen = "127.0.0.1:{self.port}"', f'listen = "127.0.0.1:{listener}"', 1)
+            config = config.replace('default-backend = "a"', f'default-backend = "{self.backend}"', 1)
+            if self.particles:
+                config += '\n[tiles.wall-particles]\nenabled = true\nparticle = "dust"\ncolour = 0x3388ff\nspacing = 1\ndistance = 8\n'
+            path = self.folder / 'particles.toml'
+            path.write_text(config)
+            response = self.store_wire.call(self.address, self.store_wire.request(13))
+            anchor, game, day, rain, thunder = struct.unpack_from('<QQQBB', response, 3)
+            env = isolated(self.folder / 'particle-private')
+            env.update(GOLIATH_CLUSTER=str(self.state_path), E8_STAGE='4',
+                       GOLIATH_CLOCK=json.dumps(dict(unix_ms=anchor, game_tick=game, day_tick=day,
+                                                    raining=bool(rain), thundering=bool(thunder))))
+            output = (self.folder / 'particle-proxy.log').open('w')
+            self.files.append(output)
+            self.proxy = subprocess.Popen([self.cluster_bins / 'meridian', path],
+                                          cwd=self.folder, env=env, stdout=output, stderr=subprocess.STDOUT)
+            self.port = listener
+            time.sleep(.25)
+            if self.proxy.poll() is not None:
+                raise RuntimeError('particle proxy refused generated configuration')
+        quiet()
+        self.observer = Observer(self.port)
+        self.endpoint = self.folder / 'client.json'
+        env = isolated(self.folder / 'client-private')
+        game_dir = self.folder / 'game'
+        game_dir.mkdir()
+        # Match the rendering load across baseline and wall runs.
+        game_dir.joinpath('options.txt').write_text('maxFps:30\nenableVsync:false\nrenderDistance:3\nbobView:false\n')
+        command = [BINS / 'horizon-ctl', '--socket', self.endpoint, 'launch', '--game', BINS / 'horizon-client',
+                   '--offscreen', '--resources', RESOURCES, '--game-dir', game_dir, '--width', '640', '--height', '360']
+        launch = subprocess.run(command, cwd=game_dir, env=env, text=True, capture_output=True, timeout=180)
+        try:
+            reply = json.loads(launch.stdout)
+        except ValueError:
+            raise RuntimeError('client launch produced no JSON: ' + launch.stdout + launch.stderr)
+        if not reply.get('ok'):
+            raise RuntimeError('client launch failed: ' + json.dumps(reply))
+        self.client_pid = reply['pid']
+        self.control = Control(json.loads(self.endpoint.read_text()))
+        response = self.control.ask(f'connect 127.0.0.1:{self.observer.port} {NAME}')
+        if response.get('error'):
+            raise RuntimeError('connect failed: ' + str(response))
+        wait_until(lambda: self.control.ask('status').get('player'), 90, 'physics player spawn')
+        self.frames = Sampler(json.loads(self.endpoint.read_text()), 'status', client_state)
+        self.control.ask('options-set maxFps 30')
+        self.control.ask('options-set enableVsync false')
+        time.sleep(1)
+        self.result['initial'] = self.compact_status()
+
+    def compact_status(self):
+        raw = self.control.ask('status')
+        result = {key: raw.get(key) for key in ('screen', 'fps', 'frames', 'ticks', 'chunks', 'pending_chunks', 'streaming', 'renderer')}
+        result['server_loaded'] = (raw.get('server') or {}).get('loaded')
+        result['server_status'] = (raw.get('server') or {}).get('status')
+        return result
+
+    def owner(self):
+        response = self.store_wire.call(self.address, self.store_wire.request(9, int(UUID_HEX, 16).to_bytes(16, 'little')))
+        if response[:3] != b'\1\3\1':
+            raise RuntimeError('fixture has no store owner')
+        generation, owner, _, _ = struct.unpack_from('<QQII', response, 3)
+        return list(TILES)[owner], generation
+
+    def reset(self, position, yaw):
+        self.control.ask('release')
+        owner, _ = self.owner()
+        response = self.servers[owner].ask('console tp ' + NAME + ' ' + ' '.join(f'{value:.6f}' for value in position))
+        if any('Incorrect' in line or 'Unknown' in line for line in response.get('output', [])):
+            raise RuntimeError('setup teleport refused')
+        wait_until(lambda: (lambda p: p and math.dist(p['position'], position) < .2)(
+            self.control.ask('status').get('player')), 5, 'setup teleport')
+        self.control.ask(f'look {yaw} 0')
+        time.sleep(.6)
+
+    def leg(self, source, target, mode, baseline=False, capture=False, extent=6):
+        quiet()
+        sx, sz = (extent if value == 0 else -extent for value in TILES[source])
+        tx, tz = (extent if value == 0 else -extent for value in TILES[target])
+        dx, dz = tx - sx, tz - sz
+        length = math.hypot(dx, dz)
+        direction = dx / length, dz / length
+        shift = [64 if value == 0 else -64 for value in TILES[source]] if baseline else [0, 0]
+        y = -56 if mode == 'fly' else -60
+        start = [sx + shift[0], y, sz + shift[1]]
+        goal = [tx + shift[0], y, tz + shift[1]]
+        yaw = math.degrees(math.atan2(-dx, dz))
+        self.reset(start, yaw)
+        before_owner, before_generation = self.owner()
+        began = time.time_ns()
+        self.control.ask('key w down')
+        if mode in ('sprint', 'sprint-jump'):
+            self.control.ask('key ctrl down')
+        if mode == 'sprint-jump':
+            self.control.ask('key space down')
+        screenshot = None
+        reached = False
+        deadline = time.monotonic() + max(10, length / 3 + 5)
+        last_progress, last_advance = 0, time.monotonic()
+        while time.monotonic() < deadline:
+            if self.frames.errors or self.observer.errors:
+                raise RuntimeError('observer failed: ' + str(self.frames.errors + self.observer.errors))
+            if self.frames.rows:
+                latest = self.frames.rows[-1]
+                progress = sum((latest['pos'][axis] - start[axis]) * direction[i] for i, axis in enumerate((0, 2)))
+                if progress > last_progress + .001:
+                    last_progress, last_advance = progress, time.monotonic()
+                if not baseline and time.monotonic() - last_advance > 3:
+                    break
+                if capture and screenshot is None and progress >= length / 2 - .5:
+                    screenshot = self.folder / (self.variant + ('-particles-on.png' if self.particles else '-particles-off.png'))
+                    self.control.ask('screenshot ' + str(screenshot))
+                if progress >= length:
+                    reached = True
+                    break
+            time.sleep(.015)
+        ended = time.time_ns()
+        self.control.ask('release')
+        time.sleep(.15)
+        after_owner, generation = self.owner()
+        row = {'source': source, 'target': target, 'mode': mode, 'baseline': baseline,
+               'start': start, 'goal': goal, 'direction': direction, 'began_ns': began, 'ended_ns': ended,
+               'reached': reached, 'owner_before': before_owner, 'owner_after': after_owner,
+               'generation_before': before_generation, 'generation_after': generation,
+               'load': os.getloadavg(), 'last_pos': self.frames.rows[-1]['pos'],
+               'status_end': self.compact_status()}
+        self.result['baselines' if baseline else 'trials'].append(row)
+        if capture and screenshot is None:
+            screenshot = self.folder / (self.variant + ('-particles-on.png' if self.particles else '-particles-off.png'))
+            self.control.ask('screenshot ' + str(screenshot))
+        if screenshot and screenshot.exists():
+            shutil.copy2(screenshot, DATA / screenshot.name)
+            row['screenshot'] = screenshot.name
+        print(json.dumps({'mode': mode, 'baseline': baseline, 'source': source, 'target': target,
+                          'reached': reached, 'owner': after_owner, 'seconds': (ended - began) / 1e9}), flush=True)
+        return row
+
+    def stop(self):
+        client_log = self.endpoint.with_suffix('.log') if hasattr(self, 'endpoint') else None
+        if client_log and client_log.exists():
+            self.result['client_warnings'] = [clean_text(line) for line in complete_lines(client_log)
+                if any(word in line.lower() for word in ('waiting', 'ignoring chunk', 'error', 'warn', 'disconnect'))][-100:]
+        if self.control:
+            try:
+                self.control.ask('release')
+                self.control.ask('quit')
+            except (OSError, RuntimeError):
+                pass
+            self.control.close()
+        self.result['resources_manifest_unchanged'] = self.result.get('resources_manifest_sha256') == hashlib.sha256(
+            (RESOURCES / 'horizon-resources.json').read_bytes()).hexdigest()
+        if self.frames:
+            self.frames.stop()
+            self.result['frames'] = self.frames.rows
+            self.result['errors'] += self.frames.errors
+        for sampler in self.samples.values():
+            sampler.stop()
+        self.result['servers'] = {label: sampler.rows for label, sampler in self.samples.items()}
+        self.result['errors'] += [error for sampler in self.samples.values() for error in sampler.errors]
+        if self.observer:
+            self.observer.stop()
+            self.result['wire'] = self.observer.rows
+            self.result['errors'] += self.observer.errors
+        for connection in self.servers.values():
+            connection.close()
+        if self.proxy:
+            self.proxy.terminate()
+            self.proxy.wait(timeout=15)
+        if hasattr(self, 'cluster_root'):
+            self.result['server_inputs'] = {}
+            for label in TILES:
+                rows = []
+                for path in self.cluster_root.glob('server-' + label + '-*.log'):
+                    for line in complete_lines(path):
+                        if 'E2_INPUT ' in line:
+                            rows.append(json.loads(line.split('E2_INPUT ', 1)[1]))
+                self.result['server_inputs'][label] = rows
+            self.result['phases'] = []
+            log = self.folder / 'particle-proxy.log' if self.proxy else self.cluster_root / 'proxy.log'
+            for line in complete_lines(log):
+                if 'E10_PHASE ' in line:
+                    raw = json.loads(line.split('E10_PHASE ', 1)[1])
+                    raw.pop('uuid', None)
+                    self.result['phases'].append(raw)
+        if self.cluster:
+            self.cluster.terminate()
+            try:
+                self.cluster.wait(timeout=40)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.cluster.pid, signal.SIGTERM)
+                self.cluster.wait(timeout=15)
+        for output in self.files:
+            output.close()
+
+
+def socket_port():
+    import socket
+    with socket.socket() as listener:
+        listener.bind(('127.0.0.1', 0))
+        return listener.getsockname()[1]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', default='pilot')
+    parser.add_argument('--suite', action='store_true')
+    parser.add_argument('--particles', action='store_true')
+    parser.add_argument('--backend', choices=list(TILES), default='a')
+    parser.add_argument('--matrix', action='store_true', help='all other destinations from this initial tile')
+    parser.add_argument('--approach', action='store_true', help='one continuous walk from far inside to the wall')
+    parser.add_argument('--variant', choices=['e10', 'e12'], default='e10')
+    parser.add_argument('--snapshot', type=Path)
+    parser.add_argument('--render-only', action='store_true')
+    args = parser.parse_args()
+    DATA.mkdir(parents=True, exist_ok=True)
+    if (DATA / (args.name + '.json.gz')).exists():
+        parser.error('raw result already exists; choose a new --name')
+    quiet()
+    with tempfile.TemporaryDirectory(prefix='E14-', dir=RUNS) as temporary:
+        run = Run(Path(temporary), args.particles, args.backend, args.variant, args.snapshot)
+        try:
+            run.start()
+            if args.render_only:
+                run.reset([2, -60, 6], 90)
+                time.sleep(2)
+                screenshot = run.folder / 'e12-wall-visible.png'
+                run.control.ask('screenshot ' + str(screenshot))
+                shutil.copy2(screenshot, DATA / screenshot.name)
+                run.result['render_capture'] = {'position': [2, -60, 6], 'yaw': 90,
+                    'screenshot': screenshot.name, 'particle_packets': run.observer.particles}
+            modes = () if args.render_only else ('walk', 'sprint', 'sprint-jump', 'fly') if args.suite or args.matrix else ('walk',)
+            for mode in modes:
+                if mode == 'fly':
+                    owner, _ = run.owner()
+                    interior = [64 if value == 0 else -64 for value in TILES[owner]]
+                    run.reset([interior[0], -60, interior[1]], 0)
+                    for action in ('down', 'up', 'down', 'up'):
+                        run.control.ask('key space ' + action)
+                        time.sleep(.08)
+                    time.sleep(.2)
+                    abilities = [row for row in run.observer.rows if row['kind'] == 'client_abilities']
+                    if not abilities or not abilities[-1]['flags'] & 2:
+                        raise RuntimeError('creative flight did not activate through real key input')
+                source = run.owner()[0]
+                cache = {}
+                targets = [label for label in TILES if label != args.backend] if args.matrix else ROUTE if args.suite else ['b']
+                for index, target in enumerate(targets):
+                    direction = tuple(b - a for a, b in zip(TILES[source], TILES[target]))
+                    if not any(direction):
+                        raise RuntimeError('previous leg failed to reach its expected tile')
+                    if (mode, direction) not in cache:
+                        cache[mode, direction] = run.leg(source, target, mode, baseline=True, extent=38 if args.approach else 6)
+                    run.leg(source, target, mode, capture=mode == 'walk' and index == 0 and args.backend == 'a', extent=38 if args.approach else 6)
+                    source = run.owner()[0]
+            run.result['collection_complete'] = True
+            run.result['status'] = 'complete' if all(row['reached'] and row['owner_after'] == row['target']
+                for row in run.result['trials']) else 'failed'
+        except BaseException as error:
+            run.result['status'] = 'quiet' if isinstance(error, Quiet) else 'failed'
+            run.result['error'] = clean_text(type(error).__name__ + ': ' + str(error))
+            print(run.result['error'], flush=True)
+        finally:
+            run.stop()
+            save(args.name + '.json.gz', run.result)
+            if run.result.get('status') == 'quiet':
+                (ROOT / '.local/quiet-ack-E14').write_text('E14 client and cluster stopped.\n')
+        print(json.dumps({'status': run.result['status'], 'trials': len(run.result['trials']),
+                          'frames': len(run.result.get('frames', [])), 'errors': run.result['errors']}), flush=True)
+        return 0 if run.result.get('status') == 'complete' else 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

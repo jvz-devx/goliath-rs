@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Start the unchanged cluster launcher against an immutable E14 binary snapshot."""
+
+import argparse
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--bins', type=Path, required=True)
+    args = parser.parse_args()
+    loader = importlib.machinery.SourceFileLoader('e14_cluster_base', str(ROOT / 'scripts/goliath-cluster'))
+    spec = importlib.util.spec_from_loader('e14_cluster_base', loader)
+    cluster = importlib.util.module_from_spec(spec)
+    loader.exec_module(cluster)
+    cluster.BINS = args.bins.resolve()
+    sys.argv = ['goliath-cluster', 'start', '--edge', '512']
+    cluster.main()
+
+
+if __name__ == '__main__':
+    main()

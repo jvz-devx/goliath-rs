@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Restore E14's approved stash, including partial staging and intent-to-add entries."""
+
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon-tiles'
+DATA = ROOT / 'docs/experiments/data/E14'
+STASH = 'bdf2ecad40b4b7c6f49cc8fe0d8b567817856324'
+INTENT = ['crates/horizon-core/src/tile_ownership.rs', 'crates/horizon-world/examples/e7_tile_write_probe.rs']
+
+
+def git(*args):
+    return subprocess.check_output(['git', '-C', str(SOURCE), *args])
+
+
+def digest(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def main():
+    previous = json.loads((DATA / 'preflight.json').read_text())
+    if git('status', '--porcelain=v1', '-z'):
+        raise RuntimeError('plain checkout is no longer clean; do not pop over unknown changes')
+    if git('rev-parse', 'refs/stash').decode().strip() != STASH:
+        raise RuntimeError('the approved E14 stash is not at the top; inspect before restoring')
+    subprocess.run(['git', '-C', str(SOURCE), 'stash', 'pop', '--index'], check=True)
+    subprocess.run(['git', '-C', str(SOURCE), 'add', '--intent-to-add', '--', *INTENT], check=True)
+    actual = {'status_sha256': digest(git('status', '--porcelain=v1', '-z')),
+              'working_diff_sha256': digest(git('diff', 'HEAD', '--binary')),
+              'staged_diff_sha256': digest(git('diff', '--cached', '--binary'))}
+    files = [{'file': row['file'], 'match': digest((SOURCE / row['file']).read_bytes()) == row['working_sha256']}
+             for row in previous['files']]
+    result = {'status_and_diff_identical': actual == previous['baseline'],
+              'actual': actual, 'expected': previous['baseline'], 'files': files,
+              'all_file_bytes_identical': all(row['match'] for row in files),
+              'intent_to_add_restored': INTENT}
+    (DATA / 'restoration.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps({'status_and_diff_identical': result['status_and_diff_identical'],
+                      'all_file_bytes_identical': result['all_file_bytes_identical'], 'files': len(files)}))
+    if not result['status_and_diff_identical'] or not result['all_file_bytes_identical']:
+        raise RuntimeError('restoration differs from the pre-stash state')
+
+
+if __name__ == '__main__':
+    main()

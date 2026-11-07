@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Extract one E14 crossing's frame, tick and packet timeline without identifiers."""
+
+import argparse
+import gzip
+import importlib.machinery
+import importlib.util
+import json
+import math
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('e14_inspect_analysis', str(ROOT / 'scripts/e14-analyse'))
+spec = importlib.util.spec_from_loader('e14_inspect_analysis', loader)
+analysis = importlib.util.module_from_spec(spec)
+loader.exec_module(analysis)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('run', type=Path)
+    parser.add_argument('index', type=int)
+    parser.add_argument('--output', type=Path)
+    args = parser.parse_args()
+    with gzip.open(args.run, 'rt') as source:
+        run = json.load(source)
+    leg = run['trials'][args.index]
+    metrics = analysis.leg_metrics(run, leg)
+    crossing = metrics['crossed_ns']
+    before, after = crossing - 1_000_000_000, crossing + 1_000_000_000
+    frames = {}
+    for row in run['frames']:
+        if before <= row['ns'] <= after:
+            frames[row['tick']] = {'ms': round((row['ns'] - crossing) / 1e6, 3),
+                                  'tick': row['tick'], 'pos': row['pos'], 'motion': row['velocity'],
+                                  'horizontal_motion': math.hypot(row['velocity'][0], row['velocity'][2]),
+                                  'keys': row['keys']}
+    packets = []
+    for row in run['wire']:
+        if before <= row['ns'] <= after and row['kind'] in (
+                'correction', 'motion_packet', 'attributes', 'entity_flags', 'server_abilities', 'client_abilities', 'respawn'):
+            packets.append({key: value for key, value in row.items() if key != 'ns'} |
+                           {'ms': round((row['ns'] - crossing) / 1e6, 3)})
+    servers = {label: [{'ms': round((row['ns'] - crossing) / 1e6, 3),
+                       **{key: row[key] for key in ('tick', 'pos', 'velocity', 'frozen')}}
+                      for row in rows if before <= row['ns'] <= after and row['pos'] is not None]
+               for label, rows in run['servers'].items()}
+    result = {'raw': args.run.name, 'trial': args.index, 'leg': leg, 'metrics': metrics,
+              'client_ticks': list(frames.values()), 'packets': packets, 'servers': servers}
+    text = json.dumps(result, indent=2) + '\n'
+    if args.output:
+        args.output.write_text(text)
+        print(args.output.relative_to(ROOT) if args.output.is_absolute() else args.output)
+    else:
+        print(text)
+
+
+if __name__ == '__main__':
+    main()
