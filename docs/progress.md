@@ -44,51 +44,55 @@ Find out what a crossing costs today and what keeps items safe when a tile crash
 - [x] Peak disk use reported, and `scripts/clean-builds --all` run. Done: peak about 3 GiB in `.local`, target dirs 1,965 and 435 MiB. E1 reached 95 MiB. Cleaned after the final gates.
 - [x] Verified work committed and pushed. Done: pushed to origin/main with this update.
 
-## M1. Two tiles and a wall
+## M1. Four tiles and walls
 
-Two real Horizon servers own the two halves of one coordinate space. A player walks through the wall with a whole-view swap.
+Four real Horizon servers own a 2 by 2 grid of one coordinate space. A player walks through any wall with a whole-view swap.
 
-- [ ] Coherent tile-wide cut built and timed on Horizon, under load, with chunks, containers, drops and every resident player.
-- [ ] Each server refuses to simulate or write outside its tile.
-- [ ] Crossing the wall triggers the handover with no command typed.
-- [ ] One shared store holds player records, with the policy chosen in D6.
+- [ ] Tile size, the owner of global state (time, weather, scoreboard, chat) and Nether and End placement decided from a short experiment and recorded in `decisions.md`.
+- [ ] Coherent tile-wide cut built on Horizon and timed under load, with chunks, containers, drops and every resident player.
+- [ ] Each server refuses to simulate or write outside its tile, proven by a test that tries to.
+- [ ] Unloaded chunks past a wall can't read as air to simulation code, proven by a test.
+- [ ] Crossing a wall triggers the handover with no command typed.
+- [ ] One shared store holds player records, using the policy chosen in D6 with a fence on every CAS.
 - [ ] 1,000 consecutive crossings by a scripted walking player with no disconnect and no inventory change.
-- [ ] Both tiles restart with their world and every player intact.
+- [ ] All four tiles restart with their world and every player intact.
 - [ ] `scripts/e2-real-transfer --build` run end to end from a fresh checkout.
 
 ## M2. Prewarmed crossing
 
-- [ ] Terrain past the wall is visible and read-only.
-- [ ] The handover starts on approach and momentum carries through.
-- [ ] Input gap P95 under 150 ms and P99 under 300 ms, measured on loopback with a walking player.
+- [ ] Terrain past the wall is visible, read-only, with no blank chunks at the wall during a crossing.
+- [ ] The handover starts on approach and momentum carries through, with no backward correction above 0.1 blocks.
+- [ ] Input gap P95 under 150 ms and P99 under 300 ms over 1,000 walking crossings on loopback, including the D6 checkpoint.
+- [ ] A real physics client, Horizon's own under `horizon-ctl`, walks through a wall and keeps its speed.
+- [ ] A stock Java Edition 26.3 client crosses a wall, confirmed by the maintainer in person.
 - [ ] Riding players cross with their vehicle.
 
 ## M3. Crashes and partitions
 
-- [ ] Killing a tile at any handover step gives zero duplicated items, and every loss is accounted for.
-- [ ] A partitioned tile can't keep writing after losing ownership.
-- [ ] Results from real processes match what E1 predicted.
+- [ ] 1,000 crossings with a tile killed at random, covering every step: write, fsync, install, CAS and acknowledgement. Zero duplicated items, and every loss accounted for.
+- [ ] A partitioned tile can't write once it has lost ownership, proven with real processes.
+- [ ] A crashed tile returns and takes players again with no manual step, while the other tiles keep ticking.
+- [ ] Results from real processes match what E1 predicted, and any difference is explained.
 
-## M4. Scale
+## M4. Scale and behaviour
 
-The baseline is still undecided, see the open questions.
+The baseline is one plain Horizon process with the same seed, view distance, bot behaviour and total CPU limit. The bots run with their CPU limited separately, so they can't be the bottleneck without it showing.
 
-- [ ] 1, 2 and 4 tiles measured with identical bot load, seed and hardware.
-- [ ] At least 1.5 times the baseline player capacity with four tiles.
-- [ ] 20 TPS and tick P99 under 50 ms at that load.
+- [ ] `horizon-bots` can walk set paths and survive a backend switch, using a patch or a wrapper.
+- [ ] A tick digest compares a tile with plain Horizon, and a redstone, piston and TNT fixture inside one tile ends identical.
+- [ ] 1, 2 and 4 tiles measured with identical load, with mob counts reported so less gameplay work can't pass as speed.
+- [ ] Four tiles hold at least 3 times the baseline's player capacity at 20 TPS with tick P99 under 50 ms. The spec's floor was 1.5 times.
+- [ ] A 30-minute soak at that load with crossings running shows no duplicates, no owner violations and no growth in memory beyond 10%.
+- [ ] Baseline rerun against Horizon's parallel tick if it has landed by then. If it hasn't, say so.
 
 ## Later
 
+- Several physical machines, with latency and partitions on a real network.
 - Dynamic tile ownership (goal 2).
 - Shared edge band for redstone, mobs and items (goal 4).
 
 ## Open questions
 
-- Tile size.
-- Who owns global state: time, weather, scoreboard, chat.
-- Where the Nether and End live.
-- Scaling baseline: today's single-threaded tick, or Horizon's planned parallel tick.
-- What "zero divergence" means, since Horizon isn't deterministic today and has no world digest.
 - Project name, since Goliath is DonutSMP's name for its system.
 - How much of the research can be published.
 
@@ -101,3 +105,4 @@ The baseline is still undecided, see the open questions.
 - 2026-11-07: Completed E2, pending review. 100/100 real Meridian moves, matching inventory checksums, walking input gap P95 495.296 ms. Evidence: `experiments/E2-real-transfer.md`. Build targets cleaned; no milestone boxes ticked.
 - 2026-11-07: E1 finished. The reviewer reproduced the sweep byte for byte and caught 4 planted P2 bugs. D6 chose P2.
 - 2026-11-07: E2 finished. The reviewer reproduced it: 100 of 100 moves, walking gap P95 495 ms and 477 ms. M0 closed.
+- 2026-11-07: M1 to M4 tightened into pass lines. Baseline fixed as plain Horizon at equal CPU, target raised to 3 times, divergence defined as a tick digest on a fixture.
