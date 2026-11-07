@@ -38,3 +38,16 @@ The project is public and MIT licensed, matching Horizon and Meridian. Research 
 ## D5. Rust and disk rules
 
 Follow the `rust-project-architecture` rules, recorded in `AGENTS.md`. Build output is disposable and capped by `scripts/clean-builds`.
+
+## D6. Durability
+
+Use P2: freeze the player, make a coherent tile-wide checkpoint durable, then commit the player's generation with a fenced compare-and-swap. E1 found zero duplicates, losses and stale writes across 200,001 scenarios per policy, while the same sweep caught P0 and P1. Mutation tests confirmed that the ordering, the single coherent cut and the fence on every CAS are each required.
+
+This is a modelled result, so it holds only if real Horizon delivers what the model assumes:
+
+- Horizon must produce one coherent cut of chunks, containers, drops and every resident player. Its separate saves don't qualify, and the mutation that models them fails.
+- The checkpoint runs inside the frozen window. E1's budget is under 128 ms of checkpoint work at 8 ms fsync. E2's stationary gap is already about 230 ms before any checkpoint, so M2 has to shorten the commit sequence as well as prewarm it.
+- If the measured cut doesn't fit, the fallback is P4, a grouped durable tick log, which also had zero duplicates but costs every action some wait. A checkpoint taken on approach, leaving only a small delta at the freeze, is worth trying first.
+
+P3 is rejected. Its fast first route needs a cluster-wide rollback domain and embargoes further crossings.
+

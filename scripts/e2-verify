@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Check E2's retained measurements without rebuilding or starting a game."""
+import importlib.util
+import json
+import math
+from pathlib import Path
+
+
+root = Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location("e2_meridian", root / "scripts/e2-meridian.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+data = root / "docs/experiments/data/E2"
+result = json.loads((data / "trials.json").read_text())
+assert result["status"] == "complete"
+trials = result["trials"]
+assert len(trials) == 100
+expected_inventory = trials[0]["inventory_before"]
+for mode in ("stationary", "walking"):
+    selected = [trial for trial in trials if trial["mode"] == mode]
+    assert len(selected) == 50
+    for metric in ("total_ms", "input_gap_ms", "client_bytes", "arrival_error_blocks"):
+        measured = module.percentiles([trial[metric] for trial in selected])
+        assert measured == result["summary"][mode][metric], (mode, metric)
+for trial in trials:
+    first, last = trial["first_target_input"], trial["last_source_input"]
+    assert first["ns"] > last["ns"]
+    assert trial["input_gap_ms"] == (first["ns"] - last["ns"]) / 1e6
+    assert trial["inventory_before"] == trial["inventory_after"] == expected_inventory
+    assert trial["inventory_count_before"] == trial["inventory_count_after"] == 17
+    assert trial["inventory_equal"]
+    assert trial["client_bytes"] > 0
+    assert len(trial["arrival_teleports"]) == 2
+    assert all(event["delta"] == [0, 0, 0] and event["flags"] == 0
+               for event in trial["arrival_teleports"])
+    assert math.isclose(trial["arrival_error_blocks"], max(
+        math.dist(event["before"], event["pos"]) for event in trial["arrival_teleports"]
+    ))
+for name in ("upstream-baseline.json", "prerequisites.json"):
+    upstream = json.loads((data / name).read_text())
+    assert upstream["upstream_exit"] == 0
+    assert len(upstream["upstream_checks"]) == 37
+    assert all(check["ok"] for check in upstream["upstream_checks"])
+    assert upstream["upstream_script_sha256"] == "ec1d93186c65e0e94f026338c372d00b06f9709c6d554276687c2add4752931e"
+assert module.percentiles([1, 2, 3, 4]) == {"p50": 2, "p95": 4, "p99": 4}
+print("E2 verified: 100 trials, 50 per mode, recomputed percentiles, exact input-gap timestamps,")
+print("unchanged 17-item inventory, two zero-delta absolute teleports per trial, 37/37 upstream checks twice.")

@@ -1,0 +1,239 @@
+{
+  "kind": "E2-prerequisites",
+  "at_unix": 1794063054.699014,
+  "horizon": "fc2868b2b26d56ec76e17414909fe58a3b87bb92",
+  "meridian": "902dcf195e0a8bbd3f39a5f560684af00e64bf5d",
+  "meridian_protocol_dependency": "0d21d5520ec26c49b774bf1533e53ea8af81278d",
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "completed_stationary_moves": 50,
+  "completed_walking_moves": 50,
+  "metrics": {
+    "stationary": {
+      "total_ms": {
+        "p50": 699.55,
+        "p95": 749.68,
+        "p99": 749.75
+      },
+      "input_gap_ms": {
+        "p50": 223.182,
+        "p95": 226.761,
+        "p99": 226.813
+      },
+      "client_bytes": {
+        "p50": 12655,
+        "p95": 13604,
+        "p99": 13708
+      },
+      "arrival_error_blocks": {
+        "p50": 0.0,
+        "p95": 0.0,
+        "p99": 0.0
+      }
+    },
+    "walking": {
+      "total_ms": {
+        "p50": 899.553,
+        "p95": 999.64,
+        "p99": 1049.681
+      },
+      "input_gap_ms": {
+        "p50": 423.214,
+        "p95": 476.759,
+        "p99": 476.882
+      },
+      "client_bytes": {
+        "p50": 10202,
+        "p95": 13893,
+        "p99": 14557
+      },
+      "arrival_error_blocks": {
+        "p50": 1.4000000000000057,
+        "p95": 1.6800000000000068,
+        "p99": 1.6800000000000352
+      }
+    }
+  },
+  "status": "complete",
+  "resource_candidates": [
+    {
+      "path": "$HOME/Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3",
+      "problems": []
+    }
+  ],
+  "binary_sha256": {
+    ".local/bin/horizon-fc2868b2b/horizon-client": "6aed2e94bb0a58327142ad895bf8c272cfbc9c76782019529aa515d49eadf9e9",
+    ".local/bin/horizon-fc2868b2b/horizon-bots": "d370c52a5024bb8fccc2e10989e23d741bcdf18661cf70b41d88cdf65d6fc82e",
+    ".local/bin/meridian-902dcf1/meridian": "bd34774a7e05be5f135336a54be52386ec6e7cf22578120a45b0b7b6e71126dd",
+    ".local/bin/meridian-902dcf1/meridian-sidecar": "f80e9789d175b940f3c672e3dcd13f49d246837d3c9a27c33fed0056a88c787f",
+    ".local/bin/meridian-902dcf1/e2-client": "a3139cf369120bc6131313daf0061e81bca98743e56a8ed3a42a1d803d9865e9"
+  },
+  "patch_sha256": {
+    "e2-horizon-input-trace.patch": "488a82c167465ad288c194103f51983a2020288e2bbf75db0b07c26d76ed2231",
+    "e2-meridian-client.patch": "76153e124f7dfd30acffe95207c92c3df852c03875a71bc887bfd087a53e55b4"
+  },
+  "upstream_script_sha256": "ec1d93186c65e0e94f026338c372d00b06f9709c6d554276687c2add4752931e",
+  "upstream_command": [
+    "/opt/homebrew/opt/python@3.15/bin/python3.15",
+    "$REPO/.local/src/horizon/tools/server_transfer_e2e.py",
+    "--bin-dir",
+    "$REPO/.local/bin/horizon-fc2868b2b",
+    "--resources",
+    "$HOME/Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3",
+    "--out",
+    "$REPO/.local/runs/E2-1qn0rdjv/upstream"
+  ],
+  "upstream_exit": 0,
+  "upstream_seconds": 15.144442208009423,
+  "upstream_steps_shape": "list",
+  "upstream_checks": [
+    {
+      "step": "both engines up, transfers on, forwarding on",
+      "ok": true
+    },
+    {
+      "step": "a login that skips the proxy is refused",
+      "ok": true
+    },
+    {
+      "step": "1. the player is on A through the proxy, with 5 diamonds, 12 logs and 7 levels",
+      "ok": true
+    },
+    {
+      "step": "1. its client moved the diamonds into its 2x2 crafting grid (they left its Inventory)",
+      "ok": true
+    },
+    {
+      "step": "2. player-expect on B",
+      "ok": true
+    },
+    {
+      "step": "2. transfer-status on B counts the player as expected, and B is not full",
+      "ok": true
+    },
+    {
+      "step": "2. B's one place is the expected player's: a second player-expect is refused as full",
+      "ok": true
+    },
+    {
+      "step": "3. player-export freeze on A gives a record with a hand-over id",
+      "ok": true
+    },
+    {
+      "step": "3. a repeated export answers the same record, byte for byte",
+      "ok": true
+    },
+    {
+      "step": "3. the export says how long the freeze still lasts",
+      "ok": true
+    },
+    {
+      "step": "3. a frozen player picks nothing up: the emeralds at its feet are still in the world",
+      "ok": true
+    },
+    {
+      "step": "4. the login on B is held, and announced to no one",
+      "ok": true
+    },
+    {
+      "step": "4. transfer-status on B: held, no longer expected, and its place taken",
+      "ok": true
+    },
+    {
+      "step": "4. transfer-status on A: the player is placed and frozen",
+      "ok": true
+    },
+    {
+      "step": "5. player-import on B, place false: taken, still held",
+      "ok": true
+    },
+    {
+      "step": "5. nothing is written before the confirmation",
+      "ok": true
+    },
+    {
+      "step": "6. player-confirm on B: placed, and its file is on disk when the reply comes",
+      "ok": true
+    },
+    {
+      "step": "6. B's file holds the record's items and experience",
+      "ok": true
+    },
+    {
+      "step": "3. the diamonds of the 2x2 grid are back in the exported inventory",
+      "ok": true
+    },
+    {
+      "step": "6. the statistics went with it",
+      "ok": true
+    },
+    {
+      "step": "6. no emerald came: the record is the player at the export",
+      "ok": true
+    },
+    {
+      "step": "6. a confirm retried after the commit is answered ok, placed",
+      "ok": true
+    },
+    {
+      "step": "6. an import retried after the commit is answered ok, placed",
+      "ok": true
+    },
+    {
+      "step": "7. player-release moved on A",
+      "ok": true
+    },
+    {
+      "step": "3. the frozen player took no damage (its client was never sent a lower health)",
+      "ok": true
+    },
+    {
+      "step": "7. A logs no \"left the game\" for a player moved away",
+      "ok": true
+    },
+    {
+      "step": "7. A's connection of the player is closed",
+      "ok": true
+    },
+    {
+      "step": "7. a repeated release is refused",
+      "ok": true
+    },
+    {
+      "step": "7. transfer-status: the player is on B now, and A has nobody",
+      "ok": true
+    },
+    {
+      "step": "7. B is full with the player on it: player-expect is refused, and transfer-status says full",
+      "ok": true
+    },
+    {
+      "step": "cancel: player-expect on A",
+      "ok": true
+    },
+    {
+      "step": "cancel: player-export freeze on B",
+      "ok": true
+    },
+    {
+      "step": "cancel: player-drop on A lets the held login go",
+      "ok": true
+    },
+    {
+      "step": "cancel: player-release abort on B",
+      "ok": true
+    },
+    {
+      "step": "cancel: a moved after the abort is refused",
+      "ok": true
+    },
+    {
+      "step": "cancel: the player plays on on B",
+      "ok": true
+    },
+    {
+      "step": "A wrote no file for the player after it moved away, even when it stopped",
+      "ok": true
+    }
+  ]
+}

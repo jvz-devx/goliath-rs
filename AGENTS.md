@@ -1,6 +1,6 @@
 # goliath-rs
 
-A sharded Minecraft world on Horizon: static tiles, one server process each, players handed over at a wall. Decisions are in `docs/decisions.md`, experiment results in `docs/experiments/`. Research notes in `docs/research/` are local and not published.
+A sharded Minecraft world on Horizon: static tiles, one server process each, players handed over at a wall. Current status and milestones are in `docs/progress.md`; keep it up to date. Decisions are in `docs/decisions.md`, experiment results in `docs/experiments/`. Research notes in `docs/research/` are local and not published.
 
 ## Who does what
 

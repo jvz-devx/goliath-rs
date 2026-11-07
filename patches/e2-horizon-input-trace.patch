@@ -1,0 +1,42 @@
+diff --git a/crates/horizon-client/src/lan/hub.rs b/crates/horizon-client/src/lan/hub.rs
+index cbbaa00b3..835da46eb 100644
+--- a/crates/horizon-client/src/lan/hub.rs
++++ b/crates/horizon-client/src/lan/hub.rs
+@@ -3987,7 +3987,7 @@ impl Hub {
+                                 .teleported(at, kept);
+                         }
+                         let rot = (p.yaw, p.pitch);
+-                        self.position_change(i, [p.x, p.y, p.z], rot, 0, ctx, events);
++                        self.position_change(i, [p.x, p.y, p.z], rot, 0, ctx, events, false);
+                     }
+                 }
+                 // handlePlayerAbilities: the client flies only if it may.
+@@ -4296,7 +4296,7 @@ impl Hub {
+         }
+         let to = pos.unwrap_or(g.position);
+         let rot = rot.unwrap_or((g.yaw, g.pitch));
+-        self.position_change(i, to, rot, flags, ctx, events);
++        self.position_change(i, to, rot, flags, ctx, events, true);
+     }
+ 
+     /// ServerGamePacketListenerImpl.handlePlayerPositionChange.
+@@ -4308,6 +4308,7 @@ impl Hub {
+         flags: u8,
+         ctx: &TickCtx,
+         events: &mut Vec<HostEvent>,
++        e2_input: bool,
+     ) {
+         let (frozen, (check, elytra_check)) = (self.ticking.1, self.movement_checks);
+         let g = &mut self.guests[i];
+@@ -4470,6 +4471,11 @@ impl Hub {
+         g.head_yaw = g.yaw;
+         g.on_ground = on_ground;
+         g.ticks = g.ticks.max(1);
++        if e2_input && std::env::var_os("E2_TRACE_INPUTS").is_some() {
++            let ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
++            let velocity = g.motion.as_ref().map(|m| [m.velocity.x, m.velocity.y, m.velocity.z]);
++            eprintln!("E2_INPUT {{\"ns\":{ns},\"tick\":{},\"pos\":{:?},\"velocity\":{:?}}}", self.ticks, g.position, velocity.unwrap_or([0.0; 3]));
++        }
+         if placed {
+             self.resend_teleport(i, None);
+         }

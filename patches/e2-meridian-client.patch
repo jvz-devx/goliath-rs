@@ -1,0 +1,129 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index ecd945f..f710114 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -603,6 +603,7 @@ name = "meridian-testkit"
+ version = "0.1.0"
+ dependencies = [
+  "horizon-protocol",
++ "serde_json",
+  "sha2",
+ ]
+ 
+diff --git a/crates/meridian-testkit/Cargo.toml b/crates/meridian-testkit/Cargo.toml
+index 8037e41..0d4f239 100644
+--- a/crates/meridian-testkit/Cargo.toml
++++ b/crates/meridian-testkit/Cargo.toml
+@@ -11,6 +11,7 @@ repository.workspace = true
+ horizon-protocol.workspace = true
+ # HMAC-SHA256 for the fake backend's own check of the forwarding signature.
+ sha2 = "0.10"
++serde_json = "1"
+ 
+ [lints]
+ workspace = true
+diff --git a/crates/meridian-testkit/src/bin/e2-client.rs b/crates/meridian-testkit/src/bin/e2-client.rs
+new file mode 100644
+index 0000000..d418c9c
+--- /dev/null
++++ b/crates/meridian-testkit/src/bin/e2-client.rs
+@@ -0,0 +1,99 @@
++//! E2's single offline test player. Commands enter on stdin; only measurements leave on stdout.
++// Copyright (c) 2026 Akirabane. MIT license, as in this workspace's LICENSE.
++use horizon_protocol::{connection::Connection, ids, packets::{Empty, configuration as cfg, play}};
++use meridian_testkit::{client::FakeClient, trace::Recorder};
++use std::{collections::HashMap, io::{self, BufRead, Write}, sync::{atomic::Ordering, mpsc}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
++use serde_json::json;
++
++fn now() -> u128 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() }
++fn emit(value: serde_json::Value) { println!("{value}"); io::stdout().flush().unwrap(); }
++
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let port: u16 = std::env::args().nth(1).ok_or("port required")?.parse()?;
++    let mut connection = Connection::connect("127.0.0.1", port, Duration::from_secs(5))?;
++    let client = FakeClient { host: "127.0.0.1".into(), port, ..FakeClient::named("E2Probe") };
++    client.run(&mut connection, &Recorder::new())?;
++    let counters = connection.reader.counters.clone();
++    connection.reader.set_read_timeout(Some(Duration::from_millis(2)))?;
++    let info = || cfg::Serverbound::ClientInformation(cfg::ClientInformation {
++        language: "en_us".into(), view_distance: 3, chat_visibility: 0, chat_colors: true,
++        model_customisation: 127, main_hand: 1, text_filtering: false, allows_listing: true,
++        particle_status: 0,
++    }).encode();
++    connection.send(&info())?;
++    let (tx, rx) = mpsc::channel();
++    std::thread::spawn(move || { for line in io::stdin().lock().lines() {
++        match line { Ok(line) => if tx.send(line).is_err() { break; }, Err(_) => break }
++    }});
++    let mut playing = false;
++    let mut loaded = false;
++    let mut pose = [0.0; 3];
++    let mut speed = 0.0;
++    let mut next = Instant::now();
++    loop {
++        while let Ok(order) = rx.try_recv() {
++            if order == "quit" { connection.writer.shutdown(); return Ok(()); }
++            if let Some(value) = order.strip_prefix("speed ") { speed = value.parse()?; }
++            if let Some(value) = order.strip_prefix("command ") {
++                emit(json!({"kind":"command", "ns":now(), "bytes":counters.bytes_in.load(Ordering::Relaxed)}));
++                connection.send(&play::Serverbound::ChatCommand(play::ChatCommand {command:value.into()}).encode())?;
++            }
++            if order == "snapshot" {
++                emit(json!({"kind":"snapshot", "ns":now(), "pos":pose, "speed":speed, "bytes":counters.bytes_in.load(Ordering::Relaxed)}));
++            }
++        }
++        if playing && loaded && Instant::now() >= next {
++            next = Instant::now() + Duration::from_millis(50);
++            pose[0] += speed / 20.0;
++            connection.send(&play::Serverbound::MovePlayerPos(play::MovePlayerPos {x:pose[0], y:pose[1], z:pose[2], flags:1}).encode())?;
++            connection.send(&play::Serverbound::ClientTickEnd(Empty).encode())?;
++        }
++        let (id, payload) = match connection.recv() {
++            Ok(value) => value,
++            Err(e) if e.is_timed_out() => continue,
++            Err(e) => return Err(e.into()),
++        };
++        if !playing {
++            let reply = match id {
++                ids::configuration::clientbound::KEEP_ALIVE => match cfg::Clientbound::decode(id, &payload)? {
++                    cfg::Clientbound::KeepAlive(p) => Some(cfg::Serverbound::KeepAlive(p).encode()), _ => None,
++                },
++                ids::configuration::clientbound::PING => match cfg::Clientbound::decode(id, &payload)? {
++                    cfg::Clientbound::Ping(p) => Some(cfg::Serverbound::Pong(p).encode()), _ => None,
++                },
++                ids::configuration::clientbound::SELECT_KNOWN_PACKS => Some(cfg::Serverbound::SelectKnownPacks(cfg::SelectKnownPacks {packs:vec![]}).encode()),
++                ids::configuration::clientbound::CODE_OF_CONDUCT => Some(cfg::Serverbound::AcceptCodeOfConduct(Empty).encode()),
++                ids::configuration::clientbound::FINISH_CONFIGURATION => { playing = true; Some(cfg::Serverbound::FinishConfiguration(Empty).encode()) },
++                _ => None,
++            };
++            if let Some(reply) = reply { connection.send(&reply)?; }
++            continue;
++        }
++        match id {
++            ids::play::clientbound::KEEP_ALIVE => if let play::Clientbound::KeepAlive(p) = play::Clientbound::decode(id, &payload)? {
++                connection.send(&play::Serverbound::KeepAlive(p).encode())?;
++            },
++            ids::play::clientbound::PING => if let play::Clientbound::Ping(p) = play::Clientbound::decode(id, &payload)? {
++                connection.send(&play::Serverbound::Pong(p).encode())?;
++            },
++            ids::play::clientbound::CHUNK_BATCH_FINISHED => {
++                connection.send(&play::Serverbound::ChunkBatchReceived(play::ChunkBatchReceived {chunks_per_tick:64.0}).encode())?;
++            },
++            ids::play::clientbound::PLAYER_POSITION => if let play::Clientbound::PlayerPosition(p) = play::Clientbound::decode(id, &payload)? {
++                let before = pose;
++                if p.relatives != 0 { return Err("relative teleport not supported by E2 client".into()); }
++                pose = p.position;
++                emit(json!({"kind":"teleport", "ns":now(), "before":before, "pos":pose, "delta":p.delta, "flags":p.relatives, "bytes":counters.bytes_in.load(Ordering::Relaxed)}));
++                connection.send(&play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {id:p.teleport, x:pose[0], y:pose[1], z:pose[2], yaw:p.yaw, pitch:p.pitch}).encode())?;
++                connection.send(&play::Serverbound::PlayerLoaded(Empty).encode())?;
++                loaded = true;
++            },
++            ids::play::clientbound::SYSTEM_CHAT => if let play::Clientbound::SystemChat(p) = play::Clientbound::decode(id, &payload)? {
++                emit(json!({"kind":"chat", "ns":now(), "text":horizon_protocol::text::plain(&p.content,&HashMap::new()), "bytes":counters.bytes_in.load(Ordering::Relaxed)}));
++            },
++            ids::play::clientbound::START_CONFIGURATION => return Err("unexpected reconfiguration".into()),
++            ids::play::clientbound::DISCONNECT => return Err("server disconnected test player".into()),
++            _ => {},
++        }
++    }
++}

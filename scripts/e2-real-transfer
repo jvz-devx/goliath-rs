@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""Run E2's unmodified Horizon check, then real Meridian transfer trials.
+
+Pinned sources:
+Horizon fc2868b2b26d56ec76e17414909fe58a3b87bb92
+Meridian 902dcf195e0a8bbd3f39a5f560684af00e64bf5d
+Meridian protocol dependency 0d21d5520ec26c49b774bf1533e53ea8af81278d
+
+No jars are downloaded. Launcher resources are opened read-only. All runtime
+files stay below .local/runs/ and are removed, including on failed checks.
+Apply the recorded patches and retain their binaries first. The default trial
+count is 50 stationary and 50 walking transfers.
+"""
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import platform
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+
+ROOT = Path(__file__).resolve().parent.parent
+HORIZON = "fc2868b2b26d56ec76e17414909fe58a3b87bb92"
+MERIDIAN = "902dcf195e0a8bbd3f39a5f560684af00e64bf5d"
+PROTOCOL = "0d21d5520ec26c49b774bf1533e53ea8af81278d"
+DATA = ROOT / "docs/experiments/data/E2"
+SOURCE = ROOT / ".local/src"
+RUNS = ROOT / ".local/runs"
+HORIZON_BIN = ROOT / ".local/bin" / f"horizon-{HORIZON[:9]}"
+MERIDIAN_BIN = ROOT / ".local/bin" / f"meridian-{MERIDIAN[:7]}"
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def source_revision(path, expected):
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=path, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if result != expected:
+        raise RuntimeError(f"{path.name}: expected {expected}, found {result}")
+    return result
+
+
+def launcher_candidates():
+    """Only inspect the location pointer and version resources, never accounts."""
+    app_support = Path.home() / "Library/Application Support"
+    launcher = app_support / "horizon-launcher"
+    pointer = Path(os.environ.get(
+        "HORIZON_LAUNCHER_LOCATION_FILE",
+        str(app_support / "horizon-launcher-location/location.json"),
+    ))
+    if pointer.is_file():
+        location = json.loads(pointer.read_text())
+        if location.get("version") != 1:
+            raise RuntimeError(f"Unsupported launcher location pointer: {pointer}")
+        launcher = Path(location["roots"]["launcher"])
+    if os.environ.get("HORIZON_LAUNCHER_HOME"):
+        launcher = Path(os.environ["HORIZON_LAUNCHER_HOME"])
+    versions = launcher / "versions"
+    if not versions.is_dir():
+        return []
+    return [
+        release / ".local/horizon-client/26.3"
+        for release in sorted(versions.iterdir()) if release.is_dir()
+    ]
+
+
+def resource_problems(path):
+    """Mirror the pinned supervisor's small pre-start check without copying data."""
+    problems = []
+    manifest_path = path / "horizon-resources.json"
+    if not manifest_path.is_file():
+        return ["horizon-resources.json is missing"]
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("minecraft") != "26.3":
+        problems.append("manifest does not name Minecraft 26.3")
+    for name in ("facts.json", "block-tags.json", "registries.json", "commands.json"):
+        if not (path / name).is_file():
+            problems.append(f"{name} is missing")
+    for name, key in (("facts.json", "facts_sha256"),
+                      ("block-tags.json", "block_tags_sha256")):
+        if (path / name).is_file() and manifest.get(key):
+            if sha256(path / name).lower() != manifest[key].lower():
+                problems.append(f"{name} checksum differs")
+    for name in ("font", "textures"):
+        directory = path / "assets/minecraft" / name
+        if not directory.is_dir() or next(directory.iterdir(), None) is None:
+            problems.append(f"assets/minecraft/{name} is missing or empty")
+    return problems
+
+
+def isolated_env(scratch):
+    env = dict(os.environ)
+    for name in ("HORIZON_HOME", "HORIZON_LAUNCHER_HOME", "XDG_DATA_HOME",
+                 "XDG_CONFIG_HOME", "HORIZON_LAUNCHER_TRASH",
+                 "HORIZON_LAUNCHER_CLIPBOARD", "HORIZON_LAUNCHER_DESKTOP"):
+        folder = scratch / name.lower()
+        folder.mkdir()
+        env[name] = str(folder)
+    # The unchanged upstream script also creates TemporaryDirectory and game_env
+    # folders. Direct all of those below this run, rather than macOS's /var/folders.
+    env["TMPDIR"] = str(scratch)
+    env["HORIZON_LAUNCHER_NO_SELF_UPDATE"] = "1"
+    env["HORIZON_NO_AUDIO"] = "1"
+    env["HORIZON_NO_DISCORD"] = "1"
+    env["HORIZON_TEST_LOOPBACK"] = "1"
+    return env
+
+
+def run_upstream(resources, result):
+    script = SOURCE / "horizon/tools/server_transfer_e2e.py"
+    original = subprocess.run(
+        ["git", "show", f"{HORIZON}:tools/server_transfer_e2e.py"],
+        cwd=SOURCE / "horizon", check=True, capture_output=True,
+    ).stdout
+    if script.read_bytes() != original:
+        raise RuntimeError("Upstream server_transfer_e2e.py is modified")
+    result["upstream_script_sha256"] = sha256(script)
+    RUNS.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="E2-", dir=RUNS) as temporary:
+        scratch = Path(temporary)
+        command = [
+            sys.executable, str(script), "--bin-dir", str(HORIZON_BIN),
+            "--resources", str(resources), "--out", str(scratch / "upstream"),
+        ]
+        result["upstream_command"] = command
+        start = time.monotonic()
+        # One private process group contains the harness, engines and bots. Kill
+        # remaining children even if upstream exits before its own cleanup.
+        with (scratch / "driver.log").open("wb") as log:
+            child = subprocess.Popen(
+                command, cwd=scratch, env=isolated_env(scratch),
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            try:
+                result["upstream_exit"] = child.wait(timeout=1200)
+            finally:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+                # A harness can exit while descendants survive its PID. SIGKILL
+                # the private group too, not only the already-exited leader.
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        result["upstream_seconds"] = time.monotonic() - start
+        steps = scratch / "upstream/steps.json"
+        if steps.is_file():
+            # Keep only check outcomes, not exported player records or game data.
+            raw = json.loads(steps.read_text())
+            result["upstream_steps_shape"] = type(raw).__name__
+            result["upstream_checks"] = [
+                {"step": entry["step"], "ok": entry["ok"]}
+                for entry in raw
+            ]
+        # No game logs, resource contents, player records or world files leave
+        # .local/. A failed run is identified by its exit code in this result.
+    if result["upstream_exit"]:
+        raise RuntimeError(f"Upstream transfer check exited {result['upstream_exit']}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--resources", type=Path)
+    parser.add_argument("--check-only", action="store_true")
+    parser.add_argument("--build", action="store_true", help="clone pins, apply patches and build once per workspace first")
+    parser.add_argument("--skip-upstream", action="store_true", help="reuse the separately recorded baseline check")
+    parser.add_argument("--stationary", type=int, default=50)
+    parser.add_argument("--walking", type=int, default=50)
+    args = parser.parse_args()
+    if min(args.stationary, args.walking) < 0 or args.stationary + args.walking < 1:
+        parser.error("trial counts must be nonnegative, with at least one trial")
+    DATA.mkdir(parents=True, exist_ok=True)
+    result = {
+        "kind": "E2-prerequisites", "at_unix": time.time(),
+        "horizon": HORIZON, "meridian": MERIDIAN,
+        "meridian_protocol_dependency": PROTOCOL,
+        "platform": platform.platform(), "machine": platform.machine(),
+        "completed_stationary_moves": 0, "completed_walking_moves": 0,
+        "metrics": None, "status": "blocked",
+    }
+    try:
+        if args.build:
+            build_spec = importlib.util.spec_from_file_location("e2_build", ROOT / "scripts/e2-build.py")
+            build_module = importlib.util.module_from_spec(build_spec)
+            build_spec.loader.exec_module(build_module)
+            build_module.prepare(ROOT)
+        source_revision(SOURCE / "horizon", HORIZON)
+        source_revision(SOURCE / "meridian", MERIDIAN)
+        candidates = [args.resources.resolve()] if args.resources else launcher_candidates()
+        result["resource_candidates"] = [
+            {"path": str(path), "problems": resource_problems(path)}
+            for path in candidates
+        ]
+        resources = next((path for path in candidates if not resource_problems(path)), None)
+        if resources is None:
+            raise RuntimeError(
+                "No complete prepared Minecraft 26.3 resources. Finish preparation "
+                "in Horizon.app, then rerun with --resources PATH. No jars downloaded."
+            )
+        needed = [HORIZON_BIN / name for name in ("horizon-client", "horizon-bots")]
+        needed += [MERIDIAN_BIN / name for name in ("meridian", "meridian-sidecar", "e2-client")]
+        missing = [str(path) for path in needed if not os.access(path, os.X_OK)]
+        if missing:
+            raise RuntimeError("Missing retained binaries: " + ", ".join(missing))
+        result["binary_sha256"] = {str(path.relative_to(ROOT)): sha256(path) for path in needed}
+        result["patch_sha256"] = {
+            name: sha256(ROOT / "patches" / name)
+            for name in ("e2-horizon-input-trace.patch", "e2-meridian-client.patch")
+        }
+        if args.check_only:
+            result["status"] = "prerequisites-ready"
+            return 0
+        if not args.skip_upstream:
+            run_upstream(resources, result)
+        spec = importlib.util.spec_from_file_location("e2_meridian", ROOT / "scripts/e2-meridian.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        measured = module.run(ROOT, resources, isolated_env, args.stationary, args.walking)
+        result["status"] = measured["status"]
+        result["completed_stationary_moves"] = sum(trial["mode"] == "stationary" for trial in measured["trials"])
+        result["completed_walking_moves"] = sum(trial["mode"] == "walking" for trial in measured["trials"])
+        result["metrics"] = measured.get("summary")
+        return 0
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        result["blocker"] = str(error)
+        print(f"E2 blocked: {error}", file=sys.stderr)
+        return 2
+    finally:
+        destination = DATA / "prerequisites.json"
+        destination.write_text(json.dumps(result, indent=2).replace(str(Path.home()), "$HOME") + "\n")
+        print(destination)
+        if args.build:
+            subprocess.run([ROOT / "scripts/clean-builds", "--all"], cwd=ROOT, check=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
