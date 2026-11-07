@@ -1,0 +1,1513 @@
+diff --git a/crates/meridian-ghost/src/view.rs b/crates/meridian-ghost/src/view.rs
+--- a/crates/meridian-ghost/src/view.rs
++++ b/crates/meridian-ghost/src/view.rs
+@@ -112,6 +112,18 @@
+     /// every chunk it holds.
+     pub fn complete(&self) -> bool {
+         self.chunks.complete()
++    }
++
++    /// Whether every column in the square around an arrival is already buffered.
++    /// Unlike `complete`, this proves presence, not only retained packet bodies.
++    pub fn covers(&self, at: [f64; 3], radius: i32) -> bool {
++        if !at.iter().all(|v| v.is_finite()) || !(0..=32).contains(&radius) {
++            return false;
++        }
++        let (x, z) = ((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
++        (-radius..=radius).all(|dx| {
++            (-radius..=radius).all(|dz| self.chunks.loaded.contains_key(&(x + dx, z + dz)))
++        })
+     }
+ 
+     /// Reads one clientbound Play packet. Packets that change nothing the view
+diff --git a/crates/meridian-handoff/src/lane_input.rs b/crates/meridian-handoff/src/lane_input.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/lane_input.rs
+@@ -0,0 +1,431 @@
++//! Bounded frozen inputs and lane-local acknowledgement identities.
++use crate::session::Lane;
++use horizon_protocol::{
++    buf::{Reader, Writer},
++    ids::play::{clientbound as c, serverbound as s},
++    packets::play::{Clientbound as C, Serverbound as S},
++};
++use meridian_ghost::Packet;
++use std::{
++    collections::{BTreeMap, VecDeque},
++    sync::{Arc, Weak},
++};
++
++const PACKETS: usize = 256;
++const BYTES: usize = 1024 * 1024;
++const REPLIES: usize = 64;
++
++#[derive(Default)]
++pub(crate) struct Inputs {
++    packets: VecDeque<Packet>,
++    bytes: usize,
++}
++
++impl Inputs {
++    pub fn push(&mut self, packet: Packet) -> Result<(), String> {
++        if self.packets.len() == PACKETS || self.bytes + packet.payload.len() > BYTES {
++            return Err("E8 input queue overflow; session closed without dropping input".into());
++        }
++        self.bytes += packet.payload.len();
++        self.packets.push_back(packet);
++        Ok(())
++    }
++    pub fn into_packets(self) -> VecDeque<Packet> {
++        self.packets
++    }
++}
++
++struct Reply<T> {
++    lane: Weak<Lane>,
++    original: T,
++}
++struct Block {
++    lane: u64,
++    local: i32,
++    client: i32,
++    answered: bool,
++}
++
++#[derive(Default)]
++pub(crate) struct Identities {
++    next: i32,
++    keepalives: BTreeMap<i64, Reply<i64>>,
++    pings: BTreeMap<i32, Reply<i32>>,
++    teleports: BTreeMap<i32, Reply<i32>>,
++    batches: VecDeque<Weak<Lane>>,
++    block_lane: u64,
++    block_next: i32,
++    blocks: VecDeque<Block>,
++}
++
++pub(crate) enum Answer {
++    Input,
++    Ignore,
++    Lane(Arc<Lane>, Vec<u8>),
++}
++
++impl Identities {
++    fn number(&mut self) -> Result<i32, String> {
++        self.next = self
++            .next
++            .checked_add(1)
++            .ok_or("E8 reply id space exhausted")?;
++        Ok(self.next)
++    }
++
++    /// Translate challenges before sending them to the client. Called for retired
++    /// lane block acks too, so acknowledgements cannot strand old predictions.
++    pub fn clientbound(
++        &mut self,
++        lane: &Arc<Lane>,
++        id: i32,
++        payload: &[u8],
++    ) -> Result<Option<Vec<u8>>, String> {
++        let mut packet = match id {
++            c::KEEP_ALIVE | c::PING | c::PLAYER_POSITION | c::BLOCK_CHANGED_ACK => {
++                Some(C::decode(id, payload).map_err(|e| e.to_string())?)
++            }
++            c::CHUNK_BATCH_FINISHED => {
++                if self.batches.len() >= REPLIES {
++                    return Err("E8 outstanding chunk batches limit".into());
++                }
++                self.batches.push_back(Arc::downgrade(lane));
++                None
++            }
++            _ => None,
++        };
++        match packet.as_mut() {
++            Some(C::KeepAlive(p)) => {
++                if self.keepalives.len() >= REPLIES {
++                    return Err("E8 outstanding keepalives limit".into());
++                }
++                let number = i64::from(self.number()?);
++                self.keepalives.insert(
++                    number,
++                    Reply {
++                        lane: Arc::downgrade(lane),
++                        original: p.id,
++                    },
++                );
++                p.id = number;
++            }
++            Some(C::Ping(p)) => {
++                if self.pings.len() >= REPLIES {
++                    return Err("E8 outstanding pings limit".into());
++                }
++                let number = self.number()?;
++                self.pings.insert(
++                    number,
++                    Reply {
++                        lane: Arc::downgrade(lane),
++                        original: p.id,
++                    },
++                );
++                p.id = number;
++            }
++            Some(C::PlayerPosition(p)) => {
++                if self.teleports.len() >= REPLIES {
++                    return Err("E8 outstanding teleports limit".into());
++                }
++                let number = self.number()?;
++                self.teleports.insert(
++                    number,
++                    Reply {
++                        lane: Arc::downgrade(lane),
++                        original: p.teleport,
++                    },
++                );
++                p.teleport = number;
++            }
++            Some(C::BlockChangedAck(p)) => {
++                for block in &mut self.blocks {
++                    if block.lane == lane.id && block.local <= p.sequence {
++                        block.answered = true;
++                    }
++                }
++                let mut sequence = None;
++                while self.blocks.front().is_some_and(|block| block.answered) {
++                    sequence = self.blocks.pop_front().map(|block| block.client);
++                }
++                let Some(sequence) = sequence else {
++                    return Ok(None);
++                };
++                p.sequence = sequence;
++            }
++            _ => {}
++        }
++        Ok(Some(match packet {
++            Some(packet) => {
++                let bytes = packet.encode();
++                let mut r = Reader::new(&bytes);
++                r.varint().map_err(|e| e.to_string())?;
++                r.rest().to_vec()
++            }
++            None => payload.to_vec(),
++        }))
++    }
++
++    /// Challenges remain bound to their issuing lane, even during a freeze.
++    /// Unknown, expired and already answered ids never fall through to a new lane.
++    pub fn answer(&mut self, id: i32, payload: &[u8]) -> Result<Answer, String> {
++        let mut w = Writer::new();
++        let reply = match id {
++            s::KEEP_ALIVE => {
++                let key = Reader::new(payload).i64().map_err(|e| e.to_string())?;
++                self.keepalives.remove(&key).map(|r| {
++                    w.i64(r.original);
++                    r.lane
++                })
++            }
++            s::PONG => {
++                let key = Reader::new(payload).i32().map_err(|e| e.to_string())?;
++                self.pings.remove(&key).map(|r| {
++                    w.i32(r.original);
++                    r.lane
++                })
++            }
++            s::ACCEPT_TELEPORTATION => {
++                let S::AcceptTeleportation(mut p) =
++                    S::decode(id, payload).map_err(|e| e.to_string())?
++                else {
++                    return Err("bad teleport answer".into());
++                };
++                self.teleports.remove(&p.id).map(|r| {
++                    p.id = r.original;
++                    let encoded = S::AcceptTeleportation(p).encode();
++                    let mut reader = Reader::new(&encoded);
++                    let _ = reader.varint();
++                    w.data.extend_from_slice(reader.rest());
++                    r.lane
++                })
++            }
++            s::CHUNK_BATCH_RECEIVED => self
++                .batches
++                .pop_front()
++                .inspect(|_| w.data.extend_from_slice(payload)),
++            _ => return Ok(Answer::Input),
++        };
++        Ok(match reply.and_then(|lane| lane.upgrade()) {
++            Some(lane) => Answer::Lane(lane, w.data),
++            None => Answer::Ignore,
++        })
++    }
++
++    /// Give each active lane its own sequence, then map cumulative acks back to
++    /// one client-wide watermark only when every earlier action was answered.
++    pub fn sequence(&mut self, lane: u64, id: i32, payload: Vec<u8>) -> Result<Vec<u8>, String> {
++        if !matches!(id, s::PLAYER_ACTION | s::USE_ITEM | s::USE_ITEM_ON) {
++            return Ok(payload);
++        }
++        let mut packet = S::decode(id, &payload).map_err(|e| e.to_string())?;
++        let seq = match &mut packet {
++            S::PlayerAction(p) => &mut p.sequence,
++            S::UseItem(p) => &mut p.sequence,
++            S::UseItemOn(p) => &mut p.sequence,
++            _ => return Ok(payload),
++        };
++        if *seq < 0 {
++            return Ok(payload);
++        }
++        if self.blocks.len() >= PACKETS {
++            return Err("E8 outstanding block actions limit".into());
++        }
++        if self.block_lane != lane {
++            self.block_lane = lane;
++            self.block_next = 0;
++        }
++        self.block_next = self
++            .block_next
++            .checked_add(1)
++            .ok_or("E8 block sequence exhausted")?;
++        self.blocks.push_back(Block {
++            lane,
++            local: self.block_next,
++            client: *seq,
++            answered: false,
++        });
++        *seq = self.block_next;
++        let encoded = packet.encode();
++        let mut r = Reader::new(&encoded);
++        r.varint().map_err(|e| e.to_string())?;
++        Ok(r.rest().to_vec())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use horizon_protocol::packets::play;
++    use std::sync::Mutex;
++
++    fn lane(id: u64) -> Arc<Lane> {
++        let (connection, _peer) = meridian_testkit::pipe();
++        let closer = connection.reader.closer().unwrap();
++        let (_reader, writer) = connection.split();
++        Arc::new(Lane {
++            id,
++            writer: Mutex::new(writer),
++            closer,
++            target: None,
++        })
++    }
++
++    fn payload(bytes: &[u8]) -> Vec<u8> {
++        let mut r = Reader::new(bytes);
++        r.varint().unwrap();
++        r.rest().to_vec()
++    }
++    #[test]
++    fn queue_is_ordered_and_bounded() {
++        let mut queue = Inputs::default();
++        for id in 0..256 {
++            queue
++                .push(Packet {
++                    id,
++                    payload: vec![id as u8],
++                })
++                .unwrap();
++        }
++        assert!(
++            queue
++                .push(Packet {
++                    id: 256,
++                    payload: vec![]
++                })
++                .is_err()
++        );
++        assert_eq!(
++            queue
++                .into_packets()
++                .iter()
++                .map(|p| p.id)
++                .collect::<Vec<_>>(),
++            (0..256).collect::<Vec<_>>()
++        );
++        let mut queue = Inputs::default();
++        assert!(
++            queue
++                .push(Packet {
++                    id: 0,
++                    payload: vec![0; BYTES + 1]
++                })
++                .is_err()
++        );
++    }
++    #[test]
++    fn unknown_lane_replies_do_not_reach_current_lane() {
++        let mut ids = Identities::default();
++        assert!(matches!(
++            ids.answer(s::KEEP_ALIVE, &7i64.to_be_bytes()).unwrap(),
++            Answer::Ignore
++        ));
++        assert!(matches!(
++            ids.answer(s::PONG, &7i32.to_be_bytes()).unwrap(),
++            Answer::Ignore
++        ));
++    }
++
++    #[test]
++    fn identical_backend_challenges_are_bound_to_their_issuing_lanes() {
++        let a = lane(1);
++        let b = lane(2);
++        let mut ids = Identities::default();
++        let keep_a = ids
++            .clientbound(&a, c::KEEP_ALIVE, &7i64.to_be_bytes())
++            .unwrap()
++            .unwrap();
++        let keep_b = ids
++            .clientbound(&b, c::KEEP_ALIVE, &7i64.to_be_bytes())
++            .unwrap()
++            .unwrap();
++        assert_ne!(keep_a, keep_b);
++        for (lane, body) in [(&b, keep_b), (&a, keep_a)] {
++            let Answer::Lane(origin, original) = ids.answer(s::KEEP_ALIVE, &body).unwrap() else {
++                panic!("not routed");
++            };
++            assert!(Arc::ptr_eq(&origin, lane));
++            assert_eq!(original, 7i64.to_be_bytes());
++            assert!(matches!(
++                ids.answer(s::KEEP_ALIVE, &body).unwrap(),
++                Answer::Ignore
++            ));
++        }
++        let teleport = C::PlayerPosition(play::PlayerPosition {
++            teleport: 0,
++            position: [1., 2., 3.],
++            delta: [0.; 3],
++            yaw: 0.,
++            pitch: 0.,
++            relatives: 0,
++        });
++        let first = ids
++            .clientbound(&a, c::PLAYER_POSITION, &payload(&teleport.encode()))
++            .unwrap()
++            .unwrap();
++        let second = ids
++            .clientbound(&b, c::PLAYER_POSITION, &payload(&teleport.encode()))
++            .unwrap()
++            .unwrap();
++        assert_ne!(first, second);
++        let C::PlayerPosition(position) = C::decode(c::PLAYER_POSITION, &first).unwrap() else {
++            panic!()
++        };
++        let answer = payload(
++            &S::AcceptTeleportation(play::AcceptTeleportation {
++                id: position.teleport,
++                x: 1.,
++                y: 2.,
++                z: 3.,
++                yaw: 0.,
++                pitch: 0.,
++            })
++            .encode(),
++        );
++        let Answer::Lane(origin, body) = ids.answer(s::ACCEPT_TELEPORTATION, &answer).unwrap()
++        else {
++            panic!()
++        };
++        assert!(Arc::ptr_eq(&origin, &a));
++        let S::AcceptTeleportation(p) = S::decode(s::ACCEPT_TELEPORTATION, &body).unwrap() else {
++            panic!()
++        };
++        assert_eq!(p.id, 0);
++    }
++
++    #[test]
++    fn retired_lane_block_ack_does_not_advance_past_an_unanswered_action() {
++        let a = lane(1);
++        let b = lane(2);
++        let mut ids = Identities::default();
++        for (lane, seq) in [(&a, 37), (&b, 38)] {
++            let body = payload(
++                &S::UseItem(play::UseItem {
++                    hand: 0,
++                    sequence: seq,
++                    yaw: 0.,
++                    pitch: 0.,
++                })
++                .encode(),
++            );
++            let body = ids.sequence(lane.id, s::USE_ITEM, body).unwrap();
++            let S::UseItem(p) = S::decode(s::USE_ITEM, &body).unwrap() else {
++                panic!()
++            };
++            assert_eq!(p.sequence, 1);
++        }
++        let ack = payload(&C::BlockChangedAck(play::BlockChangedAck { sequence: 1 }).encode());
++        assert!(
++            ids.clientbound(&b, c::BLOCK_CHANGED_ACK, &ack)
++                .unwrap()
++                .is_none()
++        );
++        let body = ids
++            .clientbound(&a, c::BLOCK_CHANGED_ACK, &ack)
++            .unwrap()
++            .unwrap();
++        let C::BlockChangedAck(p) = C::decode(c::BLOCK_CHANGED_ACK, &body).unwrap() else {
++            panic!()
++        };
++        assert_eq!(p.sequence, 38);
++    }
++}
+diff --git a/crates/meridian-handoff/src/lib.rs b/crates/meridian-handoff/src/lib.rs
+--- a/crates/meridian-handoff/src/lib.rs
++++ b/crates/meridian-handoff/src/lib.rs
+@@ -138,6 +138,7 @@
+ //!   delta, except the packets sent after it.
+ mod configure;
+ mod control;
++mod lane_input;
+ mod prepare;
+ mod reason;
+ mod session;
+@@ -151,7 +152,7 @@
+ pub use reason::{Notice, Reason};
+ pub use session::{Fallback, Loss, Replacement, Session, SessionHandle, sessions_alive};
+ pub use switch::{
+-    After, Digests, Done, Failure, PARTS, Settings, Step, TargetBackend, Trace, switch,
++    Activation, After, Digests, Done, Failure, PARTS, Settings, Step, TargetBackend, Trace, switch,
+ };
+ 
+ #[cfg(test)]
+diff --git a/crates/meridian-handoff/src/session.rs b/crates/meridian-handoff/src/session.rs
+--- a/crates/meridian-handoff/src/session.rs
++++ b/crates/meridian-handoff/src/session.rs
+@@ -31,6 +31,7 @@
+ //! then what goes to the backend ([`Up`]), then a lane's writer.
+ use crate::{
+     configure::{ClientConfiguration, Digest, DigestBuilder, Summary},
++    lane_input::{Answer, Identities, Inputs},
+     prepare::{Pose, Target},
+     reason::{Notice, Reason},
+ };
+@@ -231,6 +232,8 @@
+     /// Where the client last said it stands and how it looks, from its moves.
+     pub client_pose: Option<Pose>,
+     pub flow: Flow,
++    pub identities: Option<Identities>,
++    pub inputs: Option<Inputs>,
+ }
+ 
+ /// One connection to a backend.
+@@ -310,6 +313,8 @@
+                 client: ClientConfiguration::default(),
+                 client_pose: None,
+                 flow: Flow::default(),
++                identities: None,
++                inputs: None,
+             }),
+             client_closer,
+             events: Mutex::new(None),
+@@ -717,6 +722,12 @@
+ }
+ 
+ impl SessionHandle {
++    /// Enables lane-bound ids before the first Play packet reaches the client.
++    pub fn enable_lane_inputs(&self) {
++        let mut up = self.0.up();
++        up.identities = Some(Identities::default());
++        up.teleports = Teleports::default();
++    }
+     /// The phase the player's client is in, as far as the session has sent it.
+     pub fn phase(&self) -> Phase {
+         self.0.down().phase
+@@ -924,7 +935,7 @@
+ 
+ /// Copies a lane's packets: to the switch's target view while it prepares, to the
+ /// client while it is the active lane, nowhere otherwise.
+-fn copy_from_backend(mut from: ConnReader, lane: &Lane, shared: &Shared) -> End {
++fn copy_from_backend(mut from: ConnReader, lane: &Arc<Lane>, shared: &Shared) -> End {
+     let mut body = Vec::new();
+     loop {
+         let (id, payload) = match from.recv() {
+@@ -938,6 +949,30 @@
+             continue;
+         }
+         let mut down = shared.down();
++        // Retired lanes may still owe a block prediction acknowledgement.
++        // Do this before the active-lane filter, but translate only ack packets.
++        let payload = if down.phase == Phase::Play
++            && (down.active == lane.id || id == ids::play::clientbound::BLOCK_CHANGED_ACK)
++            && let Some(identities) = &mut shared.up().identities
++        {
++            match identities.clientbound(lane, id, &payload) {
++                Ok(Some(payload)) => payload,
++                Ok(None) => continue,
++                Err(why) => return End::Broken(horizon_protocol::Error::new(why)),
++            }
++        } else {
++            payload
++        };
++        if id == ids::play::clientbound::BLOCK_CHANGED_ACK
++            && down.active != lane.id
++            && shared.up().identities.is_some()
++        {
++            encode(&mut body, id, &payload);
++            if down.writer.send(&body).is_err() {
++                return End::ClientGone;
++            }
++            continue;
++        }
+         if down.active != lane.id {
+             continue;
+         }
+@@ -1005,7 +1040,10 @@
+                 if id == ids::play::clientbound::PLAYER_POSITION
+                     && let Ok(play::Clientbound::PlayerPosition(p)) = packet.decode()
+                 {
+-                    shared.up().teleports.sent(p.teleport);
++                    let mut up = shared.up();
++                    if up.identities.is_none() {
++                        up.teleports.sent(p.teleport);
++                    }
+                 }
+             }
+         }
+@@ -1085,16 +1123,13 @@
+                     up.client_pose = Some(pose);
+                 }
+                 if id == s::ACCEPT_TELEPORTATION
++                    && up.identities.is_none()
+                     && let Ok(teleport) = Reader::new(&payload).varint()
+                     && !up.teleports.forward(teleport)
+                 {
+                     continue;
+                 }
+-                if up.swap.is_identity() || !meridian_rewrite::serverbound_has_ids(id) {
+-                    payload
+-                } else {
+-                    rewrite(up.swap.serverbound(id, payload.clone()), payload)
+-                }
++                payload
+             }
+             Phase::Configuration => {
+                 if !configured {
+@@ -1103,11 +1138,31 @@
+                 payload
+             }
+         };
+-        encode(&mut body, id, &payload);
+-        // A write fails only when the backend has gone: its lane's reader ends the
+-        // session, which closes the client and stops this thread.
+-        if lock(&up.lane.writer).send(&body).is_ok() {
+-            add(&mut up.flow, &body);
++        let mut control = false;
++        if sending == Phase::Play
++            && let Some(identities) = &mut up.identities
++        {
++            match identities.answer(id, &payload) {
++                Ok(Answer::Ignore) => continue,
++                Ok(Answer::Lane(lane, answer)) => {
++                    encode(&mut body, id, &answer);
++                    let _ = lock(&lane.writer).send(&body);
++                    control = true;
++                }
++                Ok(Answer::Input) => {}
++                Err(why) => return End::Broken(horizon_protocol::Error::new(why)),
++            }
++        }
++        if !control {
++            if sending == Phase::Play
++                && let Some(inputs) = &mut up.inputs
++            {
++                if let Err(why) = inputs.push(Packet { id, payload }) {
++                    return End::Broken(horizon_protocol::Error::new(why));
++                }
++            } else if let Err(why) = send_input(&mut up, id, payload) {
++                return End::Broken(horizon_protocol::Error::new(why));
++            }
+         }
+         let position = (sending == Phase::Play
+             && matches!(id, s::MOVE_PLAYER_POS | s::MOVE_PLAYER_POS_ROT))
+@@ -1125,6 +1180,42 @@
+             (Phase::Play, s::CONFIGURATION_ACKNOWLEDGED) => Phase::Configuration,
+             (phase, _) => phase,
+         };
++    }
++}
++
++/// The queue keeps client numbering. Rewrite only once its destination is final.
++fn send_input(up: &mut Up, id: i32, payload: Vec<u8>) -> std::result::Result<(), String> {
++    let payload = if up.swap.is_identity() || !meridian_rewrite::serverbound_has_ids(id) {
++        payload
++    } else {
++        rewrite(up.swap.serverbound(id, payload.clone()), payload)
++    };
++    let payload = match &mut up.identities {
++        Some(ids) => ids.sequence(up.lane.id, id, payload)?,
++        None => payload,
++    };
++    let mut body = Vec::new();
++    encode(&mut body, id, &payload);
++    lock(&up.lane.writer)
++        .send(&body)
++        .map_err(|e| e.to_string())?;
++    add(&mut up.flow, &body);
++    Ok(())
++}
++
++impl Shared {
++    pub fn queue_inputs(&self) {
++        self.up().inputs = Some(Inputs::default());
++    }
++
++    pub fn replay_inputs(&self) -> std::result::Result<usize, String> {
++        let mut up = self.up();
++        let packets = up.inputs.take().unwrap_or_default().into_packets();
++        let count = packets.len();
++        for packet in packets {
++            send_input(&mut up, packet.id, packet.payload)?;
++        }
++        Ok(count)
+     }
+ }
+ 
+diff --git a/crates/meridian-handoff/src/switch.rs b/crates/meridian-handoff/src/switch.rs
+--- a/crates/meridian-handoff/src/switch.rs
++++ b/crates/meridian-handoff/src/switch.rs
+@@ -126,6 +126,9 @@
+ /// Told of each step of a switch as it happens, with the time since the switch
+ /// began: what the proxy writes to its log.
+ pub type Trace = Arc<dyn Fn(&str, Duration) + Send + Sync>;
++
++/// Waits for an approached wall to be crossed, or cancels an unused preparation.
++pub type Activation = Arc<dyn Fn() -> Result<[f64; 3], String> + Send + Sync>;
+ 
+ /// How long each part of a switch may take, and what the others are told.
+ #[derive(Clone)]
+@@ -169,6 +172,15 @@
+     pub carry_position: bool,
+     /// Fixed trigger position for a wall switch, instead of a later client snapshot.
+     pub crossing_position: Option<[f64; 3]>,
++    /// Approach prediction used to prove the held view is ready before freezing.
++    pub predicted_position: Option<[f64; 3]>,
++    /// Kept by the wall worker, not the session, so it cannot form a session cycle.
++    pub activation: Option<Activation>,
++    /// Keep ordered client input from the export request until the target is live.
++    pub replay_inputs: bool,
++    /// Experimental same-world placement: import durably places, acknowledge its
++    /// teleports on the passive lane, and do not reset the client's moving pose.
++    pub continuous_arrival: bool,
+     /// The target's players are told the player came (join line, list entry).
+     pub announce_arrival: bool,
+     /// The source's players get the "left the game" line.
+@@ -190,6 +202,10 @@
+             commit_attempts: 3,
+             carry_position: false,
+             crossing_position: None,
++            predicted_position: None,
++            activation: None,
++            replay_inputs: false,
++            continuous_arrival: false,
+             announce_arrival: true,
+             announce_departure: true,
+             trace: None,
+@@ -268,6 +284,11 @@
+ 
+ impl Drop for Switching<'_> {
+     fn drop(&mut self) {
++        // Before the lane changes, an abort replays to the resumed source. After
++        // activation it replays to the target. No failed path strands a queue.
++        if let Err(why) = self.0.replay_inputs() {
++            eprintln!("E8 replay failed on switch exit: {why}");
++        }
+         self.0.switching.store(false, Ordering::SeqCst);
+         if self.0.ended.load(Ordering::SeqCst) {
+             self.0.up().lane.closer.close();
+@@ -333,6 +354,7 @@
+ /// The two sides' controls, the player's id, and both lanes.
+ struct Run<'a> {
+     shared: &'a Shared,
++    session: &'a SessionHandle,
+     source: &'a mut dyn PlayerControl,
+     target: &'a mut dyn PlayerControl,
+     uuid: String,
+@@ -350,6 +372,7 @@
+     handover: Option<String>,
+     /// Whether the target took the record: its later requests name the hand-over.
+     imported: bool,
++    placed: bool,
+ }
+ 
+ impl Run<'_> {
+@@ -357,7 +380,11 @@
+         Failure {
+             step,
+             reason: reason.into(),
+-            after: After::Stayed,
++            after: if self.placed {
++                After::Disconnected
++            } else {
++                After::Stayed
++            },
+         }
+     }
+ 
+@@ -458,9 +485,18 @@
+         }
+     }
+ 
+-    /// The source lets the frozen player go on, and the target is let go.
++    /// Cancels an uncommitted import. An acknowledged durable placement instead
++    /// lets the source go as moved and closes the client, never resumes a writer.
+     fn abort(&mut self) {
+-        let _ = self.release_source(Outcome::Abort, false);
++        if self.placed {
++            // place:true crossed the target's durable commit point. It cannot
++            // roll back to the source, even if delivery of the delta fails.
++            let _ = self.release_source(Outcome::Moved, false);
++            self.source_lane.closer.close();
++            self.session.close();
++        } else {
++            let _ = self.release_source(Outcome::Abort, false);
++        }
+         self.abandon_target();
+     }
+ 
+@@ -558,9 +594,10 @@
+ /// Switches the player of `session` to `target`. `source` is the control of the
+ /// backend the player is on, `target_control` that of the target.
+ ///
+-/// Until the first packet of the delta goes to the client, any failure leaves the
+-/// player where they were ([`After::Stayed`]): the target forgets them and the
+-/// source lets them go on.
++/// With the default settings, a failure before the delta leaves the player on
++/// the source ([`After::Stayed`]). `continuous_arrival` commits on the target
++/// before writing the delta: once that durable placement has been acknowledged,
++/// a later delivery failure closes the client and releases the source as moved.
+ pub fn switch(
+     session: &SessionHandle,
+     target: TargetBackend<'_>,
+@@ -572,6 +609,7 @@
+     let shared: &Shared = &session.0;
+     let mut run = Run {
+         shared,
++        session,
+         source,
+         target: target_control,
+         uuid: uuid_text(shared.profile.uuid),
+@@ -582,6 +620,7 @@
+         crossing_position: settings.crossing_position,
+         handover: None,
+         imported: false,
++        placed: false,
+     };
+     if shared.switching.swap(true, Ordering::SeqCst) {
+         return Err(run.fail(Step::Check, "a switch of this player is already under way"));
+@@ -769,6 +808,24 @@
+     note(&format!(
+         "prepare: the target's world is here ({chunks} chunks, {entities} entities)"
+     ));
++    if let Some(activation) = &settings.activation {
++        match activation() {
++            Ok(position) => run.crossing_position = Some(position),
++            Err(why) => {
++                run.abandon_target();
++                return Err(run.fail(Step::Prepare, why));
++            }
++        }
++        // The target may have spawned elsewhere. Never claim the approach view
++        // covers a crossing unless its actual buffered columns prove it.
++        let predicted = settings
++            .predicted_position
++            .unwrap_or_else(|| run.crossing_position.expect("activation gave position"));
++        note(&format!(
++            "prepare: predicted arrival view ready: {}",
++            state.lock().view.covers(predicted, 1)
++        ));
++    }
+     let prepared = Instant::now();
+ 
+     // Freeze. From the export on, the switch must hand the player over, or give up
+@@ -778,9 +835,13 @@
+     // an export of a player it froze with the same record and the same id, and does
+     // not freeze again, so it is safe whether or not the first request got there.
+     let limit_at = prepared + settings.freeze_limit;
++    if settings.replay_inputs {
++        shared.queue_inputs();
++    }
+     let mut attempt = 0;
+     let (exported, sent) = loop {
+         attempt += 1;
++        note("freeze: export request sent");
+         let sent = Instant::now();
+         let e = match run.source.export(&run.uuid, true) {
+             Ok(exported) => break (exported, sent),
+@@ -879,7 +940,7 @@
+     // after the import before the client is sent anything.
+     let positions = {
+         let mut s = state.lock();
+-        s.answer_teleports = false;
++        s.answer_teleports = settings.continuous_arrival;
+         s.positions
+     };
+     if Instant::now() >= freeze.deadline() {
+@@ -889,10 +950,19 @@
+     // A carried position is where the client stands now, not where the source
+     // froze the player: what the client did since the export is kept, so it is
+     // not pulled back.
+-    let arrival = run.arrival();
++    let mut arrival = run.arrival();
++    if settings.continuous_arrival
++        && let Some(arrival) = &mut arrival
++    {
++        arrival.velocity = record
++            .get("velocity")
++            .cloned()
++            .and_then(|v| serde_json::from_value::<[f64; 3]>(v).ok());
++    }
+     // Taken before the request: the target can send the new view's centre and
+     // chunks before its answer reaches us, and they count as after the import.
+     let import_sent = Instant::now();
++    note("hand over: import request sent");
+     let (uuid, parts) = (run.uuid.clone(), run.parts.clone());
+     let imported = match run.ask_target(
+         "hand over: the import",
+@@ -908,7 +978,7 @@
+                 record.clone(),
+                 parts.clone(),
+                 Some(settings.announce_arrival),
+-                false,
++                settings.continuous_arrival,
+                 arrival,
+             )
+         },
+@@ -923,6 +993,7 @@
+         }
+     };
+     run.imported = true;
++    run.placed = settings.continuous_arrival;
+     // The confirm and the release take about as long as the slowest request so far.
+     freeze.slowest = freeze.slowest.max(import_sent.elapsed());
+     note(&match (settings.carry_position, arrival) {
+@@ -956,13 +1027,19 @@
+     // or, when it does not, the centre of the view it sent after the import does.
+     let carry = settings.carry_position;
+     let settled = |s: &crate::prepare::Preparing| {
+-        if s.positions <= positions {
++        let required = if settings.continuous_arrival { 2 } else { 1 };
++        if s.positions < positions + required {
+             return None;
+         }
+         let recentered = imported
+             .recentered
+             .unwrap_or_else(|| s.last_center.is_some_and(|at| at >= import_sent));
+         if !carry || !recentered {
++            return Some(());
++        }
++        // A full 3x3 arrival ring is explicit evidence. No quiet-time guess is
++        // needed if those exact columns were already received before freeze.
++        if settings.activation.is_some() && arrival.is_some_and(|a| s.view.covers(a.position, 1)) {
+             return Some(());
+         }
+         s.last_batch
+@@ -1040,13 +1117,31 @@
+         // it waits for the lane to be the target's. Opened right after the lane is changed; the
+         // guard also opens it if the block is left before.
+         let routing = shared.routing.shut();
+-        let packets = delta(&down.ghost, &s.view);
++        let mut packets = delta(&down.ghost, &s.view);
++        if settings.continuous_arrival {
++            // Both server corrections were acknowledged on the held lane. A
++            // synthetic absolute correction would rewind a client that kept
++            // walking. Its next replayed movement supplies the current pose.
++            packets.retain(|p| p.id != horizon_protocol::ids::play::clientbound::PLAYER_POSITION);
++        }
+         let extras = std::mem::take(&mut s.extras);
+         let mut body = Vec::new();
+         let mut bytes = 0;
+         let mut sent = true;
+         for packet in packets.iter().chain(&extras) {
+-            encode(&mut body, packet.id, &packet.payload);
++            let payload = if let Some(ids) = &mut shared.up().identities {
++                match ids.clientbound(&lane, packet.id, &packet.payload) {
++                    Ok(Some(payload)) => payload,
++                    Ok(None) => continue,
++                    Err(_) => {
++                        sent = false;
++                        break;
++                    }
++                }
++            } else {
++                packet.payload.clone()
++            };
++            encode(&mut body, packet.id, &payload);
+             if down.writer.send(&body).is_err() {
+                 sent = false;
+                 break;
+@@ -1075,13 +1170,15 @@
+             let mut up = shared.up();
+             up.lane = Arc::clone(&lane);
+             up.swap = swap;
+-            up.teleports.switched();
+-            // The client confirms the position of the delta; if the proxy did
+-            // already, the target must not get it twice.
+-            if let Some(teleport) = s.last_teleport
+-                && s.answered.contains(&teleport)
+-            {
+-                up.teleports.answered_by_proxy(teleport);
++            if up.identities.is_none() {
++                up.teleports.switched();
++                // The client confirms the position of the delta; if the proxy did
++                // already, the target must not get it twice.
++                if let Some(teleport) = s.last_teleport
++                    && s.answered.contains(&teleport)
++                {
++                    up.teleports.answered_by_proxy(teleport);
++                }
+             }
+         }
+         // The lane is the target's: the client's packets go on, on every path from here, the
+@@ -1123,13 +1220,16 @@
+     // confirm and the release does the switch go on to it. Otherwise the arrival is
+     // dropped, the source goes on, and the client, which has the target's world, is
+     // disconnected.
+-    let placed = if Instant::now() >= freeze.deadline() {
++    let placed = if run.placed {
++        Ok(())
++    } else if Instant::now() >= freeze.deadline() {
+         Err(format!(
+             "{}; the arrival on {} was dropped",
+             freeze.why_late(settings.freeze_limit),
+             target.name
+         ))
+     } else {
++        note("hand over: confirm request sent");
+         run.confirm_target(Retry {
+             attempts: settings.commit_attempts,
+             deadline: freeze.deadline(),
+@@ -1148,6 +1248,17 @@
+         });
+     }
+     note("hand over: the target placed the player");
++    if settings.continuous_arrival && settings.replay_inputs {
++        match shared.replay_inputs() {
++            Ok(count) => note(&format!(
++                "hand over: replayed {count} ordered inputs before source release"
++            )),
++            Err(why) => {
++                run.abort();
++                return Err(run.fail(Step::HandOver, why));
++            }
++        }
++    }
+     let handed = Instant::now();
+ 
+     // Commit. The target has the player's file on disk, so the source may let go. A
+@@ -1170,6 +1281,19 @@
+         }
+     };
+     source_lane.closer.close();
++    if settings.replay_inputs {
++        match shared.replay_inputs() {
++            Ok(count) => note(&format!("commit: replayed {count} ordered inputs")),
++            Err(why) => {
++                disconnect();
++                return Err(Failure {
++                    step: Step::Commit,
++                    reason: why,
++                    after: After::Disconnected,
++                });
++            }
++        }
++    }
+     let committed = Instant::now();
+     Ok(Done {
+         delta_packets,
+diff --git a/crates/meridian-handoff/src/tests/switch.rs b/crates/meridian-handoff/src/tests/switch.rs
+--- a/crates/meridian-handoff/src/tests/switch.rs
++++ b/crates/meridian-handoff/src/tests/switch.rs
+@@ -1,4 +1,41 @@
+ use super::*;
++
++#[test]
++fn lane_identities_do_not_accumulate_legacy_teleport_ids() {
++    let Bench {
++        handle,
++        run,
++        player,
++        source,
++    } = bench();
++    handle.enable_lane_inputs();
++    let log = Log::default();
++    let (address, imported, target_thread) = target(TargetWorld::default());
++    let mut source_control = FakeControl::new("source", &log);
++    let mut target_control = target_control(&log, imported);
++    switch(
++        &handle,
++        TargetBackend {
++            name: "target",
++            address: &address,
++            options: &options(),
++        },
++        &mut source_control,
++        &mut target_control,
++        &Digests::default(),
++        &settings(),
++    )
++    .unwrap();
++    assert_eq!(
++        format!("{:?}", handle.0.up().teleports),
++        "Teleports { pending: [], dropped: [] }"
++    );
++    handle.close();
++    drop(player);
++    drop(source);
++    let _ = target_thread.join().unwrap();
++    run.join().unwrap().unwrap();
++}
+ 
+ /// The target's control, which tells the fake target's connection of the import
+ /// and of the confirmation.
+@@ -70,6 +107,9 @@
+             "prepare",
+             "prepare",
+             "freeze",
++            "freeze",
++            "hand over",
++            "hand over",
+             "hand over",
+             "hand over",
+             "hand over",
+diff --git a/crates/meridian-proxy/src/main.rs b/crates/meridian-proxy/src/main.rs
+--- a/crates/meridian-proxy/src/main.rs
++++ b/crates/meridian-proxy/src/main.rs
+@@ -28,6 +28,7 @@
+ mod status;
+ mod switching;
+ mod throttle;
++mod wall_approach;
+ mod wall_particles;
+ mod walls;
+ 
+diff --git a/crates/meridian-proxy/src/session.rs b/crates/meridian-proxy/src/session.rs
+--- a/crates/meridian-proxy/src/session.rs
++++ b/crates/meridian-proxy/src/session.rs
+@@ -750,6 +750,9 @@
+             return;
+         }
+     };
++    if config.tiles.is_some() && crate::wall_approach::stage() >= 3 {
++        handle.enable_lane_inputs();
++    }
+     let relay = relay.with_commands(commands_hook(config, sessions, &handle, &name, auth, peer));
+     let relay = if config.tiles.is_some() {
+         let hook = crate::walls::hook(
+diff --git a/crates/meridian-proxy/src/switching.rs b/crates/meridian-proxy/src/switching.rs
+--- a/crates/meridian-proxy/src/switching.rs
++++ b/crates/meridian-proxy/src/switching.rs
+@@ -5,7 +5,9 @@
+ use crate::log::{error, info, warning};
+ use crate::metrics::{self, Metrics};
+ use meridian_config::{Config, Sidecar};
+-use meridian_handoff::{Digests, Done, PlayerControl, SessionHandle, Settings, TargetBackend};
++use meridian_handoff::{
++    Activation, Digests, Done, PlayerControl, SessionHandle, Settings, TargetBackend,
++};
+ use meridian_net::backend::BackendOptions;
+ use meridian_sidecar::client::SidecarClient;
+ use std::cell::Cell;
+@@ -118,7 +120,7 @@
+         handle,
+         name,
+         player_address,
+-        (target, None),
++        (target, None, None),
+         &step,
+     );
+     match &result {
+@@ -134,10 +136,10 @@
+     handle: &SessionHandle,
+     name: &str,
+     player_address: IpAddr,
+-    destination: (&str, Option<[f64; 3]>),
++    destination: (&str, Option<[f64; 3]>, Option<Activation>),
+     step: &Cell<&'static str>,
+ ) -> Result<Moved, String> {
+-    let (target, crossing_position) = destination;
++    let (target, crossing_position, activation) = destination;
+     let from = handle.backend();
+     let failed = |why: String| format!("{name} could not move from {from} to {target}: {why}");
+     let Some(backend) = config.backend(target) else {
+@@ -182,9 +184,20 @@
+     let settings = Settings {
+         trace: Some(Arc::new(move |step: &str, at: Duration| {
+             info!("{who}: switch to {to}: {step} (+{} ms)", at.as_millis());
++            eprintln!(
++                "E8_EVENT {}",
++                serde_json::json!({
++                    "target": to, "step": step, "elapsed_ms": at.as_secs_f64() * 1000.0,
++                    "ns": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_nanos()
++                })
++            );
+         })),
+         carry_position: config.switch_carry_position,
+         crossing_position,
++        predicted_position: crossing_position,
++        activation,
++        replay_inputs: crossing_position.is_some() && crate::wall_approach::stage() >= 3,
++        continuous_arrival: crossing_position.is_some() && crate::wall_approach::stage() >= 4,
+         announce_arrival: config.switch_announce_arrival,
+         announce_departure: config.switch_announce_departure,
+         freeze_limit: Duration::from_millis(config.switch_freeze_limit_ms),
+@@ -253,7 +266,33 @@
+         handle,
+         name,
+         address,
+-        (target, Some(position)),
++        (target, Some(position), None),
++        &step,
++    );
++    match &result {
++        Ok(moved) => switcher.metrics.transfer_done(&moved.done, moved.took),
++        Err(_) => switcher.metrics.transfer_failed(step.get()),
++    }
++    result
++}
++
++/// Prepares on approach, then activates only at the wall worker's crossing gate.
++pub fn approach(
++    config: &Config,
++    switcher: &Switcher,
++    handle: &SessionHandle,
++    name: &str,
++    address: IpAddr,
++    destination: (&str, [f64; 3], Activation),
++) -> Result<Moved, String> {
++    let step = Cell::new(metrics::step_label(meridian_handoff::Step::Check));
++    let result = attempt(
++        config,
++        switcher,
++        handle,
++        name,
++        address,
++        (destination.0, Some(destination.1), Some(destination.2)),
+         &step,
+     );
+     match &result {
+diff --git a/crates/meridian-proxy/src/wall_approach.rs b/crates/meridian-proxy/src/wall_approach.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-proxy/src/wall_approach.rs
+@@ -0,0 +1,213 @@
++//! One expiring approach preparation and serialized wall activation per player.
++use crate::{
++    log::{info, warning},
++    switching::{self, Switcher},
++};
++use meridian_config::Config;
++use meridian_handoff::{Activation, SessionHandle};
++use std::{
++    net::IpAddr,
++    sync::{Arc, Condvar, Mutex},
++    time::{Duration, Instant},
++};
++
++#[derive(Default)]
++struct Pending {
++    latest: Option<[f64; 3]>,
++    direction: [f64; 3],
++    running: bool,
++    refused: bool,
++    outside: bool,
++    retry_after: Option<Instant>,
++    preparing: Option<String>,
++    crossing: Option<[f64; 3]>,
++}
++
++/// Experimental cumulative changes, fixed for the life of the proxy process.
++pub fn stage() -> u8 {
++    std::env::var("E8_STAGE")
++        .ok()
++        .and_then(|s| s.parse().ok())
++        .unwrap_or(4)
++}
++
++fn candidate(config: &Config, state: &Pending, current: &str) -> Option<(String, [f64; 3])> {
++    let map = config.tiles.as_ref()?;
++    let position = state.latest?;
++    if let Some(tile) = map
++        .destination(position)
++        .filter(|tile| tile.backend != current)
++    {
++        return Some((tile.backend.clone(), position));
++    }
++    let length = state.direction[0].hypot(state.direction[2]);
++    if length < 0.0001 {
++        return None;
++    }
++    let mut predicted = position;
++    for axis in [0, 2] {
++        predicted[axis] += 4.0 * state.direction[axis] / length;
++    }
++    map.destination(predicted)
++        .filter(|tile| tile.backend != current)
++        .map(|tile| (tile.backend.clone(), predicted))
++}
++
++pub fn hook(
++    config: Arc<Config>,
++    switcher: Arc<Switcher>,
++    handle: SessionHandle,
++    name: String,
++    address: IpAddr,
++) -> Arc<dyn Fn([f64; 3]) + Send + Sync> {
++    let pending = Arc::new((Mutex::new(Pending::default()), Condvar::new()));
++    Arc::new(move |position| {
++        let Some(map) = &config.tiles else {
++            return;
++        };
++        let mut state = pending.0.lock().expect("wall state poisoned");
++        if let Some(previous) = state.latest {
++            let delta: [f64; 3] = std::array::from_fn(|axis| position[axis] - previous[axis]);
++            if delta[0] != 0.0 || delta[2] != 0.0 {
++                state.direction = delta;
++            }
++        }
++        state.latest = Some(position);
++        let outside = map
++            .tile_at(position)
++            .is_none_or(|index| !map.entries.iter().any(|t| t.index == index));
++        if outside && !state.outside {
++            handle.tell("E4 wall deferred unmapped or invalid position; current backend retained");
++        }
++        state.outside = outside;
++        if state.running
++            && state.crossing.is_none()
++            && let Some(target) = &state.preparing
++            && map
++                .destination(position)
++                .is_some_and(|tile| &tile.backend == target)
++        {
++            handle.tell(&format!("E4 wall start {target}"));
++            state.crossing = Some(position);
++        }
++        pending.1.notify_all();
++        if state.running || state.refused || state.retry_after.is_some_and(|at| Instant::now() < at)
++        {
++            return;
++        }
++        if candidate(&config, &state, &handle.backend()).is_none() {
++            return;
++        }
++        state.running = true;
++        let (config, switcher, handle, name, pending) = (
++            Arc::clone(&config),
++            Arc::clone(&switcher),
++            handle.clone(),
++            name.clone(),
++            Arc::clone(&pending),
++        );
++        let refusal_handle = handle.clone();
++        let spawned = std::thread::Builder::new()
++            .name(format!("wall-{name}"))
++            .spawn(move || {
++                loop {
++                    let (target, predicted) = {
++                        let mut state = pending.0.lock().expect("wall state poisoned");
++                        let Some(next) = candidate(&config, &state, &handle.backend()) else {
++                            state.running = false;
++                            state.preparing = None;
++                            return;
++                        };
++                        state.preparing = Some(next.0.clone());
++                        state.crossing = state.latest.filter(|p| {
++                            config
++                                .tiles
++                                .as_ref()
++                                .expect("tiles")
++                                .destination(*p)
++                                .is_some_and(|tile| tile.backend == next.0)
++                        });
++                        if state.crossing.is_some() {
++                            handle.tell(&format!("E4 wall start {}", next.0));
++                        }
++                        next
++                    };
++                    let activation: Activation = {
++                        let (pending, handle, config, target) = (
++                            Arc::clone(&pending),
++                            handle.clone(),
++                            Arc::clone(&config),
++                            target.clone(),
++                        );
++                        Arc::new(move || {
++                            let deadline = Instant::now() + Duration::from_secs(3);
++                            let mut state = pending.0.lock().expect("wall state poisoned");
++                            loop {
++                                if handle.is_over() {
++                                    return Err("E8 preparation abandoned: session ended".into());
++                                }
++                                if let Some(at) = state.crossing {
++                                    return Ok(at);
++                                }
++                                if Instant::now() >= deadline
++                                    || candidate(&config, &state, &handle.backend())
++                                        .is_none_or(|next| next.0 != target)
++                                {
++                                    return Err(
++                                        "E8 preparation abandoned: turned away or expired".into()
++                                    );
++                                }
++                                state = pending
++                                    .1
++                                    .wait_timeout(state, Duration::from_millis(25))
++                                    .expect("wall state poisoned")
++                                    .0;
++                            }
++                        })
++                    };
++                    match switching::approach(
++                        &config,
++                        &switcher,
++                        &handle,
++                        &name,
++                        address,
++                        (&target, predicted, activation),
++                    ) {
++                        Ok(moved) if moved.alert.is_none() => {
++                            info!("{}", moved.describe(&name));
++                            handle.tell(&format!("E4 wall arrived {target}"));
++                        }
++                        result => {
++                            let why = match result {
++                                Ok(m) => m.alert.unwrap_or_default(),
++                                Err(e) => e,
++                            };
++                            let abandoned = why.contains("E8 preparation abandoned:");
++                            let retry = abandoned
++                                || (why.contains("that player is dead") && !handle.is_over());
++                            warning!("wall refusal (retry {retry}): {why}");
++                            if !abandoned {
++                                handle.tell(&format!("E4 wall refused {why}"));
++                            }
++                            let mut state = pending.0.lock().expect("wall state poisoned");
++                            state.refused = !retry;
++                            state.retry_after =
++                                retry.then(|| Instant::now() + Duration::from_secs(1));
++                            state.running = false;
++                            state.preparing = None;
++                            state.crossing = None;
++                            return;
++                        }
++                    }
++                    let mut state = pending.0.lock().expect("wall state poisoned");
++                    state.preparing = None;
++                    state.crossing = None;
++                }
++            });
++        if let Err(error) = spawned {
++            state.running = false;
++            state.refused = true;
++            refusal_handle.tell(&format!("E4 wall refused cannot start worker: {error}"));
++        }
++    })
++}
+diff --git a/crates/meridian-proxy/src/walls.rs b/crates/meridian-proxy/src/walls.rs
+--- a/crates/meridian-proxy/src/walls.rs
++++ b/crates/meridian-proxy/src/walls.rs
+@@ -8,6 +8,7 @@
+ use std::{
+     net::IpAddr,
+     sync::{Arc, Mutex},
++    time::{Duration, Instant},
+ };
+ 
+ #[derive(Default)]
+@@ -16,6 +17,7 @@
+     running: bool,
+     refused: bool,
+     outside: bool,
++    retry_after: Option<Instant>,
+ }
+ 
+ pub fn hook(
+@@ -25,6 +27,9 @@
+     name: String,
+     address: IpAddr,
+ ) -> Arc<dyn Fn([f64; 3]) + Send + Sync> {
++    if crate::wall_approach::stage() >= 2 {
++        return crate::wall_approach::hook(config, switcher, handle, name, address);
++    }
+     let pending = Arc::new(Mutex::new(Pending::default()));
+     Arc::new(move |position| {
+         let Some(map) = &config.tiles else {
+@@ -40,6 +45,9 @@
+         }
+         state.outside = outside;
+         if state.running || state.refused {
++            return;
++        }
++        if state.retry_after.is_some_and(|at| Instant::now() < at) {
+             return;
+         }
+         let Some(tile) = map.destination(position) else {
+@@ -93,10 +101,15 @@
+                                 Ok(m) => m.alert.unwrap_or_default(),
+                                 Err(e) => e,
+                             };
+-                            warning!("wall routing stopped: {why}");
++                            // A dead player stays on the source. Movement resumes after
++                            // respawn, so retry then, rate-limited, instead of latching off.
++                            let retry = why.contains("that player is dead") && !handle.is_over();
++                            warning!("wall routing refused (retry after respawn: {retry}): {why}");
+                             handle.tell(&format!("E4 wall refused {why}"));
+                             let mut state = pending.lock().expect("wall state poisoned");
+-                            state.refused = true;
++                            state.refused = !retry;
++                            state.retry_after =
++                                retry.then(|| Instant::now() + Duration::from_secs(1));
+                             state.running = false;
+                             return;
+                         }
+diff --git a/crates/meridian-testkit/src/bin/e4-client.rs b/crates/meridian-testkit/src/bin/e4-client.rs
+--- a/crates/meridian-testkit/src/bin/e4-client.rs
++++ b/crates/meridian-testkit/src/bin/e4-client.rs
+@@ -79,6 +79,26 @@
+             }
+             let parts: Vec<_> = order.split_whitespace().collect();
+             match parts.as_slice() {
++                ["use", token, sequence] => {
++                    let sequence = sequence.parse()?;
++                    connection.send(
++                        &play::Serverbound::UseItem(play::UseItem {
++                            hand: 0,
++                            sequence,
++                            yaw: 0.,
++                            pitch: 0.,
++                        })
++                        .encode(),
++                    )?;
++                    emit(json!({"kind":"use", "token":token, "sequence":sequence, "ns":now()}));
++                }
++                ["respawn"] => {
++                    connection.send(
++                        &play::Serverbound::ClientCommand(play::ClientCommand { action: 0 })
++                            .encode(),
++                    )?;
++                    emit(json!({"kind":"respawn_request", "ns":now()}));
++                }
+                 ["walk", token, x, z] => {
+                     goal = Some((token.to_string(), [x.parse()?, z.parse()?]));
+                     reached = false;
+@@ -167,6 +187,13 @@
+             continue;
+         }
+         match id {
++            ids::play::clientbound::BLOCK_CHANGED_ACK => {
++                if let play::Clientbound::BlockChangedAck(p) =
++                    play::Clientbound::decode(id, &payload)?
++                {
++                    emit(json!({"kind":"block_ack", "sequence":p.sequence, "ns":now()}));
++                }
++            }
+             ids::play::clientbound::LEVEL_PARTICLES => {
+                 if let play::Clientbound::LevelParticles(p) =
+                     play::Clientbound::decode(id, &payload)?

@@ -1,0 +1,777 @@
+#!/usr/bin/env python3
+"""E7 real engines, packet bots and per-chunk Anvil checks. No launcher or downloads.
+
+Run ./scripts/e7-tiles --build once, or use retained binaries without --build.
+All worlds, logs and private homes are temporary children of .local/runs.
+"""
+import argparse
+import gzip
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+import zlib
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon-tiles'
+BINS = ROOT / '.local/bin/horizon-e7'
+BASE = ROOT / '.local/bin/horizon-fc2868b2b'
+DATA = ROOT / 'docs/experiments/data/E7'
+RUNS = ROOT / '.local/runs'
+RESOURCES = Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'
+sys.path.insert(0, str((SOURCE if SOURCE.exists() else ROOT/'.local/src/horizon') / 'tools'))
+from server_transfer_e2e import read_nbt  # Horizon MIT, notice in patches/README-E2.md
+
+
+def sanitize(value):
+    return str(value).replace(str(ROOT), '$REPO').replace(str(Path.home()), '$HOME')
+
+
+def save(name, value):
+    DATA.mkdir(parents=True, exist_ok=True)
+    destination=DATA/name
+    temporary=destination.with_suffix(destination.suffix+'.tmp')
+    temporary.write_text(sanitize(json.dumps(value, indent=2)) + '\n')
+    temporary.replace(destination)
+
+
+def port():
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+
+
+def wait_for(predicate, seconds=120, message='timeout'):
+    deadline = time.monotonic() + seconds
+    while True:
+        result = predicate()
+        if result:
+            return result
+        if time.monotonic() > deadline:
+            raise RuntimeError(message)
+        time.sleep(.05)
+
+
+def owned(x, z, edge=128):
+    return -edge // 2 <= x < edge // 2 and -edge // 2 <= z < edge // 2
+
+
+def unmix(value):
+    """26.3 mixed lists wrap scalar members in a compound named with the empty string."""
+    if isinstance(value,list):
+        return [unmix(v[''] if isinstance(v,dict) and set(v)=={''} else v) for v in value]
+    if isinstance(value,dict):
+        return {k:unmix(v) for k,v in value.items()}
+    return value
+
+
+def records(world):
+    """Read each stored chunk independently. Hash includes record bytes, not region timestamps."""
+    out = {}
+    for path in sorted(world.rglob('*.mca')):
+        rx, rz = map(int, path.stem.split('.')[1:])
+        raw = path.read_bytes()
+        for i in range(1024):
+            location = int.from_bytes(raw[4*i:4*i+4], 'big')
+            if not location:
+                continue
+            start = (location >> 8) * 4096
+            length = int.from_bytes(raw[start:start+4], 'big')
+            mode = raw[start+4]
+            payload = raw[start+5:start+4+length]
+            x, z = rx*32 + i%32, rz*32 + i//32
+            if mode & 128:
+                payload = (path.parent / f'c.{x}.{z}.mcc').read_bytes()
+                mode &= 127
+            unpacked = {1:gzip.decompress, 2:zlib.decompress, 3:lambda b:b}.get(mode)
+            if unpacked is None:
+                raise RuntimeError(f'unsupported Anvil compression {mode}')
+            out[(str(path.relative_to(world)), x, z)] = (hashlib.sha256(payload).hexdigest(), unmix(read_nbt(unpacked(payload))))
+    return out
+
+
+def outside_changes(before, after):
+    return [list(k) for k in sorted(before.keys() | after.keys())
+            if not owned(k[1]*16, k[2]*16) and
+            before.get(k, (None,))[0] != after.get(k, (None,))[0]]
+
+
+def block_state_at(rows, x, y, z):
+    chunks = [v[1] for k,v in rows.items() if '/region/' in k[0] and k[1:] == (x//16,z//16)]
+    if not chunks:
+        return None
+    for section in chunks[0].get('sections', []):
+        if section['Y'] != y//16:
+            continue
+        states = section.get('block_states', {})
+        palette = states.get('palette', [])
+        if not palette:
+            return 'minecraft:air'
+        if len(palette) == 1:
+            return palette[0]
+        bits = max(4, (len(palette)-1).bit_length())
+        per = 64//bits
+        index = (y%16)*256 + (z%16)*16 + x%16
+        word = states['data'][index//per] & ((1<<64)-1)
+        return palette[(word >> ((index%per)*bits)) & ((1<<bits)-1)]
+    return 'minecraft:air'
+
+
+def state_name(value):
+    if value is None: return None
+    return value.split('[',1)[0] if isinstance(value,str) else value['id']
+
+
+def block_at(rows, x, y, z):
+    return state_name(block_state_at(rows,x,y,z))
+
+
+def tagged(rows, tag):
+    return [entity for _,root in rows.values() for entity in root.get('Entities', []) if tag in entity.get('Tags', [])]
+
+
+class Engine:
+    def __init__(self, scratch, mask=False, baseline=False, seed_world=None, edge=128, read_probe=False):
+        self.scratch = scratch
+        self.game = scratch / 'game'
+        self.game.mkdir(parents=True)
+        if seed_world:
+            shutil.copytree(seed_world, self.game/'world')
+        self.world = self.game / 'world'
+        self.endpoint = self.game / '.horizon/engine.json'
+        self.endpoint.parent.mkdir()
+        self.port = port()
+        properties = {'online-mode':'false', 'white-list':'false', 'server-ip':'127.0.0.1',
+            'server-port':self.port, 'level-name':'world', 'level-type':'minecraft\\:flat',
+            'level-seed':12345, 'generate-structures':'false', 'gamemode':'creative',
+            'force-gamemode':'true', 'allow-flight':'true', 'spawn-protection':0,
+            'view-distance':3, 'simulation-distance':3, 'max-players':64,
+            'pause-when-empty-seconds':0, 'max-tick-time':0,
+            'generator-settings':json.dumps({'layers':[{'block':'minecraft:bedrock','height':1},
+                {'block':'minecraft:dirt','height':2},{'block':'minecraft:grass_block','height':1}],
+                'biome':'minecraft:plains','features':False,'lakes':False,'structure_overrides':[]})}
+        (self.game/'server.properties').write_text(''.join(f'{k}={v}\n' for k,v in properties.items()))
+        (self.game/'eula.txt').write_text('eula=true\n')
+        self.env = {k:v for k,v in os.environ.items() if not k.startswith(('HORIZON_', 'XDG_', 'E2_'))}
+        for key in ('HORIZON_HOME','HORIZON_LAUNCHER_HOME','XDG_DATA_HOME','XDG_CONFIG_HOME',
+                    'XDG_CACHE_HOME','XDG_RUNTIME_DIR','HORIZON_LAUNCHER_TRASH',
+                    'HORIZON_LAUNCHER_CLIPBOARD','HORIZON_LAUNCHER_DESKTOP'):
+            path = scratch / key.lower()
+            path.mkdir()
+            self.env[key] = str(path)
+        self.env.update(HORIZON_LAUNCHER_NO_SELF_UPDATE='1', HORIZON_NO_AUDIO='1')
+        if read_probe: self.env['HORIZON_E7_READ_PROBE']='1'
+        if mask:
+            self.env['HORIZON_TILE'] = f'{-edge//2},{-edge//2},{edge},0,0'
+            if edge < 512:
+                self.env['HORIZON_TILE_TEST_SMALL'] = '1'
+        self.lines, self.bots = [], []
+        self.log = (scratch/'engine.log').open('w')
+        binary = BASE/'horizon-client-baseline' if baseline else BINS/'horizon-client'
+        self.process = subprocess.Popen([binary, '--resources',RESOURCES,'--control-socket',self.endpoint,
+            '--dedicated','--nogui'],cwd=self.game,env=self.env,stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+        self.reader = threading.Thread(target=self.read, daemon=True)
+        self.reader.start()
+        self.control = None
+        try:
+            def ready():
+                if self.process.poll() is not None:
+                    raise RuntimeError('engine exited: '+'\n'.join(self.lines[-15:]))
+                return any(']: Done (' in line for line in self.lines)
+            wait_for(ready, 180, 'engine startup timed out')
+            endpoint = json.loads(self.endpoint.read_text())
+            sock = socket.create_connection(('127.0.0.1',endpoint['port']), timeout=120)
+            stream = sock.makefile('r')
+            sock.sendall(f'auth {endpoint["token"]}\n'.encode())
+            assert json.loads(stream.readline()).get('ok'), 'control auth failed'
+            self.control = sock, stream
+        except BaseException:
+            self.stop()
+            raise
+
+    def read(self):
+        for line in self.process.stdout:
+            self.lines.append(line.rstrip())
+            self.log.write(line)
+            self.log.flush()
+
+    def ask(self, line):
+        sock, stream = self.control
+        sock.sendall((line+'\n').encode())
+        raw = stream.readline()
+        if not raw:
+            raise RuntimeError('engine control closed: '+'\n'.join(self.lines[-12:]))
+        value = json.loads(raw)
+        if 'error' in value:
+            raise RuntimeError(f'{line}: {value}')
+        return value
+
+    def console(self, command):
+        return self.ask('console '+command)
+
+    def flush(self):
+        reply = self.console('save-all flush')
+        if any('fail' in line.lower() and 'sav' in line.lower() for line in reply.get('output',[])):
+            raise RuntimeError(f'engine save failed: {reply}')
+        # Horizon console execution completes before this control reply. The
+        # flush command waits for the region writer before returning.
+        rows = records(self.world)
+        if not any('/region/' in k[0] for k in rows):
+            raise RuntimeError(f'save produced no chunk evidence: {reply}')
+        return rows
+
+    def join(self, count=1, behaviour='stand'):
+        log = (self.scratch/f'bots-{len(self.bots)}.log').open('w')
+        bot = subprocess.Popen([BASE/'horizon-bots','--server',f'127.0.0.1:{self.port}',
+            '--bots',str(count),'--behaviour',behaviour,'--seconds','7200','--join-every','.02',
+            '--view-distance','3','--height','0','--name','E7Bot','--seed','12345'],
+            cwd=self.game,env=self.env,stdout=log,stderr=subprocess.STDOUT)
+        self.bots.append((bot, log))
+        wait_for(lambda: len(self.ask('server-status')['players']) == count,120,'bots failed to join')
+        time.sleep(2)
+
+    def ctl(self, *words):
+        result = subprocess.run([BASE/'horizon-ctl','--socket',self.endpoint,*map(str,words)],
+            cwd=self.game,env=self.env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=120)
+        return {'exit':result.returncode, 'reply':result.stdout.strip()}
+
+    def stop(self):
+        for bot, log in self.bots:
+            if bot.poll() is None:
+                bot.terminate()
+                try: bot.wait(5)
+                except subprocess.TimeoutExpired: bot.kill(); bot.wait()
+            log.close()
+        self.bots.clear()
+        if self.process.poll() is None:
+            try:
+                self.process.stdin.write('stop\n')
+                self.process.stdin.flush()
+                self.process.wait(60)
+            except (BrokenPipeError, subprocess.TimeoutExpired):
+                self.process.kill()
+                self.process.wait()
+        if self.control:
+            self.control[0].close()
+            self.control[1].close()
+        self.reader.join(5)
+        self.log.close()
+
+
+DIRECTIONS = {'east':(1,0), 'west':(-1,0), 'south':(0,1), 'north':(0,-1),
+              'south-east':(1,1), 'north-east':(1,-1), 'south-west':(-1,1), 'north-west':(-1,-1)}
+MECHANICS = ['setblock','fill','water','lava','fire','sand','tnt','piston','hopper','dropper',
+             'mob','arrow','ender_pearl','boat','minecart','item','redstone','lightning','sculk','tree','leaves','natural_spawn']
+
+
+def fixture(direction, mechanic, index, interior=False):
+    dx,dz = DIRECTIONS[direction]
+    x,z = [(63 if d>0 else -64 if d<0 else 0) for d in (dx,dz)]
+    if interior: x,z=0,0
+    y = -45 + index*12
+    p = lambda a,b=0,c=0: f'{x+a*dx+c*dz} {y+b} {z+a*dz-c*dx}'
+    tag = f'e7_{direction}_{mechanic}'
+    lo = lambda a,b,c,d,e,f: f'{min(a,d)} {min(b,e)} {min(c,f)} {max(a,d)} {max(b,e)} {max(c,f)}'
+    box = lo(x-5,y-1,z-5,x+5,y-1,z+5)
+    setup = [f'fill {box} minecraft:stone', f'fill {x-4} {y} {z-4} {x+4} {y+5} {z+4} minecraft:air']
+    action = []
+    kind, expected = 'block', None
+    target = (x+dx,y,z+dz)
+    if mechanic == 'setblock':
+        action = [f'setblock {p(1)} minecraft:gold_block']; expected='minecraft:gold_block'
+    elif mechanic == 'fill':
+        action = [f'fill {lo(x,y,z,x+2*dx,y,z+2*dz)} minecraft:diamond_block']; expected='minecraft:diamond_block'
+    elif mechanic in ('water','lava'):
+        # Source at the last owned cell. Flat channel prevents downward flow.
+        action=[f'setblock {p(0)} minecraft:{mechanic}']; expected='minecraft:'+mechanic
+    elif mechanic == 'fire':
+        setup += [f'fill {lo(x-2,y-1,z-2,x+2,y-1,z+2)} minecraft:netherrack',
+                  f'setblock {p(1)} minecraft:oak_planks']
+        sources={(x,y,z)}
+        if dx and dz:
+            sources |= {(x-c*dx,y,z) for c in range(5)} | {(x,y,z-c*dz) for c in range(5)}
+        else:
+            sources |= {(x+c*dz,y,z-c*dx) for c in range(-4,5)}
+        for a,b,c in sorted(sources):
+            for sx,sz in ((dx,0),(0,dz)):
+                if (sx or sz) and not owned(a+sx,c+sz):
+                    setup += [f'setblock {a+sx} {b} {c+sz} minecraft:oak_planks']
+        action=['gamerule fire_spread_radius_around_player -1']+[f'setblock {a} {b} {c} minecraft:fire' for a,b,c in sorted(sources)]+['tick sprint 400']
+        kind='fire'
+    elif mechanic == 'sand':
+        action=[f'summon minecraft:falling_block {p(-1,2)} {{BlockState:{{id:"minecraft:sand"}},Time:1,Motion:[{dx*1.5}d,0.0d,{dz*1.5}d],Tags:["{tag}"]}}']
+        kind='entity_or_sand'
+    elif mechanic == 'tnt':
+        setup += [f'setblock {p(1)} minecraft:oak_planks']
+        action=[f'summon minecraft:tnt {p(-1,1)} {{fuse:8s,Tags:["{tag}"]}}']; expected='not:minecraft:oak_planks'
+    elif mechanic == 'piston':
+        facing='east' if dx>0 else 'west' if dx<0 else 'south' if dz>0 else 'north'
+        # A piston moves along one axis. At a corner, use its x wall.
+        sx,sz=(dx,0) if dx else (0,dz)
+        p=lambda a,b=0,c=0:f'{x+a*sx+c*sz} {y+b} {z+a*sz-c*sx}'
+        target=(x+sx,y,z+sz)
+        setup += [f'setblock {p(-1)} minecraft:piston[facing={facing}]',f'setblock {p(0)} minecraft:stone']
+        action=[f'setblock {p(-2)} minecraft:redstone_block']; expected='minecraft:stone'
+    elif mechanic == 'hopper':
+        facing='east' if dx>0 else 'west' if dx<0 else 'south' if dz>0 else 'north'
+        sx,sz=(dx,0) if dx else (0,dz)
+        target=(x+sx,y,z+sz)
+        p=lambda a,b=0,c=0:f'{x+a*sx+c*sz} {y+b} {z+a*sz-c*sx}'
+        setup += [f'setblock {target[0]} {y} {target[2]} minecraft:chest',
+            f'setblock {p(0,-1)} minecraft:redstone_block',
+            f'setblock {p(0)} minecraft:hopper[facing={facing},enabled=false]{{Items:[{{Slot:0b,id:"minecraft:diamond",count:1}}]}}']
+        action=[f'setblock {p(0,-1)} minecraft:stone']; kind='container'
+    elif mechanic == 'dropper':
+        facing='east' if dx>0 else 'west' if dx<0 else 'south' if dz>0 else 'north'
+        sx,sz=(dx,0) if dx else (0,dz)
+        target=(x+sx,y,z+sz)
+        p=lambda a,b=0,c=0:f'{x+a*sx+c*sz} {y+b} {z+a*sz-c*sx}'
+        setup += [f'setblock {target[0]} {y} {target[2]} minecraft:chest',
+            f'setblock {p(0)} minecraft:dropper[facing={facing}]{{Items:[{{Slot:0b,id:"minecraft:diamond",count:1}}]}}']
+        action=[f'setblock {p(-1)} minecraft:redstone_block']; kind='container'
+    elif mechanic in ('mob','arrow','ender_pearl','boat','minecart','item'):
+        ids={'mob':'pig','boat':'oak_boat','minecart':'minecart','item':'item','arrow':'arrow','ender_pearl':'ender_pearl'}
+        extra=',Item:{id:"minecraft:diamond",count:1},PickupDelay:32767s' if mechanic=='item' else ''
+        if mechanic=='minecart':
+            dx,dz=(dx,0) if dx else (0,dz)
+            target=(x+dx,y,z+dz)
+            setup += [f'fill {lo(x-4*dx,y-1,z-4*dz,x+4*dx,y-1,z+4*dz)} minecraft:redstone_block',
+                      f'fill {lo(x-4*dx,y,z-4*dz,x+4*dx,y,z+4*dz)} minecraft:powered_rail[shape={"east_west" if dx else "north_south"},powered=true]']
+        position=f'{x-dx+0.5} {y} {z-dz+0.5}' if mechanic=='minecart' else p(-1,1)
+        action=[f'summon minecraft:{ids[mechanic]} {position} {{Motion:[{dx*1.2}d,0.0d,{dz*1.2}d],NoGravity:1b,PersistenceRequired:1b,Tags:["{tag}"]{extra}}}']
+        kind='entity'
+    elif mechanic == 'redstone':
+        # Diagonal dust is not connected in vanilla. At corners test each x wall.
+        sx,sz=(dx,0) if dx else (0,dz)
+        target=(x+sx,y,z+sz)
+        setup += [f'setblock {x} {y} {z} minecraft:redstone_wire',f'setblock {target[0]} {y} {target[2]} minecraft:redstone_lamp']
+        action=[f'setblock {x-sx} {y} {z-sz} minecraft:redstone_block']; kind='lit_lamp'
+    elif mechanic == 'lightning':
+        setup += [f'setblock {p(0)} minecraft:oxidized_copper',f'setblock {p(1)} minecraft:oxidized_copper']
+        if dx and dz:
+            setup += [f'setblock {x+dx} {y} {z} minecraft:oxidized_copper',f'setblock {x} {y} {z+dz} minecraft:oxidized_copper']
+        action=[f'summon minecraft:lightning_bolt {p(0,1)}']*8+['tick sprint 60']; expected='not:minecraft:oxidized_copper'
+    elif mechanic == 'sculk':
+        setup += [f'setblock {p(-1,-1)} minecraft:sculk_catalyst',
+                  f'summon minecraft:pig {p(0)} {{NoAI:1b,PersistenceRequired:1b,Tags:["{tag}"]}}']
+        action=[]
+        for n in range(16):
+            action += [f'summon minecraft:pig {p(0)} {{NoAI:1b,Tags:["{tag}_{n}"]}}',
+                       f'damage @e[tag={tag}_{n},limit=1] 100 minecraft:player_attack by E7Bot0']
+        action += ['tick sprint 400']
+        kind='sculk'
+    elif mechanic == 'tree':
+        setup += [f'setblock {p(0,-1)} minecraft:dirt',f'setblock {p(0)} minecraft:oak_sapling[stage=1]']
+        action=[f'setblock {p(0)} minecraft:air',f'place feature minecraft:oak {p(0)}']; kind='tree'
+    elif mechanic == 'leaves':
+        setup += [f'setblock {p(1)} minecraft:oak_leaves[persistent=false,distance=7]']
+        action=['gamerule random_tick_speed 512']; expected='not:minecraft:oak_leaves'
+    elif mechanic == 'natural_spawn':
+        action=['difficulty hard','time set midnight','gamerule spawn_mobs true','tick sprint 400']; kind='spawn'
+    return {'id':tag,'direction':direction,'mechanic':mechanic,'setup':setup,'action':action,
+            'kind':kind,'target':target,'expected':expected,'y':y}
+
+
+def observed(spec, rows):
+    x,y,z = spec['target']
+    kind=spec['kind']
+    if kind=='block':
+        if spec['mechanic'] in ('water','lava') and all(DIRECTIONS[spec['direction']]):
+            dx,dz=DIRECTIONS[spec['direction']]
+            value=[block_at(rows,x,y,z),block_at(rows,x-dx,y,z),block_at(rows,x,y,z-dz)]
+            return value, spec['expected'] in value
+        value=block_at(rows,x,y,z)
+        expected=spec['expected']
+        return value, value is not None and (value != expected[4:] if expected.startswith('not:') else value==expected)
+    if kind=='container':
+        entities=[e for _,r in rows.values() for e in r.get('block_entities',[])
+                  if (e.get('x'),e.get('y'),e.get('z'))==(x,y,z)]
+        count=sum(i.get('count',1) for e in entities for i in e.get('Items',[]) if i.get('id')=='minecraft:diamond')
+        return count,count>0
+    if kind=='fire':
+        cells=[(a,b,c) for a in range(x-5,x+6) for b in range(y,y+3) for c in range(z-5,z+6) if not owned(a,c)]
+        burning=[p for p in cells if block_at(rows,*p)=='minecraft:fire']
+        charred=block_at(rows,x,y,z) not in ('minecraft:oak_planks',None)
+        return {'fire_positions':burning,'target':block_at(rows,x,y,z)},bool(burning) or charred
+    if kind in ('entity','entity_or_sand'):
+        entities=tagged(rows,spec['id'])
+        positions=[e.get('Pos') for e in entities]
+        crossed=any(not owned(math.floor(p[0]),math.floor(p[2])) for p in positions if p)
+        if kind=='entity_or_sand':
+            crossed |= any(not owned(a,c) and block_at(rows,a,y,c)=='minecraft:sand'
+                           for a in range(x-6,x+7) for c in range(z-6,z+7))
+        return positions,crossed
+    if kind=='lit_lamp':
+        state=block_state_at(rows,x,y,z)
+        lit=(isinstance(state,str) and 'lit=true' in state) or (isinstance(state,dict) and state.get('properties',{}).get('lit')=='true')
+        return state,bool(lit)
+    if kind=='tree':
+        blocks=[block_at(rows,a,y+dy,c) for a in range(x-3,x+4) for c in range(z-3,z+4)
+                for dy in range(1,11) if not owned(a,c)]
+        return blocks, any(b in ('minecraft:oak_log','minecraft:oak_leaves') for b in blocks)
+    if kind=='sculk':
+        blocks=[block_at(rows,a,y-1,c) for a in range(x-5,x+6) for c in range(z-5,z+6) if not owned(a,c)]
+        return blocks,any(b=='minecraft:sculk' for b in blocks)
+    if kind=='spawn':
+        mobs=[e for k,(_,r) in rows.items() if not owned(k[1]*16,k[2]*16)
+              for e in r.get('Entities',[]) if e.get('id') in ('minecraft:zombie','minecraft:skeleton','minecraft:creeper','minecraft:spider')
+              and (e.get('Pos',[9999,0,9999])[0]-x)**2+(e.get('Pos',[9999,0,9999])[2]-z)**2 < 32**2]
+        return len(mobs),bool(mobs)
+    # Sculk, natural spawning and lightning need targeted outcome evidence.
+    # A command being accepted or any region hash changing is not that proof.
+    return 'not instrumented',None
+
+
+def breaches(args):
+    specs=[fixture(d,m,i) for d in DIRECTIONS for i,m in enumerate(MECHANICS)
+           if not args.mechanic or m in args.mechanic]
+    prior=DATA/'breaches.json'
+    results=json.loads(prior.read_text()) if args.mechanic and prior.exists() else []
+    with tempfile.TemporaryDirectory(prefix='e7-breaches-',dir=RUNS) as tmp:
+        scratch=Path(tmp)
+        seed=Engine(scratch/'seed')
+        try:
+            seed.join()
+            seed.console('difficulty peaceful')
+            seed.console('gamerule spawn_mobs false')
+            seed.console('gamerule random_tick_speed 0')
+            seed.console('forceload add -96 -96 95 95')
+            time.sleep(8)
+            for spec in specs:
+                for command in spec['setup']: seed.console(command)
+            seed.flush()
+        finally: seed.stop()
+        for direction in DIRECTIONS:
+            direction_specs=[s for s in specs if s['direction']==direction]
+            if not direction_specs: continue
+            for mask in (False,True):
+                engine=Engine(scratch/(direction+('-masked' if mask else '-control')),mask=mask,seed_world=seed.world)
+                try:
+                    engine.join()
+                    initial=engine.flush()
+                    if not any(not owned(k[1]*16,k[2]*16) for k in initial):
+                        raise RuntimeError('seed world has no exterior chunks, refusing empty evidence')
+                    for spec in direction_specs:
+                        if spec['mechanic']=='natural_spawn':
+                            engine.console('gamerule spawn_mobs false')
+                            engine.console('forceload remove all')
+                            for kind in ('zombie','skeleton','creeper','spider'):
+                                engine.console(f'kill @e[type=minecraft:{kind}]')
+                            dx,dz=DIRECTIONS[spec['direction']]
+                            engine.console(f'tp E7Bot0 {dx*30} -60 {dz*30}')
+                            engine.console('gamemode survival E7Bot0')
+                            engine.console('effect give E7Bot0 minecraft:resistance 600 255 true')
+                        before=engine.flush()
+                        before_value,before_crossed=observed(spec,before)
+                        replies=[engine.console(c) for c in spec['action']]
+                        time.sleep(max(args.settle, 5 if spec['mechanic'] in ('fire','tree','leaves','natural_spawn','sculk') else args.settle))
+                        if spec['mechanic']=='natural_spawn':
+                            engine.console('gamerule spawn_mobs false')
+                            engine.console('gamemode creative E7Bot0')
+                        if spec['mechanic']=='leaves': engine.console('gamerule random_tick_speed 0')
+                        after=engine.flush()
+                        value,crossed=observed(spec,after)
+                        changes=outside_changes(before,after)
+                        row={k:spec[k] for k in ('id','direction','mechanic','setup','action','target')}
+                        row.update(mask=mask,observed=value,crossed=crossed,outside_changed=changes,
+                                   before_observed=before_value,before_crossed=before_crossed,
+                                   replies=replies,pass_no_write=(not changes) if mask else None)
+                        if spec['kind']=='container':
+                            dx,dz=DIRECTIONS[spec['direction']]
+                            dx,dz=(dx,0) if dx else (0,dz)
+                            tx,ty,tz=spec['target']
+                            source=(tx-dx,ty,tz-dz)
+                            row['source_diamonds_after']=sum(i.get('count',1) for _,root in after.values()
+                                for e in root.get('block_entities',[]) if (e.get('x'),e.get('y'),e.get('z'))==source
+                                for i in e.get('Items',[]) if i.get('id')=='minecraft:diamond')
+                        results=[r for r in results if (r['mask'],r['id'])!=(mask,spec['id'])]
+                        results.append(row)
+                        save('breaches.json',results)
+                        print(f'{"mask" if mask else "control"} {spec["id"]} crossed={crossed} outside_changed={len(changes)}',flush=True)
+                    summary={'mask':mask,'outside_changed_since_start':outside_changes(initial,engine.flush()),
+                             'status':engine.ask('server-status'),'ctl':engine.ctl('server-status')}
+                    save(f'{direction}-{"masked" if mask else "control"}-status.json',summary)
+                finally:
+                    engine.stop()
+                    shutil.rmtree(engine.scratch)
+            save('disk.json',{'observed_local_mib':int(subprocess.check_output(['du','-sm',ROOT/'.local'],text=True).split()[0])})
+        by_id={r['id']:r for r in results if not r['mask']}
+    for row in results:
+        if row['mask']:
+            row['positive_control']=by_id[row['id']]['crossed'] is True and by_id[row['id']]['before_crossed'] is False
+            row['proven']=row['pass_no_write'] and row['crossed'] is False and row['positive_control'] is True
+            if row['mechanic'] in ('hopper','dropper'):
+                row['proven'] &= row.get('source_diamonds_after')==1
+    save('breaches.json',results)
+    masked=[r for r in results if r['mask']]
+    accepted=bool(masked) and all(r['proven'] for r in masked)
+    save('acceptance.json',{'accepted':accepted,'complete_matrix':len(results)==len(MECHANICS)*len(DIRECTIONS)*2,
+         'masked_trials':len(masked),'positive_controls':sum(r['positive_control'] for r in masked),
+         'changed_exterior_records':sum(len(r['outside_changed']) for r in masked),
+         'groups':[{'mechanic':name,'masked_trials':sum(r['mechanic']==name for r in masked),
+                    'proven':sum(r['mechanic']==name and r['proven'] for r in masked)}
+                   for name in MECHANICS if any(r['mechanic']==name for r in masked)],'raw':'breaches.json'})
+    return accepted
+
+
+def smoke(args):
+    result={}
+    with tempfile.TemporaryDirectory(prefix='e7-smoke-',dir=RUNS) as tmp:
+        engine=Engine(Path(tmp)/'masked',mask=True)
+        try:
+            engine.join()
+            result['status']=engine.ask('server-status')
+            result['ctl']=engine.ctl('server-status')
+            result['outside_block']=engine.ctl('block',64,-60,0)
+            result['inside_block']=engine.ctl('block',0,-60,0)
+            result['commands']=[engine.console(c) for c in ['setblock 64 -60 0 minecraft:gold_block',
+                'fill 63 -60 0 65 -60 0 minecraft:diamond_block', 'tp E7Bot0 70 -60 0',
+                'setblock 8 -60 8 minecraft:gold_block']]
+            time.sleep(1)
+            result['after']=engine.ask('server-status')
+            rows=engine.flush()
+            result['saved_chunk_records']=len(rows)
+            outside=[list(k) for k in rows if not owned(k[1]*16,k[2]*16)]
+            result['outside_saved_chunks']=outside
+            result['owned_write']=block_at(rows,8,-60,8)
+            result['pass']=not outside and result['owned_write']=='minecraft:gold_block' and all(owned(math.floor(p['position'][0]),math.floor(p['position'][2])) for p in result['after']['players'])
+        finally: engine.stop()
+    save('smoke.json',result)
+    print(sanitize(json.dumps(result,indent=2)),flush=True)
+    return result['pass']
+
+
+def unknown_reads(args):
+    rows=[]
+    for mask in (False,True):
+        with tempfile.TemporaryDirectory(prefix='e7-reads-',dir=RUNS) as tmp:
+            engine=Engine(Path(tmp)/'engine',mask=mask,edge=1024,read_probe=True)
+            try:
+                engine.join()
+                checks=[]
+                for line in engine.lines:
+                    if not line.startswith('E7_READ '): continue
+                    row=dict(word.split('=',1) for word in line.split()[1:])
+                    checks.append(row)
+                rows.append({'mask':mask,'checks':checks,'phase':'simulation World before chunk loading',
+                             'chunks_after_join':engine.ask('server-status')['chunks']})
+            finally: engine.stop()
+    save('unknown-reads.json',rows)
+    return all(len(r['checks'])==7 and all(c['block']==('minecraft:bedrock' if r['mask'] else 'minecraft:air')
+               and c['loaded']=='false' and int(c['light'])==(0 if r['mask'] else 240) for c in r['checks']) for r in rows)
+
+
+def interior_play(args):
+    names=['setblock','fill','water','lava','tnt','piston','hopper','dropper','redstone']
+    specs=[fixture('east',name,MECHANICS.index(name),interior=True) for name in names]
+    results=[]
+    for mask in (False,True):
+        with tempfile.TemporaryDirectory(prefix='e7-interior-',dir=RUNS) as tmp:
+            engine=Engine(Path(tmp)/'engine',mask=mask,baseline=not mask)
+            try:
+                engine.join()
+                engine.console('gamerule spawn_mobs false')
+                engine.console('gamerule random_tick_speed 0')
+                for spec in specs:
+                    for command in spec['setup']: engine.console(command)
+                engine.flush()
+                for spec in specs:
+                    before=observed(spec,engine.flush())
+                    replies=[engine.console(c) for c in spec['action']]
+                    time.sleep(args.settle)
+                    value,crossed=observed(spec,engine.flush())
+                    results.append({'mask':mask,'mechanic':spec['mechanic'],'before':before,
+                                    'observed':value,'expected_outcome':crossed,'replies':replies})
+            finally: engine.stop()
+    controls={r['mechanic']:r for r in results if not r['mask']}
+    for row in results:
+        if row['mask']:
+            row['matches_baseline']=row['observed']==controls[row['mechanic']]['observed']
+    save('interior.json',results)
+    return all(r['expected_outcome'] and r.get('matches_baseline',True) for r in results)
+
+
+def bench(args):
+    rows=[]
+    # Alternate process order. All bots and all loaded chunks are far from a
+    # production-aligned wall, so less simulated work cannot pass as overhead.
+    for repeat in range(args.repeats):
+        for mode in (('baseline','masked','disabled') if repeat%2==0 else ('disabled','masked','baseline')):
+            with tempfile.TemporaryDirectory(prefix='e7-bench-',dir=RUNS) as tmp:
+                engine=Engine(Path(tmp)/'engine',mask=mode=='masked',baseline=mode=='baseline',edge=1024)
+                try:
+                    engine.console('gamerule spawn_mobs false')
+                    engine.join(50)
+                    time.sleep(args.warmup)
+                    for attempt in range(3):
+                        engine.console('kill @e[type=!minecraft:player]')
+                        engine.console('tick sprint 40')
+                        time.sleep(.5)
+                        engine.console('kill @e[type=!minecraft:player]')
+                        time.sleep(.25)
+                        if sum(l['entities'] for l in engine.ask('server-status')['levels'])==0: break
+                    else: raise RuntimeError('benchmark could not clear the initial non-player population')
+                    for i in range(64):
+                        engine.console(f'summon minecraft:pig {i%8*2-7} -60 {i//8*2-7} {{PersistenceRequired:1b}}')
+                    time.sleep(args.warmup)
+                    samples=[]
+                    start=time.monotonic()
+                    while time.monotonic()-start < args.seconds:
+                        status=engine.ask('server-status')
+                        population=sum(l['entities'] for l in status['levels'])
+                        if len(status['players'])!=50 or population!=64:
+                            raise RuntimeError(f'benchmark population players={len(status["players"])} entities={population}, expected 50 and 64')
+                        samples.append({k:status[k] for k in ('mspt','tps','target_tps','chunks','levels')}
+                                       | {'player_count':len(status['players'])})
+                        time.sleep(1)
+                    row={'mode':mode,'repeat':repeat,'samples':samples,
+                         'average_mspt':sum(s['mspt']['average'] for s in samples)/len(samples),
+                         'host_load_average':list(os.getloadavg())}
+                    rows.append(row)
+                    print(f'bench {mode} repeat={repeat} mspt={row["average_mspt"]:.4f}',flush=True)
+                    save('bench.json',rows)
+                finally: engine.stop()
+    averages={mode:sum(r['average_mspt'] for r in rows if r['mode']==mode)/args.repeats for mode in ('baseline','masked','disabled')}
+    ratio=averages['masked']/averages['baseline']-1
+    disabled=averages['disabled']/averages['baseline']-1
+    result={'averages':averages,'masked_overhead_percent':ratio*100,
+            'disabled_overhead_percent':disabled*100,'under_5_percent':max(ratio,disabled)<=.05,
+            'profile':'fast','bots':50,'behaviour':'stand','seed':12345,'view_distance':3,'simulation_distance':3}
+    save('bench-summary.json',result)
+    return result['under_5_percent']
+
+
+def parity(args):
+    command=[sys.executable,'-B','tools/parity.py','--changed','HEAD','--hosts','','-j','1',
+             '--timeout','60','piston_push','block_update','light','mob_ai']
+    with tempfile.TemporaryDirectory(prefix='e7-parity-',dir=RUNS) as tmp:
+        env={k:v for k,v in os.environ.items() if not k.startswith(('HORIZON_','XDG_','CARGO_TARGET_DIR'))}
+        for key in ('HORIZON_HOME','HORIZON_LAUNCHER_HOME','XDG_DATA_HOME','XDG_CONFIG_HOME','XDG_CACHE_HOME'):
+            path=Path(tmp)/key.lower()
+            path.mkdir()
+            env[key]=str(path)
+        env.update(CARGO_INCREMENTAL='0',HORIZON_LAUNCHER_NO_SELF_UPDATE='1',HORIZON_NO_AUDIO='1')
+        result=subprocess.run(command,cwd=SOURCE,env=env,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=300)
+        save('parity.json',{'command':command,'exit':result.returncode,'output':result.stdout,
+             'resources_note':'Prepared render/game resources are present read-only. The parity runner also needs authenticated jars, libraries and manifest under .local/minecraft/26.3.'})
+        print(sanitize(result.stdout),flush=True)
+    return result.returncode==0
+
+
+def writer_probe(args):
+    with tempfile.TemporaryDirectory(prefix='e7-writer-',dir=RUNS) as tmp:
+        env={k:v for k,v in os.environ.items() if not k.startswith(('HORIZON_','XDG_'))}
+        env['HORIZON_TILE']='0,0,512,0,0'
+        result=subprocess.run([BINS/'e7_tile_write_probe',tmp],env=env,text=True,capture_output=True)
+        save('region-writer.json',{'exit':result.returncode,'stdout':result.stdout,'stderr':result.stderr})
+    return result.returncode==0
+
+
+def build():
+    if not SOURCE.exists():
+        subprocess.run(['git','clone','--no-hardlinks','--no-checkout',ROOT/'.local/src/horizon',SOURCE],check=True)
+        subprocess.run(['git','checkout','--detach','fc2868b2b'],cwd=SOURCE,check=True)
+        for patch in ('e2-horizon-input-trace.patch','horizon-02-tile-ownership.patch'):
+            subprocess.run(['git','apply',ROOT/'patches'/patch],cwd=SOURCE,check=True)
+    revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=SOURCE,text=True).strip()
+    if revision!='fc2868b2b26d56ec76e17414909fe58a3b87bb92':
+        raise RuntimeError('unexpected Horizon revision')
+    patch=ROOT/'patches/horizon-02-tile-ownership.patch'
+    if subprocess.run(['git','apply','--reverse','--check',patch],cwd=SOURCE,capture_output=True).returncode:
+        e2=ROOT/'patches/e2-horizon-input-trace.patch'
+        if subprocess.run(['git','apply','--reverse','--check',e2],cwd=SOURCE,capture_output=True).returncode:
+            subprocess.run(['git','apply','--check',e2],cwd=SOURCE,check=True)
+            subprocess.run(['git','apply',e2],cwd=SOURCE,check=True)
+        subprocess.run(['git','apply','--check',patch],cwd=SOURCE,check=True)
+        subprocess.run(['git','apply',patch],cwd=SOURCE,check=True)
+    subprocess.run(['cargo','build','--profile','fast','--no-default-features','-p','horizon-client',
+                    '-p','horizon-world','--example','e7_tile_write_probe','--bin','horizon-client'],
+        cwd=SOURCE,env={**os.environ,'CARGO_INCREMENTAL':'0'},check=True)
+    BINS.mkdir(parents=True,exist_ok=True)
+    for source,destination in [('horizon-client','horizon-client'),('examples/e7_tile_write_probe','e7_tile_write_probe')]:
+        temporary=BINS/(destination+'.tmp')
+        shutil.copy2(SOURCE/'target/fast'/source,temporary)
+        temporary.replace(BINS/destination)
+    save('build.json',{'revision':revision,'binary_sha256':hashlib.sha256((BINS/'horizon-client').read_bytes()).hexdigest(),
+         'command':'CARGO_INCREMENTAL=0 cargo build --profile fast --no-default-features -p horizon-client -p horizon-world --example e7_tile_write_probe --bin horizon-client',
+         'patch_sha256':hashlib.sha256((ROOT/'patches/horizon-02-tile-ownership.patch').read_bytes()).hexdigest()})
+
+
+class DiskSampler:
+    def __init__(self):
+        self.done=threading.Event()
+        self.peak=0
+        self.target_peak=0
+        self.thread=threading.Thread(target=self.sample,daemon=True)
+        self.thread.start()
+
+    def sample(self):
+        while not self.done.is_set():
+            result=subprocess.run(['du','-sm',ROOT/'.local'],text=True,capture_output=True)
+            if result.stdout:
+                self.peak=max(self.peak,int(result.stdout.split()[0]))
+            target=subprocess.run(['du','-sm',SOURCE/'target'],text=True,capture_output=True)
+            if target.stdout: self.target_peak=max(self.target_peak,int(target.stdout.split()[0]))
+            self.done.wait(2)
+
+    def stop(self):
+        self.done.set()
+        self.thread.join(10)
+        previous=DATA/'disk-peak.json'
+        old=json.loads(previous.read_text()) if previous.exists() else {}
+        save('disk-peak.json',{'observed_peak_local_mib':max(self.peak,old.get('observed_peak_local_mib',0)),
+             'observed_peak_e7_target_mib':max(self.target_peak,old.get('observed_peak_e7_target_mib',0)),'sampling_seconds':2,
+             'scope':'whole .local, including concurrent experiments owned by other agents'})
+
+
+def main():
+    global DATA
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--build',action='store_true')
+    parser.add_argument('--section',choices=['smoke','reads','writer','interior','breaches','bench','parity','all'],default='all')
+    parser.add_argument('--mechanic',action='append',choices=MECHANICS)
+    parser.add_argument('--out',type=Path,help='separate raw result directory for an independent rerun')
+    parser.add_argument('--settle',type=float,default=2)
+    parser.add_argument('--warmup',type=float,default=10)
+    parser.add_argument('--seconds',type=float,default=30)
+    parser.add_argument('--repeats',type=int,default=3)
+    args=parser.parse_args()
+    if args.out: DATA=args.out.resolve()
+    RUNS.mkdir(parents=True,exist_ok=True)
+    disk=DiskSampler()
+    previous=DATA/'outcomes.json'
+    outcomes=json.loads(previous.read_text()) if args.section!='all' and previous.exists() else {}
+    try:
+        if args.section in ('all','breaches'):
+            save('acceptance.json',{'accepted':False,'status':'running','complete_matrix':False})
+        if args.build: build()
+        for section,run in [('smoke',smoke),('reads',unknown_reads),('writer',writer_probe),('interior',interior_play),('breaches',breaches),('bench',bench),('parity',parity)]:
+            if args.section in ('all',section):
+                try: outcomes[section]=run(args)
+                except Exception as error:
+                    outcomes[section]=False
+                    save(f'{section}-failure.json',{'error':str(error),'kind':type(error).__name__,'traceback':traceback.format_exc()})
+                    print(sanitize(f'{section} failed: {error}'),file=sys.stderr,flush=True)
+    finally:
+        disk.stop()
+    save('outcomes.json',outcomes)
+    selected={name:value for name,value in outcomes.items() if args.section=='all' or name==args.section}
+    return 0 if selected and all(selected.values()) else 1
+
+
+if __name__=='__main__':
+    try: raise SystemExit(main())
+    except KeyboardInterrupt:
+        print('E7 interrupted. Owned engines and run folders were closed.',file=sys.stderr)
+        raise SystemExit(130)

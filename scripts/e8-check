@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Record scoped E8 checks without changing the parent workspace's Rust sources."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "docs/experiments/data/E8"
+SOURCE = ROOT / ".local/src/meridian"
+env = dict(os.environ, CARGO_INCREMENTAL="0", CARGO_PROFILE_FAST_INHERITS="release",
+           CARGO_PROFILE_FAST_LTO="false", CARGO_PROFILE_FAST_CODEGEN_UNITS="16")
+env.pop("CI", None)
+
+commands = [
+    ["rustfmt", "--edition", "2024", "--check", *json.loads((DATA / "patch.json").read_text())["changed"]],
+    ["cargo", "fmt", "--all", "--check"],
+    ["cargo", "clippy", "--locked", "--profile", "fast", "-p", "meridian-handoff", "-p", "meridian-ghost",
+     "-p", "meridian-proxy", "-p", "meridian-testkit", "--all-targets", "--", "-D", "warnings"],
+    ["cargo", "test", "--locked", "--profile", "fast", "-p", "meridian-config", "-p", "meridian-ghost",
+     "-p", "meridian-handoff", "-p", "meridian-proxy", "--lib", "--bins", "--", "--skip",
+     "serve::tests::the_listener_queues_a_large_burst"],
+]
+results = []
+for command in commands:
+    started = time.monotonic()
+    load = os.getloadavg()
+    result = subprocess.run(command, cwd=SOURCE, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    text = result.stdout.replace(str(ROOT), "$REPO").replace(str(Path.home()), "$HOME")
+    lines = text.splitlines()
+    selected = [line for line in lines if line.startswith("test result:") or "Diff in " in line or
+                line.startswith("error:") or "Finished `" in line]
+    results.append({"command": command, "exit": result.returncode, "seconds": time.monotonic() - started,
+                    "load_before": load, "load_after": os.getloadavg(), "summary": selected,
+                    "failure_tail": lines[-15:] if result.returncode else []})
+    print(json.dumps(results[-1]), flush=True)
+(DATA / "verification.json").write_text(json.dumps(results, indent=2) + "\n")
+# The known E2 formatting failure remains a failure in the aggregate exit code.
+raise SystemExit(0 if all(r["exit"] == 0 for r in results) else 1)

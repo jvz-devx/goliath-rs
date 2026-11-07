@@ -1,0 +1,160 @@
+[
+  {
+    "command": [
+      "rustfmt",
+      "--edition",
+      "2024",
+      "--check",
+      "crates/meridian-ghost/src/view.rs",
+      "crates/meridian-handoff/src/lane_input.rs",
+      "crates/meridian-handoff/src/lib.rs",
+      "crates/meridian-handoff/src/session.rs",
+      "crates/meridian-handoff/src/switch.rs",
+      "crates/meridian-handoff/src/tests/switch.rs",
+      "crates/meridian-proxy/src/main.rs",
+      "crates/meridian-proxy/src/session.rs",
+      "crates/meridian-proxy/src/switching.rs",
+      "crates/meridian-proxy/src/wall_approach.rs",
+      "crates/meridian-proxy/src/walls.rs",
+      "crates/meridian-testkit/src/bin/e4-client.rs"
+    ],
+    "exit": 0,
+    "seconds": 0.2928390000015497,
+    "load_before": [
+      19.55712890625,
+      15.8427734375,
+      19.37060546875
+    ],
+    "load_after": [
+      19.55712890625,
+      15.8427734375,
+      19.37060546875
+    ],
+    "summary": [],
+    "failure_tail": []
+  },
+  {
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "exit": 1,
+    "seconds": 0.43246900000667665,
+    "load_before": [
+      19.55712890625,
+      15.8427734375,
+      19.37060546875
+    ],
+    "load_after": [
+      19.55712890625,
+      15.8427734375,
+      19.37060546875
+    ],
+    "summary": [
+      "Diff in $REPO/.local/src/meridian/crates/meridian-testkit/src/bin/e2-client.rs:1:",
+      "Diff in $REPO/.local/src/meridian/crates/meridian-testkit/src/bin/e2-client.rs:13:",
+      "Diff in $REPO/.local/src/meridian/crates/meridian-testkit/src/bin/e2-client.rs:32:",
+      "Diff in $REPO/.local/src/meridian/crates/meridian-testkit/src/bin/e2-client.rs:46:",
+      "Diff in $REPO/.local/src/meridian/crates/meridian-testkit/src/bin/e2-client.rs:55:",
+      "Diff in $REPO/.local/src/meridian/crates/meridian-testkit/src/bin/e2-client.rs:73:"
+    ],
+    "failure_tail": [
+      "+                    emit(",
+      "+                        json!({\"kind\":\"chat\", \"ns\":now(), \"text\":horizon_protocol::text::plain(&p.content,&HashMap::new()), \"bytes\":counters.bytes_in.load(Ordering::Relaxed)}),",
+      "+                    );",
+      "+                }",
+      "+            }",
+      "+            ids::play::clientbound::START_CONFIGURATION => {",
+      "+                return Err(\"unexpected reconfiguration\".into());",
+      "+            }",
+      "+            ids::play::clientbound::DISCONNECT => {",
+      "+                return Err(\"server disconnected test player\".into());",
+      "+            }",
+      "+            _ => {}",
+      "         }",
+      "     }",
+      " }"
+    ]
+  },
+  {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--profile",
+      "fast",
+      "-p",
+      "meridian-handoff",
+      "-p",
+      "meridian-ghost",
+      "-p",
+      "meridian-proxy",
+      "-p",
+      "meridian-testkit",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "seconds": 14.392611666000448,
+    "load_before": [
+      19.55712890625,
+      15.8427734375,
+      19.37060546875
+    ],
+    "load_after": [
+      20.8701171875,
+      16.29541015625,
+      19.46875
+    ],
+    "summary": [
+      "    Finished `fast` profile [optimized] target(s) in 14.32s"
+    ],
+    "failure_tail": []
+  },
+  {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--profile",
+      "fast",
+      "-p",
+      "meridian-config",
+      "-p",
+      "meridian-ghost",
+      "-p",
+      "meridian-handoff",
+      "-p",
+      "meridian-proxy",
+      "--lib",
+      "--bins",
+      "--",
+      "--skip",
+      "serve::tests::the_listener_queues_a_large_burst"
+    ],
+    "exit": 0,
+    "seconds": 21.525580458008335,
+    "load_before": [
+      20.8701171875,
+      16.29541015625,
+      19.46875
+    ],
+    "load_after": [
+      27.39697265625,
+      18.1259765625,
+      20.0537109375
+    ],
+    "summary": [
+      "    Finished `fast` profile [optimized] target(s) in 11.26s",
+      "test result: ok. 202 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s",
+      "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+      "test result: ok. 85 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.93s",
+      "test result: ok. 559 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.26s"
+    ],
+    "failure_tail": []
+  }
+]

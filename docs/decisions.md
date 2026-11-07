@@ -61,3 +61,11 @@ E3 built the cut as a full re-serialisation and missed the budget: 160 ms to dur
 
 P3 is now rejected on safety as well: with crash notices 40 ms late, it duplicates items.
 
+## D8. Tile size, global state, Nether and End
+
+**Tile size.** Production tiles default to 2,048 blocks, a multiple of the 512-block region file so each file has one writer. The edge is configurable, and tests use 64 so crossings happen quickly. Crossing load falls with tile size: 50 sprinting players cross about 0.17 times a second at 2,048 blocks, against 1.4 at 256, using the mean rate N * v * 4 / (pi * L). At 256 blocks an E3-style 94 ms stall would take 13% of the tick thread. E3 also showed a cut's cost follows loaded chunks, not tile area, so large tiles cost nothing extra. Tiles can't be too large either, because a tile is the unit of capacity: every player in one tile shares one tick thread.
+
+**Global state.** E8 measured four independent tile clocks drifting up to 72 ticks, 3.6 seconds, with one tile under load. That is a visible sky step at a wall, so tiles can't each own time. The store holds one cluster clock and the weather, and the proxy sends clients the cluster time so the sky doesn't jump at a wall. Chat and the tab list live in the proxy. Scoreboard, statistics and advancements travel in the player's record. Game rules are cluster configuration, set at start.
+
+**Nether and End.** Each runs as one extra process with the whole dimension as a single tile, using the same handover through portals. They aren't split, and they aren't part of the M1 to M4 measurements. DonutSMP reportedly hosts them in one region as well.
+

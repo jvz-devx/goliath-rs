@@ -1,0 +1,26 @@
+{
+  "status": "superseded development checks, not acceptance results",
+  "checks": [
+    {
+      "check": "first log unit-test run",
+      "passed": 2,
+      "failed": 1,
+      "error": "fence CAS conflict in scratch directory",
+      "fix": "add a process-local atomic counter to timestamp-based test directory names",
+      "subsequent_log_tests_passed": 6
+    },
+    {
+      "check": "warm live cut with terrain_loading guard",
+      "error": "terrain work still in flight: loading=true, pending entity chunks=0; retry after a tick",
+      "rtt_ms": 60103.48791698925,
+      "retries": 564,
+      "fix": "replace terrain_loading with a generation/proto-save revision, keep pending entity data fail-closed"
+    },
+    {
+      "check": "first strict all-target Clippy",
+      "error": "collapsible_if in world-clock metadata overlay",
+      "fix": "use a let-chain; no lint suppression",
+      "subsequent_clippy": "passed"
+    }
+  ]
+}

@@ -1,0 +1,948 @@
+diff --git a/crates/horizon-client-render/src/chunk_map.rs b/crates/horizon-client-render/src/chunk_map.rs
+index 484bd9675..442000d4d 100644
+--- a/crates/horizon-client-render/src/chunk_map.rs
++++ b/crates/horizon-client-render/src/chunk_map.rs
+@@ -39,6 +39,7 @@ pub enum ChunkMembershipDelta {
+ /// blocks or light don't invalidate consumers of the loaded chunk key set.
+ /// Tokens are process-wide: replacing the entire map also invalidates caches.
+ pub struct ChunkMap {
++    pub tile_light_wall: Option<Arc<crate::chunk::Section>>,
+     columns: Columns,
+     revision: u64,
+     /// The oldest revision `recent_deltas` still answers for: the revision of
+@@ -57,6 +58,7 @@ impl Default for ChunkMap {
+     fn default() -> Self {
+         let revision = next_revision();
+         Self {
++            tile_light_wall: None,
+             columns: Columns::default(),
+             revision,
+             min_valid_revision: revision,
+@@ -117,6 +119,9 @@ impl ChunkMap {
+         Some(slice.copied())
+     }
+     pub fn insert(&mut self, key: Key, chunk: Arc<Chunk>) -> Option<Arc<Chunk>> {
++        if !horizon_core::tile_ownership::allow_write(key.0, key.1) {
++            return None;
++        }
+         if chunk.fresh {
+             self.fresh.insert(key);
+         } else {
+@@ -171,6 +176,9 @@ impl ChunkMap {
+         self.fresh.remove(key);
+     }
+     pub fn get_mut(&mut self, key: &Key) -> Option<&mut Arc<Chunk>> {
++        if !horizon_core::tile_ownership::allow_write(key.0, key.1) {
++            return None;
++        }
+         self.columns.get_mut(key)
+     }
+     pub fn values_mut(&mut self) -> ValuesMut<'_, Key, Arc<Chunk>> {
+@@ -192,9 +200,14 @@ impl<'a> IntoIterator for &'a ChunkMap {
+ }
+ impl crate::light::LightWorld for ChunkMap {
+     fn section(&self, cx: i32, s: usize, cz: i32) -> Option<&Arc<crate::chunk::Section>> {
+-        self.columns.section(cx, s, cz)
++        self.columns
++            .section(cx, s, cz)
++            .or(self.tile_light_wall.as_ref())
+     }
+     fn set_section_light(&mut self, cx: i32, s: usize, cz: i32, light: crate::chunk::Light) {
++        if !horizon_core::tile_ownership::allow_write(cx, cz) {
++            return;
++        }
+         self.columns.set_section_light(cx, s, cz, light);
+     }
+     fn layout(&self) -> crate::chunk::ColumnLayout {
+diff --git a/crates/horizon-client-render/src/collisions.rs b/crates/horizon-client-render/src/collisions.rs
+index 40124594e..e5e80af3d 100644
+--- a/crates/horizon-client-render/src/collisions.rs
++++ b/crates/horizon-client-render/src/collisions.rs
+@@ -395,6 +395,9 @@ impl SceneCollisions<'_, '_> {
+                     };
+                     // The scan passes the cells of a column that is not resident.
+                     let Some(chunk) = chunk else {
++                        if self.world.tile_barrier.is_some() {
++                            return false;
++                        }
+                         continue;
+                     };
+                     if kind != 0 {
+@@ -435,21 +438,32 @@ impl SceneCollisions<'_, '_> {
+ impl<'w> BlockCollisionWorld for SceneCollisions<'w, '_> {
+     type Error = io::Error;
+     /// The resident column, looked up once per chunk the scan enters.
+-    type Chunk = &'w crate::chunk::Chunk;
++    type Chunk = Option<&'w crate::chunk::Chunk>;
+     fn collision_chunk(&mut self, p: ChunkPos) -> io::Result<Option<Self::Chunk>> {
+-        Ok(self.world.chunks.get(&(p.x, p.z)).map(|chunk| &**chunk))
++        let chunk = self.world.chunks.get(&(p.x, p.z)).map(|chunk| &**chunk);
++        Ok(if chunk.is_some() || self.world.tile_barrier.is_some() {
++            Some(chunk)
++        } else {
++            None
++        })
+     }
+     fn collision_block(&mut self, chunk: Self::Chunk, p: BlockPos) -> io::Result<CollisionBlock> {
+-        self.binding.collision_block(chunk.block(p.x, p.y, p.z))
++        self.binding.collision_block(chunk.map_or_else(
++            || self.world.tile_barrier.unwrap_or(self.world.air),
++            |chunk| chunk.block(p.x, p.y, p.z),
++        ))
+     }
+     /// From the section's palette, without reading its blocks; a palette
+     /// of the whole registry reads every cell.
+     fn may_reach_out(&mut self, chunk: Self::Chunk, section_y: i32) -> io::Result<bool> {
+-        Ok(self.section_reaches_out(chunk, section_y))
++        Ok(chunk.is_none_or(|chunk| self.section_reaches_out(chunk, section_y)))
+     }
+     /// From the section's palette: every block it can hold has an empty shape (air, plants).
+     /// A palette of the whole registry, or a section outside the column, is read cell by cell.
+     fn section_is_empty(&mut self, chunk: Self::Chunk, section_y: i32) -> io::Result<bool> {
++        let Some(chunk) = chunk else {
++            return Ok(false);
++        };
+         let blocks = usize::try_from(section_y - (chunk.min_y() >> 4))
+             .ok()
+             .and_then(|s| chunk.sections.get(s))
+diff --git a/crates/horizon-client-render/src/streaming.rs b/crates/horizon-client-render/src/streaming.rs
+index 7f9a11929..f3d734aec 100644
+--- a/crates/horizon-client-render/src/streaming.rs
++++ b/crates/horizon-client-render/src/streaming.rs
+@@ -669,7 +669,8 @@ impl GenerationScan {
+             return None;
+         }
+         let missing = |&(_, x, z): &(i64, i32, i32)| {
+-            !input.world.chunks.contains_key(&(x, z))
++            horizon_core::tile_ownership::owns_chunk(x, z)
++                && !input.world.chunks.contains_key(&(x, z))
+                 && !input.generating.contains(&(x, z))
+                 && !input.protos.contains_key(&(x, z))
+                 && !input.finishing.contains(&(x, z))
+@@ -717,7 +718,8 @@ impl GenerationScan {
+                     x1 = x1.max(next_x1);
+                 }
+                 for x in x0..=x1 {
+-                    if !input.ranges.requested(x, z, input.decorates)
++                    if !horizon_core::tile_ownership::owns_chunk(x, z)
++                        || !input.ranges.requested(x, z, input.decorates)
+                         || input.world.chunks.contains_key(&(x, z))
+                         || input.generating.contains(&(x, z))
+                         || input.protos.contains_key(&(x, z))
+@@ -740,7 +742,8 @@ impl GenerationScan {
+                 for dz in -reach..=reach {
+                     for dx in -reach..=reach {
+                         let (x, z) = (fx + dx, fz + dz);
+-                        if input.world.chunks.contains_key(&(x, z))
++                        if !horizon_core::tile_ownership::owns_chunk(x, z)
++                            || input.world.chunks.contains_key(&(x, z))
+                             || input.generating.contains(&(x, z))
+                             || input.protos.contains_key(&(x, z))
+                             || input.finishing.contains(&(x, z))
+@@ -1440,6 +1443,9 @@ impl Streaming {
+                 let n = (x + dx as i32 - 1, z + dz as i32 - 1);
+                 region[dz][dx] = match world.chunks.get(&n) {
+                     Some(chunk) => Some(chunk.clone()),
++                    None if !horizon_core::tile_ownership::owns_chunk(n.0, n.1) => {
++                        world.tile_wall.clone()
++                    }
+                     None if !self.in_range(n.0, n.1, 1) && self.decorated.contains(&n) => {
+                         if let Some(view) = self.light_views.get(&n) {
+                             Some(view.clone())
+@@ -1641,7 +1647,11 @@ impl Streaming {
+                     if self.in_range(x, z, 4) || self.near_finished(x, z, 2) {
+                         self.light_views.remove(&(x, z));
+                         self.protos.insert((x, z), Some(proto));
+-                        if decorated || !self.decorates {
++                        // The outer two owned rings skip decoration. Its worker
++                        // needs a 3x3, and no terrain is generated past a wall.
++                        let wall_ring = horizon_core::tile_ownership::area()
++                            .is_some_and(|a| !a.chunk(x - 2, z - 2) || !a.chunk(x + 2, z + 2));
++                        if decorated || !self.decorates || wall_ring {
+                             self.decorated.insert((x, z));
+                         }
+                     }
+@@ -1794,7 +1804,8 @@ impl Streaming {
+             }
+             let ready = (-1..=1).all(|dz| {
+                 (-1..=1).all(|dx| {
+-                    self.decorated.contains(&(x + dx, z + dz))
++                    !horizon_core::tile_ownership::owns_chunk(x + dx, z + dz)
++                        || self.decorated.contains(&(x + dx, z + dz))
+                         || world.chunks.contains_key(&(x + dx, z + dz))
+                 })
+             });
+@@ -2960,7 +2971,8 @@ fn light_region_ready(
+     for dz in 0..3 {
+         for dx in 0..3 {
+             let n = (x + dx - 1, z + dz - 1);
+-            if world.chunks.contains_key(&n)
++            if !horizon_core::tile_ownership::owns_chunk(n.0, n.1)
++                || world.chunks.contains_key(&n)
+                 || (!in_range(n.0, n.1)
+                     && decorated.contains(&n)
+                     && matches!(protos.get(&n), Some(Some(_))))
+diff --git a/crates/horizon-client-render/src/world.rs b/crates/horizon-client-render/src/world.rs
+index 0410cc2a4..b173752bf 100644
+--- a/crates/horizon-client-render/src/world.rs
++++ b/crates/horizon-client-render/src/world.rs
+@@ -66,6 +66,9 @@ pub struct World {
+     pub revision: u64,
+     pub health_rules: HealthRules,
+     pub air: BlockStateId,
++    /// E7: unknown simulation space is solid, including above the build height at a wall.
++    pub tile_barrier: Option<BlockStateId>,
++    pub tile_wall: Option<Arc<Chunk>>,
+     /// Sections whose geometry changed and need remeshing.
+     pub dirty_sections: DirtySections,
+     /// Chunks whose light must be recomputed.
+@@ -201,6 +204,16 @@ impl Weather {
+     }
+ }
+ impl World {
++    pub fn enable_tile_wall(&mut self, solid: BlockStateId) {
++        let mut wall = Chunk::with_layout(0, 0, self.layout());
++        for s in 0..wall.sections.len() {
++            wall.replace_blocks(s, &[solid.0; 4096]);
++            Arc::make_mut(&mut wall.sections[s]).light = crate::chunk::Light::Uniform(0);
++        }
++        self.chunks.tile_light_wall = wall.sections.first().cloned();
++        self.tile_barrier = Some(solid);
++        self.tile_wall = Some(Arc::new(wall));
++    }
+     pub fn new(air: BlockStateId, seed: i64) -> Self {
+         Self {
+             shape: LevelShape::OVERWORLD,
+@@ -209,6 +222,8 @@ impl World {
+             revision: 0,
+             health_rules: HealthRules::default(),
+             air,
++            tile_barrier: None,
++            tile_wall: None,
+             fast_lava: false,
+             dirty_sections: Default::default(),
+             dirty_light: Default::default(),
+@@ -311,6 +326,9 @@ impl World {
+     /// section borders) for remeshing and the surrounding chunks for relighting.
+     /// Neighbour updates, drops and block entities belong to the gameplay layer.
+     pub fn set(&mut self, x: i32, y: i32, z: i32, state: BlockStateId) -> crate::Result<()> {
++        if !horizon_core::tile_ownership::allow_write(x >> 4, z >> 4) {
++            return Err("write outside owned tile".into());
++        }
+         let Some(chunk) = self.chunks.get_mut(&(x >> 4, z >> 4)) else {
+             return Err("write outside resident chunks".into());
+         };
+@@ -402,7 +420,9 @@ impl World {
+     pub fn block(&self, x: i32, y: i32, z: i32) -> BlockStateId {
+         self.chunks
+             .get(&(x >> 4, z >> 4))
+-            .map_or(self.air, |chunk| chunk.block(x & 15, y, z & 15))
++            .map_or(self.tile_barrier.unwrap_or(self.air), |chunk| {
++                chunk.block(x & 15, y, z & 15)
++            })
+     }
+     /// Whether a block of the box `lo..=hi` may match, from the palettes of
+     /// the sections it reaches (a palette of the whole registry may hold
+@@ -424,7 +444,7 @@ impl World {
+         for cx in lo[0] >> 4..=hi[0] >> 4 {
+             for cz in lo[2] >> 4..=hi[2] >> 4 {
+                 let Some(chunk) = self.chunks.get(&(cx, cz)) else {
+-                    if matches(self.air) {
++                    if matches(self.tile_barrier.unwrap_or(self.air)) {
+                         return true;
+                     }
+                     continue;
+@@ -452,9 +472,10 @@ impl World {
+         })
+     }
+     pub fn light(&self, x: i32, y: i32, z: i32) -> u8 {
+-        self.chunks
+-            .get(&(x >> 4, z >> 4))
+-            .map_or(0xF0, |chunk| chunk.light(x & 15, y, z & 15))
++        self.chunks.get(&(x >> 4, z >> 4)).map_or(
++            if self.tile_barrier.is_some() { 0 } else { 0xF0 },
++            |chunk| chunk.light(x & 15, y, z & 15),
++        )
+     }
+     pub fn is_air(&self, state: BlockStateId) -> bool {
+         state == self.air
+@@ -570,6 +591,22 @@ impl Default for HealthRules {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn tile_unknown_reads_are_solid_without_materializing_a_chunk() {
++        let mut world = super::World::new(horizon_world::registry::BlockStateId(0), 1);
++        assert_eq!(world.block(-1, 80, -1).0, 0);
++        world.enable_tile_wall(horizon_world::registry::BlockStateId(1));
++        for (x, z) in [(-1, -1), (0, 0), (1024, -1024)] {
++            for y in [-4096, 80, 4096] {
++                assert_eq!(world.block(x, y, z).0, 1);
++            }
++            assert!(!world.loaded(x, z));
++            assert_eq!(world.light(x, 80, z), 0);
++        }
++        assert!(world.may_hold([-1, 80, -1], [1, 81, 1], |s| s.0 == 1));
++        assert!(!world.may_hold([-1, 80, -1], [1, 81, 1], |s| s.0 == 0));
++        assert!(world.chunks.is_empty());
++    }
+     use super::{DirtySections, Weather, World};
+     use crate::chunk::{Chunk, MIN_Y, SECTIONS};
+     use horizon_world::registry::BlockStateId;
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index 45f23d6ac..212a0fae5 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -1454,6 +1454,17 @@ impl LevelAccess for GameLevel<'_> {
+         push: &[BlockPos],
+         destroy: &[BlockPos],
+     ) -> bool {
++        if let Some(area) = horizon_core::tile_ownership::area() {
++            let step = direction.normal();
++            if !area.contains(piston.x + step[0], piston.z + step[2])
++                || push.iter().any(|p| {
++                    !area.contains(p.x, p.z) || !area.contains(p.x + step[0], p.z + step[2])
++                })
++                || destroy.iter().any(|p| !area.contains(p.x, p.z))
++            {
++                return false;
++            }
++        }
+         let mut canceled = false;
+         if self.native_authoritative {
+             let step = direction.normal();
+@@ -2411,7 +2422,9 @@ fn ticking_chunk(world: &World, x: i32, z: i32) -> bool {
+             if dx == 0 && dz == 0 {
+                 continue;
+             }
+-            if !world.chunks.contains_key(&(x + dx, z + dz)) {
++            if horizon_core::tile_ownership::owns_chunk(x + dx, z + dz)
++                && !world.chunks.contains_key(&(x + dx, z + dz))
++            {
+                 return false;
+             }
+         }
+@@ -8403,6 +8416,7 @@ impl Game<'_> {
+         if let (Some(sent), Some(log)) = (sent, self.world.block_log.as_mut()) {
+             self.world.block_log_held = log.split_off(sent.min(log.len()));
+         }
++        self.hold_tile_entities();
+         horizon_client::spans::time("tick_lan", || self.tick_lan(false));
+         let held = std::mem::take(&mut self.world.block_log_held);
+         if let Some(log) = self.world.block_log.as_mut() {
+@@ -8448,6 +8462,7 @@ impl Game<'_> {
+             self.tick_client_ambient();
+         }
+         self.tick_frame_visuals(running);
++        self.hold_tile_entities();
+         if running {
+             // MinecraftServer.tickServer: GameTestTicker.SINGLETON.tick().
+             self.tick_game_tests();
+diff --git a/crates/horizon-client/src/game/commands.rs b/crates/horizon-client/src/game/commands.rs
+index 25cdc15e7..74ad0ae4f 100644
+--- a/crates/horizon-client/src/game/commands.rs
++++ b/crates/horizon-client/src/game/commands.rs
+@@ -2430,6 +2430,10 @@ impl Game<'_> {
+             .unwrap_or(self.source_position());
+         let block_y = pos[1].floor() as i32;
+         if !(-30_000_000.0..30_000_000.0).contains(&pos[0])
++            || !horizon_core::tile_ownership::owns_chunk(
++                (pos[0].floor() as i32) >> 4,
++                (pos[2].floor() as i32) >> 4,
++            )
+             || !(-20_000_000..20_000_000).contains(&block_y)
+             || !(-30_000_000.0..30_000_000.0).contains(&pos[2])
+         {
+diff --git a/crates/horizon-client/src/game/entity.rs b/crates/horizon-client/src/game/entity.rs
+index 9c58f7df3..e301f0883 100644
+--- a/crates/horizon-client/src/game/entity.rs
++++ b/crates/horizon-client/src/game/entity.rs
+@@ -661,6 +661,35 @@ macro_rules! entity_lists {
+ }
+ pub(crate) use entity_lists;
+ 
++impl Game<'_> {
++    /// A final guard for noclip and teleport movement, which can bypass block collisions.
++    pub(super) fn hold_tile_entities(&mut self) {
++        let Some(area) = horizon_core::tile_ownership::area() else {
++            return;
++        };
++        for handle in self.entity_handles() {
++            super::entity::with_entity_mut!(self, handle, e => {
++                let p = e.position();
++                let bounds = e.bounds();
++                let min = bounds.min_position();
++                let max = bounds.max_position();
++                let held = area.hold_body([p.x,p.y,p.z], [(p.x-min.x).max(max.x-p.x), (p.z-min.z).max(max.z-p.z)]);
++                if held != [p.x,p.y,p.z] {
++                    *e.position_mut() = Vec3::new(held[0],held[1],held[2]);
++                    let v = e.velocity_mut();
++                    if held[0] != p.x { v.x = 0.0; }
++                    if held[2] != p.z { v.z = 0.0; }
++                }
++            });
++        }
++        if let Some(dragon) = &mut self.dragon {
++            let p = dragon.position;
++            let held = area.hold_body([p.x, p.y, p.z], [8.0; 2]);
++            dragon.position = Vec3::new(held[0], held[1], held[2]);
++        }
++    }
++}
++
+ macro_rules! define_entity_handles {
+     (() $($kind:ident($ty:ty) $field:ident: $($list:ident).+,)*) => {
+         /// Every list, borrowed apart from the rest of `Game`, for
+diff --git a/crates/horizon-client/src/game/levels.rs b/crates/horizon-client/src/game/levels.rs
+index 57b177ba0..e67295d2d 100644
+--- a/crates/horizon-client/src/game/levels.rs
++++ b/crates/horizon-client/src/game/levels.rs
+@@ -242,6 +242,15 @@ impl Game<'_> {
+         let mut world = World::new(self.res.facts().air, self.level.seed);
+         world.attachments = save.load_attachments();
+         world.shape = self.level_shapes.get(dim.id());
++        if horizon_core::tile_ownership::area().is_some() {
++            world.enable_tile_wall(
++                self.pack
++                    .assets
++                    .registry
++                    .default_state("minecraft:bedrock")
++                    .ok_or("missing bedrock block")?,
++            );
++        }
+         world.fast_lava = dim == Dim::Nether;
+         Ok(Parked {
+             world,
+diff --git a/crates/horizon-client/src/game/machines.rs b/crates/horizon-client/src/game/machines.rs
+index 98e1080ff..a13abcb80 100644
+--- a/crates/horizon-client/src/game/machines.rs
++++ b/crates/horizon-client/src/game/machines.rs
+@@ -913,6 +913,9 @@ impl Game<'_> {
+             return false;
+         };
+         let front = offset(pos, facing);
++        if !horizon_core::tile_ownership::owns_chunk(front.0 >> 4, front.2 >> 4) {
++            return false;
++        }
+         let face = facing.opposite();
+         if let Some(target) = c.view(front, false) {
+             self.native_hopper_inventory_search(
+@@ -1375,6 +1378,11 @@ impl Game<'_> {
+             return Ok(());
+         };
+         let target = offset(key, facing);
++        // A wall-facing dispenser keeps its stack, rather than deleting an
++        // item when the foreign entity join would be refused.
++        if !horizon_core::tile_ownership::owns_chunk(target.0 >> 4, target.2 >> 4) {
++            return Ok(());
++        }
+         let remaining = if dropper {
+             match self.containers().view(target, false) {
+                 None => self.dispense_default(key, facing, stack),
+diff --git a/crates/horizon-client/src/game/native_entities.rs b/crates/horizon-client/src/game/native_entities.rs
+index 7633e55df..d79e5fd09 100644
+--- a/crates/horizon-client/src/game/native_entities.rs
++++ b/crates/horizon-client/src/game/native_entities.rs
+@@ -469,9 +469,42 @@ impl Game<'_> {
+     /// entity it announces; nothing runs when no mod is loaded, on a client
+     /// of a server (which tells nothing), or when nothing is new.
+     pub(super) fn native_joins_flush(&mut self, loaded_from_disk: bool, watch: u32) -> bool {
+-        if self.remote.is_some() || crate::mod_api::mods().is_empty() || !self.joins_pending() {
++        if self.remote.is_some()
++            || (crate::mod_api::mods().is_empty() && horizon_core::tile_ownership::area().is_none())
++            || !self.joins_pending()
++        {
+             return true;
+         }
++        if crate::mod_api::mods().is_empty() {
++            use super::entity::Entity;
++            let mut kept = true;
++            if let Some(area) = horizon_core::tile_ownership::area() {
++                // Preserve vanilla's late ID allocation. Only the mod path
++                // below needs to number an entity before announcing it.
++                for handle in self.entity_handles_rev() {
++                    let foreign = super::entity::with_entity!(self, handle, e => {
++                        let p = e.position();
++                        e.id() == 0 && !area.contains(p.x.floor() as i32, p.z.floor() as i32)
++                    });
++                    if foreign {
++                        self.persist.joins_canceled += 1;
++                        self.discard_entity(handle);
++                    }
++                }
++                while let Some((slot, id)) = self.next_unannounced() {
++                    self.persist.joined_mark = id;
++                    let (_, p) = self.slot_kind_and_position(slot);
++                    if !area.contains(p.x.floor() as i32, p.z.floor() as i32) {
++                        self.persist.joins_canceled += 1;
++                        self.forget_entity(id);
++                        self.discard_slot(slot);
++                        kept &= id != watch;
++                    }
++                }
++                self.persist.joined_mark = self.persist.joined_mark.max(self.next_entity);
++            }
++            return kept;
++        }
+         for t in &mut self.tnts {
+             super::lan_entities::assign_entity_id(&mut self.next_entity, &mut t.id);
+         }
+@@ -501,6 +534,8 @@ impl Game<'_> {
+                 loaded_from_disk,
+                 &mut canceled,
+             );
++            canceled |= horizon_core::tile_ownership::area()
++                .is_some_and(|a| !a.contains(at.x.floor() as i32, at.z.floor() as i32));
+             if canceled {
+                 self.persist.joins_canceled += 1;
+                 self.forget_entity(id);
+diff --git a/crates/horizon-client/src/game/postprocess.rs b/crates/horizon-client/src/game/postprocess.rs
+index 77cba6832..01b17776f 100644
+--- a/crates/horizon-client/src/game/postprocess.rs
++++ b/crates/horizon-client/src/game/postprocess.rs
+@@ -20,8 +20,12 @@ impl Game<'_> {
+             .filter(|(_, c)| c.lit && !c.postprocess.is_empty())
+             .map(|(k, _)| *k)
+             .filter(|&(x, z)| {
+-                (-1..=1)
+-                    .all(|dz| (-1..=1).all(|dx| self.world.chunks.contains_key(&(x + dx, z + dz))))
++                (-1..=1).all(|dz| {
++                    (-1..=1).all(|dx| {
++                        !horizon_core::tile_ownership::owns_chunk(x + dx, z + dz)
++                            || self.world.chunks.contains_key(&(x + dx, z + dz))
++                    })
++                })
+             })
+             .collect();
+         if ready.is_empty() {
+diff --git a/crates/horizon-client/src/game/world_loading.rs b/crates/horizon-client/src/game/world_loading.rs
+index 9230528cb..5a893408b 100644
+--- a/crates/horizon-client/src/game/world_loading.rs
++++ b/crates/horizon-client/src/game/world_loading.rs
+@@ -242,7 +242,40 @@ impl WorldRequest {
+         let mut world = World::new(res.facts().air, level.seed);
+         world.attachments = save.load_attachments();
+         world.shape = shape;
++        if horizon_core::tile_ownership::area().is_some() {
++            world.enable_tile_wall(
++                pack.assets
++                    .registry
++                    .default_state("minecraft:bedrock")
++                    .ok_or("missing bedrock block")?,
++            );
++        }
+         world.fast_lava = dim == Dim::Nether;
++        // E7's engine-level probe reads this same simulation World before
++        // loading any chunks. It never materializes the unknown columns.
++        if std::env::var_os("HORIZON_E7_READ_PROBE").is_some() {
++            for (x, z) in [
++                (400, 0),
++                (512, 0),
++                (-513, 0),
++                (0, 512),
++                (0, -513),
++                (512, 512),
++                (-513, -513),
++            ] {
++                let state = world.block(x, 80, z);
++                let name = pack
++                    .assets
++                    .registry
++                    .state(state)
++                    .map_or("unknown", |s| s.name.as_str());
++                eprintln!(
++                    "E7_READ x={x} z={z} block={name} light={} loaded={}",
++                    world.light(x, 80, z),
++                    world.loaded(x, z)
++                );
++            }
++        }
+         world.game_time = level.time;
+         world.day_time = options.time.unwrap_or(level.day_time);
+         world.weather = level.weather;
+diff --git a/crates/horizon-client/src/lan/hub.rs b/crates/horizon-client/src/lan/hub.rs
+index 835da46eb..7c8bcd1ec 100644
+--- a/crates/horizon-client/src/lan/hub.rs
++++ b/crates/horizon-client/src/lan/hub.rs
+@@ -1988,6 +1988,14 @@ impl Hub {
+         position: Option<[f64; 3]>,
+         relatives: i32,
+     ) -> Option<(Option<[f64; 3]>, i32)> {
++        let requested = position;
++        let position =
++            position.map(|p| horizon_core::tile_ownership::area().map_or(p, |a| a.hold(p)));
++        if position != requested
++            && let (Some(at), Some(m)) = (position, self.guests[i].motion.as_mut())
++        {
++            m.position = Vec3::new(at[0], at[1], at[2]);
++        }
+         let cause = TELEPORT_CAUSE.take();
+         let (Some(cause), Some(hook)) = (cause, PLAYER_TELEPORT.get()) else {
+             return Some((position, relatives));
+@@ -4417,6 +4425,13 @@ impl Hub {
+                 }
+             }
+         }
++        if let Some(area) = horizon_core::tile_ownership::area() {
++            let held = area.hold(to);
++            if held != to {
++                self.resend_teleport(i, Some(held));
++                return;
++            }
++        }
+         // clientIsFloating, from the move that is accepted: no upward-or-level
+         // step onto something, nothing but air around the body, and nothing
+         // that lets the player hover (the server's allow-flight, mayfly,
+@@ -4472,9 +4487,20 @@ impl Hub {
+         g.on_ground = on_ground;
+         g.ticks = g.ticks.max(1);
+         if e2_input && std::env::var_os("E2_TRACE_INPUTS").is_some() {
+-            let ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+-            let velocity = g.motion.as_ref().map(|m| [m.velocity.x, m.velocity.y, m.velocity.z]);
+-            eprintln!("E2_INPUT {{\"ns\":{ns},\"tick\":{},\"pos\":{:?},\"velocity\":{:?}}}", self.ticks, g.position, velocity.unwrap_or([0.0; 3]));
++            let ns = std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap_or_default()
++                .as_nanos();
++            let velocity = g
++                .motion
++                .as_ref()
++                .map(|m| [m.velocity.x, m.velocity.y, m.velocity.z]);
++            eprintln!(
++                "E2_INPUT {{\"ns\":{ns},\"tick\":{},\"pos\":{:?},\"velocity\":{:?}}}",
++                self.ticks,
++                g.position,
++                velocity.unwrap_or([0.0; 3])
++            );
+         }
+         if placed {
+             self.resend_teleport(i, None);
+diff --git a/crates/horizon-client/src/mobs.rs b/crates/horizon-client/src/mobs.rs
+index c4d6b441f..9e06e1d8d 100644
+--- a/crates/horizon-client/src/mobs.rs
++++ b/crates/horizon-client/src/mobs.rs
+@@ -3940,7 +3940,28 @@ impl Mob {
+         // LivingEntity.tick: CombatTracker.recheckStatus.
+         let alive = self.alive();
+         self.combat.recheck(alive, self.age);
+-        ai::tick(self, w, level_random, events)
++        let kept = ai::tick(self, w, level_random, events);
++        if let Some(area) = horizon_core::tile_ownership::area() {
++            let p = self.position;
++            let bounds = self.bounds();
++            let min = bounds.min_position();
++            let max = bounds.max_position();
++            let held = area.hold_body(
++                [p.x, p.y, p.z],
++                [
++                    (p.x - min.x).max(max.x - p.x),
++                    (p.z - min.z).max(max.z - p.z),
++                ],
++            );
++            self.position = Vec3::new(held[0], held[1], held[2]);
++            if held[0] != p.x {
++                self.velocity.x = 0.0;
++            }
++            if held[2] != p.z {
++                self.velocity.z = 0.0;
++            }
++        }
++        kept
+     }
+     /// The section the mob is in, noted when it changes (`EntitySection` lists).
+     fn track_section(&mut self) {
+diff --git a/crates/horizon-client/src/ticket_levels.rs b/crates/horizon-client/src/ticket_levels.rs
+index 5edb3ed52..0451e2812 100644
+--- a/crates/horizon-client/src/ticket_levels.rs
++++ b/crates/horizon-client/src/ticket_levels.rs
+@@ -183,6 +183,9 @@ impl Tiled {
+ impl Levels {
+     /// Chunk coordinates.
+     fn get(&self, x: i32, z: i32) -> Option<(u8, u8)> {
++        if !horizon_core::tile_ownership::owns_chunk(x, z) {
++            return Some(NONE);
++        }
+         Some(self.0.as_ref()?.get(x, z))
+     }
+     /// `DistanceManager.inEntityTickingRange`, in an entity-ticking chunk:
+diff --git a/crates/horizon-core/src/lib.rs b/crates/horizon-core/src/lib.rs
+index e6e99701a..235a9fd5c 100644
+--- a/crates/horizon-core/src/lib.rs
++++ b/crates/horizon-core/src/lib.rs
+@@ -20,6 +20,7 @@ pub mod random;
+ pub mod storage;
+ pub mod text;
+ pub mod ticks;
++pub mod tile_ownership;
+ 
+ pub mod release;
+ pub mod version;
+diff --git a/crates/horizon-core/src/tile_ownership.rs b/crates/horizon-core/src/tile_ownership.rs
+new file mode 100644
+index 000000000..6dd55e279
+--- /dev/null
++++ b/crates/horizon-core/src/tile_ownership.rs
+@@ -0,0 +1,138 @@
++//! Static tile ownership and rejected-write accounting for the E7 experiment.
++
++use std::sync::{
++    OnceLock,
++    atomic::{AtomicU64, Ordering},
++};
++
++#[derive(Clone, Copy, Debug)]
++pub struct OwnedArea {
++    pub min: [i32; 2],
++    pub max: [i32; 2],
++}
++
++impl OwnedArea {
++    /// origin x,z, edge in blocks, tile index x,z. Small tiles require an explicit test override.
++    pub fn parse(value: &str, small_test: bool) -> Result<Self, String> {
++        let v = value
++            .split(',')
++            .map(str::parse::<i64>)
++            .collect::<Result<Vec<_>, _>>()
++            .map_err(|_| "tile config needs five comma-separated integers")?;
++        if v.len() != 5 {
++            return Err("tile config needs origin x,z,edge,index x,z".into());
++        }
++        let alignment = if small_test { 16 } else { 512 };
++        if v[2] <= 0 || v[2] % alignment != 0 || v[0] % alignment != 0 || v[1] % alignment != 0 {
++            return Err(format!(
++                "tile edge and origin must align to {alignment} blocks"
++            ));
++        }
++        let mut min = [0; 2];
++        let mut max = [0; 2];
++        for axis in 0..2 {
++            let lo = v[axis]
++                .checked_add(v[2].checked_mul(v[axis + 3]).ok_or("tile overflow")?)
++                .ok_or("tile overflow")?;
++            let hi = lo.checked_add(v[2]).ok_or("tile overflow")?;
++            min[axis] = i32::try_from(lo).map_err(|_| "tile overflow")?;
++            max[axis] = i32::try_from(hi).map_err(|_| "tile overflow")?;
++        }
++        Ok(Self { min, max })
++    }
++    #[inline]
++    pub fn contains(self, x: i32, z: i32) -> bool {
++        x >= self.min[0] && x < self.max[0] && z >= self.min[1] && z < self.max[1]
++    }
++    #[inline]
++    pub fn chunk(self, x: i32, z: i32) -> bool {
++        x >= self.min[0].div_euclid(16)
++            && x < self.max[0].div_euclid(16)
++            && z >= self.min[1].div_euclid(16)
++            && z < self.max[1].div_euclid(16)
++    }
++    pub fn hold(self, mut p: [f64; 3]) -> [f64; 3] {
++        p = self.hold_body(p, [0.3; 2]);
++        p
++    }
++    pub fn hold_body(self, mut p: [f64; 3], radius: [f64; 2]) -> [f64; 3] {
++        for (axis, k) in [0, 2].into_iter().enumerate() {
++            let r = (radius[axis] + 0.001)
++                .min(f64::from(self.max[axis]) * 0.5 - f64::from(self.min[axis]) * 0.5);
++            p[k] = p[k].clamp(f64::from(self.min[axis]) + r, f64::from(self.max[axis]) - r);
++        }
++        p
++    }
++}
++
++static AREA: OnceLock<Option<OwnedArea>> = OnceLock::new();
++static REJECTED: AtomicU64 = AtomicU64::new(0);
++
++pub fn area() -> Option<&'static OwnedArea> {
++    AREA.get_or_init(|| {
++        std::env::var("HORIZON_TILE").ok().map(|value| {
++            OwnedArea::parse(
++                &value,
++                std::env::var("HORIZON_TILE_TEST_SMALL").as_deref() == Ok("1"),
++            )
++            .unwrap_or_else(|why| panic!("invalid HORIZON_TILE: {why}"))
++        })
++    })
++    .as_ref()
++}
++
++#[inline]
++pub fn owns_chunk(x: i32, z: i32) -> bool {
++    area().is_none_or(|a| a.chunk(x, z))
++}
++
++/// Refuse before mutation. Debug builds also fail loudly at the offending writer.
++pub fn allow_write(x: i32, z: i32) -> bool {
++    if owns_chunk(x, z) {
++        return true;
++    }
++    let n = REJECTED.fetch_add(1, Ordering::Relaxed) + 1;
++    if n.is_power_of_two() {
++        eprintln!("E7 tile refused write chunk={x},{z} rejected={n}");
++    }
++    debug_assert!(false, "write outside owned tile: {x},{z}");
++    false
++}
++
++pub fn rejected_writes() -> u64 {
++    REJECTED.load(Ordering::Relaxed)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn negative_indices_and_corners_use_euclidean_geometry() {
++        let a = OwnedArea::parse("512,-512,512,-2,-1", false).unwrap();
++        assert_eq!(a.min, [-512, -1024]);
++        assert_eq!(a.max, [0, -512]);
++        for x in -514i32..=2 {
++            for z in -1026i32..=-510 {
++                let expected = (
++                    (i64::from(x) - 512).div_euclid(512),
++                    (i64::from(z) + 512).div_euclid(512),
++                ) == (-2, -1);
++                assert_eq!(a.contains(x, z), expected);
++                assert_eq!(a.chunk(x.div_euclid(16), z.div_euclid(16)), expected);
++            }
++        }
++    }
++    #[test]
++    fn region_alignment_and_overflow_are_required() {
++        for value in [
++            "0,0,16,0,0",
++            "16,0,512,0,0",
++            "0,0,0,0,0",
++            "0,0,512,9223372036854775807,0",
++            "1,2",
++        ] {
++            assert!(OwnedArea::parse(value, false).is_err(), "{value}");
++        }
++        assert!(OwnedArea::parse("-16,0,32,-1,0", true).is_ok());
++    }
++}
+diff --git a/crates/horizon-world/examples/e7_tile_write_probe.rs b/crates/horizon-world/examples/e7_tile_write_probe.rs
+new file mode 100644
+index 000000000..98eace405
+--- /dev/null
++++ b/crates/horizon-world/examples/e7_tile_write_probe.rs
+@@ -0,0 +1,49 @@
++//! Exercises E7's real Anvil writers, including rejected exterior region creation.
++use horizon_core::{position::ChunkPos, tile_ownership};
++use horizon_world::{
++    nbt::{Compound, Limits, NamedTag, Tag},
++    region::{ChunkRecord, RegionFile, RegionWriter},
++};
++use std::{io, path::PathBuf};
++
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let root = PathBuf::from(std::env::args().nth(1).ok_or("run directory required")?);
++    let area = tile_ownership::area().ok_or("HORIZON_TILE required")?;
++    let inside = ChunkPos::new(area.min[0].div_euclid(16), area.min[1].div_euclid(16));
++    let outside = ChunkPos::new(inside.x - 1, inside.z);
++    let record = ChunkRecord::from_nbt(
++        &NamedTag {
++            name: "".into(),
++            tag: Tag::Compound(Compound::new()),
++        },
++        horizon_world::compression::Compression::Zlib,
++        1,
++        Limits::saved(),
++    )?;
++    let path = root.join(format!("r.{}.{}.mca", inside.region().x, inside.region().z));
++    let mut file = RegionFile::open_writable(&path, true)?;
++    file.write(inside, &record)?;
++    file.sync()?;
++    let before = std::fs::read(&path)?;
++    assert_eq!(
++        file.write(outside, &record).unwrap_err().kind(),
++        io::ErrorKind::PermissionDenied
++    );
++    assert_eq!(
++        file.clear(outside, 2).unwrap_err().kind(),
++        io::ErrorKind::PermissionDenied
++    );
++    assert_eq!(std::fs::read(&path)?, before);
++    let foreign = root.join(format!(
++        "r.{}.{}.mca",
++        outside.region().x,
++        outside.region().z
++    ));
++    assert!(RegionFile::open_writable(&foreign, true).is_err());
++    assert!(!foreign.exists());
++    assert!(RegionWriter::create(&foreign).is_err());
++    assert!(!foreign.exists());
++    assert_eq!(tile_ownership::rejected_writes(), 4);
++    println!("E7 owned record written, four exterior mutations refused, bytes unchanged");
++    Ok(())
++}
+diff --git a/crates/horizon-world/src/region.rs b/crates/horizon-world/src/region.rs
+index 11a19f2a8..e17a8c8b2 100644
+--- a/crates/horizon-world/src/region.rs
++++ b/crates/horizon-world/src/region.rs
+@@ -101,6 +101,25 @@ fn position(region: ChunkPos, index: usize) -> ChunkPos {
+ fn external_path(directory: &Path, chunk: ChunkPos) -> PathBuf {
+     directory.join(format!("c.{}.{}.mcc", chunk.x, chunk.z))
+ }
++fn owned_write(chunk: ChunkPos) -> io::Result<()> {
++    if horizon_core::tile_ownership::allow_write(chunk.x, chunk.z) {
++        Ok(())
++    } else {
++        Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "region write outside owned tile",
++        ))
++    }
++}
++fn owned_region(region: ChunkPos) -> io::Result<()> {
++    if let Some(a) = horizon_core::tile_ownership::area() {
++        let min = [i64::from(region.x) * 512, i64::from(region.z) * 512];
++        if (0..2).any(|k| min[k] >= i64::from(a.max[k]) || min[k] + 512 <= i64::from(a.min[k])) {
++            return owned_write(ChunkPos::new(region.x * 32, region.z * 32));
++        }
++    }
++    Ok(())
++}
+ fn remove_if_exists(path: &Path) -> io::Result<()> {
+     match fs::remove_file(path) {
+         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+@@ -122,6 +141,7 @@ impl RegionFile {
+     /// empty region with `create`.
+     pub fn open_writable(path: impl AsRef<Path>, create: bool) -> io::Result<Self> {
+         let path = path.as_ref().to_owned();
++        owned_region(position_from_path(&path)?)?;
+         let file = OpenOptions::new()
+             .read(true)
+             .write(true)
+@@ -216,6 +236,7 @@ impl RegionFile {
+     /// and only then are its old sectors freed. The other chunks stay where
+     /// they are. A chunk's last sector is padded with zeros.
+     pub fn write(&mut self, chunk: ChunkPos, record: &ChunkRecord) -> io::Result<()> {
++        owned_write(chunk)?;
+         let i = slot(self.position, chunk)?;
+         if record.compressed.len() > MAX_COMPRESSED {
+             return Err(invalid("compressed chunk limit exceeded"));
+@@ -277,6 +298,7 @@ impl RegionFile {
+     /// `RegionFile.clear`: the chunk is gone; `timestamp` marks when.
+     /// Returns whether the region held it.
+     pub fn clear(&mut self, chunk: ChunkPos, timestamp: u32) -> io::Result<bool> {
++        owned_write(chunk)?;
+         let i = slot(self.position, chunk)?;
+         let old = self.offsets[i];
+         if old == 0 {
+@@ -411,6 +433,7 @@ impl RegionWriter {
+     pub fn create(destination: impl AsRef<Path>) -> io::Result<Self> {
+         let destination = destination.as_ref().to_owned();
+         let position = position_from_path(&destination)?;
++        owned_region(position)?;
+         if destination.try_exists()? {
+             return Err(io::Error::new(
+                 io::ErrorKind::AlreadyExists,
+@@ -467,6 +490,7 @@ impl RegionWriter {
+     }
+ 
+     fn write_record(&mut self, chunk: ChunkPos, record: &ChunkRecord) -> io::Result<()> {
++        owned_write(chunk)?;
+         let i = slot(self.position, chunk)?;
+         if self.offsets[i] != 0 {
+             return Err(invalid("chunk already written"));

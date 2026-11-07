@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Recompute E8 tables and request intervals from the retained, untrimmed samples."""
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "docs/experiments/data/E8"
+loader = importlib.machinery.SourceFileLoader("e8_runner", str(ROOT / "scripts/e8-fast-crossing"))
+spec = importlib.util.spec_from_loader("e8_runner", loader)
+runner = importlib.util.module_from_spec(spec)
+loader.exec_module(runner)
+
+
+def analyse(result):
+    trials = result["trials"]
+    if result["status"] == "complete":
+        runner.verify(result)
+    events = result.get("proxy_events", [])
+    intervals = []
+    for t in trials:
+        rows = [e for e in events if e["target"] == t["target"] and t["trigger_input"]["ns"] <= e["ns"] <= t["completed_ns"]]
+        def event(prefix):
+            return next((e for e in rows if e["step"].startswith(prefix)), None)
+        export = event("freeze: export request sent")
+        frozen = event("freeze: the source froze")
+        importing = event("hand over: import request sent")
+        imported = event("hand over: the target took")
+        delta_start = event("hand over: the client holds")
+        placed = event("hand over: the target placed")
+        confirm = event("hand over: confirm request sent")
+        commit = event("commit: the source let")
+        row = {"index": t["index"], "mode": t["mode"]}
+        for key, start, end in (("source_export_rtt_ms", export, frozen),
+                               ("target_import_rtt_ms", importing, imported),
+                               ("target_confirm_rtt_ms", confirm, placed),
+                               ("source_release_rtt_ms", placed, commit),
+                               ("post_import_view_wait_ms", imported, delta_start),
+                               ("export_to_placed_ms", export, placed)):
+            if start and end:
+                row[key] = (end["ns"] - start["ns"]) / 1e6
+        if export:
+            row["export_to_first_input_ms"] = (t["first_target_input"]["ns"] - export["ns"]) / 1e6
+        if imported:
+            row["import_reply_to_first_input_ms"] = (t["first_target_input"]["ns"] - imported["ns"]) / 1e6
+        if len(row) > 2:
+            intervals.append(row)
+    phase_keys = sorted({key for row in intervals for key in row if key not in ("index", "mode")})
+    stats = runner.summary(trials) if trials else {}
+    return {"status": result["status"], "crossings": len(trials), "requested": result["requested"],
+            "error": result.get("error"), "summary": stats,
+            "largest_backward_blocks": max((t["backward_blocks"] for t in trials), default=None),
+            "arrival_teleports": sum(len(t["arrival_teleports"]) for t in trials),
+            "inventory_checksums": sorted({t["inventory_before"] for t in trials} | {t["inventory_after"] for t in trials}),
+            "horizontal_velocity_nonzero": sum(t["horizontal_velocity"] != 0 for t in trials),
+            "load_1m_min_max": [min(t["load"][0] for t in trials), max(t["load"][0] for t in trials)] if trials else [],
+            "arrival_ring_checks": {str(ready).lower(): sum(e["step"] == f"prepare: predicted arrival view ready: {str(ready).lower()}" for e in events)
+                                     for ready in (False, True)},
+            "largest_post_import_view_wait_ms": max((row["post_import_view_wait_ms"] for row in intervals if "post_import_view_wait_ms" in row), default=None),
+            "phases": {key: runner.e2.percentiles([r[key] for r in intervals if key in r]) for key in phase_keys},
+            "phase_sample_count": len(intervals), "intervals": intervals}
+
+
+def main():
+    output = {p.stem: analyse(json.loads(p.read_text())) for p in sorted(DATA.glob("stage*.json"))}
+    clock = json.loads((DATA / "clock.json").read_text())["clock"]
+    first, last = clock["samples"][0], clock["samples"][-1]
+    clocks = {}
+    for label in first["engines"]:
+        clocks[label] = {kind: {"start": first["engines"][label][kind]["value"],
+                               "end": last["engines"][label][kind]["value"],
+                               "advance": last["engines"][label][kind]["absolute"] - first["engines"][label][kind]["absolute"]}
+                         for kind in ("gametime", "daytime")}
+    output["clock"] = {"duration_s": clock["duration_s"], "engines": clocks,
+        "max_game_time_spread_ticks": max(max(row["engines"][label]["gametime"]["value"] for label in clocks) -
+            min(row["engines"][label]["gametime"]["value"] for label in clocks) for row in clock["samples"]),
+        "max_daytime_spread_ticks": max(max(row["engines"][label]["daytime"]["value"] for label in clocks) -
+            min(row["engines"][label]["daytime"]["value"] for label in clocks) for row in clock["samples"])}
+    def mib(path):
+        reading = subprocess.run(["du", "-sm", path], text=True, capture_output=True)
+        return int(reading.stdout.split()[0])
+    prior = json.loads((DATA / "analysis.json").read_text()).get("disk", {}) if (DATA / "analysis.json").exists() else {}
+    measured_local = max(json.loads(p.read_text()).get("sampled_peak_local_mib", 0) for p in DATA.glob("stage*.json"))
+    output["disk"] = {"observed_peak_project_mib": max(prior.get("observed_peak_project_mib", 0), mib(ROOT)),
+                      "observed_peak_local_mib": max(prior.get("observed_peak_local_mib", 0), measured_local, mib(ROOT / ".local")),
+                      "meridian_target_mib": mib(ROOT / ".local/src/meridian/target") if (ROOT / ".local/src/meridian/target").exists() else 0}
+    runner.save(DATA / "analysis.json", output)
+    for name, result in output.items():
+        if name in ("clock", "disk"):
+            print(name, json.dumps(result))
+        else:
+            brief = {key: value for key, value in result.items() if key != "intervals"}
+            print(name, json.dumps(brief))
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+"""E6 reuses E3's real server, bots, four markers and isolated run directories.
+
+Entry point: python3 -B scripts/e3-cut --e6 --section smoke|bench|kills.
+"""
+import argparse
+from collections import Counter
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import random
+import struct
+import sys
+import tempfile
+import threading
+import time
+import uuid
+
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('e3', str(ROOT/'scripts/e3-cut'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+e3 = importlib.util.module_from_spec(spec)
+loader.exec_module(e3)
+e3.DATA = ROOT/'docs/experiments/data/E6'
+e3.BINS = ROOT/'.local/bin/horizon-e6'
+TOKEN = e3.TOKEN
+SAVE = e3.save
+PCT = e3.pct
+BOT0 = uuid.UUID(bytes=hashlib.md5(b'OfflinePlayer:E3Bot0').digest(), version=3)
+
+
+def head(root):
+    with (root/'LOCK').open('a+b') as lock:
+        e3.fcntl.flock(lock.fileno(),e3.fcntl.LOCK_EX)
+        return head_locked(root)
+
+
+def head_locked(root):
+    latest = {'sequence': 0, 'tick': None}
+    for name in ('BASE', 'LOG'):
+        path = root/name
+        data = path.read_bytes() if path.exists() else b''
+        at = 0
+        while len(data)-at >= 48:
+            assert data[at:at+8] == b'E6CUT001', (name, at)
+            size = struct.unpack_from('<Q', data, at+8)[0]
+            end = at+48+size
+            if end > len(data):
+                break
+            payload = data[at+48:end]
+            if hashlib.sha256(data[at+8:at+16]+payload).digest() != data[at+16:at+48]:
+                assert end == len(data), 'checksum failure before tail'
+                break
+            hsize = struct.unpack_from('<Q', payload)[0]
+            header = json.loads(payload[8:8+hsize])
+            if header['head']['sequence'] > latest['sequence']:
+                latest = header['head']
+            at = end
+    return latest
+
+
+def wait_phase(engine, phase):
+    path = engine.cut/'PHASE'
+    deadline = time.monotonic()+60
+    while not path.exists() or path.read_text() != phase:
+        if engine.process.poll() is not None or time.monotonic() > deadline:
+            raise RuntimeError(f'missed phase {phase}: '+str(engine.lines[-12:]))
+        time.sleep(.001)
+
+
+def freeze_cut(engine):
+    before = e3.io_bytes(engine.process.pid)
+    start = time.monotonic()
+    value = engine.ask(f'tile-cut {TOKEN} {BOT0}')
+    value['rtt_ms'] = (time.monotonic()-start)*1000
+    after = e3.io_bytes(engine.process.pid)
+    value['disk_write_bytes'] = None if before is None else after-before
+    if not value.get('ok'):
+        raise RuntimeError(str(value))
+    export = value.pop('export')
+    record = export['record']
+    released = engine.ask(f'player-release {BOT0} {record["handover"]} abort')
+    assert released.get('ok'), released
+    value['export_sha256'] = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()
+    return value
+
+
+class Churn:
+    """Real container-only slot writes. Mobs keep their normal AI in E3's fixture."""
+    def __init__(self, engine):
+        self.engine = engine
+        self.stop_event = threading.Event()
+        self.writes = 0
+        self.error = None
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def run(self):
+        try:
+            while not self.stop_event.is_set():
+                commands = []
+                for i in range(16):
+                    slot = (self.writes+i)%128
+                    commands.append(f'item replace block {20+slot%16} 301 {20+slot//16} container.0 with minecraft:diamond {1+(self.writes//16)%50}')
+                self.engine.process.stdin.write('\n'.join(commands)+'\n')
+                self.engine.process.stdin.flush()
+                self.writes += 16
+                self.stop_event.wait(.2)
+        except Exception as error:
+            self.error = repr(error)
+
+    def stop(self):
+        self.stop_event.set()
+        self.thread.join(5)
+        assert self.error is None, self.error
+
+
+def smoke(control=False):
+    with tempfile.TemporaryDirectory(prefix='E6-smoke-', dir=e3.RUNS) as temporary:
+        scratch = Path(temporary)
+        engine = None
+        try:
+            engine = e3.Engine(scratch, phases=True)
+            e3.fixture(engine)
+            engine.join(2, .5)
+            assert engine.ask('tile-fence - '+TOKEN).get('ok')
+            e3.marker(engine, 7)
+            first = engine.cut_now()
+            engine.cut_now()
+            # Isolate a container mutation from inhabited-time and terrain COW changes.
+            engine.console('tick freeze')
+            warm = engine.cut_now()
+            feedback = engine.console('item replace block 8 -60 8 container.0 with minecraft:iron_ingot 31')
+            changed = engine.cut_now()
+            engine.stop(killed=True)
+            engine = e3.Engine(scratch, phases=True)
+            observed = e3.inspect_world(engine.game/'world')
+            survived = observed['chest'] == 31
+            result = {'first': first, 'warm': warm, 'container_cut': changed,
+                'container_write_feedback': feedback, 'observed': observed,
+                'container_only_survived': survived, 'control': control, 'load': os.getloadavg()}
+            SAVE('container-control.json' if control else 'container.json', result)
+            if control:
+                assert not survived, 'disabled-container-tracking control unexpectedly passed'
+                print('container control failed recovery as required', observed, flush=True)
+                return
+            assert survived, observed
+            assert observed['players'] == [7, 8] and observed['drop'] == 10, observed
+            assert observed['level_time'] == changed['tick'], observed
+            engine.join(2, .5)
+            engine.cut_now()
+            engine.cut_now()
+            connections=[engine.connect() for _ in range(4)]
+            for connection in connections:
+                connection[0].sendall(('tile-cut '+TOKEN+'\n').encode())
+            grouped=[json.loads(connection[1].readline()) for connection in connections]
+            for connection in connections:
+                connection[0].close()
+                connection[1].close()
+            assert all(value.get('ok') for value in grouped), grouped
+            assert sorted(value['sequence'] for value in grouped)==list(range(min(value['sequence'] for value in grouped),max(value['sequence'] for value in grouped)+1)), grouped
+            assert any(value['group_size']>1 for value in grouped), grouped
+            SAVE('grouped.json',grouped)
+            e3.marker(engine, 13)
+            accepted = engine.cut_now()
+            before_rejection=head(engine.cut)
+            engine.commands(['summon minecraft:pig 4096 -60 4096 {NoAI:1b,Tags:["e6_outside"]}',
+                'summon minecraft:item 4098 -58 4098 {Item:{id:"minecraft:obsidian",count:5},PickupDelay:32767s,Age:-32768s,NoGravity:1b,Tags:["e6_outside"]}'])
+            outside_rejected=engine.ask('tile-cut '+TOKEN)
+            assert 'every live entity chunk' in outside_rejected.get('error',''), outside_rejected
+            assert head(engine.cut)==before_rejection
+            e3.marker(engine, 29)
+            engine.stop(killed=True)
+            engine = e3.Engine(scratch, phases=True)
+            observed = e3.inspect_world(engine.game/'world')
+            e3.expected(13, observed)
+            assert observed['level_time'] == accepted['tick']
+            engine.join(2, .5)
+            live = e3.live_check(engine, 13)
+            # Revocation must prevent even appending bytes, not just acknowledgement.
+            gate = engine.cut/'gate-pack-sync'
+            gate.touch()
+            (engine.cut/'PHASE').unlink(missing_ok=True)
+            connection = engine.connect()
+            connection[0].sendall(('tile-cut '+TOKEN+'\n').encode())
+            wait_phase(engine, 'pack-sync')
+            previous = (engine.cut/'LOG').read_bytes()
+            assert engine.ask('tile-fence '+TOKEN+' e6-local-process-b').get('ok')
+            gate.unlink()
+            rejected = json.loads(connection[1].readline())
+            assert rejected.get('error') == 'stale tile fence', rejected
+            assert (engine.cut/'LOG').read_bytes() == previous
+            connection[0].close()
+            connection[1].close()
+            SAVE('coherence.json', {'restored': observed, 'live': live, 'accepted': accepted,
+                'stale_rejected': rejected, 'stale_append_bytes': 0, 'head': head(engine.cut),
+                'unloaded_footprint_rejected':outside_rejected,
+                'peak_run_kib': e3.disk_kib(scratch), 'load': os.getloadavg()})
+            print('four markers, container-only recovery and stale append rejection passed', flush=True)
+        finally:
+            if engine:
+                engine.stop(killed=True)
+
+
+def kills(count):
+    rng = random.Random(20261107)
+    phases = ['capture-begin', 'captured', 'pack-write', 'mid-append', 'pack-sync', 'head-write', 'head-rename', 'head-renamed', 'installed', 'base-write', 'base-sync', 'base-rename', 'log-rotate']
+    rows = []
+    with tempfile.TemporaryDirectory(prefix='E6-kills-', dir=e3.RUNS) as temporary:
+        scratch = Path(temporary)
+        engine = None
+        try:
+            engine = e3.Engine(scratch, phases=True, extra_env={'HORIZON_E6_TEST_COMPACT_BYTES': '1'})
+            e3.fixture(engine)
+            engine.join(2, .5)
+            engine.commands(['fill 16 -61 16 34 -61 34 minecraft:stone',
+                'fill 16 -60 16 34 -58 34 minecraft:glass',
+                'fill 17 -60 17 33 -59 33 minecraft:air']+
+                [f'summon minecraft:pig {18+i%4*3} -60 {18+i//4*3} {{PersistenceRequired:1b,Tags:["e6_kill_fixture"]}}' for i in range(16)])
+            assert engine.ask('tile-fence - '+TOKEN).get('ok')
+            e3.marker(engine, 1)
+            engine.cut_now()
+            engine.cut_now()
+            old = 1
+            for i in range(count):
+                before = head(engine.cut)
+                new = old%50+1
+                # Explicitly exercise the delta path, not just cold first cuts after restart.
+                if i:
+                    # The restored marker is already durable. Warm up capture tracking first.
+                    engine.cut_now()
+                    engine.cut_now()
+                    before = head(engine.cut)
+                e3.marker(engine, new)
+                phase = phases[i%len(phases)] if i<len(phases)*2 else rng.choice(phases)
+                gate = engine.cut/f'gate-{phase}'
+                gate.touch()
+                (engine.cut/'PHASE').unlink(missing_ok=True)
+                engine.control[0].sendall(('tile-cut '+TOKEN+'\n').encode())
+                wait_phase(engine, phase)
+                delay = rng.random()*.003 if i%2 else 0
+                if delay:
+                    gate.unlink()
+                    time.sleep(delay)
+                observed_phase = (engine.cut/'PHASE').read_text()
+                engine.stop(killed=True)
+                gate.unlink(missing_ok=True)
+                after = head(scratch/'cuts')
+                assert after['sequence'] in (before['sequence'], before['sequence']+1)
+                wanted = old if after['sequence'] == before['sequence'] else new
+                engine = e3.Engine(scratch, phases=True, extra_env={'HORIZON_E6_TEST_COMPACT_BYTES': '1'})
+                observed = e3.inspect_world(engine.game/'world')
+                e3.expected(wanted, observed)
+                assert observed['level_time'] == after['tick'], observed
+                engine.join(2, .5)
+                live = e3.live_check(engine, wanted)
+                rows.append({'trial': i, 'gate': phase, 'delay_ms': delay*1000, 'last_phase': observed_phase,
+                    'previous_sequence': before['sequence'], 'restored_sequence': after['sequence'],
+                    'expected_marker': wanted, 'observed': observed, 'live': live, 'load': os.getloadavg()})
+                old = wanted
+                SAVE('kills-running.json', rows)
+                if (i+1)%10 == 0:
+                    print(f'E6 kills {i+1}/{count} passed', flush=True)
+            SAVE('kills.json', {'requested': count, 'passed': len(rows), 'mixed_images': 0,
+                'gates': dict(Counter(row['gate'] for row in rows)), 'trials': rows,
+                'peak_run_kib': e3.disk_kib(scratch)})
+            (e3.DATA/'kills-running.json').unlink(missing_ok=True)
+        finally:
+            if engine:
+                engine.stop(killed=True)
+
+
+def benchmark(samples, only):
+    rows = []
+    rng = random.Random(20261108)
+    for bots in (1, 25, 50):
+        if only and bots != only:
+            continue
+        with tempfile.TemporaryDirectory(prefix=f'E6-normal-{bots}-', dir=e3.RUNS) as temporary:
+            scratch = Path(temporary)
+            engine = churn = None
+            try:
+                engine = e3.Engine(scratch, normal_terrain=True)
+                e3.fixture(engine)
+                engine.join(bots)
+                engine.console('tp @a 0 301 0')
+                time.sleep(3)
+                e3.fixture(engine, True)
+                engine.console('tp @a 0 301 0')
+                time.sleep(3)
+                assert engine.ask('tile-fence - '+TOKEN).get('ok')
+                initial = engine.cut_now()
+                population = e3.population(engine.game/'world', 301)
+                assert population['fixture_chests'] == 128 and population['fixture_pigs'] == 64, population
+                churn = Churn(engine)
+                startline = len(engine.lines)
+                time.sleep(10)
+                baseline_ticks = [float(line.split()[1]) for line in engine.lines[startline:] if line.startswith('E3_TICK ')]
+                baseline = engine.ask('server-status')
+                startline = len(engine.lines)
+                cuts = []
+                next_cut=time.monotonic()
+                cut_start=next_cut
+                pig_before=engine.console('data get entity @e[type=minecraft:pig,tag=e3_fixture,limit=1] Pos')
+                for i in range(samples):
+                    # Jitter prevents phase-locking to Horizon's 50 ms tick. Mean rate is 1 Hz.
+                    next_cut+=rng.uniform(.8,1.2)
+                    time.sleep(max(0,next_cut-time.monotonic()))
+                    value = freeze_cut(engine)
+                    value['offset_s']=time.monotonic()-cut_start
+                    value['load'] = os.getloadavg()
+                    cuts.append(value)
+                    if (i+1)%20 == 0:
+                        print('E6 normal', bots, i+1, 'stall', PCT([c['tick_ms'] for c in cuts]),
+                            'request', PCT([c['rtt_ms'] for c in cuts]), flush=True)
+                time.sleep(.1)
+                status = engine.ask('server-status')
+                pig_after=engine.console('data get entity @e[type=minecraft:pig,tag=e3_fixture,limit=1] Pos')
+                chest_after=engine.console('data get block 20 301 20 Items')
+                assert pig_before!=pig_after, (pig_before,pig_after)
+                assert any('diamond' in line for line in chest_after), chest_after
+                ticks = [float(line.split()[1]) for line in engine.lines[startline:] if line.startswith('E3_TICK ')]
+                churn.stop()
+                row = {'bots': bots, 'normal_terrain': True, 'samples': cuts, 'initial': initial,
+                    'population': population, 'baseline_status': baseline, 'cut_status': status,
+                    'real_bots': engine.bot_status(), 'chest_slot_writes_submitted': churn.writes,
+                    'pig_position_before':pig_before,'pig_position_after':pig_after,'chest_after':chest_after,
+                    'cut_hz':len(cuts)/(time.monotonic()-cut_start),
+                    'baseline_mspt': PCT(baseline_ticks), 'cut_mspt': PCT(ticks),
+                    'tick_count': len(ticks), 'tick_max_ms': max(ticks), 'load_end': os.getloadavg(),
+                    'peak_run_kib': e3.disk_kib(scratch)}
+                for key in ('rtt_ms', 'tick_ms', 'capture_ms', 'off_ms', 'server_ms', 'bytes_written', 'disk_write_bytes', 'install_io_ms', 'encode_ms'):
+                    row[key] = PCT([c[key] for c in cuts if c.get(key) is not None])
+                SAVE(f'bench-normal-{bots}.json', row)
+                rows.append(row)
+            finally:
+                if churn:
+                    churn.stop()
+                if engine:
+                    engine.stop(killed=True)
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--section', choices=['smoke', 'bench', 'kills', 'control'], default='smoke')
+    parser.add_argument('--samples', type=int, default=100)
+    parser.add_argument('--kills', type=int, default=200)
+    parser.add_argument('--only', type=int, choices=[1, 25, 50])
+    parser.add_argument('--binary', default='horizon-client')
+    args = parser.parse_args()
+    if args.binary != 'horizon-client':
+        # Engine expects the same basename in its selected directory.
+        e3.BINS = e3.BINS/args.binary
+    e3.RUNS.mkdir(parents=True, exist_ok=True)
+    SAVE(f'environment-{args.section}.json', {'command': ['python3', '-B', 'scripts/e3-cut', '--e6']+sys.argv[1:],
+        'date': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'load': os.getloadavg(),
+        'machine':e3.platform.platform(),
+        'cpu':e3.subprocess.check_output(['sysctl','-n','machdep.cpu.brand_string'],text=True).strip(),
+        'cpu_threads':int(e3.subprocess.check_output(['sysctl','-n','hw.ncpu'],text=True)),
+        'ram_bytes':int(e3.subprocess.check_output(['sysctl','-n','hw.memsize'],text=True)),
+        'binary': str(e3.BINS/'horizon-client'),
+        'binary_sha256': hashlib.sha256((e3.BINS/'horizon-client').read_bytes()).hexdigest(),
+        'driver_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        'local_kib_before': e3.disk_kib(ROOT/'.local')})
+    if args.section == 'smoke':
+        smoke()
+    elif args.section == 'control':
+        smoke(control=True)
+    elif args.section == 'kills':
+        kills(args.kills)
+    else:
+        benchmark(args.samples, args.only)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as error:
+        print(e3.sanitize(f'E6 FAILED: {type(error).__name__}: {error}'), file=sys.stderr, flush=True)
+        raise

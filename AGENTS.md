@@ -13,7 +13,7 @@ Build output is disposable, and it must never pile up.
 - One target dir per workspace. No extra `CARGO_TARGET_DIR` and no copies per experiment. At most two Horizon checkouts exist, `.local/src/horizon` and `.local/src/horizon-tiles`, each with one owner at a time.
 - Finished binaries you want to keep go to `.local/bin/<project>-<commit>/`. Everything under a `target/` can be deleted at any time.
 - Build Horizon and Meridian with `CARGO_INCREMENTAL=0`, in one profile only.
-- Run `scripts/clean-builds` when a task ends. `scripts/clean-builds --all` deletes every target dir not in use, and is right once an experiment is finished.
+- Run `scripts/clean-builds` when a task ends. `scripts/clean-builds --all` deletes every target dir not in use, including other agents' idle ones, so only the orchestrator runs it, between rounds.
 - A run's world and log folders live under `.local/runs/` and are deleted after the run. Keep only small results, under `docs/experiments/data/`.
 - Never run a second cargo build of the same workspace at the same time.
 

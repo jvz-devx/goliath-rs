@@ -1,0 +1,27 @@
+{
+  "format": {
+    "command": "cargo fmt --all --check",
+    "exit": 0
+  },
+  "diff": {
+    "command": "git diff --check",
+    "exit": 0
+  },
+  "clippy": {
+    "command": "CARGO_INCREMENTAL=0 cargo clippy --profile fast --no-default-features -p horizon-core -p horizon-world -p horizon-client-render -p horizon-client --lib --bin horizon-client --example e7_tile_write_probe -- -D warnings",
+    "exit": 0
+  },
+  "tests": [
+    {
+      "command": "CARGO_INCREMENTAL=0 cargo test --profile fast --no-default-features -p horizon-core --lib tile_ownership",
+      "passed": 2,
+      "failed": 0
+    },
+    {
+      "command": "CARGO_INCREMENTAL=0 cargo test --profile fast --no-default-features -p horizon-client-render --lib tile_unknown_reads_are_solid_without_materializing_a_chunk",
+      "passed": 1,
+      "failed": 0
+    }
+  ],
+  "note": "Focused tests exercise unchanged geometry/read code. Final production code and writer probe passed Clippy. No full upstream test suite was run."
+}

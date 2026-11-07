@@ -1,0 +1,82 @@
+{
+  "horizon_base": "fc2868b2b26d56ec76e17414909fe58a3b87bb92",
+  "patch_order": ["e2-horizon-input-trace.patch", "horizon-01-tile-cut.patch"],
+  "patch_sha256": "b3c431a977a061d392eeba65d628a194c5a240cb053c4a4ca66ba0f46b8239e1",
+  "patch_bytes": 90813,
+  "patch_check_after_e2": "passed, temporary index",
+  "e7_patch_check_after_e6": "passed, temporary index; no combined build or runtime test",
+  "one_target_directory": "$REPO/.local/src/horizon/target",
+  "profile": "fast",
+  "cargo_incremental": "0",
+  "default_features": false,
+  "binaries": {
+    "fast": {
+      "path": "$REPO/.local/bin/horizon-e6/horizon-client",
+      "sha256": "dec8602389cd2b659d204768f7565d56ff7ce5ede17b23d2d6213ae2f813e0eb",
+      "lto": false,
+      "codegen_units": 16,
+      "kill_trials": 200,
+      "mixed_images": 0
+    },
+    "release_grade": {
+      "path": "$REPO/.local/bin/horizon-e6/release-grade/horizon-client",
+      "sha256": "69c19bd095ee0c4d9cd877e7df4db424aa1fd540df3077cc64a3b8eb53b43282",
+      "lto": "thin",
+      "codegen_units": 1,
+      "build_wall_seconds": 304.25,
+      "build_user_seconds": 937.16,
+      "build_system_seconds": 28.92,
+      "benchmark_samples_per_bot_count": 100,
+      "bot_counts": [1, 25, 50]
+    },
+    "container_tracking_control": {
+      "path": "$REPO/.local/bin/horizon-e6/control/horizon-client",
+      "sha256": "578729a270087358600c0655d59fae86dde103768a24a9facedadd11d74d1c61",
+      "compile_environment": {"HORIZON_E6_SKIP_CONTAINERS": "1"},
+      "recovered_chest": 9,
+      "required_chest": 31,
+      "negative_control": "failed recovery as required"
+    }
+  },
+  "final_checks": {
+    "strict_clippy_all_targets": {"passed": true, "wall_seconds": 39.91},
+    "log_store_unit_tests": {"passed": 6, "failed": 0, "test_seconds": 0.44},
+    "container_mutable_access_unit_test": {"passed": 1, "failed": 0},
+    "scoped_rustfmt": "passed",
+    "diff_whitespace": "passed",
+    "whole_workspace_fmt": "failed only at the pre-existing E2 input-trace hunk in crates/horizon-client/src/lan/hub.rs:4472",
+    "python_syntax": "passed",
+    "full_horizon_suite": "not run",
+    "root_workspace_suite": "not run"
+  },
+  "observed_disk": {
+    "shared_local_max_mib": 6351,
+    "e6_target_max_mib": 3290,
+    "primary_run_max_kib": 33764,
+    "final_kill_run_max_kib": 20048,
+    "sampling": "snapshots, not continuous high-water marks"
+  },
+  "earlier_cleanup_before_parent_policy_change": {
+    "command": "GOLIATH_ROOT=$REPO scripts/clean-builds --all",
+    "exit_code": 0,
+    "freed_mib": 4514,
+    "e6_target_removed_mib": 3290,
+    "idle_horizon_tiles_target_removed_mib": 1224,
+    "project_after_mib": 1889,
+    "local_after_mib": 1838,
+    "e6_run_directories_remaining": 0,
+    "material_user_data_removed": false,
+    "removed_build_output_recoverable": "rebuild from retained source and flags"
+  },
+  "cleanup": {
+    "command": "GOLIATH_ROOT=$REPO scripts/clean-builds",
+    "exit_code": 0,
+    "freed_mib": 0,
+    "project_after_mib": 2286,
+    "horizon_tiles_target_preserved_mib": 397,
+    "e6_target_absent": true,
+    "policy": "Only the orchestrator runs --all; task agents use plain clean-builds"
+  },
+  "committed": false,
+  "pushed": false
+}

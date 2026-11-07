@@ -190,6 +190,76 @@ index 8a09fe4f3..92d30a806 100644
              self.attachments.remove(&p);
              self.asleep.remove(&p);
              let new_is_mod = matches!(e, BlockEntity::Mod(_));
+diff --git a/crates/horizon-client-render/src/streaming.rs b/crates/horizon-client-render/src/streaming.rs
+index 7f9a11929..8ab49c297 100644
+--- a/crates/horizon-client-render/src/streaming.rs
++++ b/crates/horizon-client-render/src/streaming.rs
+@@ -429,6 +429,8 @@ pub struct ProtoCensus {
+     pub caches: Vec<(&'static str, usize, Option<usize>)>,
+ }
+ pub struct Streaming {
++    /// E6 tracks generation state outside resident COW chunks. None when cuts are off.
++    cut_generation: Option<u64>,
+     shared: Arc<Shared>,
+     /// Columns generated and saved as they were left behind: new when they
+     /// next arrive, though read from the save (`World::loaded_chunks`).
+@@ -1061,6 +1063,7 @@ impl Streaming {
+             caches,
+             jobs,
+             workers,
++            cut_generation: None,
+             order: 0,
+             scan_age: 0,
+             scan_area: ((i32::MIN, i32::MIN), i32::MIN),
+@@ -1303,6 +1306,7 @@ impl Streaming {
+         writes: FinalWrites,
+         world: &mut World,
+     ) {
++        self.cut_generation_changed();
+         self.generation_scan.exhausted = false;
+         self.decorating -= 1;
+         for i in &finals {
+@@ -1335,6 +1339,7 @@ impl Streaming {
+     /// Saved proto chunks come back; those now out of range are dropped by
+     /// the next `update`.
+     fn receive_saved(&mut self, protos: Vec<((i32, i32), Proto)>) {
++        self.cut_generation_changed();
+         self.generation_scan.exhausted = false;
+         self.saving -= 1;
+         for (key, proto) in protos {
+@@ -1353,6 +1358,7 @@ impl Streaming {
+             })
+             .collect();
+         if !protos.is_empty() {
++            self.cut_generation_changed();
+             self.saving += 1;
+             // Ahead of every other job: a column generated again meanwhile
+             // would not find them saved.
+@@ -1360,6 +1366,7 @@ impl Streaming {
+         }
+     }
+     fn receive_generated(&mut self, mut chunk: Chunk, world: &mut World) {
++        self.cut_generation_changed();
+         self.generation_scan.exhausted = false;
+         let key = (chunk.x, chunk.z);
+         self.generating.remove(&key);
+@@ -1566,6 +1573,16 @@ impl Streaming {
+                 .keys()
+                 .any(|section| !self.compile_started.contains_key(section))
+     }
++    /// Start observing accepted generation/proto-save changes without waiting on workers.
++    /// Lighting alone changes only resident COW references, not these saved proto records.
++    pub fn track_cut_generation(&mut self) -> u64 {
++        *self.cut_generation.get_or_insert(0)
++    }
++    fn cut_generation_changed(&mut self) {
++        if let Some(revision) = &mut self.cut_generation {
++            *revision = revision.saturating_add(1);
++        }
++    }
+     fn chunks_in_flight(&self) -> bool {
+         !(self.generating.is_empty()
+             && self.decorating == 0
 diff --git a/crates/horizon-client/src/command_storage.rs b/crates/horizon-client/src/command_storage.rs
 index 560423e90..faf0b27d1 100644
 --- a/crates/horizon-client/src/command_storage.rs
@@ -324,10 +394,10 @@ index f09139d0e..63abe5846 100644
                  _ if request.line.trim() == "transfer-status" => self.transfer_status(),
 diff --git a/crates/horizon-client/src/game/dedicated/tile_cut.rs b/crates/horizon-client/src/game/dedicated/tile_cut.rs
 new file mode 100644
-index 000000000..a1c5aa0f7
+index 000000000..1e24b0b2a
 --- /dev/null
 +++ b/crates/horizon-client/src/game/dedicated/tile_cut.rs
-@@ -0,0 +1,735 @@
+@@ -0,0 +1,762 @@
 +//! E6's tick-boundary snapshots. The sole worker owns encoding, append and compaction.
 +use crate::game::Game;
 +use horizon_client::{
@@ -402,6 +472,7 @@ index 000000000..a1c5aa0f7
 +    seen: HashMap<Key, Seen>,
 +    names: HashMap<String, Vec<((i32, i32, i32), String)>>,
 +    unloads: HashMap<String, u64>,
++    generations: HashMap<String, u64>,
 +    players: Option<HashSet<u128>>,
 +    pending: usize,
 +    poisoned: bool,
@@ -452,6 +523,7 @@ index 000000000..a1c5aa0f7
 +            seen: HashMap::new(),
 +            names: HashMap::new(),
 +            unloads: HashMap::new(),
++            generations: HashMap::new(),
 +            players: None,
 +            pending: 0,
 +            poisoned: false,
@@ -498,6 +570,13 @@ index 000000000..a1c5aa0f7
 +) -> Result<Vec<store::Change>> {
 +    let mut changes = Vec::new();
 +    if let Some(files) = work.bootstrap.take() {
++        // Staging is disposable, not a recovery source. In particular, never preserve a file
++        // introduced by an unacknowledged worker in the previous process.
++        if staging.exists() {
++            std::fs::remove_dir_all(staging)?;
++        }
++        std::fs::create_dir_all(staging)?;
++        pois.clear();
 +        // The cold bootstrap includes unloaded saved state. Seed only metadata used by existing
 +        // codecs; no staging world writer, region thread or fsync is on the steady cut path.
 +        for (name, bytes) in files {
@@ -649,7 +728,9 @@ index 000000000..a1c5aa0f7
 +    receive: Receiver<Work>,
 +    done: Sender<std::result::Result<(), String>>,
 +) {
-+    let staging = root.join("metadata-work");
++    // A revoked process must not influence a new owner's codec input while finishing old work.
++    // PIDs are distinct for concurrent owners of this local, file-locked experiment directory.
++    let staging = root.join(format!("metadata-work-{}", std::process::id()));
 +    let mut writer = None;
 +    let mut pois = HashMap::new();
 +    let mut failure = None;
@@ -788,7 +869,7 @@ index 000000000..a1c5aa0f7
 +            }
 +            let state = runtime.as_mut().ok_or("cut runtime missing")?;
 +            state.ready()?;
-+            if state.initialized {
++            {
 +                let back = self.dim;
 +                for dim in self
 +                    .levels
@@ -797,11 +878,24 @@ index 000000000..a1c5aa0f7
 +                    .chain(std::iter::once(back))
 +                {
 +                    self.enter_level(None, dim)?;
-+                    let loading = self.streaming.terrain_loading();
++                    let generation = self.streaming.track_cut_generation();
 +                    let pending = self.world.loaded_entities.len();
-+                    if loading || pending != 0 {
++                    let prefix = save::dimension_dir(&self.world_root, dim.id())
++                        .strip_prefix(&self.world_root)?
++                        .to_str()
++                        .ok_or("non-UTF8 dimension")?
++                        .to_owned();
++                    if state
++                        .generations
++                        .get(&prefix)
++                        .is_some_and(|old| *old != generation || generation == u64::MAX)
++                    {
 +                        self.enter_level(None, back)?;
-+                        return Err(format!("terrain work still in flight: loading={loading}, pending entity chunks={pending}; retry after a tick").into());
++                        return Err("generation state changed outside resident snapshots; restart to capture a new base".into());
++                    }
++                    if state.initialized && pending != 0 {
++                        self.enter_level(None, back)?;
++                        return Err(format!("terrain work still in flight: pending entity chunks={pending}; retry after a tick").into());
 +                    }
 +                }
 +                self.enter_level(None, back)?;
@@ -857,6 +951,9 @@ index 000000000..a1c5aa0f7
 +                        .ok_or("non-UTF8 dimension")?
 +                        .to_owned();
 +                    let unloads = self.world.block_entities.cut_unloads();
++                    state
++                        .generations
++                        .insert(prefix.clone(), self.streaming.track_cut_generation());
 +                    if state
 +                        .unloads
 +                        .get(&prefix)

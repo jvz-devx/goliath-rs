@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Offline mutations must not turn missing crossings or changed measurements into passes."""
+import copy
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import unittest
+
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader("e8_runner", str(ROOT / "scripts/e8-fast-crossing"))
+spec = importlib.util.spec_from_loader("e8_runner", loader)
+e8 = importlib.util.module_from_spec(spec)
+loader.exec_module(e8)
+
+
+class Verification(unittest.TestCase):
+    def setUp(self):
+        self.result = json.loads((ROOT / "docs/experiments/data/E8/stage4-wire-final.json").read_text())
+
+    def rejects(self, mutation):
+        changed = copy.deepcopy(self.result)
+        mutation(changed)
+        with self.assertRaises(RuntimeError):
+            e8.verify(changed)
+
+    def test_real_pilot(self):
+        e8.verify(self.result)
+
+    def test_missing_crossing(self):
+        self.rejects(lambda r: r["trials"].pop())
+
+    def test_gap(self):
+        self.rejects(lambda r: r["trials"][0].update(input_gap_ms=0))
+
+    def test_inventory(self):
+        self.rejects(lambda r: r["trials"][0].update(inventory_after="changed"))
+
+    def test_backward(self):
+        self.rejects(lambda r: r["trials"][0].update(backward_blocks=0.2))
+
+    def test_velocity(self):
+        self.rejects(lambda r: r["trials"][0].update(horizontal_velocity=0.2))
+
+    def test_disconnect(self):
+        self.rejects(lambda r: r.update(disconnects=1))
+
+    def test_arrivals(self):
+        self.rejects(lambda r: r["arrival_sequence"].append("b"))
+
+    def test_wrong_route(self):
+        self.rejects(lambda r: r["trials"][0].update(target="d"))
+
+    def test_percentiles(self):
+        self.rejects(lambda r: r["summary"]["all"]["input_gap_ms"].update(p95=0))
+
+
+if __name__ == "__main__":
+    unittest.main()

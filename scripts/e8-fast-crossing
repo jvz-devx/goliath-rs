@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+"""E8 real-engine crossing measurements. No launcher or account commands.
+
+Default: 1,000 crossings, half E4's route and half long, straight wall passes.
+--stage selects cumulative proxy changes. --clock runs the five-minute clock test.
+"""
+import argparse
+import concurrent.futures
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "docs/experiments/data/E8"
+
+
+
+def proxy_events(path):
+    """Parse only complete lines, because the proxy may still be writing the last one."""
+    complete = path.read_text().rpartition("\n")[0]
+    return [json.loads(line.split("E8_EVENT ", 1)[1]) for line in complete.splitlines() if "E8_EVENT " in line]
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+e4 = load("e8_e4", ROOT / "scripts/e4-walls")
+e2, prereq = e4.e2, e4.prereq
+
+
+def save(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, separators=(",", ":"))
+                    .replace(str(ROOT), "$REPO").replace(str(Path.home()), "$HOME") + "\n")
+
+
+def disk():
+    # Other experiment owners delete their run/target dirs while du traverses.
+    # du still prints its total, but returns 1 for those disappearing entries.
+    reading = subprocess.run(["du", "-sm", ROOT / ".local"], text=True, capture_output=True)
+    if not reading.stdout.strip():
+        raise RuntimeError(f"disk sample unavailable: {reading.stderr}")
+    return int(reading.stdout.split()[0])
+
+
+def build():
+    env = dict(os.environ, CARGO_INCREMENTAL="0", CARGO_PROFILE_FAST_INHERITS="release",
+               CARGO_PROFILE_FAST_LTO="false", CARGO_PROFILE_FAST_CODEGEN_UNITS="16")
+    env.pop("CI", None)
+    command = ["cargo", "build", "--locked", "--profile", "fast", "-p", "meridian-proxy",
+               "--bin", "meridian", "-p", "meridian-testkit", "--bin", "e4-client"]
+    started = time.monotonic()
+    before = os.getloadavg()
+    subprocess.run(command, cwd=ROOT / ".local/src/meridian", env=env, check=True)
+    bins = ROOT / ".local/bin/meridian-e8"
+    bins.mkdir(parents=True, exist_ok=True)
+    import shutil
+    for name in ("meridian", "e4-client"):
+        # New inode: never truncate a binary mapped by an earlier measured run.
+        staged = bins / (name + ".new")
+        shutil.copy2(ROOT / ".local/src/meridian/target/fast" / name, staged)
+        os.replace(staged, bins / name)
+    save(DATA / "build.json", {"seconds": time.monotonic() - started, "load_before": before,
+                              "load_after": os.getloadavg(), "local_mib": disk(), "command": command})
+
+
+def wait_event(client, predicate, after=0, timeout=20):
+    # Child.wait consumes unmatched events. Check the full event stream first.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = next((e for e in client.events if e.get("ns", 0) >= after and predicate(e)), None)
+        if found:
+            return found
+        if client.process.poll() is not None:
+            raise RuntimeError(f"client exited {client.process.returncode}")
+        time.sleep(0.005)
+    raise RuntimeError("client event timed out")
+
+
+def chat(client, text, after=0, timeout=20):
+    return wait_event(client, lambda e: e.get("kind") == "chat" and e.get("text") == text, after, timeout)
+
+
+def death_probe(client, engines, uuid, upstream, known):
+    engine = engines["a"]
+    engine.server.console("gamerule keep_inventory true")
+    engine.server.console("spawnpoint E4Probe 1 -60 1")
+    engine.server.console("kill E4Probe")
+    # Force a real freeze request while dead, then explicitly request respawn.
+    started = time.time_ns()
+    client.send("walk dead -1 1")
+    refusal = wait_event(client, lambda e: e.get("kind") == "chat" and
+                         "E4 wall refused " in e.get("text", "") and "that player is dead" in e["text"], started)
+    health = engine.ask(f"player-export {uuid} freeze")
+    client.send("respawn")
+    wait_event(client, lambda e: e.get("kind") == "respawn_request", refusal["ns"])
+    arrived = chat(client, "E4 wall arrived b", refusal["ns"])
+    after = e2.inventory(engines["b"], uuid, upstream)
+    if after["sha256"] != known or health.get("ok"):
+        raise RuntimeError("death probe did not prove refusal and inventory recovery")
+    client.send("walk death-return 1 1")
+    returned = chat(client, "E4 wall arrived a", arrived["ns"])
+    return {"refusal": refusal, "dead_export": health, "arrival": arrived,
+            "returned_ns": returned["ns"], "inventory_after": after["sha256"], "passed": True}
+
+
+def abandoned_probe(client, engines):
+    evidence = []
+    for kind in ("turn_back", "expiry"):
+        began = time.time_ns()
+        client.send(f"walk abandoned-{kind} 0.6 1")
+        wait_event(client, lambda e: e.get("kind") == "reached" and e.get("token") == f"abandoned-{kind}", began)
+        # A real held login must exist before abandoning it.
+        deadline = time.monotonic() + 3
+        while True:
+            status = engines["b"].ask("transfer-status")
+            if status.get("held", 0):
+                break
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"approach never prepared a held login: {status}")
+            time.sleep(0.025)
+        if kind == "turn_back":
+            client.send(f"walk abandoned-back-{kind} 6 1")
+        deadline = time.monotonic() + 6
+        while True:
+            final = engines["b"].ask("transfer-status")
+            if final.get("held") == 0 and final.get("expected") == 0:
+                break
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"abandoned held login leaked: {final}")
+            time.sleep(0.05)
+        arrivals = [e for e in client.events if e.get("kind") == "chat" and e["ns"] >= began and e.get("text", "").startswith("E4 wall arrived")]
+        if arrivals:
+            raise RuntimeError("abandoned approach crossed")
+        evidence.append({"case": kind, "held_before": status, "after": final, "passed": True})
+        client.send(f"walk abandoned-reset-{kind} 1 1")
+        wait_event(client, lambda e: e.get("kind") == "reached" and e.get("token") == f"abandoned-reset-{kind}", began)
+        time.sleep(1.1)
+    return evidence
+
+
+def protocol_probe(client, engines, proxy_log, uuid, upstream, known):
+    began = time.time_ns()
+    client.send("use before 37")
+    first = wait_event(client, lambda e: e.get("kind") == "block_ack" and e["sequence"] == 37, began)
+    client.send("walk protocol-cross -1 1")
+    deadline = time.monotonic() + 10
+    while True:
+        events = proxy_events(proxy_log)
+        freeze = next((e for e in events if e["ns"] > first["ns"] and e["step"] == "freeze: export request sent"), None)
+        if freeze:
+            break
+        if time.monotonic() > deadline:
+            raise RuntimeError("protocol probe never reached freeze")
+        time.sleep(0.001)
+    client.send("use frozen-first 38")
+    client.send("use frozen-second 39")
+    arrived = chat(client, "E4 wall arrived b", began)
+    ack = wait_event(client, lambda e: e.get("kind") == "block_ack" and e["sequence"] == 39, began)
+    uses = [e for e in client.events if e.get("kind") == "use" and e["ns"] >= freeze["ns"]]
+    if len(uses) != 2 or any(e["ns"] >= arrived["ns"] for e in uses):
+        raise RuntimeError("actions did not enter the in-flight crossing")
+    after = e2.inventory(engines["b"], uuid, upstream)
+    if after["sha256"] != known:
+        raise RuntimeError("protocol actions changed inventory")
+    client.send("walk protocol-return 1 1")
+    chat(client, "E4 wall arrived a", arrived["ns"])
+    return {"first_ack": first, "freeze": freeze, "uses": uses, "final_ack": ack,
+            "inventory_after": after["sha256"], "passed": True}
+
+
+def summary(trials):
+    keys = ("input_gap_ms", "total_ms", "arrival_error_blocks", "backward_blocks", "horizontal_velocity")
+    return {mode: {key: e2.percentiles([t[key] for t in trials if mode == "all" or t["mode"] == mode])
+                   for key in keys}
+            for mode in ("all", "route", "straight")
+            if any(mode == "all" or t["mode"] == mode for t in trials)}
+
+
+def verify(result):
+    trials = result["trials"]
+    if result["status"] != "complete" or len(trials) != result["requested"] or result["disconnects"]:
+        raise RuntimeError("incomplete crossing run")
+    owner = "a"
+    straight = False
+    for index, t in enumerate(trials):
+        if t["index"] != index or t["source"] != owner:
+            raise RuntimeError("owner chain or index differs")
+        if t["mode"] == "straight":
+            straight = True
+            expected = "b" if owner == "a" else "a"
+        elif t["mode"] == "route" and not straight:
+            expected = e4.ROUTE[index % len(e4.ROUTE)]
+        else:
+            raise RuntimeError("mode ordering differs")
+        if t["target"] != expected:
+            raise RuntimeError("requested route differs")
+        if t["input_gap_ms"] != (t["first_target_input"]["ns"] - t["last_source_input"]["ns"]) / 1e6:
+            raise RuntimeError("gap arithmetic differs")
+        if t["total_ms"] != (t["completed_ns"] - t["trigger_input"]["ns"]) / 1e6:
+            raise RuntimeError("total arithmetic differs")
+        if t["input_gap_ms"] <= 0 or t["last_source_input"]["ns"] >= t["first_target_input"]["ns"] or t["first_target_input"]["ns"] < t["trigger_input"]["ns"]:
+            raise RuntimeError("input timestamps differ")
+        if not e4.eligible(t["first_target_input"]["pos"], t["target"]):
+            raise RuntimeError("first accepted target movement outside target tile")
+        if t["inventory_before"] != t["inventory_after"] or t["inventory_after"] != result["known_inventory"]:
+            raise RuntimeError("inventory mismatch")
+        if t["inventory_count_before"] != 17 or t["inventory_count_after"] != 17:
+            raise RuntimeError("inventory count differs")
+        if t["arrival_error_blocks"] != max((math.dist(e["before"], e["pos"]) for e in t["arrival_teleports"]), default=0):
+            raise RuntimeError("correction arithmetic differs")
+        goal = e4.POINTS[t["target"]] if t["mode"] == "route" else (-3 if t["target"] == "b" else 3, 1)
+        direction = [goal[0] - t["trigger_input"]["pos"][0], goal[1] - t["trigger_input"]["pos"][2]]
+        length = math.hypot(*direction)
+        backwards = [max(0, -sum((e["pos"][axis] - e["before"][axis]) * direction[j] / length
+                     for j, axis in enumerate((0, 2)))) for e in t["arrival_teleports"]] if length else []
+        if t["backward_blocks"] != max(backwards, default=0):
+            raise RuntimeError("backwards correction differs")
+        if t["horizontal_velocity"] != math.hypot(t["velocity_after"][0], t["velocity_after"][2]):
+            raise RuntimeError("velocity arithmetic differs")
+        owner = t["target"]
+    if result["arrival_sequence"] != [t["target"] for t in trials]:
+        raise RuntimeError("unexpected or missing arrival")
+    recomputed = summary(trials)
+    if result["summary"] != recomputed:
+        raise RuntimeError("percentiles differ")
+
+
+def clock_test(engines, scratch, bins, children, seconds):
+    # Engine requires Velocity forwarding. The relay is the unchanged upstream helper.
+    relay = upstream.Relay(engines["a"].port, lambda _line: None)
+    try:
+        bot = e2.Child([bins / "horizon-bots", "--server", f"127.0.0.1:{relay.port}",
+                        "--bots", "128", "--behaviour", "mixed", "--join-every", "0.02",
+                        "--view-distance", "3", "--seconds", str(seconds + 20),
+                        "--name", "E8Load", "--report", scratch / "bots.json"], scratch, scratch / "bots.log")
+        children.append(bot)
+        samples = []
+        start = time.monotonic()
+        while True:
+            row = {"elapsed_s": time.monotonic() - start, "load": os.getloadavg(), "engines": {}}
+            def query(item):
+                label, engine = item
+                clock = {}
+                for kind in ("gametime", "daytime"):
+                    before = engine.server.count()
+                    sent = time.time_ns()
+                    # 26.3 replaced the old daytime literal with the clock's time.
+                    command = f"time query {'gametime' if kind == 'gametime' else 'time'}"
+                    engine.server.console(command)
+                    deadline = time.monotonic() + 15
+                    while True:
+                        line = next((line for line in engine.server.since(before) if re.search(r"(?:time is|is at) -?\d+", line)), None)
+                        if line is not None:
+                            break
+                        if time.monotonic() > deadline:
+                            raise RuntimeError(f"clock query timed out on {label}: {engine.server.since(before)[-3:]}")
+                        time.sleep(0.005)
+                    absolute = int(re.search(r"(?:time is|is at) (-?\d+)", line)[1])
+                    clock[kind] = {"sent_ns": sent, "received_ns": time.time_ns(), "command": command,
+                                   "absolute": absolute, "value": absolute if kind == "gametime" else absolute % 24000}
+                return label, clock
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                row["engines"] = dict(pool.map(query, engines.items()))
+            samples.append(row)
+            print(f'E8 clock {row["elapsed_s"]:.1f}/{seconds}s load={row["load"]}', flush=True)
+            if time.monotonic() - start >= seconds:
+                break
+            time.sleep(min(10, seconds - (time.monotonic() - start)))
+        return {"samples": samples, "bots": 128, "behaviour": "mixed", "duration_s": time.monotonic() - start,
+                "bot_tail": (scratch / "bots.log").read_text(errors="replace").splitlines()[-8:]}
+    finally:
+        relay.close()
+
+
+def run(args):
+    global upstream
+    sys.path.insert(0, str(ROOT / ".local/src/horizon/tools"))
+    import server_transfer_e2e as upstream
+    bins = ROOT / ".local/bin/horizon-fc2868b2b"
+    proxybins = ROOT / ".local/bin/meridian-e8"
+    sidecar = ROOT / ".local/bin/meridian-902dcf1/meridian-sidecar"
+    binaries = [bins / "horizon-client", bins / "horizon-bots", proxybins / "meridian", proxybins / "e4-client", sidecar]
+    for path in binaries:
+        if not os.access(path, os.X_OK):
+            raise RuntimeError(f"missing {path}")
+    problems = prereq.resource_problems(args.resources)
+    if problems:
+        raise RuntimeError(str(problems))
+    result = {"status": "running", "stage": args.stage, "requested": args.crossings,
+              "trials": [], "disconnects": 0, "load_start": os.getloadavg(), "started_ns": time.time_ns(),
+              "binary_sha256": {str(p.relative_to(ROOT)): prereq.sha256(p) for p in binaries},
+              "runner_sha256": prereq.sha256(Path(__file__)), "sampled_peak_local_mib": disk()}
+    destination = DATA / f"{args.name}.json"
+    engines, children = {}, []
+    previous_env = dict(os.environ)
+    (ROOT / ".local/runs").mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="E8-", dir=ROOT / ".local/runs") as temp:
+        scratch = Path(temp)
+        os.environ.update(prereq.isolated_env(scratch))
+        for name in ("XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"):
+            folder = scratch / name.lower()
+            folder.mkdir(mode=0o700)
+            os.environ[name] = str(folder)
+        os.environ.update(E2_TRACE_INPUTS="1", E8_STAGE=str(args.stage))
+        if args.clock:
+            os.environ.pop("E2_TRACE_INPUTS", None)
+        try:
+            for label in e4.TILES:
+                extra = {"level-seed": "12345", "allow-flight": "true", "difficulty": "peaceful"}
+                if args.clock:
+                    extra.update({"max-players": "256", "gamemode": "creative", "force-gamemode": "true",
+                                  "pause-when-empty-seconds": "-1"})
+                engines[label] = upstream.Engine(bins, args.resources, scratch / label, scratch, label,
+                    **extra)
+                engines[label].ready()
+                for command in ("gamerule do_mob_spawning false", "gamerule do_weather_cycle false",
+                                "gamerule random_tick_speed 0", "gamerule spawn_radius 0"):
+                    engines[label].server.console(command)
+            if args.clock:
+                result["clock"] = clock_test(engines, scratch, bins, children, args.clock_seconds)
+            else:
+                ports = {label: e2.free_port() for label in engines}
+                keys = {label: scratch / f"{label}.key" for label in engines}
+                for label, engine in engines.items():
+                    keys[label].write_text(f"e8-local-test-secret-{label}")
+                    children.append(e2.Child([sidecar, "--endpoint-file", engine.endpoint, "--listen",
+                        f"127.0.0.1:{ports[label]}", "--secret-file", keys[label]], scratch, scratch / f"sidecar-{label}.log"))
+                port = e2.free_port()
+                config = scratch / "meridian.toml"
+                config.write_text(f'listen = "127.0.0.1:{port}"\nauth-mode = "offline"\nconnections-per-minute = 0\nmax-players = 2\n'
+                    f'forwarding-secret = "{upstream.SECRET.decode()}"\nswitch-carry-position = true\ndefault-backend = "a"\n'
+                    '[tiles]\norigin = [0,0]\nedge = 64\n'
+                    + "".join(f'[[tiles.entries]]\nindex = [{x},{z}]\nbackend = "{label}"\n' for label, (x, z) in e4.TILES.items())
+                    + "".join(f'[[backends]]\nname = "{label}"\naddress = "127.0.0.1:{engine.port}"\nsidecar = "127.0.0.1:{ports[label]}"\nsidecar-secret-file = "{keys[label]}"\n' for label, engine in engines.items()))
+                subprocess.run([proxybins / "meridian", "--check", config], cwd=scratch, capture_output=True, check=True)
+                children.append(e2.Child([proxybins / "meridian", config], scratch, scratch / "proxy.log"))
+                deadline = time.monotonic() + 10
+                while True:
+                    try:
+                        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                            break
+                    except OSError:
+                        if time.monotonic() > deadline:
+                            raise RuntimeError("proxy not listening")
+                        time.sleep(0.05)
+                client = e2.Child([proxybins / "e4-client", port], scratch, scratch / "client.log")
+                children.append(client)
+                wait_event(client, lambda e: e.get("kind") == "teleport")
+                uuid = str(upstream.offline_uuid("E4Probe"))
+                client.send("walk setup 1 1")
+                e4.wait_position(engines["a"], 0, "a")
+                engines["a"].server.console("give E4Probe minecraft:diamond 5")
+                engines["a"].server.console("give E4Probe minecraft:oak_log 12")
+                time.sleep(0.5)
+                known = e2.inventory(engines["a"], uuid, upstream)
+                if known["count"] != 17:
+                    raise RuntimeError("fixture inventory differs")
+                result["known_inventory"] = known["sha256"]
+                if args.death:
+                    result["death"] = death_probe(client, engines, uuid, upstream, known["sha256"])
+                if args.edge_cases:
+                    result["edge_cases"] = e4.edge_cases(client, engines, uuid, upstream, known["sha256"])
+                    if args.stage >= 2:
+                        result["abandoned"] = abandoned_probe(client, engines)
+                if args.protocol_probe:
+                    result["protocol_probe"] = protocol_probe(client, engines, scratch / "proxy.log", uuid, upstream, known["sha256"])
+                source = "a"
+                route_started = time.time_ns()
+                route_count = args.crossings if args.route_only else args.crossings // 2 // 14 * 14
+                for index in range(args.crossings):
+                    mode = "route" if index < route_count else "straight"
+                    target = e4.ROUTE[index % 14] if mode == "route" else ("b" if source == "a" else "a")
+                    goal = e4.POINTS[target] if mode == "route" else (-3 if target == "b" else 3, 1)
+                    before = e2.inventory(engines[source], uuid, upstream)
+                    began = time.time_ns()
+                    client.send(f"walk {index} {goal[0]} {goal[1]}")
+                    sent = wait_event(client, lambda e: e.get("kind") == "move" and e4.eligible(e["pos"], target), began)
+                    result["attempted_crossing"] = {"index": index, "mode": mode, "source": source, "target": target, "trigger_input": sent}
+                    completed = chat(client, f"E4 wall arrived {target}", sent["ns"], args.timeout)
+                    first = e4.wait_position(engines[target], sent["ns"], target)
+                    last = [v for v in e2.inputs(engines[source]) if v["ns"] < first["ns"]][-1]
+                    time.sleep(0.10)
+                    after = e2.inventory(engines[target], uuid, upstream)
+                    teleports = [e for e in client.events if e.get("kind") == "teleport" and sent["ns"] <= e["ns"] <= first["ns"] + 100_000_000]
+                    direction = [goal[0] - sent["pos"][0], goal[1] - sent["pos"][2]]
+                    length = math.hypot(*direction)
+                    backwards = [max(0, -sum((e["pos"][axis] - e["before"][axis]) * direction[j] / length
+                                    for j, axis in enumerate((0, 2)))) for e in teleports] if length else []
+                    trial = dict(result["attempted_crossing"], completed_ns=completed["ns"],
+                        total_ms=(completed["ns"] - sent["ns"]) / 1e6,
+                        input_gap_ms=(first["ns"] - last["ns"]) / 1e6,
+                        last_source_input=last, first_target_input=first, arrival_teleports=teleports,
+                        arrival_error_blocks=max((math.dist(e["before"], e["pos"]) for e in teleports), default=0),
+                        backward_blocks=max(backwards, default=0), velocity_after=after["velocity"],
+                        horizontal_velocity=math.hypot(after["velocity"][0], after["velocity"][2]),
+                        inventory_before=before["sha256"], inventory_after=after["sha256"],
+                        inventory_count_before=before["count"], inventory_count_after=after["count"],
+                        load=os.getloadavg())
+                    result["trials"].append(trial)
+                    if before["sha256"] != after["sha256"] or after["sha256"] != known["sha256"]:
+                        raise RuntimeError("inventory changed")
+                    source = target
+                    # Complete a straight leg past the wall without stopping at a short waypoint.
+                    if mode == "straight":
+                        wait_event(client, lambda e: e.get("kind") == "reached" and e.get("token") == str(index), began)
+                    if index % 25 == 0 or index + 1 == args.crossings:
+                        result["sampled_peak_local_mib"] = max(result["sampled_peak_local_mib"], disk())
+                        save(destination, result)
+                        print(f'E8 stage {args.stage} {index+1}/{args.crossings} {mode} gap={trial["input_gap_ms"]:.2f}ms load={trial["load"]}', flush=True)
+                result["arrival_sequence"] = [e["text"].removeprefix("E4 wall arrived ") for e in client.events
+                    if e.get("kind") == "chat" and e["ns"] >= route_started and e.get("text", "").startswith("E4 wall arrived ")]
+                result["disconnects"] = sum(e.get("kind") == "disconnect" for e in client.events)
+                result["summary"] = summary(result["trials"])
+                result["proxy_events"] = proxy_events(scratch / "proxy.log")
+                for trial in result["trials"]:
+                    events = [e for e in result["proxy_events"] if e["target"] == trial["target"]
+                              and trial["trigger_input"]["ns"] <= e["ns"] <= trial["completed_ns"]]
+                    def event(prefix):
+                        return next((e for e in events if e["step"].startswith(prefix)), None)
+                    export = event("freeze: export request sent")
+                    frozen = event("freeze: the source froze")
+                    importing = event("hand over: import request sent")
+                    imported = event("hand over: the target took")
+                    placed = event("hand over: the target placed")
+                    confirmed = event("hand over: confirm request sent")
+                    phases = {}
+                    for key, begin, end in (("source_export_rtt_ms", export, frozen),
+                            ("target_import_rtt_ms", importing, imported),
+                            ("target_confirm_rtt_ms", confirmed, placed),
+                            ("frozen_to_placed_ms", export, placed)):
+                        if begin and end:
+                            phases[key] = (end["ns"] - begin["ns"]) / 1e6
+                    if imported:
+                        phases["import_reply_to_first_input_ms"] = (trial["first_target_input"]["ns"] - imported["ns"]) / 1e6
+                    trial["phases"] = phases
+            result["status"] = "complete"
+            if not args.clock:
+                verify(result)
+        except (Exception, KeyboardInterrupt) as error:
+            result.update(status="failed", error=str(error) or "interrupted")
+            result["diagnostics"] = {p.name: p.read_text(errors="replace").splitlines()[-15:]
+                for p in scratch.glob("*.log") if p.name in ("client.log", "proxy.log", "server-a.log", "bots.log")}
+            print(f"E8 failed: {error}", file=sys.stderr)
+        finally:
+            for child in reversed(children):
+                child.stop()
+            for engine in reversed(list(engines.values())):
+                engine.stop()
+            result.update(finished_ns=time.time_ns(), load_end=os.getloadavg(),
+                          run_disk_mib=int(subprocess.check_output(["du", "-sm", scratch], text=True).split()[0]))
+            save(destination, result)
+            os.environ.clear()
+            os.environ.update(previous_env)
+    print(destination, flush=True)
+    return 0 if result["status"] == "complete" else 2
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--build", action="store_true")
+    parser.add_argument("--suite", action="store_true", help="all four 1,000-crossing stages, clock drift, then build cleanup")
+    parser.add_argument("--stage", type=int, choices=range(1, 6), default=4)
+    parser.add_argument("--crossings", type=int, default=1000)
+    parser.add_argument("--name")
+    parser.add_argument("--timeout", type=float, default=20)
+    parser.add_argument("--route-only", action="store_true")
+    parser.add_argument("--death", action="store_true")
+    parser.add_argument("--edge-cases", action="store_true")
+    parser.add_argument("--protocol-probe", action="store_true")
+    parser.add_argument("--clock", action="store_true")
+    parser.add_argument("--clock-seconds", type=int, default=300)
+    parser.add_argument("--verify", type=Path)
+    parser.add_argument("--resources", type=Path, default=Path.home() / "Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3")
+    args = parser.parse_args()
+    args.name = args.name or ("clock" if args.clock else f"stage{args.stage}")
+    if Path(args.name).name != args.name or args.crossings < 1:
+        parser.error("plain filename stem and positive crossing count required")
+    if args.verify:
+        value = json.loads(args.verify.read_text())
+        verify(value)
+        print(json.dumps(value["summary"], indent=2))
+        return 0
+    if args.suite:
+        try:
+            if args.build:
+                build()
+            for stage in range(1, 5):
+                command = [sys.executable, "-B", str(Path(__file__)), "--stage", str(stage),
+                           "--crossings", str(args.crossings), "--edge-cases", "--death",
+                           "--name", f"repro-stage{stage}", "--resources", str(args.resources)]
+                if stage >= 3:
+                    command.append("--protocol-probe")
+                subprocess.run(command, check=True)
+            subprocess.run([sys.executable, "-B", str(Path(__file__)), "--clock", "--name", "repro-clock",
+                            "--resources", str(args.resources)], check=True)
+            return 0
+        finally:
+            subprocess.run([ROOT / "scripts/clean-builds", "--all"], check=True)
+    if args.build:
+        build()
+    return run(args)
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    sys.exit(main())
