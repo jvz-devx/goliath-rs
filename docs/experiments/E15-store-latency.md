@@ -346,3 +346,16 @@ The final build-output cleanup command is plain `scripts/clean-builds`, without
 ## Verification status
 
 The reviewer checked the gates on 2026-11-08: formatting, all-feature Clippy and 41 tests passed, and the retained final binary hashes to `e1ec3a4b...`. The 64-client timing isn't reproduced yet; the reviewer will rerun it in the M4 quiet window on this binary before the M2 store item is ticked.
+
+## Independent reproduction
+
+The reviewer reran the timing on 2026-11-08 in its own quiet window, on the exact final binary `e1ec3a4b...` and its retained Rust driver, with `python3 -B scripts/e5-store.py --only latency`. Agents E12 and E16 had paused, and the one-minute load stayed at 3.2.
+
+| Clients | Run 1 P95, ms | Run 2 P95, ms | Run 3 P95, ms |
+| ---: | ---: | ---: | ---: |
+| 1 | 4.10 | 4.13 | 4.10 |
+| 8 | 11.09 | 11.89 | 11.90 |
+| 64 | 17.04 | 17.04 | 16.08 |
+| 256 | 19.61 | 15.72 | 16.65 |
+
+All three 64-client runs are under the 20 ms line. Raw samples are in `data/E15/repro/`.
