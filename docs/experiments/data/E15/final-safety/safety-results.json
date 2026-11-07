@@ -1,0 +1,75 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "e1ec3a4b0c99e20aeceb4cf69f71bd89611ace0906ca6d05d76c8a4e0df3ce6e",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --kills 1000",
+  "load_average_before": [
+    28.9140625,
+    24.09033203125,
+    21.49072265625
+  ],
+  "fence": {
+    "delayed_cas": 32,
+    "rejected": 32,
+    "accepted_stale": 0,
+    "checker_failure": null,
+    "safety_check": "PASS"
+  },
+  "fence_control": {
+    "delayed_cas": 32,
+    "rejected": 0,
+    "accepted_stale": 32,
+    "checker_failure": "stale CAS accepted: 32/32",
+    "safety_check": "FAIL as required"
+  },
+  "tail": {
+    "record_bytes": 154,
+    "truncations": 154,
+    "corruptions": 154,
+    "restarts": 617,
+    "failures": 0
+  },
+  "barrier": {
+    "acknowledged": 1,
+    "recovered": 1,
+    "checker_failure": null,
+    "file_layer": "same volatile file cache, persisted by real barrier"
+  },
+  "early_ack_control": {
+    "acknowledged": 1,
+    "recovered": 0,
+    "checker_failure": "lost acknowledgement after unflushed cache loss",
+    "file_layer": "volatile writes dropped before barrier"
+  },
+  "kills": [
+    {
+      "seed": 5001,
+      "kills": 500,
+      "clients": 8,
+      "load_acknowledgements": 5790,
+      "transport": "persistent load workers, fresh recovery observer and retries",
+      "transport_unknown": 4000,
+      "retries_completed_missing": 2124,
+      "distinct_snapshots": 147,
+      "lost_acknowledgements": 0,
+      "backwards_generations": 0,
+      "owner_violations": 0,
+      "observation_sha256": "cd29686509a283d4277a627f328bd2477edbe19b1fcb7c96aa93b06732f6bc6f"
+    },
+    {
+      "seed": 5002,
+      "kills": 500,
+      "clients": 8,
+      "load_acknowledgements": 5609,
+      "transport": "persistent load workers, fresh recovery observer and retries",
+      "transport_unknown": 3991,
+      "retries_completed_missing": 2202,
+      "distinct_snapshots": 151,
+      "lost_acknowledgements": 0,
+      "backwards_generations": 0,
+      "owner_violations": 0,
+      "observation_sha256": "248ee84994fe7b19ce0b4aa08bdac5e7f0990d75e4251b7a624a345a91e5011e"
+    }
+  ]
+}

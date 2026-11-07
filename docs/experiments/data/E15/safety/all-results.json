@@ -1,0 +1,81 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "db3a4b46c1123b4ed8807ee598a6eecaf37667370f44496d53351ce90d77ebe8",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --kills 1000",
+  "load_average_before": [
+    24.94287109375,
+    20.3583984375,
+    12.21826171875
+  ],
+  "fence": {
+    "delayed_cas": 32,
+    "rejected": 32,
+    "accepted_stale": 0,
+    "checker_failure": null,
+    "safety_check": "PASS"
+  },
+  "fence_control": {
+    "delayed_cas": 32,
+    "rejected": 0,
+    "accepted_stale": 32,
+    "checker_failure": "stale CAS accepted: 32/32",
+    "safety_check": "FAIL as required"
+  },
+  "tail": {
+    "record_bytes": 154,
+    "truncations": 154,
+    "corruptions": 154,
+    "restarts": 617,
+    "failures": 0
+  },
+  "barrier": {
+    "acknowledged": 1,
+    "recovered": 1,
+    "checker_failure": null,
+    "file_layer": "same volatile file cache, persisted by real barrier"
+  },
+  "early_ack_control": {
+    "acknowledged": 1,
+    "recovered": 0,
+    "checker_failure": "lost acknowledgement after unflushed cache loss",
+    "file_layer": "volatile writes dropped before barrier"
+  },
+  "kills": [
+    {
+      "seed": 5001,
+      "kills": 500,
+      "clients": 8,
+      "load_acknowledgements": 5479,
+      "transport_unknown": 3984,
+      "retries_completed_missing": 2260,
+      "distinct_snapshots": 149,
+      "lost_acknowledgements": 0,
+      "backwards_generations": 0,
+      "owner_violations": 0,
+      "observation_sha256": "add6a6a76a30235a98f7135e5c56ffa52c0c9915d1e0877da6fff376af0fa203"
+    },
+    {
+      "seed": 5002,
+      "kills": 500,
+      "clients": 8,
+      "load_acknowledgements": 5707,
+      "transport_unknown": 3990,
+      "retries_completed_missing": 2342,
+      "distinct_snapshots": 150,
+      "lost_acknowledgements": 0,
+      "backwards_generations": 0,
+      "owner_violations": 0,
+      "observation_sha256": "c0a04b532312353fe737d62aa8bc8b2449cedd3e77e2f84c0e8317da43206348"
+    }
+  ],
+  "wall_seconds": 85.953,
+  "peak_sampled_run_allocated_bytes": 7028736,
+  "target_allocated_bytes_at_end": 323493888,
+  "load_average_after": [
+    32.021484375,
+    23.537109375,
+    14.23486328125
+  ]
+}

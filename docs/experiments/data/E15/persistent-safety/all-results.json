@@ -1,0 +1,83 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "d2fe29febdb54a4a113e3dd9112b8b12fa214a54ffc14de4e911600002331612",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --kills 1000",
+  "load_average_before": [
+    26.892578125,
+    21.32666015625,
+    20.23095703125
+  ],
+  "fence": {
+    "delayed_cas": 32,
+    "rejected": 32,
+    "accepted_stale": 0,
+    "checker_failure": null,
+    "safety_check": "PASS"
+  },
+  "fence_control": {
+    "delayed_cas": 32,
+    "rejected": 0,
+    "accepted_stale": 32,
+    "checker_failure": "stale CAS accepted: 32/32",
+    "safety_check": "FAIL as required"
+  },
+  "tail": {
+    "record_bytes": 154,
+    "truncations": 154,
+    "corruptions": 154,
+    "restarts": 617,
+    "failures": 0
+  },
+  "barrier": {
+    "acknowledged": 1,
+    "recovered": 1,
+    "checker_failure": null,
+    "file_layer": "same volatile file cache, persisted by real barrier"
+  },
+  "early_ack_control": {
+    "acknowledged": 1,
+    "recovered": 0,
+    "checker_failure": "lost acknowledgement after unflushed cache loss",
+    "file_layer": "volatile writes dropped before barrier"
+  },
+  "kills": [
+    {
+      "seed": 5001,
+      "kills": 500,
+      "clients": 8,
+      "load_acknowledgements": 6176,
+      "transport": "persistent load workers, fresh recovery observer and retries",
+      "transport_unknown": 3993,
+      "retries_completed_missing": 2198,
+      "distinct_snapshots": 158,
+      "lost_acknowledgements": 0,
+      "backwards_generations": 0,
+      "owner_violations": 0,
+      "observation_sha256": "6eb727cbfaa676756b89bafc76398c8f7f763ec534fee58c112a9c232c246fc1"
+    },
+    {
+      "seed": 5002,
+      "kills": 500,
+      "clients": 8,
+      "load_acknowledgements": 6131,
+      "transport": "persistent load workers, fresh recovery observer and retries",
+      "transport_unknown": 4000,
+      "retries_completed_missing": 2239,
+      "distinct_snapshots": 153,
+      "lost_acknowledgements": 0,
+      "backwards_generations": 0,
+      "owner_violations": 0,
+      "observation_sha256": "ab445220587086d03dbf47683dd75a2d79f6bd8de5826d1f788557adbe1e92f3"
+    }
+  ],
+  "wall_seconds": 91.937,
+  "peak_sampled_run_allocated_bytes": 7376896,
+  "target_allocated_bytes_at_end": 406695936,
+  "load_average_after": [
+    34.63916015625,
+    24.67138671875,
+    21.58349609375
+  ]
+}

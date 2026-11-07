@@ -1,0 +1,47 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "32f73bbb879f5910dffd5713b2cef6fc6d5b54895c432f9bd9f4a1af1d0f19f5",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --only latency --latency-driver target/release/goliath-store-load --latency-clients 64 --latency-samples 64 --latency-modes full --trace --output docs/experiments/data/E15/rotation-pilot",
+  "load_average_before": [
+    3.5,
+    3.41259765625,
+    3.42822265625
+  ],
+  "latency": [
+    {
+      "mode": "full",
+      "clients": 64,
+      "samples": 4096,
+      "blob_bytes": 256,
+      "driver": "rust",
+      "p50_ms": 11.097958,
+      "p95_ms": 16.153,
+      "p99_ms": 18.878167,
+      "max_ms": 19.152625,
+      "wall_seconds": 1.275,
+      "load_average_before": [
+        3.5,
+        3.41259765625,
+        3.42822265625
+      ],
+      "load_average_after": [
+        3.2197265625,
+        3.35546875,
+        3.40771484375
+      ],
+      "compact_every": 256,
+      "driver_args": [],
+      "server_args": []
+    }
+  ],
+  "wall_seconds": 1.835,
+  "peak_sampled_run_allocated_bytes": 3076096,
+  "target_allocated_bytes_at_end": 188129280,
+  "load_average_after": [
+    3.2197265625,
+    3.35546875,
+    3.40771484375
+  ]
+}

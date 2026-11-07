@@ -66,6 +66,21 @@ def env(directory, extra=None):
     return result
 
 
+def stop_child(child):
+    # On macOS killpg can return EPERM for an already reaped process group.
+    # Never signal a dead child's PID, which could since have been reused.
+    if child.process.poll() is None:
+        try:
+            child.stop()
+            return
+        except PermissionError:
+            if child.process.poll() is None:
+                raise
+    if child.process.poll() is not None:
+        child.reader.join(5)
+        child.log.close()
+
+
 @contextlib.contextmanager
 def environment(values):
     previous = dict(os.environ)
@@ -142,7 +157,12 @@ class Tile:
         # This is a fresh or stopped local tile. Replace its local append fence
         # only after the shared store has issued the new process fence.
         self.cut.joinpath('FENCE').write_text(self.token)
-        self.port = e2.free_port()
+        # Meridian's backend sockets are static. A replacement must keep the
+        # original game port; sidecars read the refreshed control endpoint.
+        if hasattr(self, 'server'):
+            self.server.stop()
+        self.port = getattr(self, 'port', None) or e2.free_port()
+        self.endpoint.unlink(missing_ok=True)
         spawn = [1 if v == 0 else -2 for v in self.tile]
         settings = dict(upstream.PROPERTIES, **{'server-ip':'127.0.0.1', 'server-port':str(self.port),
             'level-seed':'12345', 'level-name':'world', 'gamemode':'creative', 'force-gamemode':'true',
@@ -155,8 +175,9 @@ class Tile:
         self.env = env(self.folder / f'private-{process}', {
             'HORIZON_TILE':f'0,0,{cluster.edge},{self.tile[0]},{self.tile[1]}', 'HORIZON_TILE_TEST_SMALL':'1' if cluster.edge < 512 else '0',
             'HORIZON_E3_CUT_DIR':str(self.cut), 'HORIZON_E3_FENCE':self.token,
-            'GOLIATH_STORE':f'{cluster.address[0]}:{cluster.address[1]}', 'GOLIATH_TILE_ID':str(self.index),
+            'GOLIATH_STORE':f'{cluster.tile_addresses.get(self.label,cluster.address)[0]}:{cluster.tile_addresses.get(self.label,cluster.address)[1]}', 'GOLIATH_TILE_ID':str(self.index),
             'GOLIATH_SPAWN':json.dumps([spawn[0],300 if cluster.normal else -60,spawn[1]])})
+        self.env.update(cluster.tile_env)
         with environment(self.env):
             self.server = upstream.Server([BINS/'horizon-client', '--resources',cluster.resources,
                 '--control-socket',self.endpoint,'--transfers',upstream.TRANSFERS,'--dedicated','--nogui'],
@@ -216,13 +237,17 @@ class Tile:
 
 
 class Cluster:
-    def __init__(self, root, resources, edge, normal=False):
+    def __init__(self, root, resources, edge, normal=False, tile_env=None, store_routes=None, store_binary=None):
         self.root, self.resources, self.edge = root, resources, edge
         self.normal = normal
+        self.tile_env = tile_env or {}
+        self.tile_addresses = {}
+        self.restarts = []
         self.tiles, self.children = {}, []
         self.proxy = None
+        self.store_binary = Path(store_binary) if store_binary is not None else BINS/'goliath-store'
         self.store_log = (root/'store.log').open('w+')
-        self.store_process = subprocess.Popen([BINS/'goliath-store','--dir',root/'store','--listen','127.0.0.1:0','--sync','full'],stdout=self.store_log,stderr=subprocess.STDOUT)
+        self.store_process = subprocess.Popen([self.store_binary,'--dir',root/'store','--listen','127.0.0.1:0','--sync','full'],stdout=self.store_log,stderr=subprocess.STDOUT)
         deadline = time.monotonic()+10
         while True:
             text = (root/'store.log').read_text().rpartition('\n')[0]
@@ -234,6 +259,8 @@ class Cluster:
             if self.store_process.poll() is not None or time.monotonic()>deadline:
                 raise RuntimeError(f'store startup failed {text}')
             time.sleep(.02)
+        if store_routes:
+            self.tile_addresses = store_routes(self.address)
         for index,(label,tile) in enumerate(e4.TILES.items()):
             self.tiles[label] = Tile(self,label,index,tile)
         clock = store.call(self.address,store.request(13))
@@ -266,7 +293,7 @@ class Cluster:
             + ''.join(f'[[tiles.entries]]\nindex = [{x},{z}]\nbackend = "{label}"\n' for label,(x,z) in e4.TILES.items())
             + ''.join(f'[[backends]]\nname = "{label}"\naddress = "127.0.0.1:{tile.port}"\nsidecar = "127.0.0.1:{ports[label]}"\nsidecar-secret-file = "{self.root / (label+".key")}"\n' for label,tile in self.tiles.items()))
         self.state = self.root/'cluster.json'
-        self.state.write_text(json.dumps({'store':f'{self.address[0]}:{self.address[1]}','tiles':{label:tile.fence for label,tile in self.tiles.items()}}))
+        self.publish_state()
         with environment(env(self.root/'proxy-private',{'GOLIATH_CLUSTER':str(self.state),'GOLIATH_CLOCK':json.dumps(self.clock),'E8_STAGE':'4'})):
             subprocess.run([BINS/'meridian','--check',config],check=True,capture_output=True)
             self.proxy = e2.Child([BINS/'meridian',config],self.root,self.root/'proxy.log')
@@ -280,6 +307,63 @@ class Cluster:
                     raise RuntimeError('proxy not listening')
                 time.sleep(.02)
 
+    def publish_state(self):
+        staged = self.state.with_suffix('.new')
+        staged.write_text(json.dumps({'store':f'{self.address[0]}:{self.address[1]}',
+            'tiles':{label:tile.fence for label,tile in self.tiles.items()}}))
+        os.replace(staged,self.state)
+
+    def supervise(self):
+        """Replace dead tiles, keeping live tiles and the proxy untouched.
+
+        Failed replacements remain unavailable and retry with bounded backoff.
+        Never publish one whose reconciliation or bootstrap cut failed.
+        """
+        for label,tile in self.tiles.items():
+            if tile.server.process.poll() is None:
+                continue
+            if time.monotonic()<getattr(tile,'retry_after',0):
+                continue
+            previous = tile.fence.copy()
+            started = time.monotonic()
+            try:
+                tile.start()
+            except Exception as error:
+                # A partially started replacement must not accept players.
+                tile.server.process.kill()
+                tile.server.process.wait(timeout=10)
+                tile.server.stop()
+                if hasattr(tile,'control'):
+                    tile.control[0].close()
+                    tile.control[1].close()
+                tile.restart_failures = getattr(tile,'restart_failures',0)+1
+                delay = min(5,2**min(tile.restart_failures-1,3))
+                tile.retry_after = time.monotonic()+delay
+                print('CLUSTER_RESTART_FAILED '+json.dumps({'tile':label,'error':str(error),'retry_seconds':delay}),flush=True)
+                continue
+            tile.restart_failures = 0
+            tile.retry_after = 0
+            self.publish_state()
+            event = {'tile':label,'old_process':previous['process'],
+                'process':tile.fence['process'],'epoch':tile.fence['epoch'],
+                'seconds':time.monotonic()-started}
+            self.restarts.append(event)
+            print('CLUSTER_RESTART '+json.dumps(event),flush=True)
+
+    def checkpoint_tiles(self):
+        for tile in self.tiles.values():
+            if tile.server.process.poll() is not None:
+                continue
+            try:
+                reply = tile.ask(f'tile-cut {tile.token}')
+                if reply.get('ok') is not True:
+                    raise RuntimeError(f'background cut refused: {reply}')
+            except (OSError,RuntimeError):
+                # Death can race the periodic cut after supervise's poll.
+                # Let the next loop replace it, without stopping healthy tiles.
+                if tile.server.process.poll() is None:
+                    raise
+
     def player(self, uuid):
         response = store.call(self.address,store.request(9,int(uuid.replace('-',''),16).to_bytes(16,'little')))
         if response[:3] != b'\1\3\1':
@@ -292,10 +376,10 @@ class Cluster:
 
     def stop_proxy(self):
         if self.proxy:
-            self.proxy.stop()
+            stop_child(self.proxy)
             self.proxy = None
         for child in getattr(self,'sidecars',[]):
-            child.stop()
+            stop_child(child)
         self.sidecars = []
 
     def stop(self):
@@ -496,7 +580,7 @@ def items(cluster,args):
 def proof(cluster, args):
     result = {'status':'running','requested':args.crossings,'trials':[],'disconnects':0,'tile_edge':cluster.edge,
         'bootstrap':{label:tile.bootstrap for label,tile in cluster.tiles.items()},'load_start':os.getloadavg()}
-    result['binary_sha256']={name:e8.prereq.sha256(BINS/name) for name in ('horizon-client','meridian','goliath-store','e4-client')}
+    result['binary_sha256']={name:e8.prereq.sha256(cluster.store_binary if name=='goliath-store' else BINS/name) for name in ('horizon-client','meridian','goliath-store','e4-client')}
     client = None
     try:
         with environment(env(cluster.root/'client-private')):
@@ -610,6 +694,7 @@ def main():
     parser.add_argument('action',choices=['start','stop','proof','walking','items','build'])
     parser.add_argument('--state',type=Path)
     parser.add_argument('--resources',type=Path,default=RESOURCES)
+    parser.add_argument('--store-binary',type=Path,help='store executable override, default: retained E10 goliath-store')
     parser.add_argument('--edge',type=int)
     parser.add_argument('--build',action='store_true')
     parser.add_argument('--fresh',action='store_true')
@@ -637,7 +722,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='E10-cluster-',dir=RUNS) as temporary:
         try:
             cluster=Cluster.__new__(Cluster)
-            cluster.__init__(Path(temporary),args.resources,edge,args.normal)
+            cluster.__init__(Path(temporary),args.resources,edge,args.normal,store_binary=args.store_binary.resolve() if args.store_binary else None)
             print(f'Cluster ready on 127.0.0.1:{cluster.port}; state {cluster.state}',flush=True)
             if args.action=='proof':
                 proof(cluster,args)
@@ -649,13 +734,9 @@ def main():
                 signal.signal(signal.SIGTERM,lambda *_:cluster.state.with_suffix('.stop').touch())
                 next_cut=time.monotonic()+5
                 while not cluster.state.with_suffix('.stop').exists():
-                    if any(tile.server.process.poll() is not None for tile in cluster.tiles.values()):
-                        raise RuntimeError('tile exited; cluster stopped fail-closed')
+                    cluster.supervise()
                     if time.monotonic()>=next_cut:
-                        for tile in cluster.tiles.values():
-                            reply=tile.ask(f'tile-cut {tile.token}')
-                            if reply.get('ok') is not True:
-                                raise RuntimeError(f'background cut refused: {reply}')
+                        cluster.checkpoint_tiles()
                         next_cut=time.monotonic()+5
                     time.sleep(.25)
         finally:

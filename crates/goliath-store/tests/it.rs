@@ -375,6 +375,16 @@ fn blocking_client_reconnects_after_a_proxy_discards_the_real_store_response() {
         let mut first = None;
         for attempt in 0..2 {
             let (mut socket, _) = listener.accept().expect("proxy connection");
+            if attempt == 0 {
+                let warm = goliath_store::read_request(&mut socket, timeout)
+                    .expect("warm reused connection");
+                assert_eq!(warm.operation, Operation::Directory);
+                let response = Client::new(backend, timeout, 1)
+                    .unwrap()
+                    .call(&warm)
+                    .unwrap();
+                goliath_store::write_response(&mut socket, &response, timeout).unwrap();
+            }
             let incoming =
                 goliath_store::read_request(&mut socket, timeout).expect("proxy request");
             if let Some(first) = &first {
@@ -393,6 +403,15 @@ fn blocking_client_reconnects_after_a_proxy_discards_the_real_store_response() {
         }
     });
     let client = Client::new(address, Duration::from_secs(2), 2).unwrap();
+    assert!(matches!(
+        client
+            .call(&Command {
+                id: RequestId(0),
+                operation: Operation::Directory
+            })
+            .unwrap(),
+        Response::Directory(_)
+    ));
     assert_eq!(
         client.call(&command).unwrap(),
         Response::Committed(Generation(1))
@@ -402,6 +421,70 @@ fn blocking_client_reconnects_after_a_proxy_discards_the_real_store_response() {
         panic!("missing player")
     };
     assert_eq!(record.generation, Generation(1));
+    server.kill();
+    drop(server);
+    fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn client_reuses_one_socket_and_fresh_mode_still_connects_per_call() {
+    for fresh in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let timeout = Duration::from_secs(2);
+            let (mut stream, _) = listener.accept().unwrap();
+            for index in 0..2 {
+                if index == 1 && fresh {
+                    stream = listener.accept().unwrap().0;
+                }
+                let command = goliath_store::read_request(&mut stream, timeout).unwrap();
+                assert_eq!(command.operation, Operation::Directory);
+                goliath_store::write_response(&mut stream, &Response::Directory(vec![]), timeout)
+                    .unwrap();
+            }
+        });
+        let client = if fresh {
+            Client::fresh(address, Duration::from_secs(2), 1)
+        } else {
+            Client::new(address, Duration::from_secs(2), 1)
+        }
+        .unwrap();
+        let command = Command {
+            id: RequestId(0),
+            operation: Operation::Directory,
+        };
+        let (_, first) = client.call_with_timing(&command).unwrap();
+        let (_, second) = client.call_with_timing(&command).unwrap();
+        assert!(!first.connect.is_zero());
+        assert_eq!(second.connect.is_zero(), !fresh);
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn existing_wire_frames_can_be_pipelined_on_one_store_connection() {
+    let path = path();
+    let mut server = Server::start(path.clone());
+    let mut stream = TcpStream::connect(server.address).unwrap();
+    let timeout = Duration::from_secs(2);
+    for id in 1..=2 {
+        goliath_store::write_request(
+            &mut stream,
+            &Command {
+                id: RequestId(id),
+                operation: Operation::Claim(TileId(id as usize - 1)),
+            },
+            timeout,
+        )
+        .unwrap();
+    }
+    for tile in 0..2 {
+        assert!(
+            matches!(goliath_store::read_response(&mut stream, timeout).unwrap(), Response::Claimed(fence) if fence.tile == TileId(tile))
+        );
+    }
+    drop(stream);
     server.kill();
     drop(server);
     fs::remove_dir_all(path).unwrap();

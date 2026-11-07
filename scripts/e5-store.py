@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""E9 rerun of E5 crash, fence, torn-tail and barrier checks, stdlib only."""
+"""E15 rerun of E5 crash, fence, torn-tail, barrier and latency checks, stdlib only."""
 
 import argparse
 import concurrent.futures
 import csv
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -27,6 +28,9 @@ U32 = struct.Struct("<I")
 ID_LOCK = threading.Lock()
 NEXT_ID = random.SystemRandom().randrange(1, 1 << 96)
 PEAK_RUN_BYTES = 0
+QUIET_FILES = []
+QUIET_DEADLINE = None
+QUIET_ACK_DEADLINE = None
 
 
 def request(operation, payload=b"", ident=None):
@@ -74,8 +78,12 @@ def receive(sock):
 def call(address, message):
     with socket.create_connection(address, timeout=5) as sock:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        sock.sendall(U32.pack(len(message)) + message)
-        return receive(sock)
+        return exchange(sock, message)
+
+
+def exchange(sock, message):
+    sock.sendall(U32.pack(len(message)) + message)
+    return receive(sock)
 
 
 def player_record(address, player):
@@ -199,7 +207,10 @@ def kill_run(binary, root, count, seed, clients):
 
             def worker(player):
                 nonlocal acknowledgements, uncertain
+                sock = None
                 try:
+                    sock = socket.create_connection(server.address, timeout=5)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     generation = observed[player]
                     barrier.wait(timeout=10)
                     while not stop.is_set():
@@ -208,7 +219,7 @@ def kill_run(binary, root, count, seed, clients):
                         with lock:
                             last_request[player] = (message, generation + 1)
                         try:
-                            response = call(server.address, message)
+                            response = exchange(sock, message)
                         except OSError:
                             with lock:
                                 uncertain += 1
@@ -223,6 +234,9 @@ def kill_run(binary, root, count, seed, clients):
                 except BaseException as error:
                     with lock:
                         errors.append(repr(error))
+                finally:
+                    if sock is not None:
+                        sock.close()
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=clients) as pool:
                 futures = [pool.submit(worker, player) for player in range(clients)]
@@ -246,6 +260,7 @@ def kill_run(binary, root, count, seed, clients):
             generation, _, _ = player_record(server.address, player)
             assert generation >= max(acknowledged[player], observed[player])
         return dict(seed=seed, kills=count, clients=clients, load_acknowledgements=acknowledgements,
+                    transport="persistent load workers, fresh recovery observer and retries",
                     transport_unknown=uncertain, retries_completed_missing=applied_uncertain,
                     distinct_snapshots=len(snapshots), lost_acknowledgements=0,
                     backwards_generations=0, owner_violations=0, observation_sha256=digest.hexdigest())
@@ -356,10 +371,34 @@ def tail_run(binary, root):
         shutil.rmtree(fixture)
 
 
-def latency_run(binary, root, mode, clients, samples, rows, driver=None):
-    load_before = os.getloadavg()
+def wait_for_load(load_limit):
+    while True:
+        missing = [path.name for path in QUIET_FILES if not path.is_file()]
+        if not missing and (load_limit is None or os.getloadavg()[0] <= load_limit):
+            return os.getloadavg()
+        if missing and QUIET_ACK_DEADLINE is not None and time.monotonic() >= QUIET_ACK_DEADLINE:
+            raise TimeoutError("quiet acknowledgements missing after 30 minutes")
+        if QUIET_DEADLINE is not None and time.monotonic() >= QUIET_DEADLINE:
+            raise TimeoutError("quiet window wait exceeded deadline")
+        print(f"waiting for load <= {load_limit}: {os.getloadavg()}, missing quiet files: {missing}", flush=True)
+        time.sleep(5)
+
+
+def latency_run(binary, root, mode, clients, samples, rows, driver=None, *, compact=256,
+                trace=None, load_limit=None, driver_args=(), server_args=(), error_output=None,
+                socket_sample=False):
+    launch_load = wait_for_load(load_limit)
     path = root / f"latency-{mode}-{clients}"
-    server = Server(binary, path, mode=mode, compact=256)
+    previous_trace = os.environ.get("GOLIATH_STORE_TRACE")
+    if trace:
+        os.environ["GOLIATH_STORE_TRACE"] = str(trace)
+    try:
+        server = Server(binary, path, mode=mode, compact=compact, extra=server_args)
+    finally:
+        if previous_trace is None:
+            os.environ.pop("GOLIATH_STORE_TRACE", None)
+        else:
+            os.environ["GOLIATH_STORE_TRACE"] = previous_trace
     try:
         fences = [claim(server.address, tile) for tile in range(2)]
         for player in range(clients):
@@ -383,18 +422,59 @@ def latency_run(binary, root, mode, clients, samples, rows, driver=None):
                 measured.append(elapsed)
             return measured
 
+        load_before = wait_for_load(load_limit)
+        monitor_done = threading.Event()
+        monitor_start = time.monotonic()
+        disturbances = []
+        loads = [load_before[0]]
+        socket_observations = []
+
+        def monitor():
+            previous = None
+            while True:
+                load = os.getloadavg()[0]
+                loads.append(load)
+                missing = [path.name for path in QUIET_FILES if not path.is_file()]
+                state = (tuple(missing), load_limit is not None and load > load_limit)
+                if state != previous and (missing or state[1]):
+                    disturbances.append(dict(seconds=round(time.monotonic() - monitor_start, 3),
+                        missing=missing, load=load))
+                previous = state
+                if socket_sample and not socket_observations and time.monotonic() - monitor_start >= .5:
+                    output = subprocess.run(["netstat", "-an", "-p", "tcp"], capture_output=True, text=True, timeout=5)
+                    socket_observations.append(dict(seconds=round(time.monotonic() - monitor_start, 3),
+                        time_wait=sum("TIME_WAIT" in line for line in output.stdout.splitlines()),
+                        established=sum("ESTABLISHED" in line for line in output.stdout.splitlines()),
+                        returncode=output.returncode, scope="whole host"))
+                if monitor_done.wait(.02):
+                    break
+
+        monitoring = threading.Thread(target=monitor)
+        monitoring.start()
         begin = time.perf_counter()
         if driver is None:
             with concurrent.futures.ThreadPoolExecutor(max_workers=clients) as pool:
                 values = list(pool.map(worker, range(clients)))
         else:
-            output = subprocess.run([str(driver), ":".join(map(str, server.address)), str(clients), str(samples)],
-                                    check=True, capture_output=True, text=True, timeout=60)
+            try:
+                output = subprocess.run([str(driver), ":".join(map(str, server.address)), str(clients), str(samples), *driver_args],
+                                        check=True, capture_output=True, text=True, timeout=60)
+            except subprocess.CalledProcessError as error:
+                detail = dict(returncode=error.returncode,
+                              stderr=error.stderr.replace(str(ROOT), "$REPO").replace(str(Path.home()), "$HOME"),
+                              load_average=os.getloadavg(), clients=clients, samples_per_client=samples)
+                if error_output:
+                    error_output.write_text(json.dumps(detail, indent=2) + "\n")
+                raise RuntimeError(f"Rust driver failed: {detail}") from error
             values = [[] for _ in range(clients)]
+            phases = {key: [] for key in ("connect_ms", "write_ms", "read_ms")}
             for row in csv.DictReader(output.stdout.splitlines()):
                 player = int(row["player"])
                 assert int(row["index"]) == len(values[player]), row
                 values[player].append(float(row["milliseconds"]))
+                for key in phases:
+                    if key in row:
+                        phases[key].append(float(row[key]))
             assert all(len(group) == samples for group in values)
         elapsed = time.perf_counter() - begin
         flat = sorted(value for group in values for value in group)
@@ -407,9 +487,23 @@ def latency_run(binary, root, mode, clients, samples, rows, driver=None):
                       p50_ms=percentile(.50), p95_ms=percentile(.95), p99_ms=percentile(.99),
                       max_ms=round(flat[-1], 6), wall_seconds=round(elapsed, 3))
         result.update(load_average_before=load_before, load_average_after=os.getloadavg())
+        result["load_average_at_launch"] = launch_load
+        result.update(disturbed=bool(disturbances), disturbances=disturbances,
+                      peak_one_minute_load=max(loads), quiet_files=[path.name for path in QUIET_FILES],
+                      socket_observations=socket_observations)
+        result.update(compact_every=compact, driver_args=list(driver_args), server_args=list(server_args))
+        if driver is not None:
+            result["driver_sha256"] = hashlib.sha256(driver.read_bytes()).hexdigest()
+            result["client_phases"] = {key: {"mean": sum(values) / len(values),
+                "p50": sorted(values)[math.ceil(.5 * len(values)) - 1],
+                "p95": sorted(values)[math.ceil(.95 * len(values)) - 1], "max": max(values)}
+                for key, values in phases.items() if values}
         print(f"latency {result}", flush=True)
         return result
     finally:
+        if "monitor_done" in locals():
+            monitor_done.set()
+            monitoring.join()
         server.kill()
         shutil.rmtree(path)
 
@@ -456,13 +550,34 @@ def barrier_control(binary, root, early=False):
 
 
 def main():
+    global QUIET_FILES, QUIET_DEADLINE, QUIET_ACK_DEADLINE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/goliath-store")
     parser.add_argument("--kills", type=int, default=1000)
-    parser.add_argument("--latency-driver", type=Path)
-    parser.add_argument("--output", type=Path, default=ROOT / "docs/experiments/data/E9")
+    parser.add_argument("--latency-driver", type=Path, default=os.environ.get("GOLIATH_STORE_LATENCY_DRIVER"))
+    parser.add_argument("--latency-clients", type=int, nargs="+", default=[1, 8, 64, 256])
+    parser.add_argument("--latency-samples", type=int, help="samples per client, otherwise E9 defaults")
+    parser.add_argument("--latency-modes", nargs="+", choices=["full", "fsync"], default=["fsync", "full"])
+    parser.add_argument("--compact-every", type=int, default=256)
+    parser.add_argument("--trace", action="store_true")
+    parser.add_argument("--load-limit", type=float, default=4)
+    parser.add_argument("--driver-arg", action="append", default=[])
+    parser.add_argument("--server-arg", action="append", default=[])
+    parser.add_argument("--skip-latency", action="store_true", default=os.environ.get("GOLIATH_STORE_SKIP_LATENCY") == "1",
+                        help="run safety separately from quiet-host latency trials")
+    parser.add_argument("--quiet-window", action="store_true", help="require the request and E12/E13/E14 acknowledgements")
+    parser.add_argument("--socket-sample", action="store_true", help="one system TCP state snapshot during the driver")
+    parser.add_argument("--output", type=Path, default=os.environ.get("GOLIATH_STORE_OUTPUT", ROOT / "docs/experiments/data/E15"))
     parser.add_argument("--only", choices=["all", "kills", "fence", "tail", "latency", "barrier"], default="all")
     args = parser.parse_args()
+    if args.quiet_window:
+        quiet = ROOT / ".local/quiet-request"
+        QUIET_FILES = [quiet, *(ROOT / f".local/quiet-ack-{agent}" for agent in ("E12", "E13", "E14"))]
+        requested = datetime.fromisoformat(quiet.read_text().splitlines()[0]).timestamp()
+        QUIET_DEADLINE = time.monotonic() + max(0, 3600 - (time.time() - requested))
+        QUIET_ACK_DEADLINE = time.monotonic() + max(0, 1800 - (time.time() - requested))
+    if args.only == "latency" and args.skip_latency:
+        parser.error("--skip-latency conflicts with --only latency")
     assert args.kills >= 0
     RUNS.mkdir(parents=True, exist_ok=True)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -497,11 +612,18 @@ def main():
             first = args.kills // 2
             result["kills"] = [kill_run(args.binary, root, first, 5001, 8),
                                kill_run(args.binary, root, args.kills - first, 5002, 8)]
-        if args.only in ("all", "latency"):
+        # Keep completed safety evidence if shared host load delays timing.
+        if args.only == "all":
+            (args.output / "safety-results.json").write_text(json.dumps(result, indent=2) + "\n")
+        if args.only in ("all", "latency") and not args.skip_latency:
             rows = []
-            result["latency"] = [latency_run(args.binary, root, mode, clients, samples, rows, args.latency_driver)
-                                 for mode in ("fsync", "full")
-                                 for clients, samples in ((1, 256), (8, 64), (64, 16), (256, 8))]
+            defaults = {1: 256, 8: 64, 64: 16, 256: 8}
+            result["latency"] = [latency_run(args.binary, root, mode, clients,
+                                 args.latency_samples or defaults.get(clients, 64), rows, args.latency_driver,
+                                 compact=args.compact_every, trace=args.output / f"trace-{mode}-{clients}.csv" if args.trace else None,
+                                 load_limit=args.load_limit, driver_args=args.driver_arg, server_args=args.server_arg,
+                                 error_output=args.output / "driver-error.json", socket_sample=args.socket_sample)
+                                 for mode in args.latency_modes for clients in args.latency_clients]
             write_csv(args.output / "latency.csv", ["mode", "clients", "player", "index", "milliseconds"], rows)
         result["wall_seconds"] = round(time.perf_counter() - begin, 3)
         result["peak_sampled_run_allocated_bytes"] = PEAK_RUN_BYTES

@@ -1,7 +1,7 @@
 //! Owns an independent threaded latency driver without Python's interpreter lock.
 
 use goliath_model::{Fence, Generation, OwnershipCas, PlayerId, TileId};
-use goliath_store::{Blob, Client, Command, Operation, RequestId, Response};
+use goliath_store::{Blob, CallTiming, Client, Command, Operation, RequestId, Response};
 use std::error::Error;
 use std::io;
 use std::net::SocketAddr;
@@ -31,20 +31,28 @@ fn commit(player: usize, generation: u64, fences: [Fence; 2]) -> Command {
     }
 }
 
-fn checked(client: &Client, command: &Command, generation: u64) -> io::Result<()> {
-    let response = client.call(command)?;
+fn checked(client: &Client, command: &Command, generation: u64) -> io::Result<CallTiming> {
+    let (response, timing) = client.call_with_timing(command)?;
     if response != Response::Committed(Generation(generation)) {
         return Err(io::Error::other(format!(
             "unexpected commit response {response:?}"
         )));
     }
-    Ok(())
+    Ok(timing)
+}
+
+struct Sample {
+    elapsed: Duration,
+    timing: CallTiming,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 3 {
-        return Err("usage: goliath-store-load ADDRESS CLIENTS SAMPLES_PER_CLIENT".into());
+    let fresh = args.get(3).is_some_and(|arg| arg == "--fresh");
+    if args.len() != 3 && !(args.len() == 4 && fresh) {
+        return Err(
+            "usage: goliath-store-load ADDRESS CLIENTS SAMPLES_PER_CLIENT [--fresh]".into(),
+        );
     }
     let address: SocketAddr = args[0].parse()?;
     let clients: usize = args[1].parse()?;
@@ -71,23 +79,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     let fences: [Fence; 2] = fences.try_into().map_err(|_| "need two fences")?;
-    for player in 0..clients {
-        checked(&client, &commit(player, 0, fences), 1)?;
+    let make_client = || {
+        if fresh {
+            Client::fresh(address, Duration::from_secs(5), 1)
+        } else {
+            Client::new(address, Duration::from_secs(5), 1)
+        }
+    };
+    let measured_clients = (0..clients)
+        .map(|_| make_client())
+        .collect::<io::Result<Vec<_>>>()?;
+    for (player, client) in measured_clients.iter().enumerate() {
+        checked(client, &commit(player, 0, fences), 1)?;
     }
     let start = Barrier::new(clients);
-    let groups = std::thread::scope(|scope| -> io::Result<Vec<Vec<f64>>> {
+    let groups = std::thread::scope(|scope| -> io::Result<Vec<Vec<Sample>>> {
         let mut workers = Vec::new();
-        for player in 0..clients {
+        for (player, client) in measured_clients.iter().enumerate() {
             let start = &start;
-            let client = &client;
-            workers.push(scope.spawn(move || -> io::Result<Vec<f64>> {
+            workers.push(scope.spawn(move || -> io::Result<Vec<Sample>> {
                 let mut values = Vec::new();
                 start.wait();
                 for index in 0..samples {
                     let command = commit(player, index + 1, fences);
                     let begin = Instant::now();
-                    checked(client, &command, index + 2)?;
-                    values.push(begin.elapsed().as_secs_f64() * 1000.0);
+                    let timing = checked(client, &command, index + 2)?;
+                    values.push(Sample {
+                        elapsed: begin.elapsed(),
+                        timing,
+                    });
                 }
                 Ok(values)
             }));
@@ -115,10 +135,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             return Err("measured player state mismatch".into());
         }
     }
-    println!("player,index,milliseconds");
+    println!("player,index,milliseconds,connect_ms,write_ms,read_ms");
     for (player, group) in groups.iter().enumerate() {
         for (index, value) in group.iter().enumerate() {
-            println!("{player},{index},{value:.6}");
+            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+            println!(
+                "{player},{index},{:.6},{:.6},{:.6},{:.6}",
+                ms(value.elapsed),
+                ms(value.timing.connect),
+                ms(value.timing.write),
+                ms(value.timing.read)
+            );
         }
     }
     Ok(())

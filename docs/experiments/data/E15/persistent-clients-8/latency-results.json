@@ -1,0 +1,83 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "d2fe29febdb54a4a113e3dd9112b8b12fa214a54ffc14de4e911600002331612",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --only latency --latency-driver .local/bin/goliath-store-e15-persistent-d4d84912bcd1/goliath-store-load --binary .local/bin/goliath-store-e15-persistent-d4d84912bcd1/goliath-store --latency-clients 8 --latency-samples 256 --latency-modes full --quiet-window --output docs/experiments/data/E15/persistent-clients-8",
+  "load_average_before": [
+    3.38720703125,
+    14.388671875,
+    18.00048828125
+  ],
+  "latency": [
+    {
+      "mode": "full",
+      "clients": 8,
+      "samples": 2048,
+      "blob_bytes": 256,
+      "driver": "rust",
+      "p50_ms": 7.075792,
+      "p95_ms": 11.944875,
+      "p99_ms": 15.910042,
+      "max_ms": 16.087583,
+      "wall_seconds": 2.014,
+      "load_average_before": [
+        3.38720703125,
+        14.388671875,
+        18.00048828125
+      ],
+      "load_average_after": [
+        3.38720703125,
+        14.388671875,
+        18.00048828125
+      ],
+      "load_average_at_launch": [
+        3.38720703125,
+        14.388671875,
+        18.00048828125
+      ],
+      "disturbed": false,
+      "disturbances": [],
+      "peak_one_minute_load": 3.38720703125,
+      "quiet_files": [
+        "quiet-request",
+        "quiet-ack-E12",
+        "quiet-ack-E13",
+        "quiet-ack-E14"
+      ],
+      "socket_observations": [],
+      "compact_every": 256,
+      "driver_args": [],
+      "server_args": [],
+      "driver_sha256": "907837509870db137b806e993eb2859756451437a7e1dd505efef9aa071d69bf",
+      "client_phases": {
+        "connect_ms": {
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "max": 0.0
+        },
+        "write_ms": {
+          "mean": 0.0107223828125,
+          "p50": 0.009916,
+          "p95": 0.020792,
+          "max": 0.060041
+        },
+        "read_ms": {
+          "mean": 7.674329175292969,
+          "p50": 7.065583,
+          "p95": 11.936292,
+          "max": 16.080708
+        }
+      }
+    }
+  ],
+  "wall_seconds": 2.087,
+  "peak_sampled_run_allocated_bytes": 1327104,
+  "target_allocated_bytes_at_end": 406695936,
+  "load_average_after": [
+    3.38720703125,
+    14.388671875,
+    18.00048828125
+  ]
+}

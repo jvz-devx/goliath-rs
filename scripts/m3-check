@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Check E13's independent location counts, phase coverage and replay schedule."""
+import argparse
+from collections import Counter
+import gzip
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT/'docs/experiments/data/E13'
+PHASES = {'write':'mid-append','fsync':'head-rename','install':'installed',
+          'cas':'store CAS durable, response held','ack':'target activation applied, reply held'}
+
+
+def saved_trials():
+    archive = DATA/'campaign-trials.jsonl.gz'
+    if not archive.exists():
+        return {}
+    with gzip.open(archive,'rt') as stream:
+        return {row['file']:row['result'] for row in map(json.loads,stream)}
+
+
+def verify(row):
+    if row['case']!='crossing' or row['status']!='complete':
+        raise ValueError('crossing did not complete its recovery audit')
+    expected = {f'E13-{row["seed"]}-carry':7,f'E13-{row["seed"]}-chest':11,f'E13-{row["seed"]}-drop':13}
+    if row['expected']!=expected:
+        raise ValueError('fixture expectation changed')
+    if row['gate']!=PHASES[row['phase']]:
+        raise ValueError('wrong deterministic gate')
+    if row['phase']=='ack':
+        placed = row.get('gate_response',{}).get('placed') is True
+        # Early pilot/campaign rows retain the same fact in complete logs.
+        placed |= any(phase['phase']=='activation' for phase in row['phases'])
+        placed |= any('player-import ' in line and ': ok,' in line and 'placed true' in line
+                      for line in row['tails']['servers']['b'])
+        if not placed:
+            raise ValueError('ack gate has no successful activation evidence')
+    if not row['run_directory_removed'] or not row['binaries_unchanged']:
+        raise ValueError('run cleanup or binary identity failed')
+    recovered = row['recovered']
+    totals = Counter()
+    for location,counts in recovered['locations'].items():
+        if location=='store/escrow' and any('/player/' in key and value for key,value in recovered['locations'].items()):
+            raise ValueError('store escrow counted beside a resident inventory')
+        totals.update(counts)
+    recomputed = {name:totals[name] for name in row['expected']}
+    if recomputed!=recovered['totals'] or recomputed!=row['expected']:
+        raise ValueError('named identity duplication or loss')
+    if row['duplicates'] or row['losses'] or recovered['stale_files']:
+        raise ValueError('reported safety violation')
+    before = row['before_fault']
+    if row['phase'] in ('cas','ack'):
+        if before!={'generation':1,'owner':1} or (recovered['generation'],recovered['owner'])!=(1,1):
+            raise ValueError('durable CAS lost on recovery')
+    elif before!={'generation':0,'owner':0}:
+        raise ValueError('CAS preceded the blocked source cut')
+    return row['phase'],row['victim']
+
+
+def campaign(name):
+    schedule = json.loads((DATA/f'{name}-schedule.json').read_text())
+    outcome = json.loads((DATA/f'{name}-campaign.json').read_text())
+    if outcome['status']!='complete' or len(outcome['trials'])!=schedule['requested']:
+        raise ValueError('campaign incomplete')
+    coverage = Counter()
+    binaries = None
+    rollbacks = Counter()
+    packed = saved_trials()
+    for planned,actual in zip(schedule['trials'],outcome['trials'],strict=True):
+        if planned!={key:actual[key] for key in ('seed','phase','victim')} or actual['exit']!=0:
+            raise ValueError('schedule changed or failing seed omitted')
+        path = DATA/f'{actual.get("evidence_name",name)}-{planned["seed"]}.json'
+        row = json.loads(path.read_text()) if path.exists() else packed[path.name]
+        if {key:row[key] for key in planned}!=planned:
+            raise ValueError('seed result does not match schedule')
+        coverage[verify(row)]+=1
+        if binaries is None:
+            binaries = row['binaries']
+        elif binaries!=row['binaries']:
+            raise ValueError('campaign mixed binaries')
+        carry = next(key for key in row['expected'] if key.endswith('-carry'))
+        if row['recovered']['locations']['a/region'].get(carry)==7:
+            rollbacks[row['phase']]+=1
+    return {'crossings':sum(coverage.values()),'coverage':{phase:{victim:coverage[phase,victim] for victim in ('source','target','both')} for phase in PHASES},
+            'take_rolled_back_to_chest':dict(rollbacks),'binaries':binaries}
+
+
+def pack(name):
+    """Losslessly pack campaign trials, retaining failed startups as well."""
+    campaign(name)
+    archive = DATA/'campaign-trials.jsonl.gz'
+    if archive.exists():
+        raise ValueError('archive already exists')
+    paths = [path for path in sorted(DATA.glob('campaign-*.json')) if path.stem.rsplit('-',1)[-1].isdigit()]
+    original = [(json.dumps({'file':path.name,'result':json.loads(path.read_text())},separators=(',',':'))+'\n').encode() for path in paths]
+    staged = archive.with_suffix('.new')
+    with staged.open('wb') as raw,gzip.GzipFile(filename='',mode='wb',fileobj=raw,mtime=0) as stream:
+        for value in original:
+            stream.write(value)
+    if gzip.decompress(staged.read_bytes())!=b''.join(original):
+        raise ValueError('compressed evidence differs')
+    staged.replace(archive)
+    (DATA/'campaign-trials-index.json').write_text(json.dumps({'files':[path.name for path in paths]},separators=(',',':'))+'\n')
+    for path in paths:
+        path.unlink()
+    campaign(name)
+
+
+if __name__=='__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('name',nargs='?',default='campaign')
+    parser.add_argument('--pack',action='store_true')
+    args = parser.parse_args()
+    if args.pack:
+        pack(args.name)
+    print(json.dumps(campaign(args.name),indent=2))

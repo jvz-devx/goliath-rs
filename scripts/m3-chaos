@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+"""E13 real-process fault reproduction with retained E10 binaries only.
+
+Each seed owns a fresh four-tile cluster. Evidence is immutable. Run folders
+are removed even on failure. A failed invariant exits 1 and keeps the seed.
+"""
+import argparse
+import concurrent.futures
+import json
+import random
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+
+from m3_chaos_support import Proxy, audit, cluster, connect, fixture, kill, lines, save, tails, wait
+
+
+def quiet_window():
+    """Wait between independent trials, never interrupt a live cluster."""
+    request = cluster.ROOT/'.local/quiet-request'
+    ack = cluster.ROOT/'.local/quiet-ack-E13'
+    try:
+        began = request.stat().st_mtime
+    except FileNotFoundError:
+        ack.unlink(missing_ok=True)
+        return
+    noted = False
+    while request.exists():
+        if time.time()-began>=40*60:
+            break
+        # All E13 cluster run folders disappear only after process cleanup.
+        # Other in-flight seeds finish before any waiting child acknowledges.
+        if not any(path.is_dir() for path in cluster.RUNS.glob('E13-*')):
+            if not ack.exists():
+                ack.write_text('E13 quiet. All active trials finished; no new engines or builds.\n')
+            if not noted:
+                print('E13 quiet window acknowledged',flush=True)
+                noted = True
+        time.sleep(1)
+    ack.unlink(missing_ok=True)
+
+
+def reserve_run(seed):
+    """Make the active run visible before hashing binaries or starting engines."""
+    request = cluster.ROOT/'.local/quiet-request'
+    while True:
+        quiet_window()
+        directory = tempfile.TemporaryDirectory(prefix=f'E13-{seed}-',dir=cluster.RUNS)
+        try:
+            requested = time.time()-request.stat().st_mtime<40*60
+        except FileNotFoundError:
+            requested = False
+        if not requested:
+            return directory
+        # The request raced our first check. No heavy work has started, so
+        # remove the empty reservation before waiting for the other trials.
+        directory.cleanup()
+
+
+def partition(c, seed, proxies, result):
+    tile = c.tiles['a']
+    relay = proxies[0]
+    child,name,uuid,names = fixture(c,seed)
+    result.update(seed=seed,case='partition',expected='all stale mutations rejected')
+    try:
+        before = tile.ask(f'tile-cut {tile.token}')
+        result['baseline_sequence'] = before['sequence']
+        record = c.player(uuid)
+        old = struct.pack('<QQQ',tile.index,tile.fence['process'],tile.fence['epoch'])
+        target = c.tiles['b'].fence
+        target_bytes = struct.pack('<QQQ',target['tile'],target['process'],target['epoch'])
+        # This queued cut is captured under the old ownership, before replacement.
+        gate = tile.cut/'gate-pack-sync'
+        gate.touch()
+        tile.cut.joinpath('PHASE').unlink(missing_ok=True)
+        tile.control[0].sendall(f'tile-cut {tile.token}\n'.encode())
+        wait(lambda:tile.cut.joinpath('PHASE').exists() and tile.cut.joinpath('PHASE').read_text()=='pack-sync',description='queued stale cut')
+        relay.blocked = True
+        replacement = cluster.Tile(c,'replacement-a',tile.index,tile.tile)
+        result['replacement_fence'] = [replacement.index,replacement.fence['process'],replacement.fence['epoch']]
+        result['replacement_running'] = replacement.server.process.poll() is None
+        result['replacement_bootstrap_sequence'] = replacement.bootstrap['sequence']
+        result['isolated_status'] = tile.server.process.poll()
+        gate.unlink()
+        queued = json.loads(tile.control[1].readline())
+        result['queued_cut_after_replacement'] = queued
+        # A new isolated request is not an old response or an idempotent receipt.
+        isolated = tile.ask(f'tile-cut {tile.token}')
+        result['new_cut_while_partitioned'] = isolated
+        result['simulating_while_partitioned'] = tile.ask('server-status')
+        relay.blocked = False
+        healed = tile.ask(f'tile-cut {tile.token}')
+        result['new_cut_after_heal'] = healed
+        payload = int(uuid.replace('-',''),16).to_bytes(16,'little')
+        body = json.dumps(record['body'],separators=(',',':')).encode()
+        message = cluster.store.request(11,payload+cluster.store.u64(record['generation'])+old+target_bytes+cluster.store.blob(body))
+        # Same delayed command, then exact replay. Both must be rejected.
+        result['delayed_cas'] = cluster.store.call(c.address,message).hex()
+        result['replayed_cas'] = cluster.store.call(c.address,message).hex()
+        result['player_after'] = {k:v for k,v in c.player(uuid).items() if k!='body'}
+        result['stale_placement'] = tile.ask(f'player-import {uuid} '+json.dumps(record['body']))
+        result['stale_fence_file_unchanged'] = tile.cut.joinpath('FENCE').read_text()==tile.token
+        accepted = [key for key in ('queued_cut_after_replacement','new_cut_while_partitioned','new_cut_after_heal')
+                    if result[key].get('ok') is True]
+        result['defects'] = ['stale cut accepted: '+','.join(accepted)] if accepted else []
+        cas_rejected = result['delayed_cas']==result['replayed_cas']=='010501' and result['player_after']=={'generation':0,'owner':0}
+        result['status'] = 'failed' if accepted or not cas_rejected or result['stale_placement'].get('ok') is True else 'complete'
+        return result
+    finally:
+        cluster.stop_child(child)
+        relay.blocked = False
+        tile.cut.joinpath('gate-pack-sync').unlink(missing_ok=True)
+
+
+def supervisor(c, seed, proxies, result):
+    name = f'E13Restart{seed}'
+    uuid = str(cluster.upstream.offline_uuid(name))
+    child = connect(c,name,0)
+    samples,errors = [],[]
+    finished = threading.Event()
+    old = c.tiles['a'].fence.copy()
+    old_port = c.tiles['a'].port
+    proxy_pid = c.proxy.process.pid
+    other_pids = {label:c.tiles[label].server.process.pid for label in ('b','c','d')}
+    result.update(seed=seed,case='supervisor')
+    def sample():
+        while not finished.is_set():
+            try:
+                for label in ('b','c','d'):
+                    reply = c.tiles[label].ask('server-status')
+                    samples.append({'ns':time.time_ns(),'tile':label,'tps':reply['tps'],'mspt':reply['mspt']})
+            except Exception as error:
+                errors.append(str(error))
+                return
+            finished.wait(.2)
+    thread = threading.Thread(target=sample,daemon=True)
+    try:
+        # Let Horizon's five-second TPS window lose startup's uncapped ticks.
+        time.sleep(5.1)
+        c.tiles['a'].ask(f'console give {name} minecraft:diamond[minecraft:custom_name="E13-restart-{seed}"] 9')
+        expected = cluster.e2.inventory(c.tiles['a'],uuid,cluster.upstream)
+        c.tiles['a'].ask(f'tile-cut {c.tiles["a"].token}')
+        thread.start()
+        result['killed_ns'] = time.time_ns()
+        kill(c.tiles['a'])
+        c.supervise()
+        result['restart'] = c.restarts[-1]
+        result['same_port'] = old_port==c.tiles['a'].port
+        result['new_fence'] = old['process']!=c.tiles['a'].fence['process']
+        result['proxy_unchanged'] = c.proxy.process.pid==proxy_pid and c.proxy.process.poll() is None
+        result['other_processes_unchanged'] = all(c.tiles[label].server.process.pid==pid and c.tiles[label].server.process.poll() is None for label,pid in other_pids.items())
+        result['old_client_events'] = child.events[-8:]
+        cluster.stop_child(child)
+        child = connect(c,name,1)
+        result['reconnected_ns'] = time.time_ns()
+        observed = cluster.e2.inventory(c.tiles['a'],uuid,cluster.upstream)
+        result['inventory_equal'] = observed['sha256']==expected['sha256']
+        began = time.time_ns()
+        child.send('walk resumed -1 1')
+        cluster.e8.chat(child,'E4 wall arrived b',began,20)
+        result['subsequent_crossing'] = c.player(uuid)['generation']==1
+        time.sleep(3)
+        result['status'] = 'complete' if all(result[key] for key in ('same_port','new_fence','proxy_unchanged','other_processes_unchanged','inventory_equal','subsequent_crossing')) else 'failed'
+        return result
+    finally:
+        finished.set()
+        if thread.is_alive():
+            thread.join(5)
+        cluster.stop_child(child)
+        result['samples'] = samples
+        result['sampling_errors'] = errors
+        result['minimum_tps'] = min((s['tps'] for s in samples),default=None)
+
+
+def recover_audit(c, uuid, names):
+    # No graceful save may cover the fault. Kill every surviving tile, then
+    # restore once under a new fence and inspect its actual files while stopped.
+    c.stop_proxy()
+    for tile in c.tiles.values():
+        kill(tile)
+    for tile in c.tiles.values():
+        tile.start()
+        kill(tile)
+    return audit(c,uuid,names)
+
+
+def late_abort(c, seed, result):
+    child,name,uuid,names = fixture(c,seed)
+    result.update(case='late-abort',expected=names,replays=[])
+    try:
+        began = time.time_ns()
+        child.send('walk outbound -1 1')
+        cluster.e8.chat(child,'E4 wall arrived b',began,20)
+        entry = c.player(uuid)
+        handover = entry['body']['record']['handover']
+        before = cluster.e2.inventory(c.tiles['b'],uuid,cluster.upstream)
+        for attempt in range(2):
+            reply = c.tiles['a'].ask(f'player-release {uuid} {handover} abort')
+            result['replays'].append({'after_crossings':1,'attempt':attempt,'reply':reply})
+        result['departed_export'] = c.tiles['a'].ask(f'player-export {uuid}')
+        result['target_unchanged'] = cluster.e2.inventory(c.tiles['b'],uuid,cluster.upstream)['sha256']==before['sha256']
+        began = time.time_ns()
+        child.send('walk return 1 1')
+        cluster.e8.chat(child,'E4 wall arrived a',began,20)
+        for attempt in range(2):
+            reply = c.tiles['a'].ask(f'player-release {uuid} {handover} abort')
+            result['replays'].append({'after_crossings':2,'attempt':attempt,'reply':reply})
+        result['final_record'] = {k:v for k,v in c.player(uuid).items() if k!='body'}
+        cluster.stop_child(child)
+        child = None
+        result['recovered'] = recover_audit(c,uuid,names)
+        result['status'] = 'complete' if all(row['reply'].get('ok') is not True for row in result['replays']) and result['departed_export'].get('ok') is not True and result['target_unchanged'] and result['final_record']=={'generation':2,'owner':0} and result['recovered']['totals']==names else 'failed'
+    finally:
+        if child:
+            cluster.stop_child(child)
+
+
+def stale_login(c, seed, proxies, result):
+    child,name,uuid,names = fixture(c,seed)
+    result.update(case='stale-login',expected='stale process rejects ordinary placement')
+    tile = c.tiles['a']
+    try:
+        tile.ask(f'tile-cut {tile.token}')
+        cluster.stop_child(child)
+        child = None
+        wait(lambda:tile.ask('transfer-status').get('players')==0,description='initial logout')
+        proxies[0].blocked = True
+        replacement = cluster.Tile(c,'replacement-a',tile.index,tile.tile)
+        result['old_fence'] = [tile.index,tile.fence['process'],tile.fence['epoch']]
+        result['replacement_fence'] = [replacement.index,replacement.fence['process'],replacement.fence['epoch']]
+        result['replacement_running'] = replacement.server.process.poll() is None
+        proxies[0].blocked = False
+        try:
+            child = connect(c,name,1)
+            time.sleep(.2)
+            result['old_transfer_status'] = tile.ask('transfer-status')
+            result['old_export'] = cluster.e2.inventory(tile,uuid,cluster.upstream)
+            result['reconnect_events'] = child.events[-5:]
+            result['placed_by_old_process'] = result['old_transfer_status']['players']==1
+        except Exception as error:
+            result['reconnect_refused'] = str(error)
+            result['placed_by_old_process'] = False
+        result['directory'] = cluster.store.directory(c.address)
+        result['status'] = 'failed' if result['placed_by_old_process'] else 'complete'
+    finally:
+        proxies[0].blocked = False
+        if child:
+            cluster.stop_child(child)
+
+
+def crossing(c, seed, proxies, phase, victim, result):
+    child,name,uuid,names = fixture(c,seed)
+    result.update(seed=seed,case='crossing',phase=phase,victim=victim,expected=names)
+    relays = []
+    gate_path = None
+    source,target = c.tiles['a'],c.tiles['b']
+    try:
+        if phase in ('write','fsync','install'):
+            hook = {'write':'mid-append','fsync':'head-rename','install':'installed'}[phase]
+            gate_path = source.cut/f'gate-{hook}'
+            gate_path.touch()
+            source.cut.joinpath('PHASE').unlink(missing_ok=True)
+            reached = lambda:source.cut.joinpath('PHASE').exists() and source.cut.joinpath('PHASE').read_text()==hook
+            result['gate'] = hook
+        elif phase=='cas':
+            relay = Proxy(c.address)
+            relays.append(relay)
+            manifest = json.loads(c.state.read_text())
+            manifest['store'] = f'{relay.address[0]}:{relay.address[1]}'
+            c.state.write_text(json.dumps(manifest))
+            rule = relay.arm(11,'after')
+            reached = rule['reached'].is_set
+            result['gate'] = 'store CAS durable, response held'
+        else:
+            endpoint = json.loads(target.endpoint.read_text())
+            relay = Proxy(('127.0.0.1',endpoint['port']),'control')
+            relays.append(relay)
+            endpoint['port'] = relay.address[1]
+            endpoint_path = c.root/'b-gated-endpoint.json'
+            endpoint_path.write_text(json.dumps(endpoint))
+            manifest = json.loads(c.state.read_text())
+            manifest['tiles']['b']['endpoint'] = str(endpoint_path)
+            c.state.write_text(json.dumps(manifest))
+            rule = relay.arm('player-import','after')
+            reached = rule['reached'].is_set
+            result['gate'] = 'target activation applied, reply held'
+        began = time.time_ns()
+        child.send('walk fault -1 1')
+        wait(reached,20,'crossing phase '+phase)
+        if phase=='ack':
+            response = json.loads(rule['response'])
+            if response.get('ok') is not True or response.get('placed') is not True:
+                raise RuntimeError('activation gate caught a refusal, not placement')
+            result['gate_response'] = response
+        elif phase=='cas':
+            result['gate_response'] = rule['response'].hex()
+            if rule['response']!=b'\1\4'+cluster.store.u64(1):
+                raise RuntimeError('CAS gate caught a rejection, not a durable commit')
+        result['fault_ns'] = time.time_ns()
+        result['before_fault'] = {k:v for k,v in c.player(uuid).items() if k!='body'}
+        if victim in ('source','both'):
+            kill(source)
+        if victim in ('target','both'):
+            kill(target)
+        if victim=='proxy':
+            c.proxy.process.kill()
+            c.proxy.process.wait(10)
+        if victim=='store':
+            c.store_process.kill()
+            c.store_process.wait(10)
+        if gate_path:
+            gate_path.unlink()
+        for relay in relays:
+            relay.release()
+        # Let uncertainty and source abort paths run before recovering. The
+        # store case waits for its real retry timeout, not a synthetic response.
+        if victim=='store':
+            time.sleep(1)
+            for tile in c.tiles.values():
+                kill(tile)
+            c.stop_proxy()
+            c.store_log.close()
+            c.store_log = (c.root/'store-restart.log').open('w+')
+            c.store_process = cluster.subprocess.Popen([cluster.BINS/'goliath-store','--dir',c.root/'store',
+                '--listen',f'{c.address[0]}:{c.address[1]}','--sync','full'],stdout=c.store_log,stderr=cluster.subprocess.STDOUT)
+            wait(lambda:any(line.startswith('LISTEN ') for line in lines(c.root/'store-restart.log')),description='store restart')
+        else:
+            time.sleep(.5)
+        result['client_events'] = child.events[-10:]
+        result['phases'] = cluster.phase_events(c.root/'proxy.log')
+        result['tails'] = tails(c)
+        cluster.stop_child(child)
+        child = None
+        result['recovered'] = recover_audit(c,uuid,names)
+        counts = result['recovered']['totals']
+        result['duplicates'] = {key:count-names[key] for key,count in counts.items() if count>names[key]}
+        result['losses'] = {key:names[key]-count for key,count in counts.items() if count<names[key]}
+        result['status'] = 'failed' if result['duplicates'] or result['losses'] or result['recovered']['stale_files'] else 'complete'
+        return result
+    finally:
+        if gate_path:
+            gate_path.unlink(missing_ok=True)
+        for relay in relays:
+            relay.close()
+        if child:
+            cluster.stop_child(child)
+
+
+def run(args, seed, phase=None, victim=None):
+    result = {'status':'running','seed':seed,'case':args.case,'phase':phase,'victim':victim,
+              'binaries':{}}
+    c = None
+    proxies = []
+    started = time.monotonic()
+    temporary_path = None
+    def routes(address):
+        relay = Proxy(address)
+        proxies.append(relay)
+        return {'a':relay.address}
+    try:
+        with reserve_run(seed) as temporary:
+            temporary_path = cluster.Path(temporary)
+            try:
+                result['binaries'] = {name:cluster.e8.prereq.sha256(cluster.BINS/name)
+                    for name in ('horizon-client','meridian','goliath-store','e4-client','meridian-sidecar')}
+                c = cluster.Cluster.__new__(cluster.Cluster)
+                c.__init__(cluster.Path(temporary),args.resources,64,
+                    tile_env={'HORIZON_E3_TEST_PHASES':'1'},store_routes=routes if args.case in ('partition','stale-login') else None)
+                if args.case=='partition':
+                    partition(c,seed,proxies,result)
+                elif args.case=='supervisor':
+                    supervisor(c,seed,proxies,result)
+                elif args.case=='late-abort':
+                    late_abort(c,seed,result)
+                elif args.case=='stale-login':
+                    stale_login(c,seed,proxies,result)
+                else:
+                    crossing(c,seed,proxies,phase,victim,result)
+            except Exception as error:
+                result.update(status='failed',error=str(error),traceback=traceback.format_exc())
+                if c and hasattr(c,'tiles'):
+                    result['tails'] = tails(c)
+            finally:
+                if c:
+                    # Discard runtime state after evidence extraction. No final
+                    # cut is allowed to rescue a failed crash experiment.
+                    for tile in c.tiles.values():
+                        kill(tile)
+                    c.stop()
+                for relay in proxies:
+                    relay.close()
+    finally:
+        result['seconds'] = time.monotonic()-started
+        result['run_directory_removed'] = temporary_path is not None and not temporary_path.exists()
+        result['binaries_unchanged'] = all(cluster.e8.prereq.sha256(cluster.BINS/name)==digest for name,digest in result['binaries'].items())
+        if not result['binaries_unchanged']:
+            result['status'] = 'failed'
+        save(f'{args.name}-{seed}.json',result)
+    print(json.dumps({key:result.get(key) for key in ('case','seed','phase','victim','status','error','seconds')}),flush=True)
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('case',choices=['crossing','partition','supervisor','campaign','late-abort','stale-login'])
+    parser.add_argument('--seed',type=int,default=13001)
+    parser.add_argument('--phase',choices=['write','fsync','install','cas','ack'],default='write')
+    parser.add_argument('--victim',choices=['source','target','both','store','proxy'],default='source')
+    parser.add_argument('--crossings',type=int,default=1000)
+    parser.add_argument('--jobs',type=int,default=1,choices=range(1,9),help='independent cluster processes, no shared environment or worlds')
+    parser.add_argument('--resume-from',help='retain successful rows and replay failed/unstarted seeds from this evidence prefix, without changing its schedule')
+    parser.add_argument('--name',default='run')
+    parser.add_argument('--resources',type=cluster.Path,default=cluster.RESOURCES)
+    args = parser.parse_args()
+    cluster.RUNS.mkdir(parents=True,exist_ok=True)
+    if args.case=='campaign':
+        rng = random.Random(args.seed)
+        schedule = [(phase,victim) for phase in ('write','fsync','install','cas','ack') for victim in ('source','target','both')]
+        plan = []
+        for index in range(args.crossings):
+            if index%len(schedule)==0:
+                rng.shuffle(schedule)
+            phase,victim = schedule[index%len(schedule)]
+            plan.append({'seed':args.seed+index,'phase':phase,'victim':victim})
+        rows = []
+        if args.resume_from:
+            from m3_chaos_support import DATA
+            original = json.loads((DATA/f'{args.resume_from}-schedule.json').read_text())
+            previous = json.loads((DATA/f'{args.resume_from}-campaign.json').read_text())
+            if original['trials']!=plan or original['requested']!=args.crossings:
+                parser.error('resume seed/count must reproduce the original schedule exactly')
+            rows = [dict(row,evidence_name=row.get('evidence_name',args.resume_from)) for row in previous['trials'] if row['status']=='complete']
+        # Save before execution, so every planned and failed seed is replayable.
+        save(args.name+'-schedule.json',{'seed':args.seed,'requested':args.crossings,'trials':plan,'resume_from':args.resume_from})
+        completed_seeds = {row['seed'] for row in rows}
+        plan = [row for row in plan if row['seed'] not in completed_seeds]
+        def execute(row):
+            command = [sys.executable,'-B',__file__,'crossing','--seed',str(row['seed']),
+                       '--phase',row['phase'],'--victim',row['victim'],'--name',args.name,
+                       '--resources',str(args.resources)]
+            completed = subprocess.run(command,check=False)
+            return dict(row,status='complete' if completed.returncode==0 else 'failed',exit=completed.returncode,evidence_name=args.name)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            pending = {}
+            next_index = 0
+            failed = False
+            while pending or next_index<len(plan) and not failed:
+                while len(pending)<args.jobs and next_index<len(plan) and not failed:
+                    row = plan[next_index]
+                    pending[pool.submit(execute,row)] = row
+                    next_index+=1
+                done,_ = concurrent.futures.wait(pending,return_when=concurrent.futures.FIRST_COMPLETED)
+                for future in done:
+                    rows.append(future.result())
+                    pending.pop(future)
+                    failed |= rows[-1]['status']!='complete'
+                # Do not start new seeds after a defect. Preserve all in-flight
+                # runs, including their failures, then stop this line of work.
+                print(f'E13 campaign {len(rows)}/{args.crossings}',flush=True)
+        rows.sort(key=lambda row:row['seed'])
+        summary = {'seed':args.seed,'requested':args.crossings,'trials':rows,
+                   'status':'complete' if len(rows)==args.crossings and all(row['status']=='complete' for row in rows) else 'failed'}
+        save(args.name+'-campaign.json',summary)
+        return 0 if summary['status']=='complete' else 1
+    result = run(args,args.seed,args.phase,args.victim)
+    return 0 if result['status']=='complete' else 1
+
+
+if __name__=='__main__':
+    sys.exit(main())

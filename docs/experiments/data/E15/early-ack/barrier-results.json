@@ -1,0 +1,32 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "db3a4b46c1123b4ed8807ee598a6eecaf37667370f44496d53351ce90d77ebe8",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --only barrier --output docs/experiments/data/E15/early-ack",
+  "load_average_before": [
+    31.86669921875,
+    24.572265625,
+    15.04248046875
+  ],
+  "barrier": {
+    "acknowledged": 1,
+    "recovered": 1,
+    "checker_failure": null,
+    "file_layer": "same volatile file cache, persisted by real barrier"
+  },
+  "early_ack_control": {
+    "acknowledged": 1,
+    "recovered": 0,
+    "checker_failure": "lost acknowledgement after unflushed cache loss",
+    "file_layer": "volatile writes dropped before barrier"
+  },
+  "wall_seconds": 0.115,
+  "peak_sampled_run_allocated_bytes": 4096,
+  "target_allocated_bytes_at_end": 323493888,
+  "load_average_after": [
+    31.86669921875,
+    24.572265625,
+    15.04248046875
+  ]
+}

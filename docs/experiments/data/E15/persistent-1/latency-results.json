@@ -1,0 +1,97 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "d2fe29febdb54a4a113e3dd9112b8b12fa214a54ffc14de4e911600002331612",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --only latency --latency-driver .local/bin/goliath-store-e15-persistent-d4d84912bcd1/goliath-store-load --binary .local/bin/goliath-store-e15-persistent-d4d84912bcd1/goliath-store --latency-clients 64 --latency-samples 128 --latency-modes full --quiet-window --output docs/experiments/data/E15/persistent-1 --socket-sample",
+  "load_average_before": [
+    26.01171875,
+    24.40478515625,
+    21.70556640625
+  ],
+  "latency": [
+    {
+      "mode": "full",
+      "clients": 64,
+      "samples": 8192,
+      "blob_bytes": 256,
+      "driver": "rust",
+      "p50_ms": 11.814333,
+      "p95_ms": 16.020792,
+      "p99_ms": 17.06175,
+      "max_ms": 17.960833,
+      "wall_seconds": 1.975,
+      "load_average_before": [
+        3.95703125,
+        15.80126953125,
+        18.6279296875
+      ],
+      "load_average_after": [
+        4.92138671875,
+        15.80419921875,
+        18.6123046875
+      ],
+      "load_average_at_launch": [
+        3.95703125,
+        15.80126953125,
+        18.6279296875
+      ],
+      "disturbed": true,
+      "disturbances": [
+        {
+          "seconds": 1.116,
+          "missing": [],
+          "load": 4.92138671875
+        }
+      ],
+      "peak_one_minute_load": 4.92138671875,
+      "quiet_files": [
+        "quiet-request",
+        "quiet-ack-E12",
+        "quiet-ack-E13",
+        "quiet-ack-E14"
+      ],
+      "socket_observations": [
+        {
+          "seconds": 0.529,
+          "time_wait": 88,
+          "established": 185,
+          "returncode": 0,
+          "scope": "whole host"
+        }
+      ],
+      "compact_every": 256,
+      "driver_args": [],
+      "server_args": [],
+      "driver_sha256": "907837509870db137b806e993eb2859756451437a7e1dd505efef9aa071d69bf",
+      "client_phases": {
+        "connect_ms": {
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "max": 0.0
+        },
+        "write_ms": {
+          "mean": 0.010856927856445313,
+          "p50": 0.008458,
+          "p95": 0.025417,
+          "max": 0.307792
+        },
+        "read_ms": {
+          "mean": 11.29386239453125,
+          "p50": 11.804125,
+          "p95": 16.007417,
+          "max": 17.942709
+        }
+      }
+    }
+  ],
+  "wall_seconds": 147.605,
+  "peak_sampled_run_allocated_bytes": 5308416,
+  "target_allocated_bytes_at_end": 406695936,
+  "load_average_after": [
+    4.92138671875,
+    15.80419921875,
+    18.6123046875
+  ]
+}

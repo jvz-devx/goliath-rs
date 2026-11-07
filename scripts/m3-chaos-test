@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""Offline checker mutations and real loopback fault-proxy controls for E13."""
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import socket
+import struct
+import threading
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+from m3_chaos_support import DATA, Proxy, cluster, tag_counts
+
+loader = importlib.machinery.SourceFileLoader('e13_check',str(Path(__file__).with_name('m3-check')))
+spec = importlib.util.spec_from_loader(loader.name,loader)
+check = importlib.util.module_from_spec(spec)
+loader.exec_module(check)
+chaos = cluster.load('e13_main_checks',Path(__file__).with_name('m3-chaos'))
+
+
+class IdentityChecks(unittest.TestCase):
+    def fixture(self):
+        return json.loads((DATA/'cas-both-13301.json').read_text())
+
+    def test_recovered_fixture(self):
+        self.assertEqual(check.verify(self.fixture()),('cas','both'))
+
+    def test_duplicate_same_tile(self):
+        row = self.fixture()
+        item = next(iter(row['expected']))
+        row['recovered']['locations']['b/region'][item] = 7
+        with self.assertRaisesRegex(ValueError,'duplication or loss'):
+            check.verify(row)
+
+    def test_lost_stack(self):
+        row = self.fixture()
+        row['recovered']['locations']['a/entities'] = {}
+        with self.assertRaisesRegex(ValueError,'duplication or loss'):
+            check.verify(row)
+
+    def test_wrong_generation(self):
+        row = self.fixture()
+        row['recovered']['generation'] = 0
+        with self.assertRaisesRegex(ValueError,'CAS lost'):
+            check.verify(row)
+
+    def test_changed_fixture_expectation(self):
+        row = self.fixture()
+        row['expected'][next(iter(row['expected']))] = 14
+        with self.assertRaisesRegex(ValueError,'fixture expectation changed'):
+            check.verify(row)
+
+    def test_stale_player_file(self):
+        row = self.fixture()
+        row['recovered']['stale_files'].append({'tile':'a'})
+        with self.assertRaisesRegex(ValueError,'safety violation'):
+            check.verify(row)
+
+    def test_wrong_gate(self):
+        row = self.fixture()
+        row['gate'] = 'arbitrary sleep'
+        with self.assertRaisesRegex(ValueError,'gate'):
+            check.verify(row)
+
+    def test_nested_stacks_not_double_counted(self):
+        stack = {'id':'minecraft:diamond','count':7,'components':{'custom_name':'E13-test'}}
+        self.assertEqual(dict(tag_counts({'Inventory':[stack]},['E13-test'])),{'E13-test':7})
+
+
+class WireControls(unittest.TestCase):
+    def exercise(self,when):
+        errors,received = [],[]
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1',0))
+            listener.listen()
+            listener.settimeout(3)
+            def server():
+                try:
+                    sock,_ = listener.accept()
+                    with sock:
+                        message = cluster.store.receive(sock)
+                        received.append(message)
+                        sock.sendall(struct.pack('<I',2)+b'OK')
+                except Exception as error:
+                    errors.append(error)
+            worker = threading.Thread(target=server)
+            worker.start()
+            relay = Proxy(listener.getsockname())
+            rule = relay.arm(11,when)
+            answer = []
+            message = cluster.store.request(11,b'payload')
+            client = threading.Thread(target=lambda:answer.append(cluster.store.call(relay.address,message)))
+            client.start()
+            try:
+                self.assertTrue(rule['reached'].wait(3))
+                self.assertEqual(rule['message'],message)
+                self.assertEqual(bool(received),when=='after')
+                self.assertEqual(answer,[])
+                relay.release()
+                client.join(3)
+                worker.join(3)
+                self.assertEqual(received,[message])
+                self.assertEqual(answer,[b'OK'])
+                self.assertEqual(errors,[])
+            finally:
+                relay.close()
+
+    def test_before_gate(self):
+        self.exercise('before')
+
+    def test_after_gate(self):
+        self.exercise('after')
+
+    def test_live_log_ignores_partial_line(self):
+        from m3_chaos_support import lines
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='E13-check-',dir=cluster.RUNS) as temporary:
+            path = Path(temporary)/'log'
+            path.write_text('first\npartial')
+            self.assertEqual(lines(path),['first'])
+
+
+class SupervisorChecks(unittest.TestCase):
+    def make_tile(self, alive, reply=None):
+        state = {'alive':alive}
+        def ask(_):
+            if isinstance(reply,Exception):
+                state['alive'] = False
+                raise reply
+            return reply
+        return SimpleNamespace(token='1:1',server=SimpleNamespace(process=SimpleNamespace(poll=lambda:None if state['alive'] else -9)),ask=ask)
+
+    def test_dead_tile_skipped_during_periodic_cut(self):
+        c = SimpleNamespace(tiles={'a':self.make_tile(False)})
+        cluster.Cluster.checkpoint_tiles(c)
+
+    def test_death_during_cut_goes_to_next_supervision_iteration(self):
+        c = SimpleNamespace(tiles={'a':self.make_tile(True,ConnectionError('EOF'))})
+        cluster.Cluster.checkpoint_tiles(c)
+
+    def test_live_refused_cut_is_not_hidden(self):
+        c = SimpleNamespace(tiles={'a':self.make_tile(True,{'ok':False,'error':'poisoned writer'})})
+        with self.assertRaisesRegex(RuntimeError,'background cut refused'):
+            cluster.Cluster.checkpoint_tiles(c)
+
+    def test_healthy_tiles_are_not_restarted(self):
+        c = SimpleNamespace(tiles={'a':self.make_tile(True)})
+        cluster.Cluster.supervise(c)
+
+    def test_failed_replacement_stays_unpublished_and_backs_off(self):
+        tile = self.make_tile(False)
+        tile.fence = {'process':1}
+        tile.server.process.kill = lambda:None
+        tile.server.process.wait = lambda **_:None
+        tile.server.stop = lambda:None
+        def fail():
+            raise RuntimeError('recovery refused')
+        tile.start = fail
+        c = SimpleNamespace(tiles={'a':tile,'b':self.make_tile(True)})
+        cluster.Cluster.supervise(c)
+        self.assertEqual(tile.restart_failures,1)
+        cluster.Cluster.supervise(c)
+        self.assertEqual(tile.restart_failures,1)
+
+    def test_store_override_and_default_without_starting_a_process(self):
+        import tempfile
+        for override in (None,Path('/not-executed/store-override')):
+            with self.subTest(override=override),tempfile.TemporaryDirectory(prefix='E13-check-',dir=cluster.RUNS) as temporary:
+                c = cluster.Cluster.__new__(cluster.Cluster)
+                try:
+                    with patch.object(cluster.subprocess,'Popen',side_effect=RuntimeError('no process started')) as launch:
+                        with self.assertRaisesRegex(RuntimeError,'no process started'):
+                            c.__init__(Path(temporary),cluster.RESOURCES,64,store_binary=override)
+                        self.assertEqual(launch.call_args.args[0][0],override or cluster.BINS/'goliath-store')
+                finally:
+                    c.store_log.close()
+
+
+class QuietChecks(unittest.TestCase):
+    def test_request_racing_run_reservation_starts_no_heavy_work(self):
+        import tempfile
+        original = tempfile.TemporaryDirectory
+        with original(prefix='E13-check-',dir=cluster.RUNS) as temporary:
+            root = Path(temporary)
+            runs = root/'.local/runs'
+            runs.mkdir(parents=True)
+            request = root/'.local/quiet-request'
+            made = []
+            def reserve(**kwargs):
+                directory = original(**kwargs)
+                made.append(Path(directory.name))
+                if len(made)==1:
+                    request.touch()
+                return directory
+            def healed():
+                request.unlink(missing_ok=True)
+            with patch.object(cluster,'ROOT',root),patch.object(cluster,'RUNS',runs),patch.object(chaos,'quiet_window',side_effect=healed),patch.object(chaos.tempfile,'TemporaryDirectory',side_effect=reserve):
+                with chaos.reserve_run(42) as active:
+                    self.assertEqual(len(made),2)
+                    self.assertFalse(made[0].exists())
+                    self.assertTrue(Path(active).exists())
+
+    def test_ack_waits_until_inflight_run_finishes(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='E13-check-',dir=cluster.RUNS) as temporary:
+            root = Path(temporary)
+            runs = root/'.local/runs'
+            active = runs/'E13-inflight'
+            active.mkdir(parents=True)
+            request = root/'.local/quiet-request'
+            ack = root/'.local/quiet-ack-E13'
+            request.touch()
+            sleeps = []
+            def advance(_):
+                sleeps.append(True)
+                if len(sleeps)==1:
+                    self.assertFalse(ack.exists())
+                    active.rmdir()
+                else:
+                    self.assertTrue(ack.exists())
+                    request.unlink()
+            with patch.object(cluster,'ROOT',root),patch.object(cluster,'RUNS',runs),patch.object(chaos.time,'sleep',side_effect=advance):
+                chaos.quiet_window()
+            self.assertEqual(len(sleeps),2)
+            self.assertFalse(ack.exists())
+
+    def test_forty_minute_limit_removes_ack(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(prefix='E13-check-',dir=cluster.RUNS) as temporary:
+            root = Path(temporary)
+            (root/'.local/runs').mkdir(parents=True)
+            request = root/'.local/quiet-request'
+            ack = root/'.local/quiet-ack-E13'
+            request.touch()
+            ack.touch()
+            with patch.object(cluster,'ROOT',root),patch.object(chaos.time,'time',return_value=request.stat().st_mtime+2401):
+                chaos.quiet_window()
+            self.assertTrue(request.exists())
+            self.assertFalse(ack.exists())
+
+
+if __name__=='__main__':
+    unittest.main()

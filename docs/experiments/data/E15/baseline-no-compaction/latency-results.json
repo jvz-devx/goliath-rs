@@ -1,0 +1,47 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "ff7747c8c6128fb0c0d141840eff440a712a41cfe3ab90f83bb6781ece90eb19",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --only latency --latency-driver target/release/goliath-store-load --latency-clients 64 --latency-samples 64 --latency-modes full --compact-every 0 --trace --output docs/experiments/data/E15/baseline-no-compaction",
+  "load_average_before": [
+    2.70361328125,
+    3.57861328125,
+    3.50244140625
+  ],
+  "latency": [
+    {
+      "mode": "full",
+      "clients": 64,
+      "samples": 4096,
+      "blob_bytes": 256,
+      "driver": "rust",
+      "p50_ms": 8.039417,
+      "p95_ms": 9.920167,
+      "p99_ms": 11.111291,
+      "max_ms": 12.032584,
+      "wall_seconds": 0.869,
+      "load_average_before": [
+        2.70361328125,
+        3.57861328125,
+        3.50244140625
+      ],
+      "load_average_after": [
+        2.70361328125,
+        3.57861328125,
+        3.50244140625
+      ],
+      "compact_every": 0,
+      "driver_args": [],
+      "server_args": []
+    }
+  ],
+  "wall_seconds": 1.195,
+  "peak_sampled_run_allocated_bytes": 2326528,
+  "target_allocated_bytes_at_end": 188043264,
+  "load_average_after": [
+    2.70361328125,
+    3.57861328125,
+    3.50244140625
+  ]
+}

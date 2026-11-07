@@ -1,11 +1,12 @@
 //! Owns durable-before-visible operation ordering and fail-closed IO handling.
 
 use crate::codec::{decode_command, encode_command, invalid};
-use crate::journal::Journal;
+use crate::journal::{Compaction, CompactionReady, Journal};
 use crate::state::State;
 use crate::{Command, Operation, Response, SyncMode};
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 pub struct Engine {
     journal: Journal,
@@ -14,11 +15,17 @@ pub struct Engine {
     since_compaction: u64,
     compact_every: u64,
     failed: bool,
+    compaction_in_flight: bool,
     #[cfg(feature = "fault-injection")]
     early_ack: bool,
 }
 
 impl Engine {
+    /// Duration of the last batch's journal barrier, excluding encoding and append.
+    pub fn last_barrier_duration(&self) -> Duration {
+        self.journal.last_barrier
+    }
+
     pub fn open(directory: &Path, mode: SyncMode, compact_every: u64) -> io::Result<Self> {
         let (journal, recovery) = Journal::open(directory, mode)?;
         let (mut state, mut sequence) = match recovery.snapshot {
@@ -49,16 +56,26 @@ impl Engine {
             sequence = record_sequence;
             since_compaction += 1;
         }
-        Ok(Self {
+        let mut engine = Self {
             journal,
             state,
             sequence,
             since_compaction,
             compact_every,
             failed: false,
+            compaction_in_flight: false,
             #[cfg(feature = "fault-injection")]
             early_ack: false,
-        })
+        };
+        // Finish an interrupted rotation from recovered state, before serving.
+        // Never consolidate overlapping log files by copying their bytes.
+        if engine.journal.has_rotation()? {
+            engine
+                .journal
+                .compact(engine.sequence, &engine.state.snapshot()?)?;
+            engine.since_compaction = 0;
+        }
+        Ok(engine)
     }
 
     #[cfg(feature = "fault-injection")]
@@ -92,6 +109,11 @@ impl Engine {
         if self.failed {
             return Err(io::Error::other(
                 "store failed after IO error; restart required",
+            ));
+        }
+        if self.compaction_in_flight && commands.iter().any(|c| c.operation == Operation::Compact) {
+            return Err(io::Error::other(
+                "finish background compaction before explicit compact",
             ));
         }
         let result = self.execute_inner(commands);
@@ -148,6 +170,9 @@ impl Engine {
         if self.failed {
             return Err(io::Error::other("store failed; restart required"));
         }
+        if self.compaction_in_flight {
+            return Err(io::Error::other("background compaction still in flight"));
+        }
         if self.compact_every != 0 && self.since_compaction >= self.compact_every {
             let result = self
                 .state
@@ -160,6 +185,49 @@ impl Engine {
             self.since_compaction = 0;
         }
         Ok(())
+    }
+
+    /// Rotate the durable prefix and return immutable work for a caller-owned
+    /// worker. New commits append to a separate, directory-synced journal.
+    pub fn begin_maintenance(&mut self) -> io::Result<Option<Compaction>> {
+        if self.failed {
+            return Err(io::Error::other("store failed; restart required"));
+        }
+        if self.compaction_in_flight
+            || self.compact_every == 0
+            || self.since_compaction < self.compact_every
+        {
+            return Ok(None);
+        }
+        let result = self
+            .state
+            .snapshot()
+            .and_then(|snapshot| self.journal.rotate(self.sequence, snapshot));
+        match result {
+            Ok(work) => {
+                self.compaction_in_flight = true;
+                self.since_compaction = 0;
+                Ok(Some(work))
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// Must receive the worker result before starting another compaction.
+    /// A failed installation closes all engine operations, including reads.
+    pub fn complete_maintenance(&mut self, result: io::Result<CompactionReady>) -> io::Result<()> {
+        if !self.compaction_in_flight {
+            return Err(io::Error::other("no background compaction in flight"));
+        }
+        let result = result.and_then(|ready| self.journal.complete_compaction(ready));
+        self.compaction_in_flight = false;
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
     }
 }
 
@@ -283,6 +351,163 @@ mod tests {
                 .is_err()
         );
         drop(engine);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn background_snapshot_keeps_newer_commits_and_receipts() {
+        let path = directory();
+        let mut engine = Engine::open(&path, SyncMode::Full, 1).unwrap();
+        let first = Command {
+            id: RequestId(1),
+            operation: Operation::Claim(TileId(0)),
+        };
+        let second = Command {
+            id: RequestId(2),
+            operation: Operation::Claim(TileId(1)),
+        };
+        let original = engine.execute_batch(std::slice::from_ref(&first)).unwrap();
+        let work = engine.begin_maintenance().unwrap().unwrap();
+        assert!(engine.begin_maintenance().unwrap().is_none());
+        let newer = engine.execute_batch(std::slice::from_ref(&second)).unwrap();
+        engine.complete_maintenance(work.run()).unwrap();
+        assert!(!path.join("journal.previous").exists());
+        assert!(fs::metadata(path.join("journal")).unwrap().len() > 0);
+        drop(engine);
+        let mut engine = Engine::open(&path, SyncMode::Full, 0).unwrap();
+        assert_eq!(engine.execute_batch(&[first]).unwrap(), original);
+        assert_eq!(engine.execute_batch(&[second]).unwrap(), newer);
+        drop(engine);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn interrupted_rotation_recovers_before_and_after_snapshot_install() {
+        for stage in 0..5 {
+            let path = directory();
+            let mut engine = Engine::open(&path, SyncMode::Full, 1).unwrap();
+            let first = Command {
+                id: RequestId(1),
+                operation: Operation::Claim(TileId(0)),
+            };
+            let second = Command {
+                id: RequestId(2),
+                operation: Operation::Claim(TileId(1)),
+            };
+            let original = engine.execute_batch(std::slice::from_ref(&first)).unwrap();
+            let work = engine.begin_maintenance().unwrap().unwrap();
+            if stage == 0 {
+                // Cut between renaming the prefix and installing a new journal.
+                fs::remove_file(path.join("journal")).unwrap();
+                drop(work);
+                drop(engine);
+                let mut recovered = Engine::open(&path, SyncMode::Full, 0).unwrap();
+                assert_eq!(recovered.execute_batch(&[first]).unwrap(), original);
+                drop(recovered);
+            } else {
+                let newer = engine.execute_batch(std::slice::from_ref(&second)).unwrap();
+                if stage >= 2 {
+                    // Install snapshot but emulate a cut before prefix deletion.
+                    let prefix = fs::read(path.join("journal.previous")).unwrap();
+                    work.run().unwrap();
+                    fs::write(path.join("journal.previous"), prefix).unwrap();
+                    if stage == 3 {
+                        // Unacknowledged active tail must not damage the prefix.
+                        use std::io::Write;
+                        std::fs::OpenOptions::new()
+                            .append(true)
+                            .open(path.join("journal"))
+                            .unwrap()
+                            .write_all(b"torn")
+                            .unwrap();
+                    }
+                    if stage == 4 {
+                        // Cut during startup cleanup, after a full recovered
+                        // snapshot and journal truncation, before prefix removal.
+                        let prefix = fs::read(path.join("journal.previous")).unwrap();
+                        engine
+                            .journal
+                            .compact(engine.sequence, &engine.state.snapshot().unwrap())
+                            .unwrap();
+                        fs::write(path.join("journal.previous"), prefix).unwrap();
+                    }
+                } else {
+                    drop(work);
+                }
+                drop(engine);
+                let mut recovered = Engine::open(&path, SyncMode::Full, 0).unwrap();
+                assert_eq!(recovered.execute_batch(&[first]).unwrap(), original);
+                assert_eq!(recovered.execute_batch(&[second]).unwrap(), newer);
+                assert!(!path.join("journal.previous").exists());
+                drop(recovered);
+            }
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn compaction_failure_closes_engine_and_in_flight_explicit_compact_is_rejected() {
+        let path = directory();
+        let mut engine = Engine::open(&path, SyncMode::Full, 1).unwrap();
+        engine
+            .execute_batch(&[Command {
+                id: RequestId(1),
+                operation: Operation::Claim(TileId(0)),
+            }])
+            .unwrap();
+        let work = engine.begin_maintenance().unwrap().unwrap();
+        assert!(
+            engine
+                .execute_batch(&[Command {
+                    id: RequestId(0),
+                    operation: Operation::Compact
+                }])
+                .is_err()
+        );
+        // A failed snapshot write must close reads as well as mutations.
+        fs::create_dir(path.join("snapshot.next")).unwrap();
+        assert!(engine.complete_maintenance(work.run()).is_err());
+        assert!(
+            engine
+                .execute_batch(&[Command {
+                    id: RequestId(0),
+                    operation: Operation::Directory
+                }])
+                .is_err()
+        );
+        drop(engine);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn failed_rotation_closes_reads_and_corrupt_rotated_prefix_refuses_startup() {
+        let path = directory();
+        let mut engine = Engine::open(&path, SyncMode::Full, 1).unwrap();
+        engine
+            .execute_batch(&[Command {
+                id: RequestId(1),
+                operation: Operation::Claim(TileId(0)),
+            }])
+            .unwrap();
+        fs::create_dir(path.join("journal.previous")).unwrap();
+        assert!(engine.begin_maintenance().is_err());
+        assert!(
+            engine
+                .execute_batch(&[Command {
+                    id: RequestId(0),
+                    operation: Operation::Directory
+                }])
+                .is_err()
+        );
+        drop(engine);
+        fs::remove_dir(path.join("journal.previous")).unwrap();
+        let mut engine = Engine::open(&path, SyncMode::Full, 1).unwrap();
+        drop(engine.begin_maintenance().unwrap().unwrap());
+        drop(engine);
+        let mut prefix = fs::read(path.join("journal.previous")).unwrap();
+        prefix[0] ^= 1;
+        fs::write(path.join("journal.previous"), prefix).unwrap();
+        assert!(Engine::open(&path, SyncMode::Full, 0).is_err());
         fs::remove_dir_all(path).unwrap();
     }
 }
