@@ -539,3 +539,117 @@ fn concurrent_claims_leave_exactly_one_authorized_process_token() {
     drop(server);
     fs::remove_dir_all(path).unwrap();
 }
+#[test]
+fn uuid_records_and_clock_survive_compaction_without_truncating_uuid() {
+    use goliath_store::{ClusterClock, Engine, PlayerKey, SyncMode};
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../.local/runs/e10-store-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut engine = Engine::open(&root, SyncMode::Full, 0).unwrap();
+    let mut next = 100_000u128;
+    let mut execute = |operation| {
+        next += 1;
+        engine
+            .execute(&Command {
+                id: RequestId(next),
+                operation,
+            })
+            .unwrap()
+    };
+    let Response::Claimed(a) = execute(Operation::Claim(TileId(0))) else {
+        panic!("claim");
+    };
+    let Response::Claimed(b) = execute(Operation::Claim(TileId(1))) else {
+        panic!("claim");
+    };
+    let x = PlayerKey((1u128 << 120) | 17);
+    let y = PlayerKey((2u128 << 120) | 17);
+    let blob = Blob {
+        version: 1,
+        bytes: vec![7, 9],
+    };
+    for player in [x, y] {
+        assert_eq!(
+            execute(Operation::CreateUuid {
+                player,
+                owner: a,
+                blob: blob.clone()
+            }),
+            Response::Committed(Generation(0))
+        );
+    }
+    assert_eq!(
+        execute(Operation::CommitUuid {
+            player: x,
+            cas: OwnershipCas {
+                generation: Generation(0),
+                source: a,
+                target: b
+            },
+            blob: blob.clone()
+        }),
+        Response::Committed(Generation(1))
+    );
+    assert_eq!(
+        execute(Operation::Players { after: None }),
+        Response::Players(vec![x, y])
+    );
+    assert_eq!(
+        execute(Operation::Players { after: Some(x) }),
+        Response::Players(vec![y])
+    );
+    let clock = ClusterClock {
+        unix_ms: 42,
+        game_tick: 5,
+        day_tick: 9,
+        raining: true,
+        thundering: false,
+    };
+    assert_eq!(
+        execute(Operation::SetClock {
+            fence: b,
+            clock: clock.clone()
+        }),
+        Response::Fault(StoreFault::StaleFence)
+    );
+    assert_eq!(
+        execute(Operation::SetClock {
+            fence: a,
+            clock: clock.clone()
+        }),
+        Response::Ok
+    );
+    execute(Operation::Compact);
+    drop(engine);
+    let mut engine = Engine::open(&root, SyncMode::Full, 0).unwrap();
+    assert_eq!(
+        engine
+            .execute(&Command {
+                id: RequestId(0),
+                operation: Operation::Clock
+            })
+            .unwrap(),
+        Response::Clock(Some(clock))
+    );
+    for (player, owner, generation) in
+        [(x, TileId(1), Generation(1)), (y, TileId(0), Generation(0))]
+    {
+        let Response::Player(Some(record)) = engine
+            .execute(&Command {
+                id: RequestId(0),
+                operation: Operation::ReadUuid(player),
+            })
+            .unwrap()
+        else {
+            panic!("read");
+        };
+        assert_eq!(
+            (record.owner, record.generation, record.inventory),
+            (owner, generation, blob.clone())
+        );
+    }
+    drop(engine);
+    std::fs::remove_dir_all(root).unwrap();
+}

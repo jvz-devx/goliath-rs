@@ -1,0 +1,4001 @@
+[
+  {
+    "id": "e7_east_setblock",
+    "direction": "east",
+    "mechanic": "setblock",
+    "setup": [
+      "fill 58 -46 -5 68 -46 5 minecraft:stone",
+      "fill 59 -45 -4 67 -40 4 minecraft:air"
+    ],
+    "action": [
+      "setblock 64 -45 0 minecraft:gold_block"
+    ],
+    "target": [
+      64,
+      -45,
+      0
+    ],
+    "mask": false,
+    "observed": "minecraft:gold_block",
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": "minecraft:air",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 64, -45, 0"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_fill",
+    "direction": "east",
+    "mechanic": "fill",
+    "setup": [
+      "fill 58 -34 -5 68 -34 5 minecraft:stone",
+      "fill 59 -33 -4 67 -28 4 minecraft:air"
+    ],
+    "action": [
+      "fill 63 -33 0 65 -33 0 minecraft:diamond_block"
+    ],
+    "target": [
+      64,
+      -33,
+      0
+    ],
+    "mask": false,
+    "observed": "minecraft:diamond_block",
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": "minecraft:air",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Successfully filled 3 block(s)"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_water",
+    "direction": "east",
+    "mechanic": "water",
+    "setup": [
+      "fill 58 -22 -5 68 -22 5 minecraft:stone",
+      "fill 59 -21 -4 67 -16 4 minecraft:air"
+    ],
+    "action": [
+      "setblock 63 -21 0 minecraft:water"
+    ],
+    "target": [
+      64,
+      -21,
+      0
+    ],
+    "mask": false,
+    "observed": "minecraft:water",
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": "minecraft:air",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 63, -21, 0"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_lava",
+    "direction": "east",
+    "mechanic": "lava",
+    "setup": [
+      "fill 58 -10 -5 68 -10 5 minecraft:stone",
+      "fill 59 -9 -4 67 -4 4 minecraft:air"
+    ],
+    "action": [
+      "setblock 63 -9 0 minecraft:lava"
+    ],
+    "target": [
+      64,
+      -9,
+      0
+    ],
+    "mask": false,
+    "observed": "minecraft:lava",
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": "minecraft:air",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 63, -9, 0"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_fire",
+    "direction": "east",
+    "mechanic": "fire",
+    "setup": [
+      "fill 58 2 -5 68 2 5 minecraft:stone",
+      "fill 59 3 -4 67 8 4 minecraft:air",
+      "fill 61 2 -2 65 2 2 minecraft:netherrack",
+      "setblock 64 3 0 minecraft:oak_planks",
+      "setblock 64 3 -4 minecraft:oak_planks",
+      "setblock 64 3 -3 minecraft:oak_planks",
+      "setblock 64 3 -2 minecraft:oak_planks",
+      "setblock 64 3 -1 minecraft:oak_planks",
+      "setblock 64 3 0 minecraft:oak_planks",
+      "setblock 64 3 1 minecraft:oak_planks",
+      "setblock 64 3 2 minecraft:oak_planks",
+      "setblock 64 3 3 minecraft:oak_planks",
+      "setblock 64 3 4 minecraft:oak_planks"
+    ],
+    "action": [
+      "gamerule fire_spread_radius_around_player -1",
+      "setblock 63 3 -4 minecraft:fire",
+      "setblock 63 3 -3 minecraft:fire",
+      "setblock 63 3 -2 minecraft:fire",
+      "setblock 63 3 -1 minecraft:fire",
+      "setblock 63 3 0 minecraft:fire",
+      "setblock 63 3 1 minecraft:fire",
+      "setblock 63 3 2 minecraft:fire",
+      "setblock 63 3 3 minecraft:fire",
+      "setblock 63 3 4 minecraft:fire",
+      "tick sprint 400"
+    ],
+    "target": [
+      64,
+      3,
+      0
+    ],
+    "mask": false,
+    "observed": {
+      "fire_positions": [
+        [
+          64,
+          3,
+          -5
+        ],
+        [
+          64,
+          3,
+          -2
+        ],
+        [
+          64,
+          3,
+          0
+        ],
+        [
+          64,
+          4,
+          -4
+        ],
+        [
+          64,
+          4,
+          2
+        ]
+      ],
+      "target": "minecraft:fire"
+    },
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": {
+      "fire_positions": [],
+      "target": "minecraft:oak_planks"
+    },
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Game rule fire_spread_radius_around_player is now set to -1"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, -4"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, -3"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, -2"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, -1"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, 0"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, 1"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, 2"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, 3"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, 4"
+        ]
+      },
+      {
+        "output": [
+          "The game is sprinting"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_sand",
+    "direction": "east",
+    "mechanic": "sand",
+    "setup": [
+      "fill 58 14 -5 68 14 5 minecraft:stone",
+      "fill 59 15 -4 67 20 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:falling_block 62 17 0 {BlockState:{id:\"minecraft:sand\"},Time:1,Motion:[1.5d,0.0d,0.0d],Tags:[\"e7_east_sand\"]}"
+    ],
+    "target": [
+      64,
+      15,
+      0
+    ],
+    "mask": false,
+    "observed": [
+      [
+        96.5886760463172,
+        1.5425367005211585,
+        0.5
+      ]
+    ],
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        6,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ]
+    ],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Falling Sand"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_tnt",
+    "direction": "east",
+    "mechanic": "tnt",
+    "setup": [
+      "fill 58 26 -5 68 26 5 minecraft:stone",
+      "fill 59 27 -4 67 32 4 minecraft:air",
+      "setblock 64 27 0 minecraft:oak_planks"
+    ],
+    "action": [
+      "summon minecraft:tnt 62 28 0 {fuse:8s,Tags:[\"e7_east_tnt\"]}"
+    ],
+    "target": [
+      64,
+      27,
+      0
+    ],
+    "mask": false,
+    "observed": "minecraft:air",
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": "minecraft:oak_planks",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Primed TNT"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_piston",
+    "direction": "east",
+    "mechanic": "piston",
+    "setup": [
+      "fill 58 38 -5 68 38 5 minecraft:stone",
+      "fill 59 39 -4 67 44 4 minecraft:air",
+      "setblock 62 39 0 minecraft:piston[facing=east]",
+      "setblock 63 39 0 minecraft:stone"
+    ],
+    "action": [
+      "setblock 61 39 0 minecraft:redstone_block"
+    ],
+    "target": [
+      64,
+      39,
+      0
+    ],
+    "mask": false,
+    "observed": "minecraft:stone",
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": "minecraft:air",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 61, 39, 0"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_hopper",
+    "direction": "east",
+    "mechanic": "hopper",
+    "setup": [
+      "fill 58 50 -5 68 50 5 minecraft:stone",
+      "fill 59 51 -4 67 56 4 minecraft:air",
+      "setblock 64 51 0 minecraft:chest",
+      "setblock 63 50 0 minecraft:redstone_block",
+      "setblock 63 51 0 minecraft:hopper[facing=east,enabled=false]{Items:[{Slot:0b,id:\"minecraft:diamond\",count:1}]}"
+    ],
+    "action": [
+      "setblock 63 50 0 minecraft:stone"
+    ],
+    "target": [
+      64,
+      51,
+      0
+    ],
+    "mask": false,
+    "observed": 1,
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": 0,
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 63, 50, 0"
+        ]
+      }
+    ],
+    "pass_no_write": null,
+    "source_diamonds_after": 0
+  },
+  {
+    "id": "e7_east_dropper",
+    "direction": "east",
+    "mechanic": "dropper",
+    "setup": [
+      "fill 58 62 -5 68 62 5 minecraft:stone",
+      "fill 59 63 -4 67 68 4 minecraft:air",
+      "setblock 64 63 0 minecraft:chest",
+      "setblock 63 63 0 minecraft:dropper[facing=east]{Items:[{Slot:0b,id:\"minecraft:diamond\",count:1}]}"
+    ],
+    "action": [
+      "setblock 62 63 0 minecraft:redstone_block"
+    ],
+    "target": [
+      64,
+      63,
+      0
+    ],
+    "mask": false,
+    "observed": 1,
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": 0,
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 62, 63, 0"
+        ]
+      }
+    ],
+    "pass_no_write": null,
+    "source_diamonds_after": 0
+  },
+  {
+    "id": "e7_east_mob",
+    "direction": "east",
+    "mechanic": "mob",
+    "setup": [
+      "fill 58 74 -5 68 74 5 minecraft:stone",
+      "fill 59 75 -4 67 80 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:pig 62 76 0 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_mob\"]}"
+    ],
+    "target": [
+      64,
+      75,
+      0
+    ],
+    "mask": false,
+    "observed": [
+      [
+        75.55431649453814,
+        76.0,
+        0.5
+      ]
+    ],
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_arrow",
+    "direction": "east",
+    "mechanic": "arrow",
+    "setup": [
+      "fill 58 86 -5 68 86 5 minecraft:stone",
+      "fill 59 87 -4 67 92 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:arrow 62 88 0 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_arrow\"]}"
+    ],
+    "target": [
+      64,
+      87,
+      0
+    ],
+    "mask": false,
+    "observed": [
+      [
+        103.02616234200181,
+        88.0,
+        0.5
+      ]
+    ],
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        6,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Arrow"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_ender_pearl",
+    "direction": "east",
+    "mechanic": "ender_pearl",
+    "setup": [
+      "fill 58 98 -5 68 98 5 minecraft:stone",
+      "fill 59 99 -4 67 104 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:ender_pearl 62 100 0 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_ender_pearl\"]}"
+    ],
+    "target": [
+      64,
+      99,
+      0
+    ],
+    "mask": false,
+    "observed": [
+      [
+        102.6209011050694,
+        100.0,
+        0.5
+      ]
+    ],
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        6,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Thrown Ender Pearl"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_boat",
+    "direction": "east",
+    "mechanic": "boat",
+    "setup": [
+      "fill 58 110 -5 68 110 5 minecraft:stone",
+      "fill 59 111 -4 67 116 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:oak_boat 62 112 0 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_boat\"]}"
+    ],
+    "target": [
+      64,
+      111,
+      0
+    ],
+    "mask": false,
+    "observed": [
+      [
+        73.15632715089082,
+        112.0,
+        0.5
+      ]
+    ],
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        6,
+        0
+      ]
+    ],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Oak Boat"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_minecart",
+    "direction": "east",
+    "mechanic": "minecart",
+    "setup": [
+      "fill 58 122 -5 68 122 5 minecraft:stone",
+      "fill 59 123 -4 67 128 4 minecraft:air",
+      "fill 59 122 0 67 122 0 minecraft:redstone_block",
+      "fill 59 123 0 67 123 0 minecraft:powered_rail[shape=east_west,powered=true]"
+    ],
+    "action": [
+      "summon minecraft:minecart 62.5 123 0.5 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_minecart\"]}"
+    ],
+    "target": [
+      64,
+      123,
+      0
+    ],
+    "mask": false,
+    "observed": [
+      [
+        74.09724653074862,
+        123.0,
+        0.5
+      ]
+    ],
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Minecart"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_item",
+    "direction": "east",
+    "mechanic": "item",
+    "setup": [
+      "fill 58 134 -5 68 134 5 minecraft:stone",
+      "fill 59 135 -4 67 140 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:item 62 136 0 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_item\"],Item:{id:\"minecraft:diamond\",count:1},PickupDelay:32767s}"
+    ],
+    "target": [
+      64,
+      135,
+      0
+    ],
+    "mask": false,
+    "observed": [
+      [
+        96.29281624768412,
+        136.0,
+        0.5
+      ]
+    ],
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        6,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Diamond"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_redstone",
+    "direction": "east",
+    "mechanic": "redstone",
+    "setup": [
+      "fill 58 146 -5 68 146 5 minecraft:stone",
+      "fill 59 147 -4 67 152 4 minecraft:air",
+      "setblock 63 147 0 minecraft:redstone_wire",
+      "setblock 64 147 0 minecraft:redstone_lamp"
+    ],
+    "action": [
+      "setblock 62 147 0 minecraft:redstone_block"
+    ],
+    "target": [
+      64,
+      147,
+      0
+    ],
+    "mask": false,
+    "observed": {
+      "id": "minecraft:redstone_lamp",
+      "properties": {
+        "lit": "true"
+      }
+    },
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": "minecraft:redstone_lamp",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 62, 147, 0"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_lightning",
+    "direction": "east",
+    "mechanic": "lightning",
+    "setup": [
+      "fill 58 158 -5 68 158 5 minecraft:stone",
+      "fill 59 159 -4 67 164 4 minecraft:air",
+      "setblock 63 159 0 minecraft:oxidized_copper",
+      "setblock 64 159 0 minecraft:oxidized_copper"
+    ],
+    "action": [
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "tick sprint 60"
+    ],
+    "target": [
+      64,
+      159,
+      0
+    ],
+    "mask": false,
+    "observed": "minecraft:copper_block",
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": "minecraft:oxidized_copper",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "The game is sprinting"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_sculk",
+    "direction": "east",
+    "mechanic": "sculk",
+    "setup": [
+      "fill 58 170 -5 68 170 5 minecraft:stone",
+      "fill 59 171 -4 67 176 4 minecraft:air",
+      "setblock 62 170 0 minecraft:sculk_catalyst",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,PersistenceRequired:1b,Tags:[\"e7_east_sculk\"]}"
+    ],
+    "action": [
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_0\"]}",
+      "damage @e[tag=e7_east_sculk_0,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_1\"]}",
+      "damage @e[tag=e7_east_sculk_1,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_2\"]}",
+      "damage @e[tag=e7_east_sculk_2,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_3\"]}",
+      "damage @e[tag=e7_east_sculk_3,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_4\"]}",
+      "damage @e[tag=e7_east_sculk_4,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_5\"]}",
+      "damage @e[tag=e7_east_sculk_5,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_6\"]}",
+      "damage @e[tag=e7_east_sculk_6,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_7\"]}",
+      "damage @e[tag=e7_east_sculk_7,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_8\"]}",
+      "damage @e[tag=e7_east_sculk_8,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_9\"]}",
+      "damage @e[tag=e7_east_sculk_9,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_10\"]}",
+      "damage @e[tag=e7_east_sculk_10,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_11\"]}",
+      "damage @e[tag=e7_east_sculk_11,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_12\"]}",
+      "damage @e[tag=e7_east_sculk_12,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_13\"]}",
+      "damage @e[tag=e7_east_sculk_13,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_14\"]}",
+      "damage @e[tag=e7_east_sculk_14,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_15\"]}",
+      "damage @e[tag=e7_east_sculk_15,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "tick sprint 400"
+    ],
+    "target": [
+      64,
+      171,
+      0
+    ],
+    "mask": false,
+    "observed": [
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:sculk",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air"
+    ],
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": [
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air"
+    ],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "The game is sprinting"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_tree",
+    "direction": "east",
+    "mechanic": "tree",
+    "setup": [
+      "fill 58 182 -5 68 182 5 minecraft:stone",
+      "fill 59 183 -4 67 188 4 minecraft:air",
+      "setblock 63 182 0 minecraft:dirt",
+      "setblock 63 183 0 minecraft:oak_sapling[stage=1]"
+    ],
+    "action": [
+      "setblock 63 183 0 minecraft:air",
+      "place feature minecraft:oak 63 183 0"
+    ],
+    "target": [
+      64,
+      183,
+      0
+    ],
+    "mask": false,
+    "observed": [
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:oak_leaves",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:oak_leaves",
+      "minecraft:oak_leaves",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air"
+    ],
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": [
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air"
+    ],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 63, 183, 0"
+        ]
+      },
+      {
+        "output": [
+          "Placed \"minecraft:oak\" at 63, 183, 0"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_leaves",
+    "direction": "east",
+    "mechanic": "leaves",
+    "setup": [
+      "fill 58 194 -5 68 194 5 minecraft:stone",
+      "fill 59 195 -4 67 200 4 minecraft:air",
+      "setblock 64 195 0 minecraft:oak_leaves[persistent=false,distance=7]"
+    ],
+    "action": [
+      "gamerule random_tick_speed 512"
+    ],
+    "target": [
+      64,
+      195,
+      0
+    ],
+    "mask": false,
+    "observed": "minecraft:air",
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/region/r.0.0.mca",
+        4,
+        0
+      ]
+    ],
+    "before_observed": "minecraft:oak_leaves",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Game rule random_tick_speed is now set to 512"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_natural_spawn",
+    "direction": "east",
+    "mechanic": "natural_spawn",
+    "setup": [
+      "fill 58 206 -5 68 206 5 minecraft:stone",
+      "fill 59 207 -4 67 212 4 minecraft:air"
+    ],
+    "action": [
+      "difficulty hard",
+      "time set midnight",
+      "gamerule spawn_mobs true",
+      "tick sprint 400"
+    ],
+    "target": [
+      64,
+      207,
+      0
+    ],
+    "mask": false,
+    "observed": 3,
+    "crossed": true,
+    "outside_changed": [
+      [
+        "dimensions/minecraft/overworld/entities/r.-1.0.mca",
+        -1,
+        4
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.-1.mca",
+        4,
+        -4
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.-1.mca",
+        4,
+        -3
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.-1.mca",
+        4,
+        -2
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.-1.mca",
+        4,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.-1.mca",
+        5,
+        -5
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.-1.mca",
+        5,
+        -4
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.-1.mca",
+        5,
+        -3
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.-1.mca",
+        5,
+        -1
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.-1.mca",
+        6,
+        -2
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        0,
+        4
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        4,
+        3
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        5,
+        0
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        5,
+        1
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        5,
+        3
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        5,
+        4
+      ],
+      [
+        "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        6,
+        1
+      ]
+    ],
+    "before_observed": 0,
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "The difficulty has been set to Hard"
+        ]
+      },
+      {
+        "output": [
+          "Set minecraft:overworld to time marker minecraft:midnight"
+        ]
+      },
+      {
+        "output": [
+          "Game rule spawn_mobs is now set to true"
+        ]
+      },
+      {
+        "output": [
+          "The game is sprinting"
+        ]
+      }
+    ],
+    "pass_no_write": null
+  },
+  {
+    "id": "e7_east_setblock",
+    "direction": "east",
+    "mechanic": "setblock",
+    "setup": [
+      "fill 58 -46 -5 68 -46 5 minecraft:stone",
+      "fill 59 -45 -4 67 -40 4 minecraft:air"
+    ],
+    "action": [
+      "setblock 64 -45 0 minecraft:gold_block"
+    ],
+    "target": [
+      64,
+      -45,
+      0
+    ],
+    "mask": true,
+    "observed": "minecraft:air",
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": "minecraft:air",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "That position is not loaded"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_fill",
+    "direction": "east",
+    "mechanic": "fill",
+    "setup": [
+      "fill 58 -34 -5 68 -34 5 minecraft:stone",
+      "fill 59 -33 -4 67 -28 4 minecraft:air"
+    ],
+    "action": [
+      "fill 63 -33 0 65 -33 0 minecraft:diamond_block"
+    ],
+    "target": [
+      64,
+      -33,
+      0
+    ],
+    "mask": true,
+    "observed": "minecraft:air",
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": "minecraft:air",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "That position is not loaded"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_water",
+    "direction": "east",
+    "mechanic": "water",
+    "setup": [
+      "fill 58 -22 -5 68 -22 5 minecraft:stone",
+      "fill 59 -21 -4 67 -16 4 minecraft:air"
+    ],
+    "action": [
+      "setblock 63 -21 0 minecraft:water"
+    ],
+    "target": [
+      64,
+      -21,
+      0
+    ],
+    "mask": true,
+    "observed": "minecraft:air",
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": "minecraft:air",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 63, -21, 0"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_lava",
+    "direction": "east",
+    "mechanic": "lava",
+    "setup": [
+      "fill 58 -10 -5 68 -10 5 minecraft:stone",
+      "fill 59 -9 -4 67 -4 4 minecraft:air"
+    ],
+    "action": [
+      "setblock 63 -9 0 minecraft:lava"
+    ],
+    "target": [
+      64,
+      -9,
+      0
+    ],
+    "mask": true,
+    "observed": "minecraft:air",
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": "minecraft:air",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 63, -9, 0"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_fire",
+    "direction": "east",
+    "mechanic": "fire",
+    "setup": [
+      "fill 58 2 -5 68 2 5 minecraft:stone",
+      "fill 59 3 -4 67 8 4 minecraft:air",
+      "fill 61 2 -2 65 2 2 minecraft:netherrack",
+      "setblock 64 3 0 minecraft:oak_planks",
+      "setblock 64 3 -4 minecraft:oak_planks",
+      "setblock 64 3 -3 minecraft:oak_planks",
+      "setblock 64 3 -2 minecraft:oak_planks",
+      "setblock 64 3 -1 minecraft:oak_planks",
+      "setblock 64 3 0 minecraft:oak_planks",
+      "setblock 64 3 1 minecraft:oak_planks",
+      "setblock 64 3 2 minecraft:oak_planks",
+      "setblock 64 3 3 minecraft:oak_planks",
+      "setblock 64 3 4 minecraft:oak_planks"
+    ],
+    "action": [
+      "gamerule fire_spread_radius_around_player -1",
+      "setblock 63 3 -4 minecraft:fire",
+      "setblock 63 3 -3 minecraft:fire",
+      "setblock 63 3 -2 minecraft:fire",
+      "setblock 63 3 -1 minecraft:fire",
+      "setblock 63 3 0 minecraft:fire",
+      "setblock 63 3 1 minecraft:fire",
+      "setblock 63 3 2 minecraft:fire",
+      "setblock 63 3 3 minecraft:fire",
+      "setblock 63 3 4 minecraft:fire",
+      "tick sprint 400"
+    ],
+    "target": [
+      64,
+      3,
+      0
+    ],
+    "mask": true,
+    "observed": {
+      "fire_positions": [],
+      "target": "minecraft:oak_planks"
+    },
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": {
+      "fire_positions": [],
+      "target": "minecraft:oak_planks"
+    },
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Game rule fire_spread_radius_around_player is now set to -1"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, -4"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, -3"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, -2"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, -1"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, 0"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, 1"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, 2"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, 3"
+        ]
+      },
+      {
+        "output": [
+          "Changed the block at 63, 3, 4"
+        ]
+      },
+      {
+        "output": [
+          "The game is sprinting"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_sand",
+    "direction": "east",
+    "mechanic": "sand",
+    "setup": [
+      "fill 58 14 -5 68 14 5 minecraft:stone",
+      "fill 59 15 -4 67 20 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:falling_block 62 17 0 {BlockState:{id:\"minecraft:sand\"},Time:1,Motion:[1.5d,0.0d,0.0d],Tags:[\"e7_east_sand\"]}"
+    ],
+    "target": [
+      64,
+      15,
+      0
+    ],
+    "mask": true,
+    "observed": [],
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Falling Sand"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_tnt",
+    "direction": "east",
+    "mechanic": "tnt",
+    "setup": [
+      "fill 58 26 -5 68 26 5 minecraft:stone",
+      "fill 59 27 -4 67 32 4 minecraft:air",
+      "setblock 64 27 0 minecraft:oak_planks"
+    ],
+    "action": [
+      "summon minecraft:tnt 62 28 0 {fuse:8s,Tags:[\"e7_east_tnt\"]}"
+    ],
+    "target": [
+      64,
+      27,
+      0
+    ],
+    "mask": true,
+    "observed": "minecraft:oak_planks",
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": "minecraft:oak_planks",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Primed TNT"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_piston",
+    "direction": "east",
+    "mechanic": "piston",
+    "setup": [
+      "fill 58 38 -5 68 38 5 minecraft:stone",
+      "fill 59 39 -4 67 44 4 minecraft:air",
+      "setblock 62 39 0 minecraft:piston[facing=east]",
+      "setblock 63 39 0 minecraft:stone"
+    ],
+    "action": [
+      "setblock 61 39 0 minecraft:redstone_block"
+    ],
+    "target": [
+      64,
+      39,
+      0
+    ],
+    "mask": true,
+    "observed": "minecraft:air",
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": "minecraft:air",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 61, 39, 0"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_hopper",
+    "direction": "east",
+    "mechanic": "hopper",
+    "setup": [
+      "fill 58 50 -5 68 50 5 minecraft:stone",
+      "fill 59 51 -4 67 56 4 minecraft:air",
+      "setblock 64 51 0 minecraft:chest",
+      "setblock 63 50 0 minecraft:redstone_block",
+      "setblock 63 51 0 minecraft:hopper[facing=east,enabled=false]{Items:[{Slot:0b,id:\"minecraft:diamond\",count:1}]}"
+    ],
+    "action": [
+      "setblock 63 50 0 minecraft:stone"
+    ],
+    "target": [
+      64,
+      51,
+      0
+    ],
+    "mask": true,
+    "observed": 0,
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": 0,
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 63, 50, 0"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "source_diamonds_after": 1,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_dropper",
+    "direction": "east",
+    "mechanic": "dropper",
+    "setup": [
+      "fill 58 62 -5 68 62 5 minecraft:stone",
+      "fill 59 63 -4 67 68 4 minecraft:air",
+      "setblock 64 63 0 minecraft:chest",
+      "setblock 63 63 0 minecraft:dropper[facing=east]{Items:[{Slot:0b,id:\"minecraft:diamond\",count:1}]}"
+    ],
+    "action": [
+      "setblock 62 63 0 minecraft:redstone_block"
+    ],
+    "target": [
+      64,
+      63,
+      0
+    ],
+    "mask": true,
+    "observed": 0,
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": 0,
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 62, 63, 0"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "source_diamonds_after": 1,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_mob",
+    "direction": "east",
+    "mechanic": "mob",
+    "setup": [
+      "fill 58 74 -5 68 74 5 minecraft:stone",
+      "fill 59 75 -4 67 80 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:pig 62 76 0 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_mob\"]}"
+    ],
+    "target": [
+      64,
+      75,
+      0
+    ],
+    "mask": true,
+    "observed": [
+      [
+        63.54900001192093,
+        76.0,
+        0.5
+      ]
+    ],
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_arrow",
+    "direction": "east",
+    "mechanic": "arrow",
+    "setup": [
+      "fill 58 86 -5 68 86 5 minecraft:stone",
+      "fill 59 87 -4 67 92 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:arrow 62 88 0 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_arrow\"]}"
+    ],
+    "target": [
+      64,
+      87,
+      0
+    ],
+    "mask": true,
+    "observed": [
+      [
+        63.749,
+        88.0,
+        0.5
+      ]
+    ],
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Arrow"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_ender_pearl",
+    "direction": "east",
+    "mechanic": "ender_pearl",
+    "setup": [
+      "fill 58 98 -5 68 98 5 minecraft:stone",
+      "fill 59 99 -4 67 104 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:ender_pearl 62 100 0 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_ender_pearl\"]}"
+    ],
+    "target": [
+      64,
+      99,
+      0
+    ],
+    "mask": true,
+    "observed": [],
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Thrown Ender Pearl"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_boat",
+    "direction": "east",
+    "mechanic": "boat",
+    "setup": [
+      "fill 58 110 -5 68 110 5 minecraft:stone",
+      "fill 59 111 -4 67 116 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:oak_boat 62 112 0 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_boat\"]}"
+    ],
+    "target": [
+      64,
+      111,
+      0
+    ],
+    "mask": true,
+    "observed": [
+      [
+        63.3115,
+        112.0,
+        0.5
+      ]
+    ],
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Oak Boat"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_minecart",
+    "direction": "east",
+    "mechanic": "minecart",
+    "setup": [
+      "fill 58 122 -5 68 122 5 minecraft:stone",
+      "fill 59 123 -4 67 128 4 minecraft:air",
+      "fill 59 122 0 67 122 0 minecraft:redstone_block",
+      "fill 59 123 0 67 123 0 minecraft:powered_rail[shape=east_west,powered=true]"
+    ],
+    "action": [
+      "summon minecraft:minecart 62.5 123 0.5 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_minecart\"]}"
+    ],
+    "target": [
+      64,
+      123,
+      0
+    ],
+    "mask": true,
+    "observed": [
+      [
+        53.34207911819967,
+        123.0,
+        0.5
+      ]
+    ],
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Minecart"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_item",
+    "direction": "east",
+    "mechanic": "item",
+    "setup": [
+      "fill 58 134 -5 68 134 5 minecraft:stone",
+      "fill 59 135 -4 67 140 4 minecraft:air"
+    ],
+    "action": [
+      "summon minecraft:item 62 136 0 {Motion:[1.2d,0.0d,0.0d],NoGravity:1b,PersistenceRequired:1b,Tags:[\"e7_east_item\"],Item:{id:\"minecraft:diamond\",count:1},PickupDelay:32767s}"
+    ],
+    "target": [
+      64,
+      135,
+      0
+    ],
+    "mask": true,
+    "observed": [
+      [
+        63.874,
+        136.0,
+        0.5
+      ]
+    ],
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": [],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Diamond"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_redstone",
+    "direction": "east",
+    "mechanic": "redstone",
+    "setup": [
+      "fill 58 146 -5 68 146 5 minecraft:stone",
+      "fill 59 147 -4 67 152 4 minecraft:air",
+      "setblock 63 147 0 minecraft:redstone_wire",
+      "setblock 64 147 0 minecraft:redstone_lamp"
+    ],
+    "action": [
+      "setblock 62 147 0 minecraft:redstone_block"
+    ],
+    "target": [
+      64,
+      147,
+      0
+    ],
+    "mask": true,
+    "observed": "minecraft:redstone_lamp",
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": "minecraft:redstone_lamp",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 62, 147, 0"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_lightning",
+    "direction": "east",
+    "mechanic": "lightning",
+    "setup": [
+      "fill 58 158 -5 68 158 5 minecraft:stone",
+      "fill 59 159 -4 67 164 4 minecraft:air",
+      "setblock 63 159 0 minecraft:oxidized_copper",
+      "setblock 64 159 0 minecraft:oxidized_copper"
+    ],
+    "action": [
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "summon minecraft:lightning_bolt 63 160 0",
+      "tick sprint 60"
+    ],
+    "target": [
+      64,
+      159,
+      0
+    ],
+    "mask": true,
+    "observed": "minecraft:oxidized_copper",
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": "minecraft:oxidized_copper",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Lightning Bolt"
+        ]
+      },
+      {
+        "output": [
+          "The game is sprinting"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_sculk",
+    "direction": "east",
+    "mechanic": "sculk",
+    "setup": [
+      "fill 58 170 -5 68 170 5 minecraft:stone",
+      "fill 59 171 -4 67 176 4 minecraft:air",
+      "setblock 62 170 0 minecraft:sculk_catalyst",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,PersistenceRequired:1b,Tags:[\"e7_east_sculk\"]}"
+    ],
+    "action": [
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_0\"]}",
+      "damage @e[tag=e7_east_sculk_0,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_1\"]}",
+      "damage @e[tag=e7_east_sculk_1,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_2\"]}",
+      "damage @e[tag=e7_east_sculk_2,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_3\"]}",
+      "damage @e[tag=e7_east_sculk_3,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_4\"]}",
+      "damage @e[tag=e7_east_sculk_4,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_5\"]}",
+      "damage @e[tag=e7_east_sculk_5,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_6\"]}",
+      "damage @e[tag=e7_east_sculk_6,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_7\"]}",
+      "damage @e[tag=e7_east_sculk_7,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_8\"]}",
+      "damage @e[tag=e7_east_sculk_8,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_9\"]}",
+      "damage @e[tag=e7_east_sculk_9,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_10\"]}",
+      "damage @e[tag=e7_east_sculk_10,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_11\"]}",
+      "damage @e[tag=e7_east_sculk_11,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_12\"]}",
+      "damage @e[tag=e7_east_sculk_12,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_13\"]}",
+      "damage @e[tag=e7_east_sculk_13,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_14\"]}",
+      "damage @e[tag=e7_east_sculk_14,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "summon minecraft:pig 63 171 0 {NoAI:1b,Tags:[\"e7_east_sculk_15\"]}",
+      "damage @e[tag=e7_east_sculk_15,limit=1] 100 minecraft:player_attack by E7Bot0",
+      "tick sprint 400"
+    ],
+    "target": [
+      64,
+      171,
+      0
+    ],
+    "mask": true,
+    "observed": [
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air"
+    ],
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": [
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:stone",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air"
+    ],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "Summoned new Pig"
+        ]
+      },
+      {
+        "output": [
+          "Applied 100.0 damage to Pig"
+        ]
+      },
+      {
+        "output": [
+          "The game is sprinting"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_tree",
+    "direction": "east",
+    "mechanic": "tree",
+    "setup": [
+      "fill 58 182 -5 68 182 5 minecraft:stone",
+      "fill 59 183 -4 67 188 4 minecraft:air",
+      "setblock 63 182 0 minecraft:dirt",
+      "setblock 63 183 0 minecraft:oak_sapling[stage=1]"
+    ],
+    "action": [
+      "setblock 63 183 0 minecraft:air",
+      "place feature minecraft:oak 63 183 0"
+    ],
+    "target": [
+      64,
+      183,
+      0
+    ],
+    "mask": true,
+    "observed": [
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air"
+    ],
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": [
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air",
+      "minecraft:air"
+    ],
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Changed the block at 63, 183, 0"
+        ]
+      },
+      {
+        "output": [
+          "That position is not loaded"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_leaves",
+    "direction": "east",
+    "mechanic": "leaves",
+    "setup": [
+      "fill 58 194 -5 68 194 5 minecraft:stone",
+      "fill 59 195 -4 67 200 4 minecraft:air",
+      "setblock 64 195 0 minecraft:oak_leaves[persistent=false,distance=7]"
+    ],
+    "action": [
+      "gamerule random_tick_speed 512"
+    ],
+    "target": [
+      64,
+      195,
+      0
+    ],
+    "mask": true,
+    "observed": "minecraft:oak_leaves",
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": "minecraft:oak_leaves",
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "Game rule random_tick_speed is now set to 512"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  },
+  {
+    "id": "e7_east_natural_spawn",
+    "direction": "east",
+    "mechanic": "natural_spawn",
+    "setup": [
+      "fill 58 206 -5 68 206 5 minecraft:stone",
+      "fill 59 207 -4 67 212 4 minecraft:air"
+    ],
+    "action": [
+      "difficulty hard",
+      "time set midnight",
+      "gamerule spawn_mobs true",
+      "tick sprint 400"
+    ],
+    "target": [
+      64,
+      207,
+      0
+    ],
+    "mask": true,
+    "observed": 0,
+    "crossed": false,
+    "outside_changed": [],
+    "before_observed": 0,
+    "before_crossed": false,
+    "replies": [
+      {
+        "output": [
+          "The difficulty has been set to Hard"
+        ]
+      },
+      {
+        "output": [
+          "Set minecraft:overworld to time marker minecraft:midnight"
+        ]
+      },
+      {
+        "output": [
+          "Game rule spawn_mobs is now set to true"
+        ]
+      },
+      {
+        "output": [
+          "The game is sprinting"
+        ]
+      }
+    ],
+    "pass_no_write": true,
+    "positive_control": true,
+    "proven": true
+  }
+]

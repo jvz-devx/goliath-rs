@@ -1,0 +1,10 @@
+{
+  "raw": "walking-normal-before-forwarding.json",
+  "accepted": false,
+  "reasons": [
+    "The persistence wrapper inherited the default saved_proto implementation, so accepted proto chunks were absent from the cut log.",
+    "Kinematic clients stopped near x=109 on terrain instead of completing the route to x=360.",
+    "No unload or proto snapshot was captured in this run. Its latency distribution cannot establish the requested sustained walking and generation pass."
+  ],
+  "fix": "Forward Persistent::saved_proto, move normal stress clients to y=302 during setup, and require completed travel plus nonzero unload and proto capture."
+}

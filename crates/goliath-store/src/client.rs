@@ -3,7 +3,25 @@
 use crate::{Command, Response, read_response, write_request};
 use std::io;
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+/// Process-unique request identity. Retain the complete Command for uncertain retries.
+pub fn request_id() -> crate::RequestId {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    static START: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+    });
+    crate::RequestId(
+        start
+            .wrapping_add(u128::from(std::process::id()) << 64)
+            .wrapping_add(u128::from(NEXT.fetch_add(1, Ordering::Relaxed))),
+    )
+}
 
 pub struct Client {
     address: SocketAddr,
@@ -12,6 +30,12 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn execute(&self, operation: crate::Operation) -> io::Result<Response> {
+        self.call(&Command {
+            id: request_id(),
+            operation,
+        })
+    }
     /// Timeout applies separately to connect, whole-frame write and whole-frame read.
     /// An IO error after all attempts means the result is unknown, not aborted.
     pub fn new(address: SocketAddr, timeout: Duration, attempts: u32) -> io::Result<Self> {

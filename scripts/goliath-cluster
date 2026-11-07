@@ -1,0 +1,667 @@
+#!/usr/bin/env python3
+"""Start/stop the four-tile cluster, or run its real-process crossing proof.
+
+start stays in the foreground. stop --state PATH asks that owner to stop.
+Every invocation owns and removes one fresh directory under .local/runs.
+Production edge is 2048. proof defaults to edge 64.
+"""
+import argparse
+import base64
+import contextlib
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+
+ROOT = Path(__file__).resolve().parent.parent
+BINS = ROOT / '.local/bin/goliath-e10'
+DATA = ROOT / 'docs/experiments/data/E10'
+RUNS = ROOT / '.local/runs'
+RESOURCES = Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+e8 = load('e10_e8', ROOT / 'scripts/e8-fast-crossing')
+e4, e2 = e8.e4, e8.e2
+store = load('e10_store_wire', ROOT / 'scripts/e5-store.py')
+sys.path.insert(0, str(ROOT / '.local/src/horizon/tools'))
+import server_transfer_e2e as upstream
+
+
+def save(name, value):
+    DATA.mkdir(parents=True, exist_ok=True)
+    e8.save(DATA / name, value)
+
+
+def env(directory, extra=None):
+    result = {k:v for k,v in os.environ.items() if not k.startswith(('HORIZON_', 'XDG_', 'GOLIATH_', 'E2_'))}
+    for key in ('HORIZON_HOME', 'HORIZON_LAUNCHER_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME',
+                'XDG_CACHE_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'HORIZON_LAUNCHER_TRASH',
+                'HORIZON_LAUNCHER_CLIPBOARD', 'HORIZON_LAUNCHER_DESKTOP'):
+        path = directory / key.lower()
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        result[key] = str(path)
+    result.update(HORIZON_LAUNCHER_NO_SELF_UPDATE='1', HORIZON_NO_AUDIO='1', HORIZON_NO_DISCORD='1', E2_TRACE_INPUTS='1')
+    result.update(extra or {})
+    return result
+
+
+@contextlib.contextmanager
+def environment(values):
+    previous = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
+
+
+def install(source, name):
+    BINS.mkdir(parents=True, exist_ok=True)
+    staged = BINS / (name + '.new')
+    shutil.copy2(source, staged)
+    os.replace(staged, BINS / name)
+
+
+def build(fresh=False):
+    settings = dict(os.environ, CARGO_INCREMENTAL='0', CARGO_PROFILE_FAST_INHERITS='release',
+                    CARGO_PROFILE_FAST_LTO='false', CARGO_PROFILE_FAST_CODEGEN_UNITS='16')
+    settings.pop('CI', None)
+    context = tempfile.TemporaryDirectory(prefix='E10-build-', dir=RUNS) if fresh else contextlib.nullcontext(None)
+    with context as temporary:
+        source_root = ROOT
+        if fresh:
+            source_root = Path(temporary)
+            # Preserve the production relative path dependencies in a fresh source layout.
+            for name in ('Cargo.toml', 'Cargo.lock', 'clippy.toml'):
+                shutil.copy2(ROOT / name, source_root / name)
+            shutil.copytree(ROOT / 'crates', source_root / 'crates')
+            patcher = load('e10_patch_build', ROOT / 'scripts/e10-patch')
+            for project in ('horizon', 'meridian'):
+                patcher.export(project, source_root / '.local/src' / project, integration=True)
+        commands = [
+            (source_root, ['cargo', 'build', '--locked', '--release', '-p', 'goliath-store', '--bin', 'goliath-store'], 'target/release', ['goliath-store']),
+            (source_root / '.local/src/horizon', ['cargo', 'build', '--locked', '--profile', 'fast', '--no-default-features', '-p', 'horizon-client', '--bin', 'horizon-client'], 'target/fast', ['horizon-client']),
+            (source_root / '.local/src/meridian', ['cargo', 'build', '--locked', '--profile', 'fast', '-p', 'meridian-proxy', '--bin', 'meridian', '-p', 'meridian-testkit', '--bin', 'e4-client', '-p', 'meridian-sidecar', '--bin', 'meridian-sidecar'], 'target/fast', ['meridian', 'e4-client', 'meridian-sidecar']),
+        ]
+        results = []
+        for cwd, command, target, names in commands:
+            started = time.monotonic()
+            subprocess.run(command, cwd=cwd, env=settings, check=True)
+            for name in names:
+                install(cwd / target / name, name)
+            results.append({'project':cwd.name, 'command':command, 'seconds':time.monotonic()-started, 'exit':0})
+        save('fresh-build.json' if fresh else 'build.json', {'fresh':fresh, 'commands':results,
+             'binaries':{name:e8.prereq.sha256(BINS/name) for name in ('horizon-client','meridian','goliath-store','e4-client','meridian-sidecar')}})
+
+
+class Tile:
+    def __init__(self, cluster, label, index, tile):
+        self.cluster, self.label, self.index, self.tile = cluster, label, index, tile
+        self.folder = cluster.root / label
+        self.folder.mkdir(exist_ok=True)
+        self.endpoint = self.folder / '.horizon/engine.json'
+        self.endpoint.parent.mkdir(exist_ok=True)
+        self.cut = cluster.root / f'{label}-cut'
+        self.cut.mkdir(exist_ok=True)
+        cluster.tiles[label] = self
+        self.start()
+
+    def start(self):
+        cluster = self.cluster
+        if hasattr(self,'server') and self.server.process.poll() is None:
+            raise RuntimeError('refusing to claim a replacement while this tile still runs')
+        fresh = not self.cut.joinpath('LOG').exists() and not self.cut.joinpath('BASE').exists()
+        response = store.call(cluster.address, store.request(1, store.u64(self.index)))
+        if response[:2] != b'\1\1':
+            raise RuntimeError(f'claim failed {response!r}')
+        tile, process, epoch = struct.unpack_from('<QQQ', response, 2)
+        self.token = f'{process}:{epoch}'
+        # This is a fresh or stopped local tile. Replace its local append fence
+        # only after the shared store has issued the new process fence.
+        self.cut.joinpath('FENCE').write_text(self.token)
+        self.port = e2.free_port()
+        spawn = [1 if v == 0 else -2 for v in self.tile]
+        settings = dict(upstream.PROPERTIES, **{'server-ip':'127.0.0.1', 'server-port':str(self.port),
+            'level-seed':'12345', 'level-name':'world', 'gamemode':'creative', 'force-gamemode':'true',
+            'allow-flight':'true', 'difficulty':'peaceful', 'pause-when-empty-seconds':'-1', 'max-players':'128'})
+        if cluster.normal:
+            settings['level-type']='minecraft\\:normal'
+        self.folder.joinpath('server.properties').write_text(''.join(f'{k}={v}\n' for k,v in settings.items()))
+        self.folder.joinpath('eula.txt').write_text('eula=true\n')
+        self.folder.joinpath('forwarding.secret').write_bytes(upstream.SECRET + b'\n')
+        self.env = env(self.folder / f'private-{process}', {
+            'HORIZON_TILE':f'0,0,{cluster.edge},{self.tile[0]},{self.tile[1]}', 'HORIZON_TILE_TEST_SMALL':'1' if cluster.edge < 512 else '0',
+            'HORIZON_E3_CUT_DIR':str(self.cut), 'HORIZON_E3_FENCE':self.token,
+            'GOLIATH_STORE':f'{cluster.address[0]}:{cluster.address[1]}', 'GOLIATH_TILE_ID':str(self.index),
+            'GOLIATH_SPAWN':json.dumps([spawn[0],300 if cluster.normal else -60,spawn[1]])})
+        with environment(self.env):
+            self.server = upstream.Server([BINS/'horizon-client', '--resources',cluster.resources,
+                '--control-socket',self.endpoint,'--transfers',upstream.TRANSFERS,'--dedicated','--nogui'],
+                self.folder, cluster.root/f'server-{self.label}-{process}.log')
+        self.server.wait_for(upstream.DONE, 120)
+        info = json.loads(self.endpoint.read_text())
+        sock = socket.create_connection(('127.0.0.1',info['port']),timeout=30)
+        reader = sock.makefile('r', encoding='utf-8')
+        sock.sendall(f'auth {info["token"]}\n'.encode())
+        if json.loads(reader.readline()).get('ok') is not True:
+            raise RuntimeError('control authentication failed')
+        self.control = sock, reader
+        self.fence = {'tile':tile,'process':process,'epoch':epoch,'endpoint':str(self.endpoint),'token':self.token}
+        for command in ('gamerule spawn_mobs false','gamerule advance_weather false','gamerule random_tick_speed 0','gamerule respawn_radius 0'):
+            reply = self.ask('console '+command)
+            if any('Incorrect' in line or 'Unknown' in line for line in reply.get('output', [])):
+                raise RuntimeError(f'cluster game rule refused: {command}: {reply}')
+        self.marker = [8 if v==0 else -8 for v in self.tile]
+        self.ask(f'console forceload add {self.marker[0]} {self.marker[1]} {self.marker[0]} {self.marker[1]}')
+        deadline=time.monotonic()+60
+        while True:
+            loaded=self.ask(f'console execute if loaded {self.marker[0]} -60 {self.marker[1]} run say E10_LOADED')
+            if any('E10_LOADED' in line for line in loaded.get('output',[])):
+                break
+            if time.monotonic()>deadline:
+                raise RuntimeError(f'tile {self.label} marker chunk did not load')
+            time.sleep(.05)
+        if fresh:
+            self.ask(f'console setblock {self.marker[0]} -60 {self.marker[1]} minecraft:gold_block')
+        marker=self.ask(f'console execute if block {self.marker[0]} -60 {self.marker[1]} minecraft:gold_block run say E10_WORLD_INTACT')
+        if not any('E10_WORLD_INTACT' in line for line in marker.get('output',[])):
+            raise RuntimeError(f'tile {self.label} world marker lost: {marker}')
+        started = time.monotonic()
+        self.bootstrap = self.ask(f'tile-cut {self.token}')
+        if self.bootstrap.get('ok') is not True:
+            raise RuntimeError(f'bootstrap refused {self.bootstrap}')
+        self.bootstrap['rtt_ms'] = (time.monotonic()-started)*1000
+
+    def ask(self, line):
+        sock, reader = self.control
+        sock.sendall((line+'\n').encode())
+        answer = reader.readline()
+        if not answer:
+            raise RuntimeError(f'tile {self.label} control closed: {self.server.since(0)[-8:]}')
+        return json.loads(answer)
+
+    def stop(self, cut=True):
+        if not hasattr(self, 'server'):
+            return
+        if cut and self.server.process.poll() is None:
+            reply = self.ask(f'tile-cut {self.token}')
+            if reply.get('ok') is not True:
+                raise RuntimeError(f'clean shutdown cut refused {reply}')
+        if hasattr(self, 'control'):
+            self.control[0].close()
+        self.server.stop()
+
+
+class Cluster:
+    def __init__(self, root, resources, edge, normal=False):
+        self.root, self.resources, self.edge = root, resources, edge
+        self.normal = normal
+        self.tiles, self.children = {}, []
+        self.proxy = None
+        self.store_log = (root/'store.log').open('w+')
+        self.store_process = subprocess.Popen([BINS/'goliath-store','--dir',root/'store','--listen','127.0.0.1:0','--sync','full'],stdout=self.store_log,stderr=subprocess.STDOUT)
+        deadline = time.monotonic()+10
+        while True:
+            text = (root/'store.log').read_text().rpartition('\n')[0]
+            lines = [line for line in text.splitlines() if line.startswith('LISTEN ')]
+            if lines:
+                host, port = lines[0].split()[1].split(':')
+                self.address = host,int(port)
+                break
+            if self.store_process.poll() is not None or time.monotonic()>deadline:
+                raise RuntimeError(f'store startup failed {text}')
+            time.sleep(.02)
+        for index,(label,tile) in enumerate(e4.TILES.items()):
+            self.tiles[label] = Tile(self,label,index,tile)
+        clock = store.call(self.address,store.request(13))
+        if clock == b'\1\7\0':
+            entry = self.tiles['a'].fence
+            anchor = int(time.time()*1000)
+            payload = struct.pack('<QQQ',entry['tile'],entry['process'],entry['epoch']) + b'\1' + struct.pack('<QQQBB',anchor,0,0,0,0)
+            if store.call(self.address,store.request(14,payload)) != b'\1\0':
+                raise RuntimeError('cluster clock initialization failed')
+            clock = store.call(self.address,store.request(13))
+        anchor,game,day,rain,thunder = struct.unpack_from('<QQQBB',clock,3)
+        self.clock = dict(unix_ms=anchor,game_tick=game,day_tick=day,raining=bool(rain),thundering=bool(thunder))
+        self.start_proxy()
+
+    def start_proxy(self):
+        self.sidecars = []
+        ports = {}
+        for label,tile in self.tiles.items():
+            ports[label] = e2.free_port()
+            key = self.root/f'{label}.key'
+            key.write_text(f'e10-private-loopback-only-{label}')
+            with environment(env(self.root/'proxy-private')):
+                child = e2.Child([BINS/'meridian-sidecar','--endpoint-file',tile.endpoint,'--listen',f'127.0.0.1:{ports[label]}','--secret-file',key],self.root,self.root/f'sidecar-{label}.log')
+            self.sidecars.append(child)
+        self.port = e2.free_port()
+        config = self.root/'meridian.toml'
+        config.write_text(f'listen = "127.0.0.1:{self.port}"\nauth-mode = "offline"\nconnections-per-minute = 0\nmax-players = 128\n'
+            f'forwarding-secret = "{upstream.SECRET.decode()}"\nswitch-carry-position = true\ndefault-backend = "a"\n'
+            f'[tiles]\norigin = [0,0]\nedge = {self.edge}\n'
+            + ''.join(f'[[tiles.entries]]\nindex = [{x},{z}]\nbackend = "{label}"\n' for label,(x,z) in e4.TILES.items())
+            + ''.join(f'[[backends]]\nname = "{label}"\naddress = "127.0.0.1:{tile.port}"\nsidecar = "127.0.0.1:{ports[label]}"\nsidecar-secret-file = "{self.root / (label+".key")}"\n' for label,tile in self.tiles.items()))
+        self.state = self.root/'cluster.json'
+        self.state.write_text(json.dumps({'store':f'{self.address[0]}:{self.address[1]}','tiles':{label:tile.fence for label,tile in self.tiles.items()}}))
+        with environment(env(self.root/'proxy-private',{'GOLIATH_CLUSTER':str(self.state),'GOLIATH_CLOCK':json.dumps(self.clock),'E8_STAGE':'4'})):
+            subprocess.run([BINS/'meridian','--check',config],check=True,capture_output=True)
+            self.proxy = e2.Child([BINS/'meridian',config],self.root,self.root/'proxy.log')
+        deadline = time.monotonic()+10
+        while True:
+            try:
+                with socket.create_connection(('127.0.0.1',self.port),timeout=.2):
+                    break
+            except OSError:
+                if time.monotonic()>deadline:
+                    raise RuntimeError('proxy not listening')
+                time.sleep(.02)
+
+    def player(self, uuid):
+        response = store.call(self.address,store.request(9,int(uuid.replace('-',''),16).to_bytes(16,'little')))
+        if response[:3] != b'\1\3\1':
+            raise RuntimeError(f'player absent {response!r}')
+        generation,owner,version,size = struct.unpack_from('<QQII',response,3)
+        body = response[27:]
+        if len(body)!=size or version!=1:
+            raise RuntimeError('bad player blob')
+        return {'generation':generation,'owner':owner,'body':json.loads(body)}
+
+    def stop_proxy(self):
+        if self.proxy:
+            self.proxy.stop()
+            self.proxy = None
+        for child in getattr(self,'sidecars',[]):
+            child.stop()
+        self.sidecars = []
+
+    def stop(self):
+        self.stop_proxy()
+        for tile in self.tiles.values():
+            try:
+                tile.stop()
+            except Exception as error:
+                print(f'tile shutdown failed: {error}',file=sys.stderr)
+                tile.server.stop()
+        if hasattr(self,'store_process'):
+            self.store_process.terminate()
+            self.store_process.wait(timeout=10)
+            self.store_log.close()
+
+
+def phase_events(path):
+    return [json.loads(line.split('E10_PHASE ',1)[1]) for line in path.read_text().rpartition('\n')[0].splitlines() if 'E10_PHASE ' in line]
+
+
+def walking(cluster,args):
+    clients=[]
+    result={'status':'running','bots':25,'samples':[],'refused_cuts':0,'rate_hz':2,'seconds':args.seconds,
+        'normal_terrain':cluster.normal,'freezing_player':'E10Walker0',
+        'binary_sha256':e8.prereq.sha256(BINS/'horizon-client')}
+    tile=cluster.tiles['a']
+    try:
+        for index in range(25):
+            with environment(env(cluster.root/f'walker-private-{index}')):
+                child=e2.Child([BINS/'e4-client',cluster.port,f'E10Walker{index}'],cluster.root,cluster.root/f'walker-{index}.log')
+            clients.append(child)
+            e8.wait_event(child,lambda e:e.get('kind')=='teleport')
+            if cluster.normal:
+                began=time.time_ns()
+                reply=tile.ask(f'console tp E10Walker{index} 1.5 302 1.5')
+                e8.wait_event(child,lambda e:e.get('kind')=='teleport' and e['pos'][1]==302,began)
+            child.send(f'walk lane {16+index%5} 1')
+        for index,child in enumerate(clients):
+            e8.wait_event(child,lambda e:e.get('kind')=='reached' and e.get('token')=='lane')
+            child.send(f'walk setup {16+index%5} {16+index//5}')
+        for child in clients:
+            e8.wait_event(child,lambda e:e.get('kind')=='reached' and e.get('token')=='setup')
+        result['warmup']=tile.ask(f'tile-cut {tile.token}')
+        result['before']=tile.ask('server-status')
+        for index,child in enumerate(clients):
+            child.send(f'walk load {360+index%5} {16+index//5}')
+        began=time.monotonic()
+        deadline=began
+        uuid=str(upstream.offline_uuid('E10Walker0'))
+        while time.monotonic()-began<args.seconds:
+            started=time.monotonic()
+            reply=tile.ask(f'tile-cut {tile.token} {uuid}')
+            reply['rtt_ms']=(time.monotonic()-started)*1000
+            if reply.get('ok') is not True:
+                result['refused_cuts']+=1
+            else:
+                handover=reply['export']['record']['handover']
+                released=tile.ask(f'player-release {uuid} {handover} abort')
+                if released.get('ok') is not True:
+                    raise RuntimeError(f'walking freeze release failed: {released}')
+            result['samples'].append(reply)
+            deadline+=.5
+            time.sleep(max(0,deadline-time.monotonic()))
+        result['after']=tile.ask('server-status')
+        result['disconnects']=sum(e.get('kind')=='disconnect' for child in clients for e in child.events)
+        result['positions']=[next((e['pos'] for e in reversed(child.events) if e.get('kind')=='move'),None) for child in clients]
+        if any(position is None or position[0]<350 for position in result['positions']):
+            raise RuntimeError('a walking client stopped before the generated/unloaded route finished')
+        if cluster.normal and not any(s.get('lifecycle',{}).get('proto_chunks',0)>0 for s in result['samples']):
+            raise RuntimeError('normal generation never entered the coherent proto log')
+        if not any(s.get('lifecycle',{}).get('unloaded_chunks',0)>0 for s in result['samples']):
+            raise RuntimeError('walking route did not exercise chunk unload capture')
+        accepted=[s for s in result['samples'] if s.get('ok') is True]
+        result['summary']={key:e2.percentiles([s[key] for s in accepted]) for key in ('rtt_ms','tick_ms','capture_ms','encode_ms','install_io_ms')}
+        result['status']='complete' if result['refused_cuts']==0 and result['disconnects']==0 else 'failed'
+        if result['status']!='complete':
+            raise RuntimeError('walking cut stress failed')
+    except BaseException as error:
+        result['status']='failed'
+        result['error']=str(error)
+        result['client_tails']=[child.events[-5:] for child in clients]
+        raise
+    finally:
+        for child in clients:
+            child.stop()
+        save(args.name+'.json',result)
+
+
+def items(cluster,args):
+    clients=[]
+    result={'status':'running','expected':{'E10Chest-Alpha':7,'E10Chest-Beta':11}}
+    tile=cluster.tiles['a']
+    names=['E10Giver','E10Receiver']
+    uuids={name:str(upstream.offline_uuid(name)) for name in names}
+
+    def inventory(label,name):
+        reply=cluster.tiles[label].ask('player-export '+uuids[name])
+        if reply.get('ok') is not True:
+            raise RuntimeError(f'item player export failed: {reply}')
+        tag=upstream.read_nbt(base64.b64decode(reply['record']['player']))
+        counts={key:0 for key in result['expected']}
+        for stack in tag.get('Inventory',[]):
+            text=json.dumps(stack)
+            for key in counts:
+                if key in text:
+                    counts[key]+=stack.get('count',1)
+        return counts
+
+    def wait_counts(label,name,wanted,seconds=8):
+        deadline=time.monotonic()+seconds
+        while True:
+            counts=inventory(label,name)
+            if counts==wanted:
+                return counts
+            if time.monotonic()>deadline:
+                raise RuntimeError(f'named item count differs for {name}: {counts}, wanted {wanted}')
+            time.sleep(.05)
+
+    try:
+        for name,z in zip(names,[1,4]):
+            with environment(env(cluster.root/f'items-private-{name}')):
+                child=e2.Child([BINS/'e4-client',cluster.port,name],cluster.root,cluster.root/f'items-{name}.log')
+            clients.append(child)
+            e8.wait_event(child,lambda e:e.get('kind')=='teleport')
+            child.send(f'walk setup 3.5 {z}')
+            e8.wait_event(child,lambda e:e.get('kind')=='reached' and e.get('token')=='setup')
+        tile.ask('console setblock 3 -60 2 minecraft:chest')
+        for index,(name,count) in enumerate(result['expected'].items()):
+            command=f'item replace block 3 -60 2 container.{index} with minecraft:diamond[minecraft:custom_name="{name}"] {count}'
+            reply=tile.ask('console '+command)
+            if any('Incorrect' in line or 'Unknown' in line for line in reply.get('output',[])):
+                raise RuntimeError(f'named stack setup refused: {reply}')
+        result['chest_before']=tile.ask('console data get block 3 -60 2 Items')
+        start=time.time_ns()
+        clients[0].send('open 3 -60 2')
+        e8.wait_event(clients[0],lambda e:e.get('kind')=='open',start)
+        time.sleep(.1)
+        for slot in [0,54,1,55]:
+            clients[0].send(f'click {slot}')
+            time.sleep(.15)
+        clients[0].send('close')
+        result['taken']=wait_counts('a',names[0],result['expected'])
+        result['chest_after']=tile.ask('console data get block 3 -60 2 Items')
+        if any(key in json.dumps(result['chest_after']) for key in result['expected']):
+            raise RuntimeError('named items remained in chest after taking')
+        clients[0].send('drop')
+        clients[0].send('walk clear 7 1')
+        giver={'E10Chest-Alpha':0,'E10Chest-Beta':11}
+        receiver={'E10Chest-Alpha':7,'E10Chest-Beta':0}
+        result['giver_after_drop']=wait_counts('a',names[0],giver)
+        result['receiver_after_pickup']=wait_counts('a',names[1],receiver,10)
+        result['loose_items_after_pickup']=tile.ask('console execute if entity @e[type=minecraft:item] run say E10_LOOSE_ITEMS')
+        if any('E10_LOOSE_ITEMS' in line for line in result['loose_items_after_pickup'].get('output',[])):
+            raise RuntimeError('loose items remain after pickup')
+        for child,name,z,wanted in zip(clients,names,[1,4],[giver,receiver]):
+            began=time.time_ns()
+            child.send(f'walk cross -1 {z}')
+            e8.chat(child,'E4 wall arrived b',began,30)
+            wait_counts('b',name,wanted)
+        for child in clients:
+            child.stop()
+        clients=[]
+        time.sleep(.2)
+        cluster.stop_proxy()
+        # Clean restart every tile, including the emptied chest's tile and receiver's tile.
+        for tile in cluster.tiles.values():
+            tile.stop()
+        for tile in cluster.tiles.values():
+            tile.start()
+        cluster.start_proxy()
+        result['recovered']={}
+        for name,wanted in zip(names,[giver,receiver]):
+            with environment(env(cluster.root/f'items-reconnect-{name}')):
+                child=e2.Child([BINS/'e4-client',cluster.port,name],cluster.root,cluster.root/f'items-reconnected-{name}.log')
+            clients.append(child)
+            e8.wait_event(child,lambda e:e.get('kind')=='teleport')
+            result['recovered'][name]=wait_counts('b',name,wanted)
+        result['recovered_chest']=cluster.tiles['a'].ask('console data get block 3 -60 2 Items')
+        if any(key in json.dumps(result['recovered_chest']) for key in result['expected']):
+            raise RuntimeError('restart restored a transferred item in the chest')
+        result['loose_items_after_restart']={label:tile.ask('console execute if entity @e[type=minecraft:item] run say E10_LOOSE_ITEMS') for label,tile in cluster.tiles.items()}
+        if any('E10_LOOSE_ITEMS' in json.dumps(reply.get('output',[])) for reply in result['loose_items_after_restart'].values()):
+            raise RuntimeError('restart restored loose transferred items')
+        result['total']={key:sum(counts[key] for counts in result['recovered'].values()) for key in result['expected']}
+        if result['total']!=result['expected']:
+            raise RuntimeError('named item conservation failed')
+        result['status']='complete'
+    except BaseException as error:
+        result.update(status='failed',error=str(error),traceback=traceback.format_exc())
+        result['server_tail']=cluster.tiles['a'].server.since(0)[-25:]
+        raise
+    finally:
+        for child in clients:
+            child.stop()
+        save(args.name+'.json',result)
+
+
+def proof(cluster, args):
+    result = {'status':'running','requested':args.crossings,'trials':[],'disconnects':0,'tile_edge':cluster.edge,
+        'bootstrap':{label:tile.bootstrap for label,tile in cluster.tiles.items()},'load_start':os.getloadavg()}
+    result['binary_sha256']={name:e8.prereq.sha256(BINS/name) for name in ('horizon-client','meridian','goliath-store','e4-client')}
+    client = None
+    try:
+        with environment(env(cluster.root/'client-private')):
+            client = e2.Child([BINS/'e4-client',cluster.port],cluster.root,cluster.root/'client.log')
+        e8.wait_event(client,lambda e:e.get('kind')=='teleport')
+        uuid = str(upstream.offline_uuid('E4Probe'))
+        client.send('walk setup 1 1')
+        e4.wait_position(cluster.tiles['a'],0,'a')
+        cluster.tiles['a'].ask('console give E4Probe minecraft:diamond 5')
+        cluster.tiles['a'].ask('console give E4Probe minecraft:oak_log 12')
+        time.sleep(.2)
+        known = e2.inventory(cluster.tiles['a'],uuid,upstream)
+        if known['count']!=17:
+            raise RuntimeError('fixture inventory differs')
+        result['known_inventory']=known['sha256']
+        source='a'
+        for index in range(args.crossings):
+            target=e4.ROUTE[index%len(e4.ROUTE)]
+            goal=e4.POINTS[target]
+            before=e2.inventory(cluster.tiles[source],uuid,upstream)
+            began=time.time_ns()
+            client.send(f'walk {index} {goal[0]} {goal[1]}')
+            sent=e8.wait_event(client,lambda e:e.get('kind')=='move' and e4.eligible(e['pos'],target),began)
+            complete=e8.chat(client,f'E4 wall arrived {target}',sent['ns'],args.timeout)
+            first=e4.wait_position(cluster.tiles[target],sent['ns'],target)
+            last=[v for v in e2.inputs(cluster.tiles[source]) if v['ns']<first['ns']][-1]
+            time.sleep(.1)
+            after=e2.inventory(cluster.tiles[target],uuid,upstream)
+            record=cluster.player(uuid)
+            teleports=[e for e in client.events if e.get('kind')=='teleport' and sent['ns']<=e['ns']<=first['ns']+100_000_000]
+            phases=phase_events(cluster.root/'proxy.log')[-3:]
+            trial={'index':index,'source':source,'target':target,'input_gap_ms':(first['ns']-last['ns'])/1e6,
+                'last_source_input':last,'first_target_input':first,'trigger_input':sent,'completed_ns':complete['ns'],
+                'inventory_before':before['sha256'],'inventory_after':after['sha256'],
+                'generation':record['generation'],'store_owner':record['owner'],
+                'cut_sequence':record['body']['record']['goliath_cut']['sequence'],
+                'arrival_error_blocks':max((math.dist(e['before'],e['pos']) for e in teleports),default=0),
+                'phases':phases,'load':os.getloadavg()}
+            result['trials'].append(trial)
+            if before['sha256']!=known['sha256'] or after['sha256']!=known['sha256']:
+                raise RuntimeError('inventory changed')
+            if record['generation']!=index+1 or record['owner']!=list(e4.TILES).index(target):
+                raise RuntimeError('CAS is not visible at the expected generation and tile')
+            source=target
+            if index%25==0 or index+1==args.crossings:
+                save(args.name+'.json',result)
+                print(f'E10 {index+1}/{args.crossings} gap={trial["input_gap_ms"]:.2f} ms generation={record["generation"]}',flush=True)
+        result['disconnects']=sum(e.get('kind')=='disconnect' for e in client.events)
+        result['summary']={'input_gap_ms':e2.percentiles([t['input_gap_ms'] for t in result['trials']]),
+            'max_correction_blocks':max(t['arrival_error_blocks'] for t in result['trials']),
+            'cas_visible':len(result['trials'])}
+        clocks=[e for e in client.events if e.get('kind')=='clock']
+        result['cluster_clock']={'packets':len(clocks),'backward_steps':sum(b['game_time']<a['game_time'] for a,b in zip(clocks,clocks[1:])),
+            'first':clocks[:1],'last':clocks[-1:]}
+        if result['cluster_clock']['backward_steps']:
+            raise RuntimeError('cluster clock moved backwards at a wall')
+        # Leave normally, capture the final resident state, restart every tile,
+        # then reconnect through store-based login routing.
+        client.stop()
+        client=None
+        time.sleep(.2)
+        cluster.stop_proxy()
+        for tile in cluster.tiles.values():
+            tile.stop(cut=not (args.materialize and tile.label==source))
+        for tile in cluster.tiles.values():
+            tile.start()
+        cluster.start_proxy()
+        with environment(env(cluster.root/'client-reconnect-private')):
+            client=e2.Child([BINS/'e4-client',cluster.port],cluster.root,cluster.root/'client-reconnect.log')
+        e8.wait_event(client,lambda e:e.get('kind')=='teleport')
+        time.sleep(.2)
+        recovered=e2.inventory(cluster.tiles[source],uuid,upstream)
+        if recovered['sha256']!=known['sha256']:
+            raise RuntimeError('inventory changed after all-tile restart')
+        generation=cluster.player(uuid)['generation']
+        files={}
+        for label,tile in cluster.tiles.items():
+            path=tile.folder/'world/players/data'/f'{uuid}.dat'
+            files[label]={'current':path.exists(),'old':path.with_suffix('.dat_old').exists()}
+            if path.exists() != (label==source):
+                raise RuntimeError('departed player file survived or current owner file is missing')
+            if label!=source and files[label]['old']:
+                raise RuntimeError('departed player fallback file survived')
+            if label==source:
+                tag=upstream.read_nbt(gzip.decompress(path.read_bytes()))
+                files[label]['generation']=tag.get('goliath:generation')
+                files[label]['inventory_sha256']=hashlib.sha256(json.dumps(tag.get('Inventory',[]),sort_keys=True).encode()).hexdigest()
+                if files[label]['generation']!=generation or files[label]['inventory_sha256']!=known['sha256']:
+                    raise RuntimeError('recovered owner file generation or inventory differs')
+        result['restart']={'all_four_started':True,'inventory_equal':True,'owner':source,
+            'generation':generation,'world_markers':4,
+            'target_cut_deliberately_omitted':args.materialize,'player_files':files}
+        result['status']='complete'
+    except BaseException as error:
+        result['status']='failed'
+        result['error']=str(error)
+        result['client_tail']=client.events[-50:] if client else []
+        result['traceback']=traceback.format_exc()
+        result['phases']=phase_events(cluster.root/'proxy.log') if (cluster.root/'proxy.log').exists() else []
+        result['server_tails']={name:tile.server.since(0)[-12:] for name,tile in cluster.tiles.items()}
+        result['proxy_tail']=(cluster.root/'proxy.log').read_text().rpartition('\n')[0].splitlines()[-20:]
+        raise
+    finally:
+        if client:
+            client.stop()
+        save(args.name+'.json',result)
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action',choices=['start','stop','proof','walking','items','build'])
+    parser.add_argument('--state',type=Path)
+    parser.add_argument('--resources',type=Path,default=RESOURCES)
+    parser.add_argument('--edge',type=int)
+    parser.add_argument('--build',action='store_true')
+    parser.add_argument('--fresh',action='store_true')
+    parser.add_argument('--crossings',type=int,default=1000)
+    parser.add_argument('--name',default='crossings')
+    parser.add_argument('--timeout',type=float,default=30)
+    parser.add_argument('--seconds',type=float,default=70)
+    parser.add_argument('--normal',action='store_true',help='normal terrain with creative clients at y=300, for generation/cut stress')
+    parser.add_argument('--materialize',action='store_true',help='proof only: omit the target shutdown cut to prove newer store entry materialization')
+    args=parser.parse_args()
+    RUNS.mkdir(parents=True,exist_ok=True)
+    if args.action=='stop':
+        if not args.state or not args.state.resolve().is_relative_to(RUNS.resolve()) or not args.state.is_file():
+            parser.error('--state must name this runner\'s live cluster.json under .local/runs')
+        args.state.with_suffix('.stop').touch()
+        return
+    if args.build or args.action=='build':
+        build(args.fresh)
+        if args.action=='build':
+            return
+    edge=args.edge or (64 if args.action in ('proof','items') else 512 if args.action=='walking' else 2048)
+    if edge<=0 or edge%16 or (args.action=='start' and edge%512):
+        parser.error('edge must align to 512, or 16 for proof')
+    cluster=None
+    with tempfile.TemporaryDirectory(prefix='E10-cluster-',dir=RUNS) as temporary:
+        try:
+            cluster=Cluster.__new__(Cluster)
+            cluster.__init__(Path(temporary),args.resources,edge,args.normal)
+            print(f'Cluster ready on 127.0.0.1:{cluster.port}; state {cluster.state}',flush=True)
+            if args.action=='proof':
+                proof(cluster,args)
+            elif args.action=='walking':
+                walking(cluster,args)
+            elif args.action=='items':
+                items(cluster,args)
+            else:
+                signal.signal(signal.SIGTERM,lambda *_:cluster.state.with_suffix('.stop').touch())
+                next_cut=time.monotonic()+5
+                while not cluster.state.with_suffix('.stop').exists():
+                    if any(tile.server.process.poll() is not None for tile in cluster.tiles.values()):
+                        raise RuntimeError('tile exited; cluster stopped fail-closed')
+                    if time.monotonic()>=next_cut:
+                        for tile in cluster.tiles.values():
+                            reply=tile.ask(f'tile-cut {tile.token}')
+                            if reply.get('ok') is not True:
+                                raise RuntimeError(f'background cut refused: {reply}')
+                        next_cut=time.monotonic()+5
+                    time.sleep(.25)
+        finally:
+            if cluster:
+                cluster.stop()
+
+
+if __name__=='__main__':
+    main()

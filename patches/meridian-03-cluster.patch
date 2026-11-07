@@ -1,0 +1,660 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -240,6 +240,17 @@
+  "libc",
+  "r-efi",
+  "wasip2",
++]
++
++[[package]]
++name = "goliath-model"
++version = "0.1.0"
++
++[[package]]
++name = "goliath-store"
++version = "0.1.0"
++dependencies = [
++ "goliath-model",
+ ]
+ 
+ [[package]]
+@@ -564,6 +575,7 @@
+ version = "0.1.0"
+ dependencies = [
+  "ctrlc",
++ "goliath-store",
+  "horizon-protocol",
+  "meridian-config",
+  "meridian-extension",
+diff --git a/crates/meridian-handoff/src/cluster_sky.rs b/crates/meridian-handoff/src/cluster_sky.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/cluster_sky.rs
+@@ -0,0 +1,80 @@
++//! Replaces backend sky packets with the durable cluster clock and weather anchor.
++use horizon_protocol::{
++    buf::Reader,
++    ids::play::clientbound as c,
++    packets::play::{Clientbound as C, ClockState, SetTime},
++};
++use std::{
++    sync::OnceLock,
++    time::{SystemTime, UNIX_EPOCH},
++};
++
++pub(crate) fn rewrite(id: i32, payload: Vec<u8>) -> Vec<u8> {
++    static CLOCK: OnceLock<Option<serde_json::Value>> = OnceLock::new();
++    let Some(clock) = CLOCK.get_or_init(|| {
++        std::env::var("GOLIATH_CLOCK")
++            .ok()
++            .and_then(|v| serde_json::from_str(&v).ok())
++    }) else {
++        return payload;
++    };
++    if id == c::SET_TIME {
++        let now = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .map_or(0, |d| d.as_millis() as u64);
++        let elapsed = now.saturating_sub(clock["unix_ms"].as_u64().unwrap_or(now)) / 50;
++        let packet = C::SetTime(SetTime {
++            game_time: clock["game_tick"]
++                .as_u64()
++                .unwrap_or(0)
++                .saturating_add(elapsed) as i64,
++            clocks: vec![ClockState {
++                clock: 0,
++                total_ticks: clock["day_tick"]
++                    .as_u64()
++                    .unwrap_or(0)
++                    .saturating_add(elapsed) as i64,
++                partial_tick: 0.,
++                rate: 1.,
++            }],
++        })
++        .encode();
++        let mut reader = Reader::new(&packet);
++        if reader.varint().is_ok() {
++            return reader.rest().to_vec();
++        }
++    }
++    if id == c::GAME_EVENT
++        && let Ok(C::GameEvent(mut event)) = C::decode(id, &payload)
++    {
++        // Suppress per-tile weather. The startup config fixes cluster weather.
++        if [1, 2, 7, 8].contains(&event.event) {
++            event.param = match event.event {
++                7 => {
++                    if clock["raining"] == true {
++                        1.
++                    } else {
++                        0.
++                    }
++                }
++                8 => {
++                    if clock["thundering"] == true {
++                        1.
++                    } else {
++                        0.
++                    }
++                }
++                _ => event.param,
++            };
++            if [1, 2].contains(&event.event) {
++                event.event = if clock["raining"] == true { 1 } else { 2 };
++            }
++            let packet = C::GameEvent(event).encode();
++            let mut reader = Reader::new(&packet);
++            if reader.varint().is_ok() {
++                return reader.rest().to_vec();
++            }
++        }
++    }
++    payload
++}
+diff --git a/crates/meridian-handoff/src/control.rs b/crates/meridian-handoff/src/control.rs
+--- a/crates/meridian-handoff/src/control.rs
++++ b/crates/meridian-handoff/src/control.rs
+@@ -19,9 +19,23 @@
+ /// The player requests of a switch. Each error is the reason the backend or its
+ /// sidecar gave, as text for the person who asked for the switch.
+ pub trait PlayerControl {
++    /// Authority may already have moved even if activation's reply was lost.
++    fn authority_uncertain(&self) -> bool {
++        false
++    }
+     /// The player will log in through the proxy within `seconds`: the backend
+     /// holds them when they do, without placing them in its world.
+     fn expect(&mut self, uuid: &str, seconds: Option<u64>) -> Result<(), String>;
++    /// Prepare a held login at the approach point, without importing player state.
++    fn expect_at(
++        &mut self,
++        uuid: &str,
++        seconds: Option<u64>,
++        position: Option<[f64; 3]>,
++    ) -> Result<(), String> {
++        let _ = position;
++        self.expect(uuid, seconds)
++    }
+ 
+     /// The player's record; with `freeze`, their own inputs stop being acted on
+     /// until a release, and the record carries the `handover` id that the later
+diff --git a/crates/meridian-handoff/src/lib.rs b/crates/meridian-handoff/src/lib.rs
+--- a/crates/meridian-handoff/src/lib.rs
++++ b/crates/meridian-handoff/src/lib.rs
+@@ -136,6 +136,7 @@
+ //!   a count of columns.
+ //! - What the ghost does not keep (`meridian-ghost`'s known limits) is not in the
+ //!   delta, except the packets sent after it.
++mod cluster_sky;
+ mod configure;
+ mod control;
+ mod lane_input;
+diff --git a/crates/meridian-handoff/src/session.rs b/crates/meridian-handoff/src/session.rs
+--- a/crates/meridian-handoff/src/session.rs
++++ b/crates/meridian-handoff/src/session.rs
+@@ -1000,6 +1000,11 @@
+         } else {
+             payload
+         };
++        let payload = if down.phase == Phase::Play {
++            crate::cluster_sky::rewrite(id, payload)
++        } else {
++            payload
++        };
+         encode(&mut body, id, &payload);
+         if down.writer.send(&body).is_err() {
+             return End::ClientGone;
+diff --git a/crates/meridian-handoff/src/switch.rs b/crates/meridian-handoff/src/switch.rs
+--- a/crates/meridian-handoff/src/switch.rs
++++ b/crates/meridian-handoff/src/switch.rs
+@@ -488,7 +488,7 @@
+     /// Cancels an uncommitted import. An acknowledged durable placement instead
+     /// lets the source go as moved and closes the client, never resumes a writer.
+     fn abort(&mut self) {
+-        if self.placed {
++        if self.placed || self.target.authority_uncertain() {
+             // place:true crossed the target's durable commit point. It cannot
+             // roll back to the source, even if delivery of the delta fails.
+             let _ = self.release_source(Outcome::Moved, false);
+@@ -681,7 +681,11 @@
+         }
+     };
+     run.target
+-        .expect(&run.uuid, Some(settings.expect_seconds))
++        .expect_at(
++            &run.uuid,
++            Some(settings.expect_seconds),
++            settings.predicted_position,
++        )
+         .map_err(|e| {
+             run.fail(
+                 Step::Prepare,
+@@ -1141,6 +1145,7 @@
+             } else {
+                 packet.payload.clone()
+             };
++            let payload = crate::cluster_sky::rewrite(packet.id, payload);
+             encode(&mut body, packet.id, &payload);
+             if down.writer.send(&body).is_err() {
+                 sent = false;
+diff --git a/crates/meridian-proxy/Cargo.toml b/crates/meridian-proxy/Cargo.toml
+--- a/crates/meridian-proxy/Cargo.toml
++++ b/crates/meridian-proxy/Cargo.toml
+@@ -12,6 +12,7 @@
+ path = "src/main.rs"
+ 
+ [dependencies]
++goliath-store = { path = "../../../../../crates/goliath-store" }
+ ctrlc = "3.4"
+ horizon-protocol.workspace = true
+ meridian-config.workspace = true
+diff --git a/crates/meridian-proxy/src/cluster.rs b/crates/meridian-proxy/src/cluster.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-proxy/src/cluster.rs
+@@ -0,0 +1,278 @@
++//! D6's real source cut, fenced store CAS and target activation adapter.
++use goliath_store::{
++    Blob, Client, Command, Epoch, Fence, Generation, Operation, OwnershipCas, PlayerKey, ProcessId,
++    RequestId, Response, TileId,
++};
++use meridian_handoff::{Arrival, Exported, Imported, Outcome, PlayerControl};
++use meridian_sidecar::endpoint::Endpoint;
++use serde_json::{Value, json};
++use std::{
++    path::Path,
++    time::{Duration, Instant},
++};
++
++fn manifest() -> Result<Option<Value>, String> {
++    let Some(path) = std::env::var_os("GOLIATH_CLUSTER") else {
++        return Ok(None);
++    };
++    serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
++        .map(Some)
++        .map_err(|e| e.to_string())
++}
++
++fn client(manifest: &Value) -> Result<Client, String> {
++    let address = manifest["store"].as_str().ok_or("missing store address")?;
++    Client::new(
++        address.parse().map_err(|e| format!("{e}"))?,
++        Duration::from_secs(3),
++        3,
++    )
++    .map_err(|e| e.to_string())
++}
++
++fn fence(tile: &Value) -> Result<Fence, String> {
++    Ok(Fence {
++        tile: TileId(tile["tile"].as_u64().ok_or("missing tile id")? as usize),
++        process: ProcessId(tile["process"].as_u64().ok_or("missing process")?),
++        epoch: Epoch(tile["epoch"].as_u64().ok_or("missing epoch")?),
++    })
++}
++
++pub(crate) fn owner(uuid: [u8; 16]) -> Result<Option<String>, String> {
++    let Some(manifest) = manifest()? else {
++        return Ok(None);
++    };
++    match client(&manifest)?
++        .execute(Operation::ReadUuid(PlayerKey(u128::from_be_bytes(uuid))))
++        .map_err(|e| e.to_string())?
++    {
++        Response::Player(None) => Ok(None),
++        Response::Player(Some(record)) => manifest["tiles"]
++            .as_object()
++            .ok_or("missing tiles")?
++            .iter()
++            .find(|(_, tile)| tile["tile"].as_u64() == Some(record.owner.0 as u64))
++            .map(|(name, _)| Some(name.clone()))
++            .ok_or_else(|| "store owner is not configured".into()),
++        other => Err(format!("store routing failed: {other:?}")),
++    }
++}
++
++pub(crate) fn wrap(
++    backend: &str,
++    inner: Box<dyn PlayerControl>,
++    timeout: Duration,
++) -> Result<Box<dyn PlayerControl>, String> {
++    let Some(manifest) = manifest()? else {
++        return Ok(inner);
++    };
++    let tile = &manifest["tiles"][backend];
++    let path = tile["endpoint"].as_str().ok_or("missing endpoint")?;
++    let endpoint = Endpoint::read(Path::new(path)).map_err(|e| e.to_string())?;
++    Ok(Box::new(Control {
++        inner,
++        endpoint,
++        client: client(&manifest)?,
++        fence: fence(tile)?,
++        timeout,
++        authority_uncertain: false,
++    }))
++}
++
++struct Control {
++    inner: Box<dyn PlayerControl>,
++    endpoint: Endpoint,
++    client: Client,
++    fence: Fence,
++    timeout: Duration,
++    authority_uncertain: bool,
++}
++
++impl Control {
++    fn ask(&self, line: &str) -> Result<Value, String> {
++        let reply = self
++            .endpoint
++            .ask(line, self.timeout)
++            .map_err(|e| e.to_string())?;
++        if reply["ok"] != true {
++            return Err(reply.to_string());
++        }
++        Ok(reply)
++    }
++    fn player(uuid: &str) -> Result<PlayerKey, String> {
++        u128::from_str_radix(&uuid.replace('-', ""), 16)
++            .map(PlayerKey)
++            .map_err(|e| e.to_string())
++    }
++}
++
++impl PlayerControl for Control {
++    fn authority_uncertain(&self) -> bool {
++        self.authority_uncertain
++    }
++    fn expect(&mut self, uuid: &str, seconds: Option<u64>) -> Result<(), String> {
++        self.inner.expect(uuid, seconds)
++    }
++    fn expect_at(
++        &mut self,
++        uuid: &str,
++        seconds: Option<u64>,
++        position: Option<[f64; 3]>,
++    ) -> Result<(), String> {
++        if let Some(position) = position {
++            self.ask(&format!(
++                "player-expect-at {uuid} {} {}",
++                seconds.unwrap_or(10),
++                json!(position)
++            ))
++            .map(drop)
++        } else {
++            self.expect(uuid, seconds)
++        }
++    }
++    fn export(&mut self, uuid: &str, freeze: bool) -> Result<Exported, String> {
++        if !freeze {
++            return self.inner.export(uuid, false);
++        }
++        let started = Instant::now();
++        let reply = self.ask(&format!(
++            "tile-cut {}:{} {uuid}",
++            self.fence.process.0, self.fence.epoch.0
++        ))?;
++        let export = &reply["export"];
++        let mut record = export["record"].clone();
++        if !record.is_object() {
++            return Err("durable cut has no frozen record".into());
++        }
++        record["goliath_source"] =
++            json!([self.fence.tile.0, self.fence.process.0, self.fence.epoch.0]);
++        record["goliath_cut"] = json!({"sequence":reply["sequence"],"tick":reply["tick"]});
++        eprintln!(
++            "E10_PHASE {}",
++            json!({"phase":"cut","uuid":uuid,"ms":started.elapsed().as_secs_f64()*1000.,"tick_ms":reply["tick_ms"],"capture_ms":reply["capture_ms"],"encode_ms":reply["encode_ms"],"install_io_ms":reply["install_io_ms"],"sequence":reply["sequence"]})
++        );
++        Ok(Exported {
++            record,
++            freeze_ticks_left: export["freeze_ticks_left"].as_u64(),
++        })
++    }
++    fn import(
++        &mut self,
++        uuid: &str,
++        record: Value,
++        parts: Option<Vec<String>>,
++        announce: Option<bool>,
++        place: bool,
++        arrival: Option<Arrival>,
++    ) -> Result<Imported, String> {
++        if !place || parts.is_some() {
++            return Err("cluster activation requires a whole placed record".into());
++        }
++        let source = record["goliath_source"]
++            .as_array()
++            .ok_or("activation has no source fence")?;
++        if source.len() != 3 {
++            return Err("invalid source fence".into());
++        }
++        let source = Fence {
++            tile: TileId(source[0].as_u64().ok_or("source tile")? as usize),
++            process: ProcessId(source[1].as_u64().ok_or("source process")?),
++            epoch: Epoch(source[2].as_u64().ok_or("source epoch")?),
++        };
++        let generation = Generation(
++            record["goliath_generation"]
++                .as_u64()
++                .ok_or("record has no generation")?,
++        );
++        let handover = record["handover"]
++            .as_str()
++            .ok_or("record has no handover")?;
++        let id = RequestId(u128::from_str_radix(handover, 16).map_err(|e| e.to_string())?);
++        let mut body = json!({"record":record,"announce":announce.unwrap_or(false),"place":true});
++        if let Some(arrival) = arrival {
++            body["position"] = json!(arrival.position);
++            body["rotation"] = json!(arrival.rotation);
++            if let Some(velocity) = arrival.velocity {
++                body["velocity"] = json!(velocity);
++            }
++            if let Some(on_ground) = arrival.on_ground {
++                body["on_ground"] = json!(on_ground);
++            }
++        }
++        let command = Command {
++            id,
++            operation: Operation::CommitUuid {
++                player: Self::player(uuid)?,
++                cas: OwnershipCas {
++                    generation,
++                    source,
++                    target: self.fence,
++                },
++                blob: Blob {
++                    version: 1,
++                    bytes: serde_json::to_vec(&body).map_err(|e| e.to_string())?,
++                },
++            },
++        };
++        let started = Instant::now();
++        self.authority_uncertain = true;
++        match self
++            .client
++            .call(&command)
++            .map_err(|e| format!("store CAS result unknown, never resume source: {e}"))?
++        {
++            Response::Committed(next) if next.0 == generation.0 + 1 => {}
++            other => {
++                self.authority_uncertain = false;
++                return Err(format!("store CAS rejected: {other:?}"));
++            }
++        }
++        eprintln!(
++            "E10_PHASE {}",
++            json!({"phase":"cas","uuid":uuid,"generation":generation.0+1,"target":self.fence.tile.0,"ms":started.elapsed().as_secs_f64()*1000.})
++        );
++        let started = Instant::now();
++        let reply = self.ask(&format!("player-import {uuid} {body}"))?;
++        eprintln!(
++            "E10_PHASE {}",
++            json!({"phase":"activation","uuid":uuid,"ms":started.elapsed().as_secs_f64()*1000.,"timing":reply["timing"]})
++        );
++        Ok(Imported {
++            recentered: reply["recentered"].as_bool(),
++        })
++    }
++    fn confirm(&mut self, uuid: &str, handover: &str) -> Result<(), String> {
++        self.inner.confirm(uuid, handover)
++    }
++    fn release(
++        &mut self,
++        uuid: &str,
++        handover: &str,
++        outcome: Outcome,
++        announce: bool,
++    ) -> Result<(), String> {
++        // Resolve uncertain CAS outcomes before any abort. A store outage closes
++        // this path; Horizon's cluster freeze timeout disconnects instead of resuming.
++        let outcome = match self
++            .client
++            .execute(Operation::ReadUuid(Self::player(uuid)?))
++            .map_err(|e| e.to_string())?
++        {
++            Response::Player(Some(record)) if record.owner != self.fence.tile => Outcome::Moved,
++            Response::Player(Some(_)) if outcome == Outcome::Abort || self.authority_uncertain => {
++                Outcome::Abort
++            }
++            _ => return Err("cannot establish authority for source release".into()),
++        };
++        self.inner.release(uuid, handover, outcome, announce)
++    }
++    fn drop_player(&mut self, uuid: &str, handover: Option<&str>) -> Result<(), String> {
++        self.inner.drop_player(uuid, handover)
++    }
++    fn recover(&mut self) -> Result<bool, String> {
++        Ok(true)
++    }
++    fn lost(&self) -> bool {
++        true
++    }
++}
+diff --git a/crates/meridian-proxy/src/main.rs b/crates/meridian-proxy/src/main.rs
+--- a/crates/meridian-proxy/src/main.rs
++++ b/crates/meridian-proxy/src/main.rs
+@@ -17,6 +17,7 @@
+ mod queue;
+ mod restart;
+ // Used by the session once routing is wired in; until then only its tests call it.
++mod cluster;
+ #[cfg_attr(not(test), allow(dead_code))]
+ mod route;
+ mod serve;
+diff --git a/crates/meridian-proxy/src/session.rs b/crates/meridian-proxy/src/session.rs
+--- a/crates/meridian-proxy/src/session.rs
++++ b/crates/meridian-proxy/src/session.rs
+@@ -598,7 +598,7 @@
+     let _seat = client::Seat::take(&name, uuid);
+     let auth = route_auth(session.auth);
+     let retry = Duration::from_secs(config.backend_retry_seconds);
+-    let candidates = match route::candidates(config, session.virtual_host.as_deref(), auth) {
++    let mut candidates = match route::candidates(config, session.virtual_host.as_deref(), auth) {
+         // A backend that just failed is tried after the others.
+         Ok(candidates) => sessions.health.order(candidates, retry, Instant::now()),
+         Err(e) => {
+@@ -611,6 +611,15 @@
+             return;
+         }
+     };
++    match crate::cluster::owner(uuid) {
++        Ok(Some(owner)) => candidates = vec![owner],
++        Ok(None) => {}
++        Err(why) => {
++            warning!("cluster login authority failed: {why}");
++            refuse(session.connection, "Cluster authority is unavailable.");
++            return;
++        }
++    }
+     // The extension that decides the choice of server, if there is one, may put the candidates in an
+     // order of its own or refuse the player (docs/EXTENSIONS.md, 4.4). It is asked after the player has a
+     // place, and again if they wait in the queue and are woken.
+diff --git a/crates/meridian-proxy/src/switching.rs b/crates/meridian-proxy/src/switching.rs
+--- a/crates/meridian-proxy/src/switching.rs
++++ b/crates/meridian-proxy/src/switching.rs
+@@ -45,7 +45,7 @@
+     let secret = sidecar.read_secret()?;
+     let client = SidecarClient::connect(&sidecar.address, &secret, timeout)
+         .map_err(|e| format!("cannot reach it at {}: {e}", sidecar.address))?;
+-    Ok(Box::new(client))
++    crate::cluster::wrap(&sidecar.backend, Box::new(client), timeout)
+ }
+ 
+ /// How long Horizon lets a player stay frozen by default (`max_freeze_seconds` of a
+diff --git a/crates/meridian-testkit/src/bin/e4-client.rs b/crates/meridian-testkit/src/bin/e4-client.rs
+--- a/crates/meridian-testkit/src/bin/e4-client.rs
++++ b/crates/meridian-testkit/src/bin/e4-client.rs
+@@ -31,7 +31,7 @@
+     let client = FakeClient {
+         host: "127.0.0.1".into(),
+         port,
+-        ..FakeClient::named("E4Probe")
++        ..FakeClient::named(&std::env::args().nth(2).unwrap_or_else(|| "E4Probe".into()))
+     };
+     client.run(&mut connection, &Recorder::new())?;
+     let counters = connection.reader.counters.clone();
+@@ -70,6 +70,8 @@
+     let mut pose = [0.0; 3];
+     let mut goal: Option<(String, [f64; 2])> = None;
+     let mut reached = false;
++    let mut container = 0;
++    let mut container_state = 0;
+     let mut next = Instant::now();
+     loop {
+         while let Ok(order) = rx.try_recv() {
+@@ -79,6 +81,52 @@
+             }
+             let parts: Vec<_> = order.split_whitespace().collect();
+             match parts.as_slice() {
++                ["open", x, y, z] => {
++                    connection.send(
++                        &play::Serverbound::UseItemOn(play::UseItemOn {
++                            hand: 0,
++                            pos: [x.parse()?, y.parse()?, z.parse()?],
++                            face: 1,
++                            cursor: [0.5; 3],
++                            inside: false,
++                            world_border: false,
++                            sequence: 1,
++                        })
++                        .encode(),
++                    )?;
++                }
++                ["click", slot] => {
++                    connection.send(
++                        &play::Serverbound::ContainerClick(play::ContainerClick {
++                            container,
++                            state: container_state,
++                            slot: slot.parse()?,
++                            button: 0,
++                            input: 0,
++                            changed: vec![],
++                            carried: None,
++                        })
++                        .encode(),
++                    )?;
++                }
++                ["close"] => {
++                    connection.send(
++                        &play::Serverbound::ContainerClose(play::ContainerClose { container })
++                            .encode(),
++                    )?;
++                    container = 0;
++                }
++                ["drop"] => {
++                    connection.send(
++                        &play::Serverbound::PlayerAction(play::PlayerAction {
++                            action: 4,
++                            pos: [0; 3],
++                            direction: 0,
++                            sequence: 2,
++                        })
++                        .encode(),
++                    )?;
++                }
+                 ["use", token, sequence] => {
+                     let sequence = sequence.parse()?;
+                     connection.send(
+@@ -187,6 +235,40 @@
+             continue;
+         }
+         match id {
++            ids::play::clientbound::SET_TIME => {
++                if let play::Clientbound::SetTime(p) = play::Clientbound::decode(id, &payload)? {
++                    emit(
++                        json!({"kind":"clock","game_time":p.game_time,"clocks":p.clocks.iter().map(|c| (c.clock,c.total_ticks)).collect::<Vec<_>>(),"ns":now()}),
++                    );
++                }
++            }
++            ids::play::clientbound::CONTAINER_SET_SLOT => {
++                if let play::Clientbound::ContainerSetSlot(p) =
++                    play::Clientbound::decode(id, &payload)?
++                {
++                    if p.container == container {
++                        container_state = p.state;
++                    }
++                }
++            }
++            ids::play::clientbound::OPEN_SCREEN => {
++                if let play::Clientbound::OpenScreen(p) = play::Clientbound::decode(id, &payload)? {
++                    container = p.container;
++                    emit(json!({"kind":"open","container":container,"ns":now()}));
++                }
++            }
++            ids::play::clientbound::CONTAINER_SET_CONTENT => {
++                if let play::Clientbound::ContainerSetContent(p) =
++                    play::Clientbound::decode(id, &payload)?
++                {
++                    if p.container == container {
++                        container_state = p.state;
++                    }
++                    emit(
++                        json!({"kind":"container","container":p.container,"state":p.state,"ns":now()}),
++                    );
++                }
++            }
+             ids::play::clientbound::BLOCK_CHANGED_ACK => {
+                 if let play::Clientbound::BlockChangedAck(p) =
+                     play::Clientbound::decode(id, &payload)?

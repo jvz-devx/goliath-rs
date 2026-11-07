@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Independently check E10's route, visible generations and timing arithmetic."""
+import argparse
+import hashlib
+import json
+import math
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E10'
+TILES={'a':(0,0),'b':(-1,0),'c':(-1,-1),'d':(0,-1)}
+ROUTE=['b','c','d','a','d','c','b','a','c','a','d','b','d','a']
+
+
+def percentiles(values):
+    ordered=sorted(values)
+    if not ordered or any(not math.isfinite(value) for value in ordered):
+        raise ValueError('empty or nonfinite distribution')
+    return {f'p{p}':ordered[math.ceil(len(ordered)*p/100)-1] for p in (50,95,99)}
+
+
+def verify(result,count):
+    if result['status']!='complete' or len(result['trials'])!=count or result['disconnects']!=0:
+        raise ValueError('incomplete run or disconnect')
+    if count<14:
+        raise ValueError('acceptance needs the complete route')
+    source='a'
+    borders=set()
+    diagonals=set()
+    for index,trial in enumerate(result['trials']):
+        target=ROUTE[index%len(ROUTE)]
+        if (trial['index'],trial['source'],trial['target'])!=(index,source,target):
+            raise ValueError('missing crossing or broken owner chain')
+        if trial['generation']!=index+1 or trial['store_owner']!=list(TILES).index(target):
+            raise ValueError('CAS generation or owner differs')
+        if trial['inventory_before']!=result['known_inventory'] or trial['inventory_after']!=result['known_inventory']:
+            raise ValueError('inventory changed')
+        gap=(trial['first_target_input']['ns']-trial['last_source_input']['ns'])/1e6
+        if gap<=0 or gap!=trial['input_gap_ms']:
+            raise ValueError('input gap arithmetic differs')
+        pos=trial['first_target_input']['pos']
+        if (math.floor(pos[0])//result['tile_edge'],math.floor(pos[2])//result['tile_edge'])!=TILES[target]:
+            raise ValueError('accepted input belongs to another tile')
+        phases=trial['phases']
+        if [p['phase'] for p in phases]!=['cut','cas','activation']:
+            raise ValueError('missing or reordered durable phases')
+        if phases[0]['sequence']!=trial['cut_sequence'] or trial['cut_sequence']<=0:
+            raise ValueError('durable receipt differs')
+        if phases[1]['generation']!=trial['generation'] or phases[1]['target']!=trial['store_owner']:
+            raise ValueError('phase CAS differs from observed store record')
+        if any(p['ms']<=0 for p in phases):
+            raise ValueError('invalid phase duration')
+        distance=sum(abs(a-b) for a,b in zip(TILES[source],TILES[target]))
+        (borders if distance==1 else diagonals).add((source,target))
+        source=target
+    if len(borders)!=8 or len(diagonals)!=4:
+        raise ValueError('wall/corner coverage differs')
+    summary=percentiles([t['input_gap_ms'] for t in result['trials']])
+    if summary!=result['summary']['input_gap_ms']:
+        raise ValueError('published gap percentiles differ')
+    if not result['restart']['all_four_started'] or not result['restart']['inventory_equal'] or result['restart']['world_markers']!=4:
+        raise ValueError('missing four-tile restart evidence')
+    if result['cluster_clock']['packets']<2 or result['cluster_clock']['backward_steps']!=0:
+        raise ValueError('missing or backward cluster clock evidence')
+    phase_summary={}
+    for name in ['cut','cas','activation']:
+        phase_summary[name]=percentiles([p['ms'] for t in result['trials'] for p in t['phases'] if p['phase']==name])
+    for key in ['tick_ms','capture_ms','encode_ms','install_io_ms']:
+        phase_summary[key]=percentiles([t['phases'][0][key] for t in result['trials']])
+    for key in ['queue_ms','apply_ms']:
+        phase_summary['activation_'+key]=percentiles([t['phases'][2]['timing'][key] for t in result['trials']])
+    correction=max(t['arrival_error_blocks'] for t in result['trials'])
+    return {'crossings':count,'input_gap_ms':summary,
+        'trigger_to_arrived_ms':percentiles([(t['completed_ns']-t['trigger_input']['ns'])/1e6 for t in result['trials']]),
+        'trigger_to_first_target_ms':percentiles([(t['first_target_input']['ns']-t['trigger_input']['ns'])/1e6 for t in result['trials']]),
+        'phases_ms':phase_summary,
+        'directed_borders':sorted(borders),'diagonals':sorted(diagonals),
+        'inventory_changes':0,'disconnects':0,'visible_cas':count,'max_correction_blocks':correction,
+        'latency_passed':summary['p95']<150 and summary['p99']<300,
+        'correction_passed':correction<=.1,'cluster_clock':result['cluster_clock'],
+        'load_1m':{'min':min(t['load'][0] for t in result['trials']),'max':max(t['load'][0] for t in result['trials'])}}
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--input',type=Path,default=DATA/'crossings-final.json')
+    parser.add_argument('--count',type=int,default=1000)
+    args=parser.parse_args()
+    result=json.loads(args.input.read_text())
+    analysis=verify(result,args.count)
+    analysis['raw_sha256']=hashlib.sha256(args.input.read_bytes()).hexdigest()
+    analysis['binary_sha256']=result['binary_sha256']
+    normal=json.loads((DATA/'walking-normal-final.json').read_text())
+    if normal['status']!='complete' or normal['bots']!=25 or normal['refused_cuts'] or normal['disconnects'] or len(normal['samples'])!=140:
+        raise ValueError('normal walking proof incomplete')
+    if normal['binary_sha256']!=analysis['binary_sha256']['horizon-client']:
+        raise ValueError('normal cut and crossing binaries differ')
+    if len(normal['after']['players'])!=25 or any(p['position'][0]<350 for p in normal['after']['players']):
+        raise ValueError('server did not accept the completed walking route')
+    lifecycle={key:sum(s['lifecycle'][key] for s in normal['samples']) for key in ['unloaded_chunks','proto_chunks','finished_nonresident_chunks']}
+    if lifecycle['unloaded_chunks']<=0 or lifecycle['proto_chunks']<=0:
+        raise ValueError('normal proof omitted unloads or accepted proto generation')
+    if len({s['export']['record']['handover'] for s in normal['samples']})!=140:
+        raise ValueError('normal proof did not freeze and resume for every cut')
+    for key in ['rtt_ms','tick_ms','encode_ms','install_io_ms']:
+        if percentiles([s[key] for s in normal['samples']])!=normal['summary'][key]:
+            raise ValueError('normal-cut percentile arithmetic differs')
+    analysis['normal_cut']={'samples':140,'bots':25,'refused_cuts':0,'disconnects':0,'lifecycle':lifecycle,
+        'freeze_to_durable_ms':normal['summary']['rtt_ms'],'tick_stall_ms':normal['summary']['tick_ms'],
+        'encode_ms':normal['summary']['encode_ms'],'append_full_flush_ms':normal['summary']['install_io_ms'],
+        'tick_budget_passed':normal['summary']['tick_ms']['p95']<5,
+        'durable_budget_passed':normal['summary']['rtt_ms']['p95']<40}
+    kills=json.loads((DATA/'kills/kills.json').read_text())
+    breaches=json.loads((DATA/'breaches/acceptance.json').read_text())
+    for name in ['kills','breaches']:
+        outcome=json.loads((DATA/(name+'-outcome.json')).read_text())
+        if outcome['status']!='complete' or outcome['binary_sha256']!=analysis['binary_sha256']['horizon-client']:
+            raise ValueError('safety campaign binary or outcome differs')
+    if kills['requested']!=200 or kills['passed']!=200 or kills['mixed_images']!=0:
+        raise ValueError('kill campaign failed')
+    if not breaches['accepted'] or breaches['masked_trials']!=22 or breaches['positive_controls']!=22 or breaches['changed_exterior_records']!=0:
+        raise ValueError('breach campaign failed')
+    analysis['safety']={'kills':200,'mixed_images':0,'breaches':22,'changed_exterior_records':0,'same_binary':True}
+    (DATA/'analysis.json').write_text(json.dumps(analysis,indent=2)+'\n')
+    print(json.dumps(analysis,indent=2))
+
+
+if __name__=='__main__':
+    main()

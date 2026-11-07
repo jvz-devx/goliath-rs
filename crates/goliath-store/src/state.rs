@@ -12,6 +12,20 @@ pub(crate) const MAX_BLOB: usize = 256 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct RequestId(pub u128);
 
+/// Full Minecraft UUID. Separate from the simulator's small integer identities.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct PlayerKey(pub u128);
+
+/// One durable cluster sky. Ticks advance from this wall-clock anchor, not tile ticks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClusterClock {
+    pub unix_ms: u64,
+    pub game_tick: u64,
+    pub day_tick: u64,
+    pub raining: bool,
+    pub thundering: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Blob {
     pub version: u32,
@@ -54,6 +68,26 @@ pub enum Operation {
         counter: u64,
     },
     Compact,
+    ReadUuid(PlayerKey),
+    CreateUuid {
+        player: PlayerKey,
+        owner: Fence,
+        blob: Blob,
+    },
+    CommitUuid {
+        player: PlayerKey,
+        cas: OwnershipCas,
+        blob: Blob,
+    },
+    /// Bounded UUID listing for startup reconciliation. Fetch blobs separately.
+    Players {
+        after: Option<PlayerKey>,
+    },
+    Clock,
+    SetClock {
+        fence: Fence,
+        clock: ClusterClock,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,6 +117,8 @@ pub enum Response {
     Player(Option<Record<Blob>>),
     Committed(Generation),
     Fault(StoreFault),
+    Players(Vec<PlayerKey>),
+    Clock(Option<ClusterClock>),
 }
 
 #[derive(Default)]
@@ -91,6 +127,8 @@ pub(crate) struct State {
     tiles: BTreeMap<TileId, DirectoryEntry>,
     players: BTreeMap<PlayerId, Record<Blob>>,
     receipts: BTreeMap<RequestId, (Command, Response)>,
+    uuid_players: BTreeMap<PlayerKey, Record<Blob>>,
+    clock: Option<ClusterClock>,
     #[cfg(feature = "fault-injection")]
     pub(crate) disable_fence: bool,
 }
@@ -98,6 +136,8 @@ pub(crate) struct State {
 pub(crate) enum Change {
     Tile(DirectoryEntry),
     Player(PlayerId, Record<Blob>),
+    Uuid(PlayerKey, Record<Blob>),
+    Clock(ClusterClock),
 }
 
 impl State {
@@ -127,11 +167,18 @@ impl State {
     ) -> Result<(Response, Option<Change>), StoreFault> {
         // Authorization precedes retry lookup. A receipt never renews authority.
         match &command.operation {
-            Operation::Commit { cas, .. } => {
+            Operation::Commit { cas, .. } | Operation::CommitUuid { cas, .. } => {
                 let (source, target) = self.fences(*cas);
                 cas.check_fences(source, target)?;
             }
             Operation::Create { owner, .. } => self.check(*owner)?,
+            Operation::CreateUuid { owner, .. } => self.check(*owner)?,
+            Operation::SetClock { fence, .. } => {
+                self.check(*fence)?;
+                if fence.tile != TileId(0) {
+                    return Err(StoreFault::StaleFence);
+                }
+            }
             Operation::Heartbeat { fence, .. } => self.check(*fence)?,
             Operation::Release(fence)
                 if !accepts_fence(self.tiles.get(&fence.tile).map(|e| e.fence), *fence) =>
@@ -148,6 +195,60 @@ impl State {
             };
         }
         let (response, change) = match &command.operation {
+            Operation::ReadUuid(player) => {
+                return Ok((
+                    Response::Player(self.uuid_players.get(player).cloned()),
+                    None,
+                ));
+            }
+            Operation::Players { after } => {
+                return Ok((
+                    Response::Players(
+                        self.uuid_players
+                            .keys()
+                            .filter(|key| after.is_none_or(|after| **key > after))
+                            .take(256)
+                            .copied()
+                            .collect(),
+                    ),
+                    None,
+                ));
+            }
+            Operation::Clock => return Ok((Response::Clock(self.clock.clone()), None)),
+            Operation::SetClock { clock, .. } => (Response::Ok, Change::Clock(clock.clone())),
+            Operation::CreateUuid {
+                player,
+                owner,
+                blob,
+            } => {
+                if self.uuid_players.contains_key(player) {
+                    return Err(StoreFault::AlreadyExists);
+                }
+                (
+                    Response::Committed(Generation(0)),
+                    Change::Uuid(
+                        *player,
+                        Record {
+                            generation: Generation(0),
+                            owner: owner.tile,
+                            inventory: blob.clone(),
+                        },
+                    ),
+                )
+            }
+            Operation::CommitUuid { player, cas, blob } => {
+                let mut record = self
+                    .uuid_players
+                    .get(player)
+                    .cloned()
+                    .ok_or(StoreFault::MissingPlayer)?;
+                let (source, target) = self.fences(*cas);
+                cas.commit(&mut record, blob, source, target)?;
+                (
+                    Response::Committed(record.generation),
+                    Change::Uuid(*player, record),
+                )
+            }
             Operation::Directory => {
                 return Ok((
                     Response::Directory(self.tiles.values().cloned().collect()),
@@ -233,7 +334,10 @@ impl State {
             return Err(StoreFault::RequestConflict);
         }
         match &command.operation {
-            Operation::Create { blob, .. } | Operation::Commit { blob, .. }
+            Operation::Create { blob, .. }
+            | Operation::Commit { blob, .. }
+            | Operation::CreateUuid { blob, .. }
+            | Operation::CommitUuid { blob, .. }
                 if blob.bytes.len() > MAX_BLOB =>
             {
                 return Err(StoreFault::Limit);
@@ -251,6 +355,12 @@ impl State {
             }
             Change::Player(player, record) => {
                 self.players.insert(player, record);
+            }
+            Change::Uuid(player, record) => {
+                self.uuid_players.insert(player, record);
+            }
+            Change::Clock(clock) => {
+                self.clock = Some(clock);
             }
         }
         self.receipts.insert(command.id, (command, response));
@@ -273,6 +383,12 @@ impl State {
             e.bytes(&crate::codec::encode_command(command)?)?;
             e.bytes(&crate::codec::encode_response(response)?)?;
         }
+        e.count(self.uuid_players.len())?;
+        for (player, record) in &self.uuid_players {
+            e.uuid(*player);
+            e.record(record)?;
+        }
+        e.clock(self.clock.as_ref());
         Ok(e.finish())
     }
 
@@ -294,6 +410,14 @@ impl State {
             let command = crate::codec::decode_command(d.bytes()?)?;
             let response = crate::codec::decode_response(d.bytes()?)?;
             state.receipts.insert(command.id, (command, response));
+        }
+        // E5/E9 snapshots end after receipts. The extension preserves their format.
+        if !d.is_empty() {
+            for _ in 0..d.count()? {
+                let player = d.uuid()?;
+                state.uuid_players.insert(player, d.record()?);
+            }
+            state.clock = d.clock()?;
         }
         d.end()?;
         Ok(state)

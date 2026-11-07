@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Run the existing E6 kill and E7 east-wall fixtures on the integrated binary."""
+import argparse
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import json
+import hashlib
+import time
+import traceback
+from types import SimpleNamespace
+
+ROOT=Path(__file__).resolve().parent.parent
+BINS=ROOT/'.local/bin/goliath-e10'
+DATA=ROOT/'docs/experiments/data/E10'
+
+
+def load(name,path):
+    loader=importlib.machinery.SourceFileLoader(name,str(path))
+    spec=importlib.util.spec_from_loader(name,loader)
+    module=importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('section',choices=['kills','breaches'])
+    parser.add_argument('--kills',type=int,default=200)
+    args=parser.parse_args()
+    started=time.monotonic()
+    outcome={'section':args.section,'status':'running'}
+    before=hashlib.sha256((BINS/'horizon-client').read_bytes()).hexdigest()
+    outcome['binary_sha256']=before
+    try:
+        if args.section=='kills':
+            module=load('e10_e6',ROOT/'scripts/e6-cut')
+            module.e3.BINS=BINS
+            module.e3.DATA=DATA/'kills'
+            module.kills(args.kills)
+        else:
+            module=load('e10_e7',ROOT/'scripts/e7-tiles')
+            module.BINS=BINS
+            module.DATA=DATA/'breaches'
+            module.SOURCE=ROOT/'.local/src/horizon'
+            module.DIRECTIONS={'east':(1,0)}
+            if not module.breaches(SimpleNamespace(mechanic=None,settle=2)):
+                raise RuntimeError('combined-binary east breach fixture failed')
+        after=hashlib.sha256((BINS/'horizon-client').read_bytes()).hexdigest()
+        if before!=after:
+            raise RuntimeError('binary changed during regression campaign; rerun on one final binary')
+        outcome['status']='complete'
+    except BaseException as error:
+        outcome.update(status='failed',error=str(error),traceback=traceback.format_exc())
+        raise
+    finally:
+        outcome['seconds']=time.monotonic()-started
+        DATA.mkdir(parents=True,exist_ok=True)
+        (DATA/(args.section+'-outcome.json')).write_text(json.dumps(outcome,indent=2).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME')+'\n')
+
+
+if __name__=='__main__':
+    main()

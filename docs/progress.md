@@ -11,7 +11,7 @@ How to keep this file:
 
 ## Current state
 
-Working on M1 and M2. The pieces work alone and are verified: automatic crossings, a fenced store, a fast coherent cut (stall 2.5 ms, durable in 31 ms) and tile ownership. E10 is wiring them into one cluster, and E11 is building the capacity measurement tools.
+M1 is complete. Working on M2, M3 and M4. Four real Horizon servers run as one cluster through the fenced store, with a walking input gap P95 of about 110 to 125 ms including the cut. Open: terrain past the wall, a physics client, vehicles, store latency at 64 clients, crash testing and the capacity run.
 
 ## M0. First evidence
 
@@ -49,25 +49,25 @@ Find out what a crossing costs today and what keeps items safe when a tile crash
 Four real Horizon servers own a 2 by 2 grid of one coordinate space. A player walks through any wall with a whole-view swap.
 
 - [x] Tile size, the owner of global state (time, weather, scoreboard, chat) and Nether and End placement decided from a short experiment and recorded in `decisions.md`. Done: D8, from E3 cut costs, E8 clock drift and the crossing-rate calculation.
-- [ ] Coherent tile-wide cut built on Horizon and timed under load, with chunks, containers, drops and every resident player.
+- [x] Coherent tile-wide cut built on Horizon and timed under load, with chunks, containers, drops and every resident player. Verified: E6 and E10, tick stall P95 about 1.2 ms with 25 walking clients, zero refused cuts, 200 of 200 kills. Normal-terrain cut P95 46 to 49 ms misses its 40 ms share; tracked under M2.
 - [x] Each server refuses to simulate or write outside its tile, proven by a test that tries to. Verified: E7, 176 of 176 breaches blocked with 176 working controls, reproduced. E10 must recheck it on the combined binary.
 - [x] Unloaded chunks past a wall can't read as air to simulation code, proven by a test. Verified: E7 read probe, bedrock and light zero with the mask, air and light 240 without, reproduced.
 - [x] Crossing a wall triggers the handover with no command typed. Verified: E4, 1,000 of 1,000 crossings in two runs, all eight borders and the diagonals, no command typed.
 - [x] Optional visible wall: the proxy draws particles near a tile wall when enabled, off by default, with no cost when off, proven by a client in and out of range. Verified: 720 packets in range, 0 out of range, 0 when off, in two runs. Rendered look in a stock client is unverified.
-- [ ] One shared store holds player records, using the policy chosen in D6 with a fence on every CAS.
-- [ ] 1,000 consecutive crossings by a scripted walking player with no disconnect and no inventory change.
-- [ ] All four tiles restart with their world and every player intact.
-- [ ] `scripts/e2-real-transfer --build` run end to end from a fresh checkout.
+- [x] One shared store holds player records, using the policy chosen in D6 with a fence on every CAS. Verified: E10, every one of 1,000 crossings committed generation index plus one through the fenced store, reproduced.
+- [x] 1,000 consecutive crossings by a scripted walking player with no disconnect and no inventory change. Verified: E10, 1,000 of 1,000 in two runs, zero disconnects, zero inventory changes.
+- [x] All four tiles restart with their world and every player intact. Verified: E10 recovery, entry-recovery and named-item fixtures, reproduced.
+- [x] `scripts/e2-real-transfer --build` run end to end from a fresh checkout. Verified: replaced by the integrated `scripts/goliath-cluster proof --build --fresh`, which the reviewer ran end to end: 202 s, 14 of 14 crossings.
 
 ## M2. Prewarmed crossing
 
 - [ ] Terrain past the wall is visible, read-only, with no blank chunks at the wall during a crossing.
 - [ ] The handover starts on approach and momentum carries through, with no backward correction above 0.1 blocks.
-- [ ] Input gap P95 under 150 ms and P99 under 300 ms over 1,000 walking crossings on loopback, including the D6 checkpoint.
+- [x] Input gap P95 under 150 ms and P99 under 300 ms over 1,000 walking crossings on loopback, including the D6 checkpoint. Verified: E10, P95 124.0 and 109.6 ms, P99 133.1 and 143.5 ms in two runs, cut and CAS included. Trigger to first target input is about 290 ms at P95, see the E10 report.
 - [ ] A real physics client, Horizon's own under `horizon-ctl`, walks through a wall and keeps its speed.
 - [ ] A stock Java Edition 26.3 client crosses a wall, confirmed by the maintainer in person.
 - [ ] Riding players cross with their vehicle.
-- [ ] Store group commit: commit P95 under 20 ms at 64 concurrent clients with `F_FULLFSYNC`. E5 measured 223 ms.
+- [ ] Store group commit: commit P95 under 20 ms at 64 concurrent clients with `F_FULLFSYNC`. E5 measured 223 ms; a quiet rerun after E9 gave 23, 68 and 23 ms.
 
 ## M3. Crashes and partitions
 
@@ -124,5 +124,7 @@ The baseline is one plain Horizon process with the same seed, view distance, bot
 - 2026-11-07: Built E7, pending review. The accepted final-binary matrix has 176/176 masked wall trials with positive controls and zero exterior record changes, after an eight-strike lightning follow-up. Fourteen direct unknown reads, four Anvil write refusals and nine interior comparisons passed. Geometry/read tests, formatting and scoped Clippy passed. Four selected parity harnesses could not compare without authenticated vanilla inputs. At 50 bots, 64 pigs and 144 chunks, mean MSPT was 1.811 unpatched, 1.595 masked and 1.858 patched-disabled. Repeat variance leaves the strict 5% ceiling unverified. E6 overlaps in `streaming.rs` and `levels.rs`; combined apply passed, combined runtime is unverified. Sampled shared `.local` peak was 6,413 MiB. Plain cleanup used per the reviewer, not `--all`. Evidence: `experiments/E7-tile-ownership.md`. No milestone boxes ticked, no commit or push.
 - 2026-11-08: E6, E7 and E8 verified by the reviewer. The fast cut meets its budget, but refuses player set changes and chunk unloads until E10 fixes that.
 - 2026-11-07: E10 integration built and tested, acceptance still in progress. The combined Horizon binary passed 200 coherent-cut kills and all 22 east-wall breach mechanics. Twenty-five walking clients completed 140 cuts at 2 Hz, with 80 unload snapshots, zero refused cuts, P95 tick stall 0.650 ms and cut RTT 15.224 ms. A real cut/CAS/activation route, named-item chest/drop/pickup fixture, all-four clean restart and newer-store-entry recovery passed. The integrated fresh-source build ran end to end with 14 crossings. Root gates and scoped Horizon/Meridian checks passed. The 1,000-crossing run, final patch regeneration and cleanup are pending E11's quiet window, marked at 21:29:30 local time. Chat, tab list, scoreboard, live weather updates and activation-tick input remain unbuilt. Evidence: `experiments/E10-cluster.md`. No milestone boxes ticked, no commit or push.
+- 2026-11-07: E10 implementation and evidence handed off for review. The final binary passed 1,000 consecutive wall/corner crossings, every CAS visible, zero disconnects, inventory changes or client corrections. Input gap P50/P95/P99 was 75.702/124.001/133.136 ms. Final-binary 200-kill and 22-mechanic east-wall campaigns passed, as did named-item transfer/restart, newer-entry recovery and direct departed-player-file checks. Normal-terrain walking captured 397 proto and 80 unload snapshots with zero refused cuts, but freeze-to-durable P95 missed 40 ms at 48.730 ms; tick-stall P95 passed at 1.173 ms. A missing proto-snapshot forwarding method was fixed and all final-binary proofs repeated. Fresh-source builds, root/scoped gates, patch equality, eight evidence-checker tests and plain cleanup passed. Global chat/tab/scoreboard, live weather updates, activation-tick input, normal-world end-to-end latency and remaining M2 acceptance stay open. Evidence: `experiments/E10-cluster.md`. No boxes ticked, no commit or push.
 - 2026-11-07: Built E11 measurement tools, pending review. One shared-loop process drove 800 packet clients with headroom. Plain self-diff and E7 interior digests matched all 80 fixture ticks, with active clock, piston and TNT controls. Four live Transfer reconnects resumed their route. Under the same four-core server cap and separate one-core client cap, the repeated tested baseline passed 200 bots and failed 400; four independent plain servers passed 600 twice and 800 once. The limiter control inflated worst-tile P99 from 0.844 to 12.580 ms, so capped P99 is not intrinsic engine execution time. The quiet marker was released after 44.686 minutes; the second 800-bot repeat, client saturation ceiling, fine frontiers and integrated seamless proxy remain unverified. Thirteen bot tests, seven tool tests, scoped release Clippy, formatting and patch checks passed. The digest binary test command selected zero tests and is not counted. Plain cleanup completed, no active E11 engines or run folders remain. Evidence: `experiments/E11-measurement.md`. No milestone boxes ticked, no commit or push.
 - 2026-11-07: E11 delivered bots, a tick digest and the capacity harness. Under a 4-core cap, plain Horizon passed at 200 bots and failed at 400; four separate plain servers passed 600 twice and 800 once.
+- 2026-11-07: E10 verified by the reviewer, including a fresh-checkout build. M1 complete. M2 gap line passed. Store group commit failed a quiet rerun at 23 to 68 ms.

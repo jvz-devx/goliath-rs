@@ -1,7 +1,8 @@
 //! Owns the versioned, size-bounded binary encoding used by TCP and the journal.
 
 use crate::state::{
-    Blob, Command, DirectoryEntry, MAX_BLOB, Operation, RequestId, Response, StoreFault,
+    Blob, ClusterClock, Command, DirectoryEntry, MAX_BLOB, Operation, PlayerKey, RequestId,
+    Response, StoreFault,
 };
 use goliath_model::{Epoch, Fence, Generation, OwnershipCas, PlayerId, ProcessId, Record, TileId};
 use std::io::{self, Read, Write};
@@ -18,6 +19,19 @@ pub(crate) fn invalid(message: &str) -> io::Error {
 pub(crate) struct Encoder(Vec<u8>);
 
 impl Encoder {
+    pub(crate) fn uuid(&mut self, key: PlayerKey) {
+        self.0.extend(key.0.to_le_bytes());
+    }
+    pub(crate) fn clock(&mut self, clock: Option<&ClusterClock>) {
+        self.byte(u8::from(clock.is_some()));
+        if let Some(clock) = clock {
+            self.u64(clock.unix_ms);
+            self.u64(clock.game_tick);
+            self.u64(clock.day_tick);
+            self.byte(u8::from(clock.raining));
+            self.byte(u8::from(clock.thundering));
+        }
+    }
     pub(crate) fn finish(self) -> Vec<u8> {
         self.0
     }
@@ -66,6 +80,34 @@ impl Encoder {
 pub(crate) struct Decoder<'a>(&'a [u8]);
 
 impl<'a> Decoder<'a> {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub(crate) fn uuid(&mut self) -> io::Result<PlayerKey> {
+        Ok(PlayerKey(u128::from_le_bytes(
+            self.take(16)?.try_into().map_err(|_| invalid("uuid"))?,
+        )))
+    }
+    pub(crate) fn clock(&mut self) -> io::Result<Option<ClusterClock>> {
+        match self.byte()? {
+            0 => Ok(None),
+            1 => Ok(Some(ClusterClock {
+                unix_ms: self.u64()?,
+                game_tick: self.u64()?,
+                day_tick: self.u64()?,
+                raining: self.flag()?,
+                thundering: self.flag()?,
+            })),
+            _ => Err(invalid("clock flag")),
+        }
+    }
+    fn flag(&mut self) -> io::Result<bool> {
+        match self.byte()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(invalid("boolean")),
+        }
+    }
     pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Self(bytes)
     }
@@ -193,6 +235,41 @@ pub(crate) fn encode_command(command: &Command) -> io::Result<Vec<u8>> {
             e.u64(*counter);
         }
         Operation::Compact => e.byte(8),
+        Operation::ReadUuid(player) => {
+            e.byte(9);
+            e.uuid(*player);
+        }
+        Operation::CreateUuid {
+            player,
+            owner,
+            blob,
+        } => {
+            e.byte(10);
+            e.uuid(*player);
+            e.fence(*owner);
+            e.blob(blob)?;
+        }
+        Operation::CommitUuid { player, cas, blob } => {
+            e.byte(11);
+            e.uuid(*player);
+            e.u64(cas.generation.0);
+            e.fence(cas.source);
+            e.fence(cas.target);
+            e.blob(blob)?;
+        }
+        Operation::Players { after } => {
+            e.byte(12);
+            e.byte(u8::from(after.is_some()));
+            if let Some(key) = after {
+                e.uuid(*key);
+            }
+        }
+        Operation::Clock => e.byte(13),
+        Operation::SetClock { fence, clock } => {
+            e.byte(14);
+            e.fence(*fence);
+            e.clock(Some(clock));
+        }
     }
     Ok(e.finish())
 }
@@ -229,6 +306,29 @@ pub(crate) fn decode_command(bytes: &[u8]) -> io::Result<Command> {
             counter: d.u64()?,
         },
         8 => Operation::Compact,
+        9 => Operation::ReadUuid(d.uuid()?),
+        10 => Operation::CreateUuid {
+            player: d.uuid()?,
+            owner: d.fence()?,
+            blob: d.blob()?,
+        },
+        11 => Operation::CommitUuid {
+            player: d.uuid()?,
+            cas: OwnershipCas {
+                generation: Generation(d.u64()?),
+                source: d.fence()?,
+                target: d.fence()?,
+            },
+            blob: d.blob()?,
+        },
+        12 => Operation::Players {
+            after: if d.flag()? { Some(d.uuid()?) } else { None },
+        },
+        13 => Operation::Clock,
+        14 => Operation::SetClock {
+            fence: d.fence()?,
+            clock: d.clock()?.ok_or_else(|| invalid("missing clock"))?,
+        },
         _ => return Err(invalid("unknown operation")),
     };
     d.end()?;
@@ -273,6 +373,17 @@ pub(crate) fn encode_response(response: &Response) -> io::Result<Vec<u8>> {
                 StoreFault::Limit => 6,
             });
         }
+        Response::Players(keys) => {
+            e.byte(6);
+            e.count(keys.len())?;
+            for key in keys {
+                e.uuid(*key);
+            }
+        }
+        Response::Clock(clock) => {
+            e.byte(7);
+            e.clock(clock.as_ref());
+        }
     }
     Ok(e.finish())
 }
@@ -299,6 +410,15 @@ pub(crate) fn decode_response(bytes: &[u8]) -> io::Result<Response> {
             _ => return Err(invalid("player flag")),
         }),
         4 => Response::Committed(Generation(d.u64()?)),
+        6 => {
+            let count = d.count()?;
+            let mut keys = Vec::new();
+            for _ in 0..count {
+                keys.push(d.uuid()?);
+            }
+            Response::Players(keys)
+        }
+        7 => Response::Clock(d.clock()?),
         5 => Response::Fault(match d.byte()? {
             1 => StoreFault::StaleFence,
             2 => StoreFault::GenerationConflict,

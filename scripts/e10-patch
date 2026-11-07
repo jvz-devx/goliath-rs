@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Save separate E10 deltas against pinned E2/E6/E7 and E2/E4/E8 stacks.
+
+Builds no code, stages nothing and commits nothing. Verifies clean application
+and exact byte equality. Scratch sources are deleted on return.
+"""
+import difflib
+import hashlib
+import io
+import json
+from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
+
+ROOT=Path(__file__).resolve().parent.parent
+PROJECTS={
+    'horizon':('fc2868b2b26d56ec76e17414909fe58a3b87bb92',
+        ['e2-horizon-input-trace.patch','horizon-01-tile-cut.patch','horizon-02-tile-ownership.patch'],
+        'horizon-03-cluster.patch'),
+    'meridian':('902dcf195e0a8bbd3f39a5f560684af00e64bf5d',
+        ['e2-meridian-client.patch','meridian-01-wall-trigger.patch','meridian-02-fast-crossing.patch'],
+        'meridian-03-cluster.patch'),
+}
+
+
+def export(project, destination, integration=False):
+    pin,patches,delta=PROJECTS[project]
+    destination.mkdir(parents=True,exist_ok=True)
+    archive=subprocess.check_output(['git','-C',ROOT/'.local/src'/project,'archive',pin])
+    with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
+        bundle.extractall(destination,filter='data')
+    subprocess.run(['git','init','--quiet',destination],check=True)
+    for name in patches+([delta] if integration else []):
+        subprocess.run(['git','apply','--check',ROOT/'patches'/name],cwd=destination,check=True)
+        subprocess.run(['git','apply',ROOT/'patches'/name],cwd=destination,check=True)
+
+
+def main():
+    evidence=[]
+    for project,(pin,patches,delta) in PROJECTS.items():
+        source=ROOT/'.local/src'/project
+        candidates=set()
+        for command in (['diff','--name-only','-z'],['ls-files','--others','--exclude-standard','-z']):
+            candidates.update(subprocess.check_output(['git','-C',source,*command]).decode().strip('\0').split('\0'))
+        candidates=sorted(p for p in candidates if p and (p.startswith('crates/') or p=='Cargo.lock'))
+        with tempfile.TemporaryDirectory(prefix='E10-patch-',dir=ROOT/'.local/runs') as temporary:
+            baseline=Path(temporary)
+            export(project,baseline)
+            parts=[]
+            changed=[]
+            for relative in candidates:
+                old=baseline/relative
+                new=source/relative
+                before=old.read_text() if old.exists() else ''
+                after=new.read_text() if new.exists() else ''
+                if before==after:
+                    continue
+                changed.append(relative)
+                parts.append(f'diff --git a/{relative} b/{relative}\n')
+                if not old.exists():
+                    parts.append('new file mode 100644\n')
+                parts.extend(difflib.unified_diff(before.splitlines(keepends=True),after.splitlines(keepends=True),
+                    fromfile=f'a/{relative}' if before else '/dev/null',tofile=f'b/{relative}' if after else '/dev/null'))
+            output=ROOT/'patches'/delta
+            output.write_text(''.join(parts))
+            subprocess.run(['git','apply','--check',output],cwd=baseline,check=True)
+            subprocess.run(['git','apply',output],cwd=baseline,check=True)
+            for relative in candidates:
+                if (source/relative).is_file() and (source/relative).read_bytes()!=(baseline/relative).read_bytes():
+                    raise RuntimeError(f'patch differs from working source: {project}/{relative}')
+        evidence.append({'project':project,'pin':pin,'order':patches+[delta],'changed':changed,
+            'bytes':output.stat().st_size,'sha256':hashlib.sha256(output.read_bytes()).hexdigest(),
+            'apply_check':'passed','source_equality':'passed'})
+    output=ROOT/'docs/experiments/data/E10/patch.json'
+    output.parent.mkdir(parents=True,exist_ok=True)
+    output.write_text(json.dumps(evidence,indent=2)+'\n')
+    print(json.dumps(evidence,indent=2))
+
+
+if __name__=='__main__':
+    main()

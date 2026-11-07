@@ -16,7 +16,9 @@ Apply patches from the matching upstream checkout. Nothing here has been sent up
   The first cut still uses E3's full-save bootstrap. Warm cuts never wait on its
   region writers. Chunk tick metadata is separate from terrain and containers.
   The control prelude also runs during tick pacing. Idle control work counts in MSPT.
-  Unloads, changed player sets and incomplete streaming fail closed until restart.
+  Unloads, changed player sets and newly accepted generation/proto-save state
+  require a restart and a new full base. Pending entity spawns refuse before
+  freezing and may be retried after a tick. Light jobs alone do not block cuts.
   Native mods are refused. Use a fresh cut directory, not an E3 HEAD archive.
   Complete BASE and LOG records, not a HEAD file, select recovery.
 
@@ -59,3 +61,44 @@ No Folia, Paper, other GPL source or `docs/research/05-folia.md` was read for E4
   `python3 -B scripts/e8-patch` rebuilds the delta mechanically, checks the
   application order in an isolated archive, and compares resulting source bytes.
   No Folia, Paper, other GPL source or excluded research was read for E8.
+
+- `horizon-03-bots.patch`: E11 opt-in single-threaded `horizon-bots --event-loop`,
+  seeded spread routes, explicit wall-crossing paths, configuration re-entry,
+  Respawn cache reset and Transfer reconnects. Base is Horizon `fc2868b2b`
+  after `e2-horizon-input-trace.patch`. Existing bot modes stay unchanged.
+  Mio is already in the pinned lockfile. See `docs/experiments/E11-measurement.md`.
+
+- `horizon-04-digest.patch`: E11 opt-in fixture-region SHA-256 digests,
+  bounded individual tick samples and mob census. Same base plus E2.
+  `HORIZON_E11_MEASURE=1` enables control commands `e11-digest` and
+  `e11-samples`. The digest covers blocks, live block-entity save NBT and
+  entity kind/position multisets, not RNG, lighting or full entity state.
+  It rejects unloaded regions and unsupported entity kinds. Both E11 patches
+  can be applied with E7. `scripts/e11-build` retains plain and E7 release
+  engines, with ThinLTO and one codegen unit. No GPL source or excluded
+  research was read. Nothing has been sent upstream.
+
+- `horizon-03-cluster.patch`: E10 delta after E2, E6's
+  `horizon-01-tile-cut.patch` and E7's `horizon-02-tile-ownership.patch`, on
+  Horizon `fc2868b2b26d56ec76e17414909fe58a3b87bb92`. Tracks unloads,
+  departures and accepted generation in cuts. Adds full-UUID store registration,
+  exact committed-blob activation checks, generation-aware recovery, positioned
+  held logins and control queue timing. Cluster movement stays server-clamped
+  without sending the wall correction that prevented a proxy crossing.
+  `GOLIATH_STORE`, `GOLIATH_TILE_ID` and the store-derived `HORIZON_E3_FENCE`
+  enable authority integration. Ordinary E6/E7 behavior stays opt-in separately.
+  The path dependency expects this repository's `crates/goliath-store` in the
+  normal `.local/src/horizon` layout. See `docs/experiments/E10-cluster.md`.
+
+- `meridian-03-cluster.patch`: E10 delta after E2, E4's
+  `meridian-01-wall-trigger.patch` and E8's `meridian-02-fast-crossing.patch`,
+  on Meridian `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`. Adds the path
+  dependency on `goliath-store`, source cut then fenced CAS then target
+  activation, store-owned reconnect routing and cluster sky packets.
+  `GOLIATH_CLUSTER` selects the private runtime manifest; `GOLIATH_CLOCK`
+  supplies the store's startup sky anchor. It does not implement proxy chat,
+  a global tab list, scoreboard transfer or neighboring terrain composition.
+  `scripts/e10-patch` recreates both E10 deltas and checks clean application
+  plus exact source equality. The final check includes the test client's
+  corrected 26.3 drop action and the persistence wrapper's proto-snapshot
+  forwarding. Both deltas apply and reproduce the working source byte for byte.

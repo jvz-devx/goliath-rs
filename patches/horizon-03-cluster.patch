@@ -1,0 +1,1017 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1260,6 +1260,17 @@
+ ]
+ 
+ [[package]]
++name = "goliath-model"
++version = "0.1.0"
++
++[[package]]
++name = "goliath-store"
++version = "0.1.0"
++dependencies = [
++ "goliath-model",
++]
++
++[[package]]
+ name = "gpu-allocator"
+ version = "0.28.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1432,6 +1443,7 @@
+  "fs4",
+  "gilrs",
+  "glam",
++ "goliath-store",
+  "horizon-anticheat",
+  "horizon-assets",
+  "horizon-bench",
+diff --git a/crates/horizon-client-render/src/streaming.rs b/crates/horizon-client-render/src/streaming.rs
+--- a/crates/horizon-client-render/src/streaming.rs
++++ b/crates/horizon-client-render/src/streaming.rs
+@@ -246,10 +246,14 @@
+ }
+ /// The generator's saving, for the streamer (which doesn't know its type).
+ trait Saves: LodSource {
++    fn cut_proto(&self, proto: &Proto) -> Option<crate::chunk::SavedProto>;
+     fn save_protos(&self, protos: &[&Proto]);
+     fn save_finished(&self, chunk: Chunk);
+ }
+ impl<G: ChunkGenerator> Saves for G {
++    fn cut_proto(&self, proto: &Proto) -> Option<crate::chunk::SavedProto> {
++        ChunkGenerator::saved_proto(self, proto)
++    }
+     fn save_protos(&self, protos: &[&Proto]) {
+         ChunkGenerator::save_protos(self, protos);
+     }
+@@ -431,6 +435,8 @@
+ pub struct Streaming {
+     /// E6 tracks generation state outside resident COW chunks. None when cuts are off.
+     cut_generation: Option<u64>,
++    cut_protos: std::collections::HashMap<(i32, i32), crate::chunk::SavedProto>,
++    cut_finished: Vec<Arc<Chunk>>,
+     shared: Arc<Shared>,
+     /// Columns generated and saved as they were left behind: new when they
+     /// next arrive, though read from the save (`World::loaded_chunks`).
+@@ -1067,6 +1073,8 @@
+             jobs,
+             workers,
+             cut_generation: None,
++            cut_protos: std::collections::HashMap::new(),
++            cut_finished: Vec::new(),
+             order: 0,
+             scan_age: 0,
+             scan_area: ((i32::MIN, i32::MIN), i32::MIN),
+@@ -1324,6 +1332,11 @@
+                 continue;
+             }
+             let key = (x + (i % 3) as i32 - 1, z + (i / 3) as i32 - 1);
++            if self.cut_generation.is_some()
++                && let Some(saved) = self.saves.cut_proto(&proto)
++            {
++                self.cut_protos.insert(key, saved);
++            }
+             self.light_views.remove(&key);
+             self.protos.insert(key, Some(proto));
+             self.written.insert(key);
+@@ -1372,6 +1385,7 @@
+         self.cut_generation_changed();
+         self.generation_scan.exhausted = false;
+         let key = (chunk.x, chunk.z);
++        self.cut_protos.remove(&key);
+         self.generating.remove(&key);
+         self.finishing.remove(&key);
+         self.decorated.insert(key);
+@@ -1383,6 +1397,9 @@
+         // not give it back.
+         if !self.ranges().chunk_kept(key.0, key.1, self.decorates) {
+             if chunk.fresh {
++                if self.cut_generation.is_some() {
++                    self.cut_finished.push(Arc::new(chunk.clone()));
++                }
+                 self.dropped_new.insert(key);
+                 self.saves.save_finished(chunk);
+             }
+@@ -1583,6 +1600,14 @@
+     /// Lighting alone changes only resident COW references, not these saved proto records.
+     pub fn track_cut_generation(&mut self) -> u64 {
+         *self.cut_generation.get_or_insert(0)
++    }
++    /// Accepted generation since the last cut, including columns no longer resident.
++    /// Jobs still running are not accepted world state and belong to a later cut.
++    pub fn take_cut_generation(&mut self) -> (Vec<crate::chunk::SavedProto>, Vec<Arc<Chunk>>) {
++        (
++            self.cut_protos.drain().map(|(_, p)| p).collect(),
++            std::mem::take(&mut self.cut_finished),
++        )
+     }
+     fn cut_generation_changed(&mut self) {
+         if let Some(revision) = &mut self.cut_generation {
+diff --git a/crates/horizon-client/Cargo.toml b/crates/horizon-client/Cargo.toml
+--- a/crates/horizon-client/Cargo.toml
++++ b/crates/horizon-client/Cargo.toml
+@@ -11,6 +11,7 @@
+ autotests = false
+ 
+ [dependencies]
++goliath-store = { path = "../../../../../crates/goliath-store" }
+ horizon-cosmetics = { path = "../horizon-cosmetics" }
+ horizon-client-lib = { path = "../horizon-client-lib", default-features = false }
+ horizon-assets = { path = "../horizon-assets" }
+diff --git a/crates/horizon-client/src/benchmark.rs b/crates/horizon-client/src/benchmark.rs
+--- a/crates/horizon-client/src/benchmark.rs
++++ b/crates/horizon-client/src/benchmark.rs
+@@ -97,6 +97,7 @@
+         let (reply, response) = mpsc::channel();
+         self.0
+             .send(Request {
++                queued_at: std::time::Instant::now(),
+                 line: line.to_owned(),
+                 reply,
+             })
+diff --git a/crates/horizon-client/src/control.rs b/crates/horizon-client/src/control.rs
+--- a/crates/horizon-client/src/control.rs
++++ b/crates/horizon-client/src/control.rs
+@@ -133,6 +133,7 @@
+ 
+ /// One command line from a client, with the channel for its JSON reply.
+ pub struct Request {
++    pub queued_at: std::time::Instant,
+     pub line: String,
+     pub reply: mpsc::Sender<String>,
+ }
+@@ -377,7 +378,14 @@
+             continue;
+         }
+         let (reply, response) = mpsc::channel();
+-        if sender.send(Request { line, reply }).is_err() {
++        if sender
++            .send(Request {
++                line,
++                reply,
++                queued_at: std::time::Instant::now(),
++            })
++            .is_err()
++        {
+             return;
+         }
+         // The game dropping the reply sender means it exited mid-command.
+diff --git a/crates/horizon-client/src/game/dedicated.rs b/crates/horizon-client/src/game/dedicated.rs
+--- a/crates/horizon-client/src/game/dedicated.rs
++++ b/crates/horizon-client/src/game/dedicated.rs
+@@ -34,6 +34,7 @@
+     time::{Duration, Instant},
+ };
+ 
++mod cluster;
+ pub(super) mod events;
+ mod management;
+ mod report;
+@@ -1304,6 +1305,9 @@
+                     self.console_line(&mut state, &line);
+                 }
+                 self.poll_server_control(&mut state);
++                if let Err(e) = self.cluster_register_players() {
++                    panic!("cluster authority failed: {e}");
++                }
+             }));
+             if let Err(payload) = prelude {
+                 crashed = Some(panic_message(payload.as_ref()));
+@@ -1462,6 +1466,13 @@
+     /// spawn (MinecraftServer.setInitialSpawn): a player's spawn is found as
+     /// one joins.
+     pub(super) fn settle_spawn(&mut self) -> Result<()> {
++        if self.level.spawn.is_none()
++            && let Ok(position) = std::env::var("GOLIATH_SPAWN")
++        {
++            let position: [i32; 3] = serde_json::from_str(&position)?;
++            self.level.spawn = Some(position.map(f64::from));
++            self.level.world_spawn = Some(position);
++        }
+         let deadline = Instant::now() + Duration::from_secs(600);
+         if self.standalone_server() {
+             if self.level.spawn.is_none() {
+diff --git a/crates/horizon-client/src/game/dedicated/cluster.rs b/crates/horizon-client/src/game/dedicated/cluster.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client/src/game/dedicated/cluster.rs
+@@ -0,0 +1,240 @@
++//! Store authority checks and generation-aware player recovery for a cluster tile.
++use goliath_store::{
++    Blob, Client, Epoch, Fence, Generation, Operation, PlayerKey, ProcessId, Response, TileId,
++};
++use horizon_client::{Result, save};
++use horizon_world::nbt::{self, Limits, Tag};
++use serde_json::{Value, json};
++use std::{path::Path, time::Duration};
++
++pub(super) const GENERATION: &str = "goliath:generation";
++
++pub(super) fn connection() -> Result<Option<(Client, Fence)>> {
++    let Ok(address) = std::env::var("GOLIATH_STORE") else {
++        return Ok(None);
++    };
++    let tile = std::env::var("GOLIATH_TILE_ID")?.parse()?;
++    let token = std::env::var("HORIZON_E3_FENCE")?;
++    let (process, epoch) = token.split_once(':').ok_or("invalid store fence")?;
++    Ok(Some((
++        Client::new(address.parse()?, Duration::from_secs(3), 3)?,
++        Fence {
++            tile: TileId(tile),
++            process: ProcessId(process.parse()?),
++            epoch: Epoch(epoch.parse()?),
++        },
++    )))
++}
++
++pub(super) fn local_generation(tag: Option<&Tag>) -> Option<u64> {
++    match tag.and_then(|t| t.get(GENERATION)) {
++        Some(Tag::Long(value)) => u64::try_from(*value).ok(),
++        _ => None,
++    }
++}
++
++pub(super) fn mark(tag: &mut Option<Tag>, generation: u64) -> Result<()> {
++    let generation = i64::try_from(generation)?;
++    let tag = tag.get_or_insert_with(|| Tag::compound([] as [(&str, Tag); 0]));
++    if let Tag::Compound(fields) = tag {
++        fields.insert(GENERATION.into(), Tag::Long(generation));
++    } else {
++        return Err("player extra is not a compound".into());
++    }
++    Ok(())
++}
++
++fn current(client: &Client, fence: Fence) -> Result<()> {
++    match client.execute(Operation::Directory)? {
++        Response::Directory(entries) if entries.iter().any(|e| e.active && e.fence == fence) => {
++            Ok(())
++        }
++        _ => Err("stale cluster tile fence".into()),
++    }
++}
++
++/// Validate the exact committed activation body, not just a caller-supplied generation.
++pub(super) fn activation(uuid: u128, body: &Value) -> Result<Option<u64>> {
++    let Some((client, fence)) = connection()? else {
++        return Ok(None);
++    };
++    current(&client, fence)?;
++    let Response::Player(Some(record)) = client.execute(Operation::ReadUuid(PlayerKey(uuid)))?
++    else {
++        return Err("activation has no store record".into());
++    };
++    let committed: Value = serde_json::from_slice(&record.inventory.bytes)?;
++    // Inputs may be attached later, but the player body and placement are exactly committed.
++    for key in ["record", "position", "rotation", "velocity", "on_ground"] {
++        if committed.get(key) != body.get(key) {
++            return Err(format!("activation differs from store: {key}").into());
++        }
++    }
++    if record.owner != fence.tile {
++        return Err("activation belongs to another tile".into());
++    }
++    Ok(Some(record.generation.0))
++}
++
++pub(super) fn reconcile(world: &Path) -> Result<()> {
++    let Some((client, fence)) = connection()? else {
++        return Ok(());
++    };
++    current(&client, fence)?;
++    let mut after = None;
++    loop {
++        let Response::Players(keys) = client.execute(Operation::Players { after })? else {
++            return Err("bad player listing".into());
++        };
++        if keys.is_empty() {
++            break;
++        }
++        after = keys.last().copied();
++        for key in keys {
++            let Response::Player(Some(entry)) = client.execute(Operation::ReadUuid(key))? else {
++                return Err("player missing during recovery".into());
++            };
++            let path = horizon_client::lan::playerdata::path(world, key.0);
++            let local = save::read_dat(&path);
++            let generation = local_generation(local.as_ref());
++            if generation.is_some_and(|g| g > entry.generation.0) {
++                return Err("cut generation is newer than store".into());
++            }
++            if entry.owner != fence.tile {
++                let uuid = horizon_protocol::crypto::uuid_string(key.0);
++                for path in [
++                    path.clone(),
++                    path.with_extension("dat_old"),
++                    world.join(format!("players/stats/{uuid}.json")),
++                    world.join(format!("players/advancements/{uuid}.json")),
++                ] {
++                    match std::fs::remove_file(path) {
++                        Ok(()) => {}
++                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
++                        Err(e) => return Err(e.into()),
++                    }
++                }
++                continue;
++            }
++            if generation == Some(entry.generation.0) {
++                continue;
++            }
++            let body: Value = serde_json::from_slice(&entry.inventory.bytes)?;
++            let record = &body["record"];
++            if record["uuid"]
++                .as_str()
++                .and_then(horizon_client::lan::arrivals::parse_uuid)
++                != Some(key.0)
++            {
++                return Err("stored record UUID differs from its key".into());
++            }
++            let bytes = record["player"]
++                .as_str()
++                .and_then(horizon_client::skins::base64_decode)
++                .ok_or("bad stored player NBT")?;
++            let (named, _) = nbt::read_named(&bytes, Limits::saved()).map_err(|e| e.to_string())?;
++            let mut tag = Some(named.tag);
++            mark(&mut tag, entry.generation.0)?;
++            let mut tag = tag.ok_or("missing player tag")?;
++            if let (Some(position), Tag::Compound(fields)) =
++                (body.get("position").and_then(Value::as_array), &mut tag)
++            {
++                fields.insert(
++                    "Pos".into(),
++                    Tag::List(
++                        position
++                            .iter()
++                            .map(|v| {
++                                v.as_f64()
++                                    .map(|v| Tag::Double(v.to_bits()))
++                                    .ok_or("bad stored position")
++                            })
++                            .collect::<std::result::Result<_, _>>()?,
++                    ),
++                );
++            }
++            if let Tag::Compound(fields) = &mut tag {
++                for (key, name) in [("rotation", "Rotation"), ("velocity", "Motion")] {
++                    if let Some(values) = body.get(key).and_then(Value::as_array) {
++                        let values = values
++                            .iter()
++                            .map(|v| {
++                                v.as_f64()
++                                    .map(|v| {
++                                        if key == "rotation" {
++                                            Tag::Float((v as f32).to_bits())
++                                        } else {
++                                            Tag::Double(v.to_bits())
++                                        }
++                                    })
++                                    .ok_or("bad stored movement")
++                            })
++                            .collect::<std::result::Result<Vec<_>, _>>()?;
++                        fields.insert(name.into(), Tag::List(values));
++                    }
++                }
++            }
++            save::write_dat_durable(&path, tag)?;
++            let uuid = horizon_protocol::crypto::uuid_string(key.0);
++            for kind in ["stats", "advancements"] {
++                let path = world.join(format!("players/{kind}/{uuid}.json"));
++                save::write_durable(&path, &serde_json::to_vec(&record[kind])?)?;
++            }
++            eprintln!(
++                "E10_RECOVER {}",
++                json!({"uuid":uuid,"generation":entry.generation.0,"tile":fence.tile.0})
++            );
++        }
++    }
++    current(&client, fence)
++}
++
++impl crate::game::Game<'_> {
++    /// New logins have no entry generation. Register before they perform a gameplay tick.
++    pub(super) fn cluster_register_players(&mut self) -> Result<()> {
++        let Some((client, fence)) = connection()? else {
++            return Ok(());
++        };
++        let uuids: Vec<_> = self
++            .lan
++            .as_ref()
++            .map(|h| {
++                h.hub
++                    .guests
++                    .iter()
++                    .filter(|g| {
++                        g.placed && !g.released && local_generation(g.saved.as_ref()).is_none()
++                    })
++                    .map(|g| g.uuid)
++                    .collect()
++            })
++            .unwrap_or_default();
++        for uuid in uuids {
++            let id = horizon_protocol::crypto::uuid_string(uuid);
++            let reply = self.player_request("player-export", &id);
++            if reply["ok"] != true {
++                return Err("new player export failed".into());
++            }
++            let blob = Blob {
++                version: 1,
++                bytes: serde_json::to_vec(&json!({"record":reply["record"]}))?,
++            };
++            match client.execute(Operation::CreateUuid {
++                player: PlayerKey(uuid),
++                owner: fence,
++                blob,
++            })? {
++                Response::Committed(Generation(0)) => {}
++                other => return Err(format!("new player registration failed: {other:?}").into()),
++            }
++            if let Some(g) = self
++                .lan
++                .as_mut()
++                .and_then(|h| h.hub.guests.iter_mut().find(|g| g.uuid == uuid))
++            {
++                mark(&mut g.saved, 0)?;
++            }
++        }
++        Ok(())
++    }
++}
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -44,11 +44,18 @@
+     /// Answers the requests waiting on the control endpoint.
+     pub(super) fn poll_server_control(&mut self, state: &mut ServerState) {
+         while let Some(request) = self.control.as_ref().and_then(|c| c.try_recv()) {
++            let applied = std::time::Instant::now();
++            let queue_ms = applied.duration_since(request.queued_at).as_secs_f64() * 1000.;
+             // A `console stop` just before stops this server for the next request too.
+             self.note_stopping(state.lists.lock().unwrap().stop);
+             let reply = match request.line.trim().split_once(' ') {
+                 Some(("tile-cut", args)) => {
+-                    self.tile_cut_request(args, request.reply.clone(), &mut state.tile_cut);
++                    self.tile_cut_request(
++                        args,
++                        request.reply.clone(),
++                        &mut state.tile_cut,
++                        queue_ms,
++                    );
+                     continue;
+                 }
+                 Some(("tile-fence", args)) => super::tile_cut::fence_request(args),
+@@ -61,7 +68,9 @@
+                 Some(("management", rest)) => self.management(state, rest),
+                 // A proxy moving a player here or away (transfer.rs, lan/arrivals.rs).
+                 Some((verb, rest)) if verb.starts_with("player-") => {
+-                    self.player_request(verb, rest)
++                    let mut reply = self.player_request(verb, rest);
++                    reply["timing"] = json!({"queue_ms":queue_ms,"apply_ms":applied.elapsed().as_secs_f64()*1000.,"tick":self.world.game_time});
++                    reply
+                 }
+                 Some(("console", line)) => {
+                     // Command feedback is logged as system chat; the reply carries the text alone.
+diff --git a/crates/horizon-client/src/game/dedicated/tile_cut.rs b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+--- a/crates/horizon-client/src/game/dedicated/tile_cut.rs
++++ b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+@@ -58,6 +58,7 @@
+     if let Some(head) = store::restore(&root, &token, world)? {
+         eprintln!("E3_RESTORED {}", serde_json::to_string(&head)?);
+     }
++    super::cluster::reconcile(world)?;
+     Ok(())
+ }
+ type Key = (String, i32, i32);
+@@ -71,9 +72,6 @@
+     done: Receiver<std::result::Result<(), String>>,
+     seen: HashMap<Key, Seen>,
+     names: HashMap<String, Vec<((i32, i32, i32), String)>>,
+-    unloads: HashMap<String, u64>,
+-    generations: HashMap<String, u64>,
+-    players: Option<HashSet<u128>>,
+     pending: usize,
+     poisoned: bool,
+     initialized: bool,
+@@ -81,6 +79,7 @@
+ struct Terrain {
+     prefix: String,
+     chunks: Vec<Arc<Chunk>>,
++    protos: Vec<save::SavedProto>,
+     metadata: Vec<ChunkMetadata>,
+     entities: Vec<((i32, i32), Vec<Tag>)>,
+     registry: &'static BlockRegistry,
+@@ -106,6 +105,8 @@
+     bootstrap: Option<store::Files>,
+     start: Instant,
+     tick_ms: f64,
++    queue_ms: f64,
++    lifecycle: Value,
+     capture_ms: f64,
+     export: Option<Value>,
+     reply: Sender<String>,
+@@ -122,9 +123,6 @@
+             done,
+             seen: HashMap::new(),
+             names: HashMap::new(),
+-            unloads: HashMap::new(),
+-            generations: HashMap::new(),
+-            players: None,
+             pending: 0,
+             poisoned: false,
+             initialized: false,
+@@ -189,6 +187,21 @@
+         }
+     }
+     for terrain in &work.terrain {
++        for proto in &terrain.protos {
++            let tag = save::encode_proto(
++                proto,
++                terrain.registry,
++                &terrain.biomes,
++                terrain.tables.as_deref(),
++                terrain.shape,
++            );
++            let bytes = nbt::write_named(&tag, Limits::saved()).map_err(|e| e.to_string())?;
++            changes.push(store::Change::chunk(
++                region(&terrain.prefix, "region", proto.column.x, proto.column.z),
++                [proto.column.x, proto.column.z],
++                Compression::Zlib.encode(&bytes)?,
++            ));
++        }
+         for chunk in &terrain.chunks {
+             let tag = save::encode_with(
+                 chunk,
+@@ -369,7 +382,7 @@
+                 for (work, (head, bytes, io_ms)) in batch.into_iter().zip(receipts) {
+                     let value = json!({"ok":true,"sequence":head.sequence,"tick":head.tick,"tick_ms":work.tick_ms,"capture_ms":work.capture_ms,
+                         "off_ms":off.elapsed().as_secs_f64()*1000.,"server_ms":work.start.elapsed().as_secs_f64()*1000.,
+-                        "bytes_written":bytes,"install_io_ms":io_ms,"encode_ms":encode_ms,"group_size":group,"export":work.export});
++                        "bytes_written":bytes,"install_io_ms":io_ms,"encode_ms":encode_ms,"group_size":group,"export":work.export,"queue_ms":work.queue_ms,"lifecycle":work.lifecycle});
+                     let _ = work.reply.send(value.to_string());
+                     let _ = done.send(Ok(()));
+                     last = Some(head);
+@@ -442,6 +455,7 @@
+         args: &str,
+         reply: Sender<String>,
+         runtime: &mut Option<Runtime>,
++        queue_ms: f64,
+     ) {
+         let start = Instant::now();
+         let mut capture_started = false;
+@@ -469,37 +483,7 @@
+             }
+             let state = runtime.as_mut().ok_or("cut runtime missing")?;
+             state.ready()?;
+-            {
+-                let back = self.dim;
+-                for dim in self
+-                    .levels
+-                    .parked_dims()
+-                    .into_iter()
+-                    .chain(std::iter::once(back))
+-                {
+-                    self.enter_level(None, dim)?;
+-                    let generation = self.streaming.track_cut_generation();
+-                    let pending = self.world.loaded_entities.len();
+-                    let prefix = save::dimension_dir(&self.world_root, dim.id())
+-                        .strip_prefix(&self.world_root)?
+-                        .to_str()
+-                        .ok_or("non-UTF8 dimension")?
+-                        .to_owned();
+-                    if state
+-                        .generations
+-                        .get(&prefix)
+-                        .is_some_and(|old| *old != generation || generation == u64::MAX)
+-                    {
+-                        self.enter_level(None, back)?;
+-                        return Err("generation state changed outside resident snapshots; restart to capture a new base".into());
+-                    }
+-                    if state.initialized && pending != 0 {
+-                        self.enter_level(None, back)?;
+-                        return Err(format!("terrain work still in flight: pending entity chunks={pending}; retry after a tick").into());
+-                    }
+-                }
+-                self.enter_level(None, back)?;
+-            }
++            self.cluster_register_players()?;
+             capture_started = true;
+             store::phase(&root, "capture-begin")?;
+             let export = if let Some(player) = player {
+@@ -512,26 +496,6 @@
+                 None
+             };
+             self.tile_close_menus()?;
+-            let players: HashSet<_> = self
+-                .lan
+-                .as_ref()
+-                .map(|h| {
+-                    h.hub
+-                        .guests
+-                        .iter()
+-                        .filter(|g| g.placed && !g.released)
+-                        .map(|g| g.uuid)
+-                        .collect()
+-                })
+-                .unwrap_or_default();
+-            if state
+-                .players
+-                .as_ref()
+-                .is_some_and(|previous| previous != &players)
+-            {
+-                return Err("tile cut requires a fixed resident player set; restart after joins or departures".into());
+-            }
+-            state.players = Some(players);
+             let bootstrap = if state.initialized {
+                 None
+             } else {
+@@ -541,40 +505,36 @@
+             let back = self.dim;
+             let dims = self.levels.parked_dims();
+             let mut terrain = Vec::new();
++            let mut departed = Vec::new();
++            let (mut unloaded_count, mut proto_count, mut finished_count, mut residents) =
++                (0, 0, 0, 0);
+             let (_, tags) = save::cut_tags(|| {
+                 for dim in dims.into_iter().chain(std::iter::once(back)) {
+                     self.enter_level(None, dim)?;
++                    // Pending loaded entity tags are accepted state too. Spawn them before
++                    // capturing, so they cannot disappear between a load and this cut.
++                    self.spawn_loaded_entities();
+                     self.world.block_entities.track_cuts();
+                     let prefix = save::dimension_dir(&self.world_root, dim.id())
+                         .strip_prefix(&self.world_root)?
+                         .to_str()
+                         .ok_or("non-UTF8 dimension")?
+                         .to_owned();
+-                    let unloads = self.world.block_entities.cut_unloads();
+-                    state
+-                        .generations
+-                        .insert(prefix.clone(), self.streaming.track_cut_generation());
+-                    if state
+-                        .unloads
+-                        .get(&prefix)
+-                        .is_some_and(|old| *old != unloads || unloads == u64::MAX)
+-                    {
+-                        return Err("tile cut observed an unload since its base; restart to include unloaded state".into());
+-                    }
+-                    state.unloads.insert(prefix.clone(), unloads);
++                    self.streaming.track_cut_generation();
++                    let (protos, finished) = self.streaming.take_cut_generation();
++                    let unloaded = std::mem::take(&mut self.persist.cut_unloaded);
++                    unloaded_count += unloaded.len();
++                    proto_count += protos.len();
++                    finished_count += finished.len();
++                    residents += self.world.chunks.len();
+                     let mut keys: HashSet<_> = self.world.chunks.keys().copied().collect();
+                     self.tile_entity_keys(&mut keys);
+                     if keys.iter().any(|key| !self.world.chunks.contains_key(key)) {
+                         return Err("tile cut requires every live entity chunk to be resident; load the missing chunks before retrying".into());
+                     }
+-                    // No unobserved unload can silently discard changed containers or entities.
+-                    if state
++                    state
+                         .seen
+-                        .keys()
+-                        .any(|(p, x, z)| p == &prefix && !keys.contains(&(*x, *z)))
+-                    {
+-                        return Err("tile cut requires the previous footprint resident; restart before changing the footprint".into());
+-                    }
++                        .retain(|(p, x, z), _| p != &prefix || keys.contains(&(*x, *z)));
+                     let mut names: Vec<_> = self
+                         .world
+                         .block_names
+@@ -649,14 +609,30 @@
+                             },
+                         );
+                     }
+-                    let chunks = self.with_entities(&dirty);
+-                    let entities = self.entity_chunks(&keys, false);
++                    // Last unload wins, and a current resident always wins over an unload.
++                    let mut retired: HashMap<_, _> = finished
++                        .into_iter()
++                        .map(|c| ((c.x, c.z), (c.clone(), c.entities.clone())))
++                        .collect();
++                    for (chunk, entities) in unloaded {
++                        retired.insert((chunk.x, chunk.z), (chunk, entities));
++                    }
++                    retired.retain(|key, _| !keys.contains(key));
++                    let mut chunks: Vec<_> = retired.values().map(|(c, _)| c.clone()).collect();
++                    chunks.extend(self.with_entities(&dirty));
++                    let mut entities: Vec<_> =
++                        retired.into_iter().map(|(key, (_, e))| (key, e)).collect();
++                    entities.extend(self.entity_chunks(&keys, false));
++                    // Disconnected players are saved at the boundary where they leave.
++                    // A later resident snapshot of the same UUID supersedes these tags.
++                    departed.extend(std::mem::take(&mut self.persist.cut_players));
+                     self.save_border();
+                     self.save_raids();
+                     self.save.save_attachments(&self.world.attachments)?;
+                     terrain.push(Terrain {
+                         prefix,
+                         chunks,
++                        protos,
+                         metadata,
+                         entities,
+                         registry: self.pack.assets.registry,
+@@ -692,6 +668,11 @@
+                 })
+                 .collect::<Result<_>>()?;
+             let mut json = Vec::new();
++            for (uuid, player, advancements, stats) in departed {
++                tags.push((format!("players/data/{uuid}.dat"), player));
++                json.push((format!("players/advancements/{uuid}.json"), advancements));
++                json.push((format!("players/stats/{uuid}.json"), stats));
++            }
+             if let Some(mut host) = self.lan.take() {
+                 for guest in host
+                     .hub
+@@ -733,6 +714,8 @@
+                 bootstrap,
+                 start,
+                 tick_ms: start.elapsed().as_secs_f64() * 1000.,
++                queue_ms,
++                lifecycle: json!({"unloaded_chunks":unloaded_count,"proto_chunks":proto_count,"finished_nonresident_chunks":finished_count,"resident_chunks":residents}),
+                 capture_ms,
+                 export,
+                 reply: reply.clone(),
+diff --git a/crates/horizon-client/src/game/dedicated/transfer.rs b/crates/horizon-client/src/game/dedicated/transfer.rs
+--- a/crates/horizon-client/src/game/dedicated/transfer.rs
++++ b/crates/horizon-client/src/game/dedicated/transfer.rs
+@@ -68,6 +68,46 @@
+             return json!({ "error": arrivals::OFF });
+         }
+         match verb {
++            "player-expect-at" => {
++                let mut parts = args.splitn(3, ' ');
++                let Some(uuid) = parts.next().and_then(arrivals::parse_uuid) else {
++                    return json!({"error":"missing uuid"});
++                };
++                let Some(seconds) = parts.next() else {
++                    return json!({"error":"missing ttl"});
++                };
++                let position: [f64; 3] =
++                    match parts.next().and_then(|v| serde_json::from_str(v).ok()) {
++                        Some(p) => p,
++                        None => return json!({"error":"invalid positioned expectation"}),
++                    };
++                if position
++                    .iter()
++                    .any(|v| !v.is_finite() || v.abs() > 30_000_000.)
++                {
++                    return json!({"error":"invalid position"});
++                }
++                let host = self.lan.as_mut().expect("checked above");
++                let reply = arrivals::expect_request(
++                    &mut host.hub,
++                    &format!("{} {seconds}", horizon_protocol::crypto::uuid_string(uuid)),
++                    Instant::now(),
++                );
++                host.hub
++                    .arrival_positions
++                    .retain(|_, (_, deadline)| *deadline > Instant::now());
++                if reply["ok"] == true {
++                    let ttl = reply["ttl_seconds"].as_u64().unwrap_or(10);
++                    host.hub.arrival_positions.insert(
++                        uuid,
++                        (
++                            position,
++                            Instant::now() + std::time::Duration::from_secs(ttl),
++                        ),
++                    );
++                }
++                reply
++            }
+             "player-expect" => match self.lan.as_mut() {
+                 Some(host) => arrivals::expect_request(&mut host.hub, args, Instant::now()),
+                 None => json!({ "error": "the server is not open to players" }),
+@@ -126,6 +166,10 @@
+         let request: Value = match serde_json::from_str(request.trim()) {
+             Ok(v) => v,
+             Err(e) => return json!({ "error": format!("the request is not JSON: {e}") }),
++        };
++        let generation = match super::cluster::activation(uuid, &request) {
++            Ok(generation) => generation,
++            Err(e) => return json!({"error":e.to_string()}),
+         };
+         let Some(mut host) = self.lan.take() else {
+             return json!({ "error": "the server is not open to players" });
+@@ -152,6 +196,13 @@
+         let reply = match result {
+             Ok(done) => {
+                 self.take_arrival_records(&mut host, uuid, &done);
++                if let Some(generation) = generation
++                    && let Some(guest) = host.hub.guests.iter_mut().find(|g| g.uuid == uuid)
++                    && let Err(e) = super::cluster::mark(&mut guest.saved, generation)
++                {
++                    self.lan = Some(host);
++                    return json!({"error":e.to_string()});
++                }
+                 let handover = arrivals::handover_text(done.handover);
+                 let placed = if done.place {
+                     self.place_arrival(&mut host, uuid, done.handover)
+@@ -253,8 +304,14 @@
+         self.guest_attachments_into(&mut g);
+         // An autosave of this player still in flight must not land after this write.
+         let _ = self.finish_player_autosaves(true);
+-        let written = horizon_client::lan::playerdata::save_now(&g, &self.world_root)
+-            .and_then(|()| self.write_arrival_records(host, &g));
++        let written = if std::env::var_os("GOLIATH_STORE").is_some() {
++            // The exact blob was validated against the durable store before import.
++            // A crash before the next tile cut materialises this entry at recovery.
++            Ok(())
++        } else {
++            horizon_client::lan::playerdata::save_now(&g, &self.world_root)
++                .and_then(|()| self.write_arrival_records(host, &g))
++        };
+         let name = g.name.clone();
+         host.hub.guests.insert(i, g);
+         written?;
+@@ -281,7 +338,12 @@
+         };
+         // A repeat while the hand-over lasts: the same record, and nothing touched.
+         if let Some(h) = &host.hub.guests[i].handover {
+-            return arrivals::export_reply(&host.hub, i, h.record.clone());
++            let mut record = h.record.clone();
++            if std::env::var_os("GOLIATH_STORE").is_some() {
++                record["goliath_generation"] =
++                    super::cluster::local_generation(host.hub.guests[i].saved.as_ref()).into();
++            }
++            return arrivals::export_reply(&host.hub, i, record);
+         }
+         let conn = host.hub.guests[i].conn;
+         let window = host.hub.guests[i].menu.as_ref().map(|m| m.window);
+@@ -329,7 +391,13 @@
+             stats,
+         };
+         match arrivals::export_record(&mut host.hub, i, freeze, records) {
+-            Ok(record) => arrivals::export_reply(&host.hub, i, record),
++            Ok(mut record) => {
++                if std::env::var_os("GOLIATH_STORE").is_some() {
++                    record["goliath_generation"] =
++                        super::cluster::local_generation(host.hub.guests[i].saved.as_ref()).into();
++                }
++                arrivals::export_reply(&host.hub, i, record)
++            }
+             Err(e) => json!({ "error": e }),
+         }
+     }
+diff --git a/crates/horizon-client/src/game/lan.rs b/crates/horizon-client/src/game/lan.rs
+--- a/crates/horizon-client/src/game/lan.rs
++++ b/crates/horizon-client/src/game/lan.rs
+@@ -1552,6 +1552,18 @@
+         // A player a proxy moved to another server (`player-release moved`) is saved
+         // there now, not here.
+         if guest.placed && !guest.released {
++            if std::env::var_os("HORIZON_E3_CUT_DIR").is_some() {
++                self.persist.cut_players.push((
++                    horizon_protocol::crypto::uuid_string(guest.uuid),
++                    playerdata::player_tag(guest),
++                    guest
++                        .advancements
++                        .to_json(&self.adv.tree, horizon_world::DATA_VERSION),
++                    host.play
++                        .get(&guest.conn)
++                        .map_or(serde_json::Value::Null, |p| p.stats.to_json()),
++                ));
++            }
+             let _ = self.finish_player_autosaves(true);
+             if host.owner.as_ref().is_some_and(|o| o.uuid == guest.uuid) {
+                 playerdata::save_owner(guest, &mut self.level, &self.world_root);
+diff --git a/crates/horizon-client/src/game/persist.rs b/crates/horizon-client/src/game/persist.rs
+--- a/crates/horizon-client/src/game/persist.rs
++++ b/crates/horizon-client/src/game/persist.rs
+@@ -26,6 +26,9 @@
+ /// What Horizon remembers about loaded entities to save them faithfully.
+ #[derive(Default)]
+ pub struct EntityMemory {
++    /// Immutable unload images retained until the next coherent tile cut.
++    pub(super) cut_unloaded: Vec<(Arc<Chunk>, Vec<Tag>)>,
++    pub(super) cut_players: Vec<(String, Tag, serde_json::Value, serde_json::Value)>,
+     /// UUIDs of entities by Horizon entity ID: the one each was loaded with,
+     /// or made up once something needed it (a save, a native mod's attachment).
+     pub(super) uuids: HashMap<u32, [i32; 4]>,
+@@ -1785,6 +1788,17 @@
+         self.spawn_loaded_entities();
+         let keys: HashSet<(i32, i32)> = unloaded.iter().map(|c| (c.x, c.z)).collect();
+         let chunks = self.entity_chunks(&keys, true);
++        if std::env::var_os("HORIZON_E3_CUT_DIR").is_some() {
++            let snapshots = self.with_entities(unloaded);
++            for chunk in snapshots {
++                let entities = chunks
++                    .iter()
++                    .find(|(key, _)| *key == (chunk.x, chunk.z))
++                    .map(|(_, entities)| entities.clone())
++                    .unwrap_or_default();
++                self.persist.cut_unloaded.push((chunk, entities));
++            }
++        }
+         let counts: Vec<_> = chunks
+             .iter()
+             .map(|(key, entities)| (*key, entities.len()))
+diff --git a/crates/horizon-client/src/game/ui_control.rs b/crates/horizon-client/src/game/ui_control.rs
+--- a/crates/horizon-client/src/game/ui_control.rs
++++ b/crates/horizon-client/src/game/ui_control.rs
+@@ -134,6 +134,7 @@
+         }
+         if self.ui_wait.stale() {
+             self.ui_wait.waiting.push(Request {
++                queued_at: std::time::Instant::now(),
+                 line: line.to_owned(),
+                 reply: reply.clone(),
+             });
+diff --git a/crates/horizon-client/src/lan/hub.rs b/crates/horizon-client/src/lan/hub.rs
+--- a/crates/horizon-client/src/lan/hub.rs
++++ b/crates/horizon-client/src/lan/hub.rs
+@@ -36,6 +36,7 @@
+     nbt::{JavaString, Tag},
+     world_movement::in_range_of_ground,
+ };
++use std::collections::HashMap;
+ use std::sync::{Arc, Mutex, atomic::Ordering};
+ 
+ /// GameEvent types (ClientboundGameEventPacket).
+@@ -304,6 +305,7 @@
+     /// `[transfer]` on (a dedicated server's `--transfers`): the players a proxy
+     /// said would arrive (`player-expect`). None while it is off.
+     pub transfers: Option<super::arrivals::Transfers>,
++    pub arrival_positions: HashMap<u128, ([f64; 3], std::time::Instant)>,
+     /// The entities players started and stopped tracking, collected by
+     /// `collect_tracking`, for the game to tell the mods.
+     pub native_tracking: Vec<TrackingBatch>,
+@@ -735,6 +737,7 @@
+             native_menu_returns: Vec::new(),
+             pending_kicks: Vec::new(),
+             transfers: None,
++            arrival_positions: HashMap::new(),
+             native_tracking: Vec::new(),
+             attachment_snapshots: Vec::new(),
+             sync_attachments: false,
+@@ -1202,6 +1205,14 @@
+                     g.name,
+                 )));
+             } else if super::arrivals::frozen_too_long(h.since, self.ticks, max) {
++                if std::env::var_os("GOLIATH_STORE").is_some() {
++                    // A lost store reply is not evidence of an abort. Never resume
++                    // this writer on a timer after an uncertain durable CAS.
++                    g.released = true;
++                    g.left_reason = "cluster handover timed out; reconnect".into();
++                    g.sender.disconnect(translatable("disconnect.timeout", &[]));
++                    continue;
++                }
+                 g.handover = None;
+                 events.push(HostEvent::Warn(format!(
+                     "{} was frozen for a hand-over for {max} ticks and nothing finished it: let go",
+@@ -1405,6 +1416,11 @@
+             let g = &mut self.guests[i];
+             g.held = true;
+             g.held_since = self.ticks;
++            if let Some((position, deadline)) = self.arrival_positions.remove(&uuid)
++                && deadline > std::time::Instant::now()
++            {
++                g.position = position;
++            }
+         }
+         let held = self.guests[i].held;
+         let g = &self.guests[i];
+@@ -4326,6 +4342,11 @@
+             to[1].clamp(-2.0E7, 2.0E7),
+             to[2].clamp(-3.0E7, 3.0E7),
+         ];
++        let to = if std::env::var_os("GOLIATH_STORE").is_some() {
++            horizon_core::tile_ownership::area().map_or(to, |area| area.hold(to))
++        } else {
++            to
++        };
+         let (yaw, pitch) = (wrap_degrees(yaw), wrap_degrees(pitch));
+         // A passenger only turns: its vehicle carries it (absSnapTo where it is).
+         if g.vehicle.is_some() {
+@@ -4428,8 +4449,14 @@
+         if let Some(area) = horizon_core::tile_ownership::area() {
+             let held = area.hold(to);
+             if held != to {
+-                self.resend_teleport(i, Some(held));
+-                return;
++                if std::env::var_os("GOLIATH_STORE").is_some() {
++                    // The proxy owns the continuous wall view. Simulation stays
++                    // inside while its client reaches the handover threshold.
++                    to = held;
++                } else {
++                    self.resend_teleport(i, Some(held));
++                    return;
++                }
+             }
+         }
+         // clientIsFloating, from the move that is accepted: no upward-or-level
+diff --git a/crates/horizon-client/src/save.rs b/crates/horizon-client/src/save.rs
+--- a/crates/horizon-client/src/save.rs
++++ b/crates/horizon-client/src/save.rs
+@@ -5154,6 +5154,9 @@
+     fn proto_heap_bytes(&self, proto: &crate::streaming::Proto) -> ([usize; 6], [usize; 16]) {
+         self.inner.proto_heap_bytes(proto)
+     }
++    fn saved_proto(&self, proto: &crate::streaming::Proto) -> Option<SavedProto> {
++        self.inner.saved_proto(proto)
++    }
+     fn save_protos(&self, protos: &[&crate::streaming::Proto]) {
+         self.save
+             .tables

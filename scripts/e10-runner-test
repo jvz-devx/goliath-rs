@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Require E10's evidence checker to reject broken route and safety evidence."""
+import copy
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import unittest
+
+ROOT=Path(__file__).resolve().parent.parent
+loader=importlib.machinery.SourceFileLoader('e10_analysis',str(ROOT/'scripts/e10-analyse'))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+analysis=importlib.util.module_from_spec(spec)
+loader.exec_module(analysis)
+
+
+class EvidenceChecks(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fixture=json.loads((ROOT/'docs/experiments/data/E10/crossings-final.json').read_text())
+
+    def test_real_complete_run(self):
+        self.assertEqual(analysis.verify(self.fixture,1000)['visible_cas'],1000)
+
+    def test_missing_crossing(self):
+        data=copy.deepcopy(self.fixture)
+        data['trials'].pop()
+        with self.assertRaises(ValueError):
+            analysis.verify(data,1000)
+
+    def test_wrong_generation(self):
+        data=copy.deepcopy(self.fixture)
+        data['trials'][3]['generation']+=1
+        with self.assertRaises(ValueError):
+            analysis.verify(data,1000)
+
+    def test_inventory_change(self):
+        data=copy.deepcopy(self.fixture)
+        data['trials'][3]['inventory_after']='different'
+        with self.assertRaises(ValueError):
+            analysis.verify(data,1000)
+
+    def test_wrong_gap(self):
+        data=copy.deepcopy(self.fixture)
+        data['trials'][3]['input_gap_ms']+=1
+        with self.assertRaises(ValueError):
+            analysis.verify(data,1000)
+
+    def test_wrong_phase_order(self):
+        data=copy.deepcopy(self.fixture)
+        data['trials'][3]['phases'].reverse()
+        with self.assertRaises(ValueError):
+            analysis.verify(data,1000)
+
+    def test_backward_cluster_clock(self):
+        data=copy.deepcopy(self.fixture)
+        data['cluster_clock']['backward_steps']=1
+        with self.assertRaises(ValueError):
+            analysis.verify(data,1000)
+
+    def test_correction_budget_is_not_silently_passed(self):
+        data=copy.deepcopy(self.fixture)
+        data['trials'][3]['arrival_error_blocks']=.2
+        self.assertFalse(analysis.verify(data,1000)['correction_passed'])
+
+
+if __name__=='__main__':
+    unittest.main()
