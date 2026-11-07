@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# clean-builds: keep goliath-rs build output bounded.
+#
+# Build output here is disposable. Binaries worth keeping live in .local/bin/.
+# Each Cargo target dir has a size cap. Over the cap, its incremental caches go
+# first, then the whole dir. A target dir with cargo or rustc running in it is
+# left alone. Experiment run folders are deleted once they pass RUNS_MAX_DAYS.
+#
+#   scripts/clean-builds            apply the caps
+#   scripts/clean-builds --all      delete every target dir not in use
+#   scripts/clean-builds --dry-run  report only
+#   scripts/clean-builds --quiet    print nothing when nothing was freed
+#
+# Environment: GOLIATH_ROOT, TARGET_CAP_MB (default 30720), RUNS_MAX_DAYS (default 2).
+set -u
+
+root="${GOLIATH_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+cap_mb="${TARGET_CAP_MB:-30720}"
+runs_max_days="${RUNS_MAX_DAYS:-2}"
+all=0
+dry=0
+quiet=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --all) all=1 ;;
+    --dry-run) dry=1 ;;
+    --quiet) quiet=1 ;;
+    *) echo "clean-builds: unknown option $arg" >&2; exit 2 ;;
+  esac
+done
+
+size_mb() { du -sm "$1" 2>/dev/null | awk '{print $1}'; }
+
+in_use() {
+  lsof -c cargo -c rustc -c rust-lld -c ld -Fn 2>/dev/null | grep -qF "n$1/"
+}
+
+remove() {
+  if [ "$dry" -eq 1 ]; then
+    echo "would delete $1"
+  else
+    rm -rf "$1"
+  fi
+}
+
+freed=0
+report=""
+
+clean_target() {
+  local dir="$1" before after
+  before="$(size_mb "$dir")"
+  [ -n "$before" ] || return 0
+
+  if in_use "$dir"; then
+    report="$report  in use, skipped: ${dir#"$root"/} (${before} MB)\n"
+    return 0
+  fi
+
+  if [ "$all" -eq 1 ]; then
+    remove "$dir"
+  elif [ "$before" -gt "$cap_mb" ]; then
+    while IFS= read -r inc; do remove "$inc"; done \
+      < <(find "$dir" -maxdepth 3 -type d -name incremental 2>/dev/null)
+    after="$(size_mb "$dir")"
+    if [ "${after:-0}" -gt "$cap_mb" ]; then
+      remove "$dir"
+    fi
+  else
+    report="$report  under cap: ${dir#"$root"/} (${before} MB)\n"
+    return 0
+  fi
+
+  after="$(size_mb "$dir")"
+  after="${after:-0}"
+  freed=$((freed + before - after))
+  report="$report  cleaned: ${dir#"$root"/} (${before} MB to ${after} MB)\n"
+}
+
+while IFS= read -r dir; do
+  clean_target "$dir"
+done < <(
+  find "$root" -type d \( -name .git -o -name node_modules \) -prune -o \
+    -type d \( -name target -o -name parity-target \) -print -prune 2>/dev/null
+)
+
+if [ -d "$root/.local/runs" ]; then
+  while IFS= read -r run; do
+    before="$(size_mb "$run")"
+    remove "$run"
+    freed=$((freed + ${before:-0}))
+    report="$report  old run: ${run#"$root"/} (${before:-0} MB)\n"
+  done < <(find "$root/.local/runs" -mindepth 1 -maxdepth 1 -type d -mtime "+$runs_max_days" 2>/dev/null)
+fi
+
+if [ "$quiet" -eq 0 ] || [ "$freed" -gt 0 ]; then
+  printf '%b' "$report"
+  total="$(size_mb "$root")"
+  echo "clean-builds: freed ${freed} MB, project now ${total:-0} MB"
+fi
