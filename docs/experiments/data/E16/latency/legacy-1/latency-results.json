@@ -1,0 +1,81 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --only latency --latency-modes full --binary .local/bin/goliath-store-e16-7b413bd/goliath-store --latency-driver .local/bin/goliath-store-e16-7b413bd/goliath-store-load --latency-clients 64 --latency-samples 128 --output docs/experiments/data/E16/latency/legacy-1",
+  "load_average_before": [
+    1.2412109375,
+    3.3095703125,
+    7.80322265625
+  ],
+  "latency": [
+    {
+      "mode": "full",
+      "clients": 64,
+      "samples": 8192,
+      "blob_bytes": 256,
+      "driver": "rust",
+      "p50_ms": 11.929792,
+      "p95_ms": 16.070667,
+      "p99_ms": 16.87775,
+      "max_ms": 17.154292,
+      "wall_seconds": 1.996,
+      "load_average_before": [
+        1.109375,
+        3.14306640625,
+        7.63818359375
+      ],
+      "load_average_after": [
+        1.2607421875,
+        3.140625,
+        7.61083984375
+      ],
+      "load_average_at_launch": [
+        1.109375,
+        3.14306640625,
+        7.63818359375
+      ],
+      "disturbed": false,
+      "disturbances": [],
+      "peak_one_minute_load": 1.2607421875,
+      "quiet_files": [
+        "quiet-request",
+        "quiet-ack-E12"
+      ],
+      "socket_observations": [],
+      "compact_every": 256,
+      "driver_args": [],
+      "server_args": [],
+      "driver_sha256": "a51e55c0763ee42c416ab835756ab1d2b8c49f1cb0312641fac4dbc1bd6cbe58",
+      "client_phases": {
+        "connect_ms": {
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "max": 0.0
+        },
+        "write_ms": {
+          "mean": 0.011717096313476562,
+          "p50": 0.008958,
+          "p95": 0.02675,
+          "max": 0.270084
+        },
+        "read_ms": {
+          "mean": 11.467954501464844,
+          "p50": 11.917917,
+          "p95": 16.058917,
+          "max": 17.148416
+        }
+      }
+    }
+  ],
+  "wall_seconds": 22.609,
+  "peak_sampled_run_allocated_bytes": 4997120,
+  "target_allocated_bytes_at_end": 561025024,
+  "load_average_after": [
+    1.2607421875,
+    3.140625,
+    7.61083984375
+  ]
+}

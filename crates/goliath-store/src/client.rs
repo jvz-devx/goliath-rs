@@ -40,6 +40,48 @@ pub struct Client {
 }
 
 impl Client {
+    /// Uses a fresh request identity and anchors the keeper before any network IO.
+    pub fn claim_lease(
+        &self,
+        tile: crate::TileId,
+        lease_ms: u64,
+        margin: Duration,
+    ) -> io::Result<crate::LeaseKeeper> {
+        let mut keeper = crate::LeaseKeeper::new(tile, lease_ms, margin).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "invalid lease or margin")
+        })?;
+        let request = keeper.request(Instant::now()).expect("fresh lease keeper");
+        let response = self.execute(crate::Operation::ClaimLease { tile, lease_ms })?;
+        if let Response::Leased(grant) = response
+            && keeper.observe(request, grant, Instant::now())
+        {
+            return Ok(keeper);
+        }
+        Err(io::Error::other(format!(
+            "lease claim refused or late: {response:?}"
+        )))
+    }
+
+    /// IO uncertainty leaves the old deadline intact. Never act while waiting
+    /// unless a separate side-effect path still checks that deadline itself.
+    pub fn renew_lease(&self, keeper: &mut crate::LeaseKeeper) -> io::Result<bool> {
+        let Some(fence) = keeper.fence() else {
+            return Ok(false);
+        };
+        let Some(request) = keeper.request(Instant::now()) else {
+            return Ok(false);
+        };
+        let response = self.execute(crate::Operation::RenewLease {
+            fence,
+            counter: request.counter(),
+        })?;
+        if let Response::Leased(grant) = response {
+            return Ok(keeper.observe(request, grant, Instant::now()));
+        }
+        keeper.stop();
+        Ok(false)
+    }
+
     pub fn execute(&self, operation: crate::Operation) -> io::Result<Response> {
         self.call(&Command {
             id: request_id(),

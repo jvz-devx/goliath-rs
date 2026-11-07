@@ -2,10 +2,11 @@
 
 use crate::codec::{Decoder, Encoder};
 use goliath_model::{
-    Epoch, Fence, Generation, OwnershipCas, PlayerId, ProcessId, Record, StoreError, TileId,
-    accepts_fence,
+    Epoch, Fence, Generation, LeaseGrant, OwnershipCas, PlayerId, ProcessId, Record, StoreError,
+    StoreLease, TileId, accepts_fence,
 };
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 pub(crate) const MAX_BLOB: usize = 256 * 1024;
 
@@ -88,6 +89,19 @@ pub enum Operation {
         fence: Fence,
         clock: ClusterClock,
     },
+    /// New tiles use this instead of the legacy, unleased Claim.
+    ClaimLease {
+        tile: TileId,
+        lease_ms: u64,
+    },
+    RenewLease {
+        fence: Fence,
+        counter: u64,
+    },
+    /// Stop renewals, then retry ClaimLease after the last granted window ends.
+    BeginTakeover(Fence),
+    /// Activation check only. It does not renew or grant a local deadline.
+    CheckLease(Fence),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,6 +112,11 @@ pub enum StoreFault {
     MissingPlayer,
     RequestConflict,
     Limit,
+    LeaseBusy,
+    LeaseExpired,
+    LeaseRequired,
+    RenewalReplay,
+    LeaseDraining,
 }
 
 impl From<StoreError> for StoreFault {
@@ -119,6 +138,7 @@ pub enum Response {
     Fault(StoreFault),
     Players(Vec<PlayerKey>),
     Clock(Option<ClusterClock>),
+    Leased(LeaseGrant),
 }
 
 #[derive(Default)]
@@ -129,6 +149,9 @@ pub(crate) struct State {
     receipts: BTreeMap<RequestId, (Command, Response)>,
     uuid_players: BTreeMap<PlayerKey, Record<Blob>>,
     clock: Option<ClusterClock>,
+    leases: BTreeMap<TileId, StoreLease>,
+    // None only during deterministic historical journal replay.
+    now: Option<Instant>,
     #[cfg(feature = "fault-injection")]
     pub(crate) disable_fence: bool,
 }
@@ -138,16 +161,32 @@ pub(crate) enum Change {
     Player(PlayerId, Record<Blob>),
     Uuid(PlayerKey, Record<Blob>),
     Clock(ClusterClock),
+    Lease(DirectoryEntry, StoreLease),
 }
 
 impl State {
     fn current(&self, tile: TileId) -> Option<Fence> {
-        self.tiles.get(&tile).filter(|e| e.active).map(|e| e.fence)
+        self.tiles
+            .get(&tile)
+            .filter(|e| e.active && self.live(tile))
+            .map(|e| e.fence)
+    }
+
+    fn live(&self, tile: TileId) -> bool {
+        self.now
+            .is_none_or(|now| self.leases.get(&tile).is_none_or(|lease| lease.active(now)))
     }
 
     fn check(&self, supplied: Fence) -> Result<(), StoreFault> {
         if accepts_fence(self.current(supplied.tile), supplied) {
             Ok(())
+        } else if self
+            .tiles
+            .get(&supplied.tile)
+            .is_some_and(|e| e.active && e.fence == supplied)
+            && !self.live(supplied.tile)
+        {
+            Err(StoreFault::LeaseExpired)
         } else {
             Err(StoreFault::StaleFence)
         }
@@ -167,6 +206,21 @@ impl State {
     ) -> Result<(Response, Option<Change>), StoreFault> {
         // Authorization precedes retry lookup. A receipt never renews authority.
         match &command.operation {
+            Operation::RenewLease { fence, .. }
+            | Operation::CheckLease(fence)
+            | Operation::BeginTakeover(fence) => {
+                self.check(*fence)?;
+                let lease = self
+                    .leases
+                    .get(&fence.tile)
+                    .ok_or(StoreFault::LeaseRequired)?;
+                if matches!(command.operation, Operation::RenewLease { .. }) && lease.draining() {
+                    return Err(StoreFault::LeaseDraining);
+                }
+            }
+            Operation::Claim(tile) if self.leases.contains_key(tile) => {
+                return Err(StoreFault::LeaseRequired);
+            }
             Operation::Commit { cas, .. } | Operation::CommitUuid { cas, .. } => {
                 let (source, target) = self.fences(*cas);
                 cas.check_fences(source, target)?;
@@ -179,7 +233,15 @@ impl State {
                     return Err(StoreFault::StaleFence);
                 }
             }
-            Operation::Heartbeat { fence, .. } => self.check(*fence)?,
+            Operation::Heartbeat { fence, .. } => {
+                self.check(*fence)?;
+                if self.leases.contains_key(&fence.tile) {
+                    return Err(StoreFault::LeaseRequired);
+                }
+            }
+            Operation::Release(fence) if self.leases.contains_key(&fence.tile) => {
+                self.check(*fence)?
+            }
             Operation::Release(fence)
                 if !accepts_fence(self.tiles.get(&fence.tile).map(|e| e.fence), *fence) =>
             {
@@ -188,6 +250,9 @@ impl State {
             _ => {}
         }
         if let Some((previous, response)) = self.receipts.get(&command.id) {
+            if let Response::Leased(grant) = response {
+                self.check(grant.fence)?;
+            }
             return if previous == command {
                 Ok((response.clone(), None))
             } else {
@@ -195,6 +260,64 @@ impl State {
             };
         }
         let (response, change) = match &command.operation {
+            Operation::CheckLease(_) => return Ok((Response::Ok, None)),
+            Operation::BeginTakeover(fence) => {
+                let entry = self
+                    .tiles
+                    .get(&fence.tile)
+                    .cloned()
+                    .ok_or(StoreFault::StaleFence)?;
+                let mut lease = self
+                    .leases
+                    .get(&fence.tile)
+                    .cloned()
+                    .ok_or(StoreFault::LeaseRequired)?;
+                lease.drain();
+                (Response::Ok, Change::Lease(entry, lease))
+            }
+            Operation::RenewLease { fence, counter } => {
+                let mut lease = self
+                    .leases
+                    .get(&fence.tile)
+                    .cloned()
+                    .ok_or(StoreFault::LeaseRequired)?;
+                if *counter <= lease.counter() {
+                    return Err(StoreFault::RenewalReplay);
+                }
+                let now = self.now.unwrap_or_else(Instant::now);
+                if self.now.is_none() {
+                    lease = StoreLease::recover(lease.lease_ms(), *counter, lease.draining(), now)
+                        .ok_or(StoreFault::Limit)?;
+                } else if !lease.renew(*counter, now) {
+                    return Err(StoreFault::LeaseExpired);
+                }
+                let mut entry = self
+                    .tiles
+                    .get(&fence.tile)
+                    .cloned()
+                    .ok_or(StoreFault::StaleFence)?;
+                entry.heartbeat = *counter;
+                (
+                    Response::Leased(lease.grant(*fence)),
+                    Change::Lease(entry, lease),
+                )
+            }
+            Operation::ClaimLease { tile, lease_ms } => {
+                let now = self.now.unwrap_or_else(Instant::now);
+                let lease = StoreLease::new(*lease_ms, now).ok_or(StoreFault::Limit)?;
+                if self.now.is_some()
+                    && (self.leases.get(tile).is_some_and(|old| old.active(now))
+                        || (!self.leases.contains_key(tile)
+                            && self.tiles.get(tile).is_some_and(|entry| entry.active)))
+                {
+                    return Err(StoreFault::LeaseBusy);
+                }
+                let entry = self.next_entry(*tile)?;
+                (
+                    Response::Leased(lease.grant(entry.fence)),
+                    Change::Lease(entry, lease),
+                )
+            }
             Operation::ReadUuid(player) => {
                 return Ok((
                     Response::Player(self.uuid_players.get(player).cloned()),
@@ -251,7 +374,16 @@ impl State {
             }
             Operation::Directory => {
                 return Ok((
-                    Response::Directory(self.tiles.values().cloned().collect()),
+                    Response::Directory(
+                        self.tiles
+                            .values()
+                            .cloned()
+                            .map(|mut entry| {
+                                entry.active &= self.live(entry.fence.tile);
+                                entry
+                            })
+                            .collect(),
+                    ),
                     None,
                 ));
             }
@@ -260,25 +392,8 @@ impl State {
             }
             Operation::Compact => return Ok((Response::Ok, None)),
             Operation::Claim(tile) => {
-                let epoch = self
-                    .tiles
-                    .get(tile)
-                    .map_or(Some(1), |e| e.fence.epoch.0.checked_add(1))
-                    .ok_or(StoreFault::Limit)?;
-                let process = self.next_process.checked_add(1).ok_or(StoreFault::Limit)?;
-                let fence = Fence {
-                    tile: *tile,
-                    process: ProcessId(process),
-                    epoch: Epoch(epoch),
-                };
-                (
-                    Response::Claimed(fence),
-                    Change::Tile(DirectoryEntry {
-                        fence,
-                        active: true,
-                        heartbeat: 0,
-                    }),
-                )
+                let entry = self.next_entry(*tile)?;
+                (Response::Claimed(entry.fence), Change::Tile(entry))
             }
             Operation::Create {
                 player,
@@ -349,6 +464,11 @@ impl State {
 
     pub(crate) fn apply(&mut self, command: Command, response: Response, change: Change) {
         match change {
+            Change::Lease(entry, lease) => {
+                self.leases.insert(entry.fence.tile, lease);
+                self.next_process = self.next_process.max(entry.fence.process.0);
+                self.tiles.insert(entry.fence.tile, entry);
+            }
             Change::Tile(entry) => {
                 self.next_process = self.next_process.max(entry.fence.process.0);
                 self.tiles.insert(entry.fence.tile, entry);
@@ -364,6 +484,38 @@ impl State {
             }
         }
         self.receipts.insert(command.id, (command, response));
+    }
+
+    fn next_entry(&self, tile: TileId) -> Result<DirectoryEntry, StoreFault> {
+        let epoch = self
+            .tiles
+            .get(&tile)
+            .map_or(Some(1), |e| e.fence.epoch.0.checked_add(1))
+            .ok_or(StoreFault::Limit)?;
+        let process = self.next_process.checked_add(1).ok_or(StoreFault::Limit)?;
+        Ok(DirectoryEntry {
+            fence: Fence {
+                tile,
+                process: ProcessId(process),
+                epoch: Epoch(epoch),
+            },
+            active: true,
+            heartbeat: 0,
+        })
+    }
+
+    pub(crate) fn set_now(&mut self, now: Instant) {
+        self.now = Some(now);
+    }
+
+    pub(crate) fn restart_leases(&mut self) -> std::io::Result<()> {
+        let now = Instant::now();
+        for lease in self.leases.values_mut() {
+            *lease = StoreLease::recover(lease.lease_ms(), lease.counter(), lease.draining(), now)
+                .ok_or_else(|| crate::codec::invalid("invalid durable lease"))?;
+        }
+        self.set_now(now);
+        Ok(())
     }
 
     pub(crate) fn snapshot(&self) -> std::io::Result<Vec<u8>> {
@@ -389,6 +541,13 @@ impl State {
             e.record(record)?;
         }
         e.clock(self.clock.as_ref());
+        e.count(self.leases.len())?;
+        for (tile, lease) in &self.leases {
+            e.u64(tile.0 as u64);
+            e.u64(lease.lease_ms());
+            e.u64(lease.counter());
+            e.u64(u64::from(lease.draining()));
+        }
         Ok(e.finish())
     }
 
@@ -418,6 +577,24 @@ impl State {
                 state.uuid_players.insert(player, d.record()?);
             }
             state.clock = d.clock()?;
+        }
+        if !d.is_empty() {
+            for _ in 0..d.count()? {
+                let tile = TileId(d.index()?);
+                let lease_ms = d.u64()?;
+                let counter = d.u64()?;
+                let draining = match d.u64()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(crate::codec::invalid("invalid lease drain flag")),
+                };
+                if !state.tiles.contains_key(&tile) || state.leases.contains_key(&tile) {
+                    return Err(crate::codec::invalid("invalid lease tile"));
+                }
+                let lease = StoreLease::recover(lease_ms, counter, draining, Instant::now())
+                    .ok_or_else(|| crate::codec::invalid("invalid durable lease"))?;
+                state.leases.insert(tile, lease);
+            }
         }
         d.end()?;
         Ok(state)

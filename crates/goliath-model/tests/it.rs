@@ -1,5 +1,8 @@
 //! Owns authority, conservation and persistence regression tests.
 
+#[path = "it/leases.rs"]
+mod leases;
+
 use goliath_model::{
     Cluster, Epoch, Generation, Place, PlayerId, Policy, StoreError, TileGeometry, TileId,
 };

@@ -4,7 +4,9 @@ use crate::state::{
     Blob, ClusterClock, Command, DirectoryEntry, MAX_BLOB, Operation, PlayerKey, RequestId,
     Response, StoreFault,
 };
-use goliath_model::{Epoch, Fence, Generation, OwnershipCas, PlayerId, ProcessId, Record, TileId};
+use goliath_model::{
+    Epoch, Fence, Generation, LeaseGrant, OwnershipCas, PlayerId, ProcessId, Record, TileId,
+};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
@@ -270,6 +272,24 @@ pub(crate) fn encode_command(command: &Command) -> io::Result<Vec<u8>> {
             e.fence(*fence);
             e.clock(Some(clock));
         }
+        Operation::ClaimLease { tile, lease_ms } => {
+            e.byte(15);
+            e.u64(tile.0 as u64);
+            e.u64(*lease_ms);
+        }
+        Operation::RenewLease { fence, counter } => {
+            e.byte(16);
+            e.fence(*fence);
+            e.u64(*counter);
+        }
+        Operation::BeginTakeover(fence) => {
+            e.byte(17);
+            e.fence(*fence);
+        }
+        Operation::CheckLease(fence) => {
+            e.byte(18);
+            e.fence(*fence);
+        }
     }
     Ok(e.finish())
 }
@@ -329,6 +349,16 @@ pub(crate) fn decode_command(bytes: &[u8]) -> io::Result<Command> {
             fence: d.fence()?,
             clock: d.clock()?.ok_or_else(|| invalid("missing clock"))?,
         },
+        15 => Operation::ClaimLease {
+            tile: TileId(d.index()?),
+            lease_ms: d.u64()?,
+        },
+        16 => Operation::RenewLease {
+            fence: d.fence()?,
+            counter: d.u64()?,
+        },
+        17 => Operation::BeginTakeover(d.fence()?),
+        18 => Operation::CheckLease(d.fence()?),
         _ => return Err(invalid("unknown operation")),
     };
     d.end()?;
@@ -371,6 +401,11 @@ pub(crate) fn encode_response(response: &Response) -> io::Result<Vec<u8>> {
                 StoreFault::MissingPlayer => 4,
                 StoreFault::RequestConflict => 5,
                 StoreFault::Limit => 6,
+                StoreFault::LeaseBusy => 7,
+                StoreFault::LeaseExpired => 8,
+                StoreFault::LeaseRequired => 9,
+                StoreFault::RenewalReplay => 10,
+                StoreFault::LeaseDraining => 11,
             });
         }
         Response::Players(keys) => {
@@ -383,6 +418,12 @@ pub(crate) fn encode_response(response: &Response) -> io::Result<Vec<u8>> {
         Response::Clock(clock) => {
             e.byte(7);
             e.clock(clock.as_ref());
+        }
+        Response::Leased(grant) => {
+            e.byte(8);
+            e.fence(grant.fence);
+            e.u64(grant.lease_ms);
+            e.u64(grant.counter);
         }
     }
     Ok(e.finish())
@@ -419,6 +460,11 @@ pub(crate) fn decode_response(bytes: &[u8]) -> io::Result<Response> {
             Response::Players(keys)
         }
         7 => Response::Clock(d.clock()?),
+        8 => Response::Leased(LeaseGrant {
+            fence: d.fence()?,
+            lease_ms: d.u64()?,
+            counter: d.u64()?,
+        }),
         5 => Response::Fault(match d.byte()? {
             1 => StoreFault::StaleFence,
             2 => StoreFault::GenerationConflict,
@@ -426,6 +472,11 @@ pub(crate) fn decode_response(bytes: &[u8]) -> io::Result<Response> {
             4 => StoreFault::MissingPlayer,
             5 => StoreFault::RequestConflict,
             6 => StoreFault::Limit,
+            7 => StoreFault::LeaseBusy,
+            8 => StoreFault::LeaseExpired,
+            9 => StoreFault::LeaseRequired,
+            10 => StoreFault::RenewalReplay,
+            11 => StoreFault::LeaseDraining,
             _ => return Err(invalid("unknown fault")),
         }),
         _ => return Err(invalid("unknown response")),

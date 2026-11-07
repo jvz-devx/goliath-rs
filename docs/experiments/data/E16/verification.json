@@ -1,0 +1,50 @@
+{
+  "starting_commit": "7b413bd",
+  "implementation_committed": false,
+  "store_sha256": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+  "rust_driver_sha256": "a51e55c0763ee42c416ab835756ab1d2b8c49f1cb0312641fac4dbc1bd6cbe58",
+  "gates": {
+    "cargo fmt --all --check": "PASS",
+    "cargo clippy --workspace --all-targets --all-features -- -D warnings": "PASS",
+    "just test": {"outcome": "PASS", "tests": 52, "wall_seconds": 5.71},
+    "cargo test --workspace --all-features": {"outcome": "PASS", "tests": 52},
+    "cargo build --release --workspace": "PASS",
+    "git diff --check": "PASS",
+    "rust_architecture_audit": "No missing ownership docs, kind-named modules, wildcard imports, new unsafe or lint suppressions"
+  },
+  "simulator": {
+    "lease_ms": [500, 1000, 2000],
+    "seeds_per_length_per_mode": 20000,
+    "enforced_failures": 0,
+    "ignored_deadline_failures": 60000,
+    "lease_csv_reproduction": "byte-identical",
+    "e9_sweep": {"exit_code": 1, "reason": "Expected delayed-abort P3 failure", "csv": "byte-identical", "sha256": "0c92e6ed296670ca0fb29e8498380583c149a6da976a4c8522b9e34bf74e9cbd"},
+    "e1_instant_abort": {"exit_code": 0, "non_p5_csv": "byte-identical", "sha256": "e70e7e27b0bdd11566b590166a137a59df3b71d3f250172f7cd0de68150c66b7"}
+  },
+  "real_store_timing_trials": 18,
+  "quiet_latency": {
+    "rows": 6,
+    "timed_commits": 49152,
+    "percentiles_recomputed_from_csv": true,
+    "required_acknowledgements": ["E12"],
+    "parent_waived_finished_agent": "E14",
+    "legacy_p95_ms": [16.070667, 16.065916, 16.053584],
+    "leased_p95_ms": [15.954333, 16.167792, 16.06725],
+    "all_p95_below_20_ms": true,
+    "all_rows_undisturbed": true,
+    "request_and_acknowledgements_released": true
+  },
+  "recommendation": {"lease_ms": 1000, "margin_ms": 100, "renew_interval_ms": 250},
+  "limits": [
+    "E12 must wire and retest real Horizon cut and login boundaries",
+    "Bounded advancing monotonic clocks and bounded check-to-side-effect work are required",
+    "No real power cut or full leased-cluster restart measured",
+    "Wall-clock steps use independent test inputs, not an OS clock change",
+    "Existing unbounded receipt retention remains"
+  ],
+  "cleanup_command": "scripts/clean-builds",
+  "cleanup_completed": true,
+  "cleanup_freed_mb": 0,
+  "cleanup_project_mb": 10000,
+  "cleanup_workspace_target_mb": 415
+}

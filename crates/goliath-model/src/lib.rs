@@ -2,6 +2,7 @@
 
 mod authority;
 mod cut_log;
+mod lease;
 mod tile;
 mod transfer;
 
@@ -10,6 +11,7 @@ pub use authority::{
     StoreError, TileId, accepts_fence,
 };
 pub use cut_log::{Cut, CutId, CutLog};
+pub use lease::{LeaseGrant, LeaseKeeper, LeaseRequest, StoreLease};
 pub use tile::{
     Actor, Checkpoint, Delta, ITEMS, Image, ItemId, PLAYERS, Place, TILES, Tile, TileGeometry,
 };

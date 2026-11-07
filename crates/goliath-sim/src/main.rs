@@ -1,5 +1,6 @@
 //! Owns replay commands and process-parallel sweeps, never scenario scheduling.
 
+mod lease_sweep;
 mod sweep;
 
 use goliath_model::Policy;
@@ -9,6 +10,11 @@ use std::error::Error;
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("leases") => {
+            let seeds = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(20_000);
+            let output = args.get(2).map(String::as_str).unwrap_or("docs/experiments/data/E16/leases.csv");
+            lease_sweep::sweep(seeds, output)?;
+        }
         Some("sweep" | "calm") => {
             let count = args.get(1).map(|v| v.parse()).transpose()?.unwrap_or(66_667);
             let output = args.get(2).map(String::as_str).unwrap_or("docs/experiments/data/E9/sweep.csv");

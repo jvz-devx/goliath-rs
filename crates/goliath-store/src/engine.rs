@@ -6,7 +6,7 @@ use crate::state::State;
 use crate::{Command, Operation, Response, SyncMode};
 use std::io;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct Engine {
     journal: Journal,
@@ -75,6 +75,9 @@ impl Engine {
                 .compact(engine.sequence, &engine.state.snapshot()?)?;
             engine.since_compaction = 0;
         }
+        // Historical commands replay without today's deadlines. Only after all
+        // recovery IO completes does every durable lease get a full-L quarantine.
+        engine.state.restart_leases()?;
         Ok(engine)
     }
 
@@ -127,6 +130,7 @@ impl Engine {
         let mut records = Vec::new();
         let mut responses = Vec::with_capacity(commands.len());
         for command in commands {
+            self.state.set_now(Instant::now());
             let bytes = encode_command(command)?;
             let (response, change) = match self.state.prepare(command) {
                 Ok(result) => result,

@@ -1,0 +1,83 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --only latency --latency-modes full --binary .local/bin/goliath-store-e16-7b413bd/goliath-store --latency-driver .local/bin/goliath-store-e16-7b413bd/goliath-store-load --latency-clients 64 --latency-samples 128 --output docs/experiments/data/E16/latency/leased-2",
+  "load_average_before": [
+    1.15966796875,
+    3.08837890625,
+    7.56591796875
+  ],
+  "latency": [
+    {
+      "mode": "full",
+      "clients": 64,
+      "samples": 8192,
+      "blob_bytes": 256,
+      "driver": "rust",
+      "p50_ms": 11.80475,
+      "p95_ms": 16.167792,
+      "p99_ms": 17.087542,
+      "max_ms": 20.146083,
+      "wall_seconds": 1.767,
+      "load_average_before": [
+        1.15966796875,
+        3.08837890625,
+        7.56591796875
+      ],
+      "load_average_after": [
+        1.15966796875,
+        3.08837890625,
+        7.56591796875
+      ],
+      "load_average_at_launch": [
+        1.15966796875,
+        3.08837890625,
+        7.56591796875
+      ],
+      "disturbed": false,
+      "disturbances": [],
+      "peak_one_minute_load": 1.15966796875,
+      "quiet_files": [
+        "quiet-request",
+        "quiet-ack-E12"
+      ],
+      "socket_observations": [],
+      "compact_every": 256,
+      "driver_args": [],
+      "server_args": [],
+      "driver_sha256": "a51e55c0763ee42c416ab835756ab1d2b8c49f1cb0312641fac4dbc1bd6cbe58",
+      "client_phases": {
+        "connect_ms": {
+          "mean": 0.0,
+          "p50": 0.0,
+          "p95": 0.0,
+          "max": 0.0
+        },
+        "write_ms": {
+          "mean": 0.010865330078125,
+          "p50": 0.008458,
+          "p95": 0.025084,
+          "max": 0.214584
+        },
+        "read_ms": {
+          "mean": 11.473689757202148,
+          "p50": 11.790292,
+          "p95": 16.160959,
+          "max": 20.125583
+        }
+      },
+      "lease_ms": 1000,
+      "renew_interval_ms": 250
+    }
+  ],
+  "wall_seconds": 2.052,
+  "peak_sampled_run_allocated_bytes": 6098944,
+  "target_allocated_bytes_at_end": 561025024,
+  "load_average_after": [
+    1.15966796875,
+    3.08837890625,
+    7.56591796875
+  ]
+}

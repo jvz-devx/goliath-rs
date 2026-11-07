@@ -1,5 +1,25 @@
 //! Owns deterministic replay, shrinking and hostile crash-cut tests.
 
+#[test]
+fn partitioned_old_owner_stops_locally_and_the_ignored_deadline_control_fails() {
+    use goliath_sim::{LeaseMode, lease_partition};
+    for lease_ms in [500, 1000, 2000] {
+        for seed in 0..1000 {
+            let safe = lease_partition(seed, lease_ms, LeaseMode::Enforce);
+            assert!(!safe.violated(), "seed {seed} L {lease_ms}: {safe:?}");
+            assert!(safe.old_ticks_after_deadline > 0);
+            assert!(safe.rejected_actions > 0);
+            let control = lease_partition(seed, lease_ms, LeaseMode::IgnoreDeadline);
+            assert!(control.violated());
+            assert!(control.stale_appends > 0);
+            assert!(control.stale_logins > 0);
+            assert!(control.overlapping_owners > 0);
+            assert!(control.duplicate_identities > 0);
+            assert_eq!(safe.takeover_ms, control.takeover_ms);
+        }
+    }
+}
+
 use goliath_model::{ItemId, PlayerId, Policy, TileId};
 use goliath_sim::{
     Action, Fault, FaultAt, Mutation, SETUPS, Scenario, Settings, run, run_with_settings, shrink,

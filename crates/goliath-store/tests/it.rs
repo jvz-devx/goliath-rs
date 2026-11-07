@@ -1,5 +1,8 @@
 //! Owns short, real-process protocol and recovery regressions.
 
+#[path = "it/leases.rs"]
+mod leases;
+
 use goliath_model::{Fence, Generation, OwnershipCas, PlayerId, TileId};
 use goliath_store::{Blob, Client, Command, Operation, RequestId, Response, StoreFault};
 use std::fs;
