@@ -1,0 +1,45 @@
+{
+  "date": "2026-11-07",
+  "commands": [
+    {"command": "cargo fmt --all --check", "exit": 0},
+    {"command": "cargo clippy --workspace --all-targets --all-features -- -D warnings", "exit": 0},
+    {"command": "/usr/bin/time -p just test", "exit": 0, "tests": 34, "wall_seconds": 4.89},
+    {"command": "cargo test --workspace --all-features", "exit": 0, "tests": 34},
+    {"command": "just store-torture", "exit": 0, "kills": 1000, "wall_seconds_excluding_build": 109.24},
+    {"command": "target/release/goliath-sim sweep 66667 docs/experiments/data/E9/sweep.csv", "exit": 1, "reason": "P3 fails with delayed cluster abort; P5 has zero duplicates, losses, owner violations and stale writes", "scenario_seeds": 1200006},
+    {"command": "target/release/goliath-sim sweep 66667 docs/experiments/data/E9/instant-abort.csv 0", "exit": 0, "scenario_seeds": 1200006},
+    {"command": "cmp <(sed '/^P5,/d' docs/experiments/data/E9/instant-abort.csv) docs/experiments/data/E1-results.csv", "exit": 0},
+    {"command": "target/release/goliath-sim mutations 20000 docs/experiments/data/E9/mutations.csv", "exit": 0, "mutations": 9, "scenario_seeds": 540000},
+    {"command": "target/release/goliath-sim replay P3 33 0", "exit": 0, "reduced_hash": "9762ffd904c8e02f"},
+    {"command": "$HOME/.agents/skills/rust-project-architecture/scripts/audit-rust-layout.sh .", "exit": 0},
+    {"command": "git diff --check", "exit": 0}
+  ],
+  "sha256": {
+    "target/release/goliath-store": "7a41b4bc44a4f79f3821f0b03a0fa370a67cc210d923360c89ea6da3c8bb5570",
+    "target/release/goliath-store-load": "086d5a37d9b126908b3ace123853017967ec236c8dfce94d518e4c45cd5580d3",
+    "target/release/goliath-sim": "752aa71b9153141d604cf695cd2896bbc779ed4699399db261d6918706e5e4c1",
+    "sweep.csv": "0c92e6ed296670ca0fb29e8498380583c149a6da976a4c8522b9e34bf74e9cbd",
+    "instant-abort.csv": "9cef682c25c275a9987832e62bf0072d99d9aa36a36c61f6e076291650d12ddd",
+    "mutations.csv": "90a879fdac485469f83d7030e2f41c3f7cd0edf9b43e3bc71f387c3c841df0a2"
+  },
+  "disk": {
+    "max_sampled_own_run_allocated_bytes": 8392704,
+    "max_observed_workspace_target_file_block_sum_bytes": 356605952,
+    "max_observed_workspace_target_du_kib": 270432,
+    "max_observed_shared_repo_kib": 5672908,
+    "max_observed_shared_local_kib": 5383036,
+    "cleanup": {
+      "command": "scripts/clean-builds --all",
+      "exit": 0,
+      "freed_mib": 265,
+      "workspace_target_removed": true,
+      "own_cargo_or_experiment_processes_running": false,
+      "skipped_in_use_targets_mib": {
+        ".local/src/horizon-tiles/target": 1262,
+        ".local/src/horizon/target": 1385,
+        ".local/src/meridian/target": 476
+      },
+      "shared_project_mib_reported_by_script": 5353
+    }
+  }
+}

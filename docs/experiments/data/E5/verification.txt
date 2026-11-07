@@ -1,0 +1,51 @@
+E5 verification, 2026-11-07, Apple M5 Pro, macOS 26.5.2 arm64, Rust 1.98.1
+
+cargo fmt --all --check
+PASS
+
+cargo clippy --workspace --all-targets -- -D warnings
+PASS
+
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+PASS
+
+/usr/bin/time -p just test
+26 tests passed: 10 model, 8 simulator, 1 journal unit, 7 store integration.
+Final timed run: real 1.92, user 1.90, sys 0.53 seconds.
+
+cargo run --release -p goliath-sim -- sweep 66667 .local/runs/E5-E1-results.csv
+PASS: 1,000,005 scenario-seeds, 18 independent OS processes.
+shasum -a 256 .local/runs/E5-E1-results.csv
+e70e7e27b0bdd11566b590166a137a59df3b71d3f250172f7cd0de68150c66b7
+Temporary reproduction CSV deleted afterwards. Original E1 result file unchanged.
+
+just store-torture
+PASS: 1,000 store SIGKILL cuts, 308 byte-offset tail mutations,
+617 tail-check restarts, 32 stale requests rejected, 32 stale requests accepted
+by the fence-disabled negative control, 8,192 latency samples.
+Full process run: 89.264 seconds, excluding compilation.
+See all-results.json, latency.csv and tail.csv.
+
+python3 -B scripts/e5-store.py --only fence
+PASS: same safety assertion passes with fencing and raises
+"stale CAS accepted: 32/32" with the deliberate fence mutation.
+See fence-results.json. Negative control failure is required.
+
+$HOME/.agents/skills/rust-project-architecture/scripts/audit-rust-layout.sh .
+No missing module docs, undocumented unsafe blocks, wildcard imports,
+kind-named modules or lint suppressions. All three crates inherit workspace lints.
+One documented unsafe Darwin syscall block.
+
+git diff --check
+PASS
+
+scripts/clean-builds --all
+  cleaned: target (132 MB to 0 MB)
+  in use, skipped: .local/src/horizon/target (1834 MB)
+  cleaned: .local/src/meridian/target (560 MB to 0 MB)
+clean-builds: freed 692 MB, project now 2589 MB
+
+No E5 run directories remain. No commit or GitHub write was made.
+Not covered: physical power cuts, disk loss, replication, Horizon integration,
+bounded receipt retention, long-lived large-state performance, other OS runtime.
+The 64-client F_FULLFSYNC commit P95 of 222.895708 ms misses the 150 ms budget.

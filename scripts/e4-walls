@@ -1,0 +1,410 @@
+#!/usr/bin/env python3
+"""E4: four real flat worlds, position-triggered Meridian handoffs, no game commands.
+
+Use retained E2 engines/sidecars and .local/bin/meridian-e4/{meridian,e4-client}.
+Every run owns a temporary .local/runs/E4-* folder and deletes it on exit.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import socket
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / "docs/experiments/data/E4"
+TILES = {"a": (0, 0), "b": (-1, 0), "c": (-1, -1), "d": (0, -1)}
+POINTS = {name: tuple(1.0 if axis == 0 else -1.0 for axis in tile) for name, tile in TILES.items()}
+# Starts and ends on a. Eight directed cardinal borders and four diagonal directions.
+ROUTE = ["b", "c", "d", "a", "d", "c", "b", "a", "c", "a", "d", "b", "d", "a"]
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+e2 = load("e4_e2_support", ROOT / "scripts/e2-meridian.py")
+prereq = load("e4_e2_prereq", ROOT / "scripts/e2-real-transfer")
+
+
+def save(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2).replace(str(ROOT), "$REPO").replace(str(Path.home()), "$HOME") + "\n")
+
+
+def tile_at(position):
+    return math.floor(position[0]) // 64, math.floor(position[2]) // 64
+
+
+def eligible(position, target):
+    return tile_at(position) == TILES[target] and all(0.5 <= position[axis] % 64 <= 63.5 for axis in (0, 2))
+
+
+def verify(result, expected):
+    trials = result["trials"]
+    if len(trials) != expected or [t["index"] for t in trials] != list(range(expected)):
+        raise RuntimeError(f"silently skipped crossing: expected {expected}, got {len(trials)}")
+    owner = "a"
+    for index, trial in enumerate(trials):
+        if trial["source"] != owner or trial["target"] != ROUTE[index % len(ROUTE)]:
+            raise RuntimeError("crossing route or owner chain differs")
+        if not trial["inventory_equal"] or trial["inventory_before"] != result["known_inventory"]:
+            raise RuntimeError("inventory checksum changed")
+        if trial["inventory_before"] != trial["inventory_after"] or trial["inventory_count_before"] != 17 or trial["inventory_count_after"] != 17:
+            raise RuntimeError("known inventory count or checksum differs")
+        if trial["input_gap_ms"] != (trial["first_target_input"]["ns"] - trial["last_source_input"]["ns"]) / 1e6:
+            raise RuntimeError("input gap arithmetic differs")
+        if trial["input_gap_ms"] <= 0 or trial["first_target_input"]["ns"] < trial["trigger_input"]["ns"]:
+            raise RuntimeError("input timestamps are out of order")
+        if trial["total_ms"] != (trial["completed_ns"] - trial["trigger_input"]["ns"]) / 1e6:
+            raise RuntimeError("total-time arithmetic differs")
+        correction = max((math.dist(e["before"], e["pos"]) for e in trial["arrival_teleports"]), default=0)
+        if correction != trial["arrival_error_blocks"]:
+            raise RuntimeError("arrival correction arithmetic differs")
+        if tuple(trial["tile_to"]) != tile_at(trial["first_target_input"]["pos"]):
+            raise RuntimeError("arrival movement belongs to the wrong tile")
+        owner = trial["target"]
+    if result["disconnects"] or result["game_commands"]:
+        raise RuntimeError("disconnect or game command observed")
+    if "arrival_sequence" in result and result["arrival_sequence"] != [t["target"] for t in trials]:
+        raise RuntimeError("unrequested, duplicated, or silently skipped actual handoff")
+    if result.get("refusals"):
+        raise RuntimeError("wall handoff was refused")
+    if not result.get("wall_particles_enabled", False) and result.get("particle_packets", 0):
+        raise RuntimeError("wall particles were sent with the option off")
+    borders = {(t["source"], t["target"]) for t in trials
+               if sum(abs(a-b) for a, b in zip(t["tile_from"], t["tile_to"])) == 1}
+    diagonals = {(t["source"], t["target"]) for t in trials
+                 if sum(abs(a-b) for a, b in zip(t["tile_from"], t["tile_to"])) == 2}
+    result["coverage"] = {"directed_borders": sorted(borders), "diagonals": sorted(diagonals)}
+    if expected >= len(ROUTE) and (len(borders) != 8 or len(diagonals) != 4):
+        raise RuntimeError("route did not exercise all eight borders and four diagonals")
+    recomputed = {key: e2.percentiles([t[key] for t in trials]) for key in ("input_gap_ms", "total_ms", "arrival_error_blocks")}
+    if "summary" in result and result["summary"] != recomputed:
+        raise RuntimeError("stored percentiles differ from recomputed samples")
+    result["summary"] = recomputed
+
+
+def wait_position(engine, after, target, timeout=12):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        values = [v for v in e2.inputs(engine, after) if eligible(v["pos"], target)]
+        if values:
+            return values[0]
+        time.sleep(0.01)
+    raise RuntimeError(f"silently skipped crossing: no accepted movement on {target}")
+
+
+def edge_cases(client, engines, uuid, upstream, known):
+    """Separate healthy boundary probes. Return to a before the counted route."""
+    evidence = []
+    def walk(token, x, z):
+        client.send(f"walk {token} {x} {z}")
+        return client.wait(lambda e: e.get("kind") == "walk" and e.get("token") == token)
+    def arrived(target):
+        return client.wait(lambda e: e.get("kind") == "chat" and e.get("text") == f"E4 wall arrived {target}")
+    began = time.time_ns()
+    for token, x, z in [("stand", 0, 1), ("parallel", 0, -1), ("jitter-plus", 0.25, -1),
+                         ("jitter-minus", -0.25, -1), ("parallel-back", 0, 1)]:
+        walk(token, x, z)
+        client.wait(lambda e: e.get("kind") == "reached" and e.get("token") == token)
+        time.sleep(0.10)
+    starts = [e for e in client.events if e.get("kind") == "chat" and e["ns"] >= began and e.get("text", "").startswith("E4 wall start")]
+    if starts:
+        raise RuntimeError("standing, parallel walk, or sub-margin jitter triggered a transfer")
+    evidence.append({"case": "standing_parallel_jitter", "switches": 0, "passed": True})
+    walk("reset", 1, 1)
+    client.wait(lambda e: e.get("kind") == "reached" and e.get("token") == "reset")
+    for label, during, expected in [("reverse_in_flight", "a", ["b", "a"]),
+                                     ("second_crossing_in_flight", "c", ["b", "c"])]:
+        began = time.time_ns()
+        walk(label, -1, 1)
+        client.wait(lambda e: e.get("kind") == "chat" and e.get("text") == "E4 wall start b")
+        changed = walk(label + "-changed", *POINTS[during])
+        completions = [arrived(target) for target in expected]
+        wait_position(engines[during], changed["ns"], during)
+        # Prove the alternate tile was sent before the first switch completed.
+        pending_moves = [e for e in client.events if e.get("kind") == "move" and changed["ns"] <= e["ns"] < completions[0]["ns"] and eligible(e["pos"], during)]
+        if not pending_moves:
+            raise RuntimeError(f"{label}: alternate position was not exercised while in flight")
+        time.sleep(0.2)
+        after = e2.inventory(engines[during], uuid, upstream)
+        if after["sha256"] != known:
+            raise RuntimeError(f"{label}: inventory changed")
+        evidence.append({"case": label, "passed": True, "started_ns": began,
+                         "changed": changed, "in_flight_input": pending_moves[0],
+                         "arrivals": completions, "inventory_after": after["sha256"]})
+        if during != "a":
+            walk("return-a", 1, 1)
+            arrived("a")
+            wait_position(engines["a"], began, "a")
+        time.sleep(0.2)
+    return evidence
+
+
+def particle_evidence(client, proxy_log, enabled):
+    windows = []
+    for label, x, z in [("near", 1, 1), ("far", 16, 16)]:
+        client.send(f"walk particles-{label} {x} {z}")
+        client.wait(lambda e: e.get("kind") == "reached" and e.get("token") == f"particles-{label}")
+        time.sleep(0.6)
+        start = time.time_ns()
+        time.sleep(5)
+        end = time.time_ns()
+        received = [e for e in client.events if e.get("kind") == "particle" and start <= e["ns"] <= end]
+        bursts = []
+        for line in proxy_log.read_text().splitlines():
+            if "E4_PARTICLES " in line:
+                burst = json.loads(line.split("E4_PARTICLES ", 1)[1])
+                if start <= burst["ns"] <= end:
+                    bursts.append(burst)
+        expected = enabled and label == "near"
+        if bool(received) != expected or bool(bursts) != expected:
+            raise RuntimeError(f"particle {label} delivery differs, enabled={enabled}, packets={len(received)}")
+        if any(e["id"] != 21 or e["colour"] != 0x3388ff or e["count"] != 1 for e in received):
+            raise RuntimeError("default particles were not blue dust")
+        if any(e["pos"][0] != 0 and e["pos"][2] != 0 for e in received):
+            raise RuntimeError("particle was not on the configured wall")
+        seconds = (end - start) / 1e9
+        wire_bytes = sum(b["wire_bytes"] for b in bursts)
+        windows.append({"location": label, "player_pos": [x, -60, z], "start_ns": start, "end_ns": end,
+            "seconds": seconds, "received_packets": len(received), "emitted_bursts": len(bursts),
+            "wire_bytes": wire_bytes, "extra_tcp_payload_bytes_per_second": wire_bytes / seconds,
+            "particle": "dust", "colour": 0x3388ff, "sample": received[:1], "bursts": bursts})
+    return windows
+
+
+def verify_particles(result):
+    if result["status"] != "complete" or result["disconnects"]:
+        raise RuntimeError("particle evidence incomplete or disconnected")
+    if [w["location"] for w in result["particle_windows"]] != ["near", "far"]:
+        raise RuntimeError("missing particle evidence location")
+    for window in result["particle_windows"]:
+        expected = result["wall_particles_enabled"] and window["location"] == "near"
+        if bool(window["received_packets"]) != expected or bool(window["emitted_bursts"]) != expected:
+            raise RuntimeError("particle delivery differs")
+        if window["wire_bytes"] != sum(b["wire_bytes"] for b in window["bursts"]):
+            raise RuntimeError("particle byte arithmetic differs")
+        if window["extra_tcp_payload_bytes_per_second"] != window["wire_bytes"] / window["seconds"]:
+            raise RuntimeError("particle byte rate differs")
+        if any(e["id"] != 21 or e["colour"] != 0x3388ff for e in window["sample"]):
+            raise RuntimeError("particle type or colour differs")
+    if not result["wall_particles_enabled"] and result["particle_packets"]:
+        raise RuntimeError("particles emitted with the option off")
+
+
+def run(args):
+    # Import the unchanged E2 harness for process startup/control and NBT decoding.
+    # It is not rebuilt and its checkout is never written by E4.
+    sys.path.insert(0, str(ROOT / ".local/src/horizon/tools"))
+    import server_transfer_e2e as upstream
+    resources = args.resources
+    problems = prereq.resource_problems(resources)
+    if problems:
+        raise RuntimeError(str(problems))
+    bins = ROOT / ".local/bin/horizon-fc2868b2b"
+    proxybins = ROOT / ".local/bin/meridian-e4"
+    sidecarbin = ROOT / ".local/bin/meridian-902dcf1/meridian-sidecar"
+    binary_paths = [bins / "horizon-client", sidecarbin, proxybins / "meridian", proxybins / "e4-client"]
+    for path in binary_paths:
+        if not os.access(path, os.X_OK):
+            raise RuntimeError(f"missing binary {path}")
+    result = {"status": "running", "requested": 0 if args.particle_evidence else args.crossings, "trials": [], "disconnects": 0,
+              "game_commands": 0, "horizon": prereq.HORIZON, "meridian": prereq.MERIDIAN,
+              "protocol": prereq.PROTOCOL, "binary_sha256": {str(p.relative_to(ROOT)): prereq.sha256(p) for p in binary_paths},
+              "route": ROUTE, "tiles": TILES, "tile_edge": 64, "origin": [0, 0],
+              "speed_blocks_per_second": 5.6, "cadence_ms": 50,
+              "difficulty": "peaceful", "level_seed": "12345", "view_distance": 3, "simulation_distance": 3,
+              "wall_particles_enabled": args.wall_particles,
+              "gap": "first target accepted movement ns minus last source accepted movement ns, E2_TRACE_INPUTS",
+              "total": "first eligible client position send to wall-arrived chat receipt",
+              "started_ns": time.time_ns(), "runner_sha256": prereq.sha256(Path(__file__)),
+              "patch_sha256": prereq.sha256(ROOT / "patches/meridian-01-wall-trigger.patch"),
+              "client_commands": "zero by construction: e4-client has no ChatCommand send path"}
+    destination = DATA / f"{args.name}.json"
+    engines, children = {}, []
+    previous_env = dict(os.environ)
+    (ROOT / ".local/runs").mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="E4-", dir=ROOT / ".local/runs") as temporary:
+        scratch = Path(temporary)
+        os.environ.update(prereq.isolated_env(scratch))
+        # Complete the isolated XDG set without changing the E2 helper.
+        for name in ("XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR"):
+            folder = scratch / name.lower()
+            folder.mkdir(mode=0o700)
+            os.environ[name] = str(folder)
+        os.environ["E2_TRACE_INPUTS"] = "1"
+        try:
+            for label in TILES:
+                engine = upstream.Engine(bins, resources, scratch / label, scratch, label,
+                                         **{"level-seed": "12345", "allow-flight": "true", "difficulty": "peaceful"})
+                engines[label] = engine
+                engine.ready()
+            sideports = {label: e2.free_port() for label in engines}
+            sidekeys = {label: scratch / f"sidecar-{label}.key" for label in engines}
+            for label, engine in engines.items():
+                sidekeys[label].write_text(f"e4-local-only-secret-{label}-2026-11-07")
+                children.append(e2.Child([sidecarbin, "--endpoint-file", engine.endpoint,
+                    "--listen", f"127.0.0.1:{sideports[label]}", "--secret-file", sidekeys[label]],
+                    scratch, scratch / f"sidecar-{label}.log"))
+                for command in ("gamerule do_mob_spawning false", "gamerule do_weather_cycle false",
+                                "gamerule random_tick_speed 0", "gamerule spawn_radius 0"):
+                    engine.server.console(command)
+            port = e2.free_port()
+            config = scratch / "meridian.toml"
+            config.write_text(f'listen = "127.0.0.1:{port}"\nauth-mode = "offline"\n'
+                'connections-per-minute = 0\nmax-players = 2\n'
+                f'forwarding-secret = "{upstream.SECRET.decode()}"\n'
+                'switch-carry-position = true\ndefault-backend = "a"\n'
+                + ("" if args.fault_skip else '[tiles]\norigin = [0,0]\nedge = 64\n'
+                    + "".join(f'[[tiles.entries]]\nindex = [{x},{z}]\nbackend = "{label}"\n' for label, (x, z) in TILES.items()))
+                + ('[tiles.wall-particles]\nenabled = true\nparticle = "dust"\ncolour = 0x3388ff\nspacing = 1\ndistance = 8\n' if args.wall_particles else "")
+                + "".join(f'[[backends]]\nname = "{label}"\naddress = "127.0.0.1:{engine.port}"\n'
+                    f'sidecar = "127.0.0.1:{sideports[label]}"\nsidecar-secret-file = "{sidekeys[label]}"\n'
+                    for label, engine in engines.items()))
+            subprocess.run([proxybins / "meridian", "--check", config], cwd=scratch, check=True, capture_output=True)
+            children.append(e2.Child([proxybins / "meridian", config], scratch, scratch / "proxy.log"))
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                        break
+                except OSError:
+                    if time.monotonic() > deadline:
+                        raise RuntimeError("proxy not listening")
+                    time.sleep(0.05)
+            client = e2.Child([proxybins / "e4-client", port], scratch, scratch / "client.log")
+            children.append(client)
+            client.wait(lambda e: e.get("kind") == "teleport")
+            uuid = str(upstream.offline_uuid("E4Probe"))
+            # Begin inside tile a, without any transfer or Minecraft command.
+            client.send("walk setup 1 1")
+            wait_position(engines["a"], 0, "a")
+            engines["a"].server.console("give E4Probe minecraft:diamond 5")
+            engines["a"].server.console("give E4Probe minecraft:oak_log 12")
+            time.sleep(0.5)
+            known = e2.inventory(engines["a"], uuid, upstream)
+            if known["count"] != 17:
+                raise RuntimeError("known inventory not 17 items")
+            result["known_inventory"] = known["sha256"]
+            source = "a"
+            if args.edge_cases:
+                result["edge_cases"] = edge_cases(client, engines, uuid, upstream, result["known_inventory"])
+            route_started = time.time_ns()
+            if args.particle_evidence:
+                result["particle_windows"] = particle_evidence(client, scratch / "proxy.log", args.wall_particles)
+            for index in range(result["requested"]):
+                target = ROUTE[index % len(ROUTE)]
+                before = e2.inventory(engines[source], uuid, upstream)
+                started = time.time_ns()
+                x, z = POINTS[target]
+                client.send(f"walk {index} {x} {z}")
+                sent = client.wait(lambda e: e.get("kind") == "move" and e["ns"] >= started and eligible(e["pos"], target))
+                result["attempted_crossing"] = {"index": index, "source": source, "target": target, "trigger_input": sent}
+                try:
+                    completed = client.wait(lambda e: e.get("kind") == "chat" and
+                                            (e.get("text") == f"E4 wall arrived {target}" or e.get("text", "").startswith("E4 wall refused ")), timeout=args.timeout)
+                    if completed["text"].startswith("E4 wall refused "):
+                        raise RuntimeError(completed["text"])
+                except RuntimeError as error:
+                    raise RuntimeError(f"silently skipped crossing {index} {source}->{target}: {error}") from error
+                first = wait_position(engines[target], sent["ns"], target)
+                last = [v for v in e2.inputs(engines[source]) if v["ns"] < first["ns"]][-1]
+                # Let placement's second teleport and the route's final inputs drain.
+                time.sleep(0.10)
+                after = e2.inventory(engines[target], uuid, upstream)
+                teleports = [e for e in client.events if e.get("kind") == "teleport" and sent["ns"] <= e["ns"] <= first["ns"] + 100_000_000]
+                trial = {"index": index, "source": source, "target": target, "tile_from": TILES[source], "tile_to": TILES[target],
+                    "trigger_input": sent, "completed_ns": completed["ns"],
+                    "total_ms": (completed["ns"] - sent["ns"]) / 1e6,
+                    "input_gap_ms": (first["ns"] - last["ns"]) / 1e6,
+                    "last_source_input": last, "first_target_input": first,
+                    "arrival_error_blocks": max((math.dist(e["before"], e["pos"]) for e in teleports), default=0),
+                    "arrival_teleports": teleports,
+                    "inventory_before": before["sha256"], "inventory_after": after["sha256"],
+                    "inventory_count_before": before["count"], "inventory_count_after": after["count"],
+                    "inventory_equal": before["sha256"] == after["sha256"] == result["known_inventory"], "disconnects": 0}
+                result["trials"].append(trial)
+                if not trial["inventory_equal"]:
+                    raise RuntimeError("inventory changed")
+                if index % 25 == 0 or index + 1 == args.crossings:
+                    save(destination, result)
+                    print(f'E4 {index+1}/{args.crossings}: {source}->{target}, gap {trial["input_gap_ms"]:.1f} ms', flush=True)
+                source = target
+            result["disconnects"] = sum(e.get("kind") == "disconnect" for e in client.events)
+            result["particle_packets"] = sum(e.get("kind") == "particle" for e in client.events)
+            result["arrival_sequence"] = [e["text"].removeprefix("E4 wall arrived ") for e in client.events
+                                          if e.get("kind") == "chat" and e["ns"] >= route_started and e.get("text", "").startswith("E4 wall arrived ")]
+            result["refusals"] = [e for e in client.events if e.get("kind") == "chat" and e.get("text", "").startswith("E4 wall refused ")]
+            if not args.particle_evidence:
+                verify(result, args.crossings)
+            elif result["disconnects"] or (not args.wall_particles and result["particle_packets"]):
+                raise RuntimeError("particle evidence disconnected or emitted with the option off")
+            result["status"] = "complete"
+        except (Exception, KeyboardInterrupt) as error:
+            result["status"] = "failed"
+            result["error"] = str(error) or "interrupted by developer"
+            if "client" in locals():
+                result["disconnects"] = sum(e.get("kind") == "disconnect" for e in client.events)
+            result["diagnostics"] = {log.name: log.read_text(errors="replace").splitlines()[-10:] for log in scratch.glob("*.log") if log.name in ("proxy.log", "client.log")}
+            print(f"E4 failed: {error}", file=sys.stderr)
+        finally:
+            for child in reversed(children):
+                child.stop()
+            for engine in reversed(list(engines.values())):
+                engine.stop()
+            result["run_disk_mib"] = int(subprocess.check_output(["du", "-sm", scratch], text=True).split()[0])
+            result["finished_ns"] = time.time_ns()
+            save(destination, result)
+            os.environ.clear()
+            os.environ.update(previous_env)
+    print(destination)
+    return 0 if result["status"] == "complete" else 2
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--crossings", type=int, default=1000)
+    parser.add_argument("--name")
+    parser.add_argument("--timeout", type=float, default=15)
+    parser.add_argument("--fault-skip", action="store_true", help="omit tile routing, must fail the first expected crossing")
+    parser.add_argument("--edge-cases", action="store_true", help="exercise standing, parallel walking, jitter, and in-flight changes first")
+    parser.add_argument("--wall-particles", action="store_true", help="enable blue dust wall drawing, off by default")
+    parser.add_argument("--particle-evidence", action="store_true", help="measure near/far particle delivery and framed byte cost instead of crossing trials")
+    parser.add_argument("--verify", type=Path, help="recompute route, checksums and gaps without servers")
+    parser.add_argument("--resources", type=Path, default=Path.home() / "Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3")
+    args = parser.parse_args()
+    if args.name is None:
+        args.name = ("particles-on" if args.wall_particles else "particles-off") if args.particle_evidence else "trials"
+    if args.fault_skip and args.wall_particles:
+        parser.error("fault-skip cannot be combined with wall-particles")
+    if args.crossings < 1 or Path(args.name).name != args.name:
+        parser.error("crossings must be positive and name must be a plain filename stem")
+    if args.verify:
+        result = json.loads(args.verify.read_text())
+        if "particle_windows" in result:
+            verify_particles(result)
+            print(json.dumps(result["particle_windows"], indent=2))
+            return 0
+        verify(result, result["requested"])
+        print(json.dumps(result.get("summary"), indent=2))
+        return 0
+    return run(args)
+
+
+if __name__ == "__main__":
+    def interrupted(_signal, _frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupted)
+    sys.exit(main())

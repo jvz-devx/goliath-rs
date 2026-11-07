@@ -1,0 +1,1217 @@
+diff --git a/crates/meridian-config/src/lib.rs b/crates/meridian-config/src/lib.rs
+index 17e62ce..9f961f2 100644
+--- a/crates/meridian-config/src/lib.rs
++++ b/crates/meridian-config/src/lib.rs
+@@ -17,6 +17,8 @@ mod proxy_protocol;
+ mod queue;
+ mod restart;
+ mod sidecar;
++mod tiles;
++pub use tiles::{Tile, TileMap, WallParticle, WallParticles};
+ 
+ pub use access::{Access, AccessError, AccessSettings, AccessSync, Ban, Net, Refusal, Target};
+ pub use auth::{AuthSettings, OnLookupFailure};
+@@ -216,6 +218,8 @@ pub struct Config {
+     /// request: Horizon does since #8735, merged into its main on 2026-11-05. It has not been
+     /// run against a real server.
+     pub switch_carry_position: bool,
++    /// Optional spatial routing for the E4 shared-coordinate experiment.
++    pub tiles: Option<TileMap>,
+     /// Whether the players of the server a player is moved to see them arrive: the
+     /// join line and the entry in the player list. With `false` the arrival is quiet.
+     pub switch_announce_arrival: bool,
+@@ -301,6 +305,7 @@ impl Default for Config {
+             sidecars: Vec::new(),
+             sidecar_timeout_ms: 5_000,
+             switch_carry_position: false,
++            tiles: None,
+             switch_announce_arrival: true,
+             switch_announce_departure: true,
+             switch_freeze_limit_ms: 8_000,
+@@ -351,6 +356,7 @@ impl std::fmt::Debug for Config {
+             sidecars,
+             sidecar_timeout_ms,
+             switch_carry_position,
++            tiles,
+             switch_announce_arrival,
+             switch_announce_departure,
+             switch_freeze_limit_ms,
+@@ -403,6 +409,7 @@ impl std::fmt::Debug for Config {
+             .field("sidecars", sidecars)
+             .field("sidecar_timeout_ms", sidecar_timeout_ms)
+             .field("switch_carry_position", switch_carry_position)
++            .field("tiles", tiles)
+             .field("switch_announce_arrival", switch_announce_arrival)
+             .field("switch_announce_departure", switch_announce_departure)
+             .field("switch_freeze_limit_ms", switch_freeze_limit_ms)
+@@ -459,6 +466,7 @@ struct File {
+     commands: FileCommands,
+     sidecar_timeout_ms: Option<u64>,
+     switch_carry_position: Option<bool>,
++    tiles: Option<TileMap>,
+     switch_announce_arrival: Option<bool>,
+     switch_announce_departure: Option<bool>,
+     switch_freeze_limit_ms: Option<u64>,
+@@ -668,6 +676,7 @@ impl Config {
+             switch_carry_position: file
+                 .switch_carry_position
+                 .unwrap_or(defaults.switch_carry_position),
++            tiles: file.tiles,
+             switch_announce_arrival: file
+                 .switch_announce_arrival
+                 .unwrap_or(defaults.switch_announce_arrival),
+@@ -706,6 +715,9 @@ impl Config {
+     /// timeout is not zero, the player limit fits the server list and the
+     /// forwarding secret is set. The first problem found is returned.
+     pub fn validate(&self) -> Result<(), ConfigError> {
++        if let Some(tiles) = &self.tiles {
++            tiles.validate(self)?;
++        }
+         if self.backends.is_empty() {
+             return Err(ConfigError::NoBackend);
+         }
+diff --git a/crates/meridian-handoff/src/session.rs b/crates/meridian-handoff/src/session.rs
+index 389f3cf..6279440 100644
+--- a/crates/meridian-handoff/src/session.rs
++++ b/crates/meridian-handoff/src/session.rs
+@@ -36,7 +36,7 @@ use crate::{
+ };
+ use horizon_protocol::{
+     buf::{Reader, write_varint},
+-    connection::{Closer, ConnReader, ConnWriter},
++    connection::{Closer, ConnReader, ConnWriter, Counters},
+     ids,
+     packets::{configuration, play},
+     text,
+@@ -124,6 +124,7 @@ pub struct Session {
+     /// Kept here and then by the thread that reads the client, never in [`Shared`]: a hook
+     /// may hold a [`SessionHandle`], which would then keep the session alive for good.
+     commands: Option<Arc<CommandHook>>,
++    positions: Option<Arc<dyn Fn([f64; 3]) + Send + Sync>>,
+ }
+ 
+ /// Switches a session to another backend (`crate::switch`), or ends it, from another
+@@ -133,6 +134,7 @@ pub struct SessionHandle(pub(crate) Arc<Shared>);
+ 
+ pub(crate) struct Shared {
+     pub profile: Profile,
++    client_counters: Arc<Counters>,
+     down: Mutex<Down>,
+     /// The active backend's name, as in [`Down::backend`], under a lock of its own: the
+     /// reader of the active lane holds `down` while it writes to the client, which waits
+@@ -283,6 +285,7 @@ impl Session {
+         });
+         let shared = Arc::new(Shared {
+             profile: client.profile,
++            client_counters: Arc::clone(&client_reader.counters),
+             down: Mutex::new(Down {
+                 writer: client_writer,
+                 phase: Phase::Configuration,
+@@ -337,6 +340,7 @@ impl Session {
+                 client_reader,
+                 first: (lane, backend_reader),
+                 commands: None,
++                positions: None,
+             },
+             handle,
+         ))
+@@ -348,6 +352,13 @@ impl Session {
+         self
+     }
+ 
++    /// Observes position-bearing moves after forwarding, outside the session locks.
++    /// Teleport acknowledgements and rotation-only packets never request routing.
++    pub fn with_positions(mut self, hook: Arc<dyn Fn([f64; 3]) + Send + Sync>) -> Self {
++        self.positions = Some(hook);
++        self
++    }
++
+     /// Relays the session until the client or the active backend closes it, and
+     /// says what it carried. A switch under way when the client leaves finishes
+     /// on its own thread (DESIGN.md decision 10).
+@@ -370,6 +381,7 @@ impl Session {
+             client_reader,
+             first: (lane, backend_reader),
+             commands,
++            positions,
+         } = self;
+         shared
+             .fallback_kick
+@@ -384,7 +396,12 @@ impl Session {
+             std::thread::Builder::new()
+                 .name("session-to-backend".to_owned())
+                 .spawn(move || {
+-                    let end = copy_to_backend(client_reader, &shared, commands.as_deref());
++                    let end = copy_to_backend(
++                        client_reader,
++                        &shared,
++                        commands.as_deref(),
++                        positions.as_deref(),
++                    );
+                     let _ = events.send(Event::Client(end));
+                 })?
+         };
+@@ -739,6 +756,24 @@ impl SessionHandle {
+         let _ = down.writer.send(&packet);
+     }
+ 
++    /// Sends a bounded cosmetic burst in Play, atomically with respect to a view swap.
++    /// Returns framed TCP payload bytes, measured under the writer lock so other
++    /// traffic cannot enter the counter delta. No persistent ghost state changes.
++    pub fn send_particles(&self, particles: &[play::LevelParticles]) -> Result<u64> {
++        let mut down = self.0.down();
++        if down.phase != Phase::Play || particles.len() > 128 {
++            return Ok(0);
++        }
++        let before = self.0.client_counters.bytes_out.load(Ordering::Relaxed);
++        for particle in particles {
++            let body = play::Clientbound::LevelParticles(particle.clone()).encode();
++            down.writer.send(&body)?;
++            add(&mut down.flow, &body);
++        }
++        let after = self.0.client_counters.bytes_out.load(Ordering::Relaxed);
++        Ok(after.saturating_sub(before) as u64)
++    }
++
+     /// Whether a switch of this player is under way.
+     pub fn is_switching(&self) -> bool {
+         self.0.switching.load(Ordering::SeqCst)
+@@ -1005,6 +1040,7 @@ fn copy_to_backend(
+     mut from: ConnReader,
+     shared: &Arc<Shared>,
+     commands: Option<&CommandHook>,
++    positions: Option<&(dyn Fn([f64; 3]) + Send + Sync)>,
+ ) -> End {
+     use ids::{configuration::serverbound as cfg, play::serverbound as s};
+     let mut body = Vec::new();
+@@ -1073,6 +1109,14 @@ fn copy_to_backend(
+         if lock(&up.lane.writer).send(&body).is_ok() {
+             add(&mut up.flow, &body);
+         }
++        let position = (sending == Phase::Play
++            && matches!(id, s::MOVE_PLAYER_POS | s::MOVE_PLAYER_POS_ROT))
++        .then_some(up.client_pose)
++        .flatten();
++        drop(up);
++        if let (Some(hook), Some(pose)) = (positions, position) {
++            hook(pose.at);
++        }
+         sending = match (sending, id) {
+             (Phase::Configuration, cfg::FINISH_CONFIGURATION) => {
+                 configured = true;
+diff --git a/crates/meridian-handoff/src/switch.rs b/crates/meridian-handoff/src/switch.rs
+index 9a93609..411f34a 100644
+--- a/crates/meridian-handoff/src/switch.rs
++++ b/crates/meridian-handoff/src/switch.rs
+@@ -167,6 +167,8 @@ pub struct Settings {
+     /// arrive where the target puts them, in chunks the target already sent;
+     /// with it, the target must first send the chunks around the new place.
+     pub carry_position: bool,
++    /// Fixed trigger position for a wall switch, instead of a later client snapshot.
++    pub crossing_position: Option<[f64; 3]>,
+     /// The target's players are told the player came (join line, list entry).
+     pub announce_arrival: bool,
+     /// The source's players get the "left the game" line.
+@@ -187,6 +189,7 @@ impl Default for Settings {
+             export_attempts: 3,
+             commit_attempts: 3,
+             carry_position: false,
++            crossing_position: None,
+             announce_arrival: true,
+             announce_departure: true,
+             trace: None,
+@@ -341,6 +344,7 @@ struct Run<'a> {
+     parts: Option<Vec<String>>,
+     /// Whether the player's place goes to the target.
+     carry: bool,
++    crossing_position: Option<[f64; 3]>,
+     /// The id of the hand-over, which the export with freeze gave and the requests
+     /// that end it name. `None` until the export.
+     handover: Option<String>,
+@@ -469,7 +473,7 @@ impl Run<'_> {
+         }
+         let pose = self.shared.up().client_pose?;
+         Some(Arrival {
+-            position: pose.at,
++            position: self.crossing_position.unwrap_or(pose.at),
+             rotation: [pose.yaw, pose.pitch],
+             // The client never sends its velocity, and the record's is the export's,
+             // which the client has left behind since. A zero velocity is not sent:
+@@ -575,6 +579,7 @@ pub fn switch(
+         lane: None,
+         parts: settings.parts(),
+         carry: settings.carry_position,
++        crossing_position: settings.crossing_position,
+         handover: None,
+         imported: false,
+     };
+diff --git a/crates/meridian-handoff/src/tests/switch.rs b/crates/meridian-handoff/src/tests/switch.rs
+index cc2dffe..f6c814e 100644
+--- a/crates/meridian-handoff/src/tests/switch.rs
++++ b/crates/meridian-handoff/src/tests/switch.rs
+@@ -1341,6 +1341,56 @@ fn a_carried_position_in_the_same_chunk_waits_for_no_chunk() {
+     run.join().unwrap().unwrap();
+ }
+ 
++/// A later movement cannot change the destination position of an E4 request.
++#[test]
++fn wall_crossing_position_overrides_the_later_client_pose() {
++    let Bench {
++        handle,
++        run,
++        mut player,
++        mut source,
++    } = bench();
++    player
++        .send(
++            &play::Serverbound::MovePlayerPos(play::MovePlayerPos {
++                x: 3.0,
++                y: 71.0,
++                z: 3.0,
++                flags: 1,
++            })
++            .encode(),
++        )
++        .unwrap();
++    expect(&mut source, ps::MOVE_PLAYER_POS).unwrap();
++    let log = Log::default();
++    let (address, signal, target_thread) = target(TargetWorld::default());
++    switch(
++        &handle,
++        target_backend(&address, &options()),
++        &mut FakeControl::new("source", &log),
++        &mut FakeControl {
++            recentered: Some(false),
++            ..target_control(&log, signal)
++        },
++        &Digests::default(),
++        &Settings {
++            carry_position: true,
++            crossing_position: Some([-0.5, 71.0, 1.0]),
++            ..settings()
++        },
++    )
++    .unwrap();
++    assert!(
++        log.lines()[2].contains("at=[-0.5, 71.0, 1.0]"),
++        "{:?}",
++        log.lines()
++    );
++    after_switch(&mut player);
++    attack(&mut player, TARGET_ID);
++    target_thread.join().unwrap().unwrap();
++    run.join().unwrap().unwrap();
++}
++
+ /// The target tells the player their operator level at login, as an entity event
+ /// (24 plus the level) the views do not keep: the client must still get it, in its
+ /// own numbering, after the delta and before the command tree, or it keeps the level
+diff --git a/crates/meridian-proxy/src/main.rs b/crates/meridian-proxy/src/main.rs
+index 1101e2d..fe2378f 100644
+--- a/crates/meridian-proxy/src/main.rs
++++ b/crates/meridian-proxy/src/main.rs
+@@ -28,6 +28,8 @@ mod state;
+ mod status;
+ mod switching;
+ mod throttle;
++mod wall_particles;
++mod walls;
+ 
+ use args::Command;
+ use log::{error, info, warning};
+diff --git a/crates/meridian-proxy/src/session.rs b/crates/meridian-proxy/src/session.rs
+index 031e73f..33da2fc 100644
+--- a/crates/meridian-proxy/src/session.rs
++++ b/crates/meridian-proxy/src/session.rs
+@@ -751,6 +751,24 @@ fn place(
+         }
+     };
+     let relay = relay.with_commands(commands_hook(config, sessions, &handle, &name, auth, peer));
++    let relay = if config.tiles.is_some() {
++        let hook = crate::walls::hook(
++            Arc::new(config.clone()),
++            Arc::clone(&sessions.switcher),
++            handle.clone(),
++            name.clone(),
++            peer.ip(),
++        );
++        // Off returns the original hook. There is no per-move visual branch,
++        // clock read, geometry calculation or timer when the option is disabled.
++        relay.with_positions(crate::wall_particles::with_drawing(
++            hook,
++            config,
++            handle.clone(),
++        ))
++    } else {
++        relay
++    };
+     let player = Player {
+         name: name.clone(),
+         uuid,
+diff --git a/crates/meridian-proxy/src/switching.rs b/crates/meridian-proxy/src/switching.rs
+index 557fea1..014fad0 100644
+--- a/crates/meridian-proxy/src/switching.rs
++++ b/crates/meridian-proxy/src/switching.rs
+@@ -118,7 +118,7 @@ pub fn switch(
+         handle,
+         name,
+         player_address,
+-        target,
++        (target, None),
+         &step,
+     );
+     match &result {
+@@ -134,9 +134,10 @@ fn attempt(
+     handle: &SessionHandle,
+     name: &str,
+     player_address: IpAddr,
+-    target: &str,
++    destination: (&str, Option<[f64; 3]>),
+     step: &Cell<&'static str>,
+ ) -> Result<Moved, String> {
++    let (target, crossing_position) = destination;
+     let from = handle.backend();
+     let failed = |why: String| format!("{name} could not move from {from} to {target}: {why}");
+     let Some(backend) = config.backend(target) else {
+@@ -183,6 +184,7 @@ fn attempt(
+             info!("{who}: switch to {to}: {step} (+{} ms)", at.as_millis());
+         })),
+         carry_position: config.switch_carry_position,
++        crossing_position,
+         announce_arrival: config.switch_announce_arrival,
+         announce_departure: config.switch_announce_departure,
+         freeze_limit: Duration::from_millis(config.switch_freeze_limit_ms),
+@@ -234,6 +236,33 @@ fn attempt(
+     })
+ }
+ 
++/// The ordinary handoff, with the wall's trigger position carried unchanged.
++pub fn wall(
++    config: &Config,
++    switcher: &Switcher,
++    handle: &SessionHandle,
++    name: &str,
++    address: IpAddr,
++    target: &str,
++    position: [f64; 3],
++) -> Result<Moved, String> {
++    let step = Cell::new(metrics::step_label(meridian_handoff::Step::Check));
++    let result = attempt(
++        config,
++        switcher,
++        handle,
++        name,
++        address,
++        (target, Some(position)),
++        &step,
++    );
++    match &result {
++        Ok(moved) => switcher.metrics.transfer_done(&moved.done, moved.took),
++        Err(_) => switcher.metrics.transfer_failed(step.get()),
++    }
++    result
++}
++
+ /// A switch asked for in game: the player is told it started, and how it ended;
+ /// the log gets the same line as the console's.
+ pub fn in_game(
+diff --git a/crates/meridian-config/src/tiles.rs b/crates/meridian-config/src/tiles.rs
+new file mode 100644
+index 0000000..56fd1de
+--- /dev/null
++++ b/crates/meridian-config/src/tiles.rs
+@@ -0,0 +1,227 @@
++//! The optional static tile map and its half-open, Euclidean coordinate rule.
++use crate::{Config, ConfigError};
++use serde::Deserialize;
++
++#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
++#[serde(deny_unknown_fields, rename_all = "kebab-case")]
++pub struct TileMap {
++    pub origin: [i32; 2],
++    pub edge: i32,
++    pub entries: Vec<Tile>,
++    /// Omitted or disabled means no particle hook, timer, or drawing work.
++    #[serde(default)]
++    pub wall_particles: WallParticles,
++}
++
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum WallParticle {
++    #[default]
++    Dust,
++    EndRod,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
++#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
++pub struct WallParticles {
++    pub enabled: bool,
++    pub particle: WallParticle,
++    /// RGB, used by dust. End rods carry no colour field.
++    pub colour: u32,
++    /// Whole blocks between points. The drawn patch is only eight blocks wide.
++    pub spacing: u8,
++    /// Perpendicular distance in blocks at which a wall starts drawing.
++    pub distance: u8,
++}
++
++impl Default for WallParticles {
++    fn default() -> Self {
++        Self {
++            enabled: false,
++            particle: WallParticle::Dust,
++            colour: 0x3388ff,
++            spacing: 1,
++            distance: 8,
++        }
++    }
++}
++
++impl WallParticles {
++    fn validate(&self) -> Result<(), ConfigError> {
++        if !(1..=8).contains(&self.spacing)
++            || !(1..=32).contains(&self.distance)
++            || self.colour > 0xffffff
++        {
++            return Err(ConfigError::Parse("tiles.wall-particles: spacing must be 1..8 blocks, distance 1..32 blocks, colour a 24-bit RGB value".into()));
++        }
++        Ok(())
++    }
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct Tile {
++    pub index: [i32; 2],
++    pub backend: String,
++}
++
++impl TileMap {
++    pub(crate) fn validate(&self, config: &Config) -> Result<(), ConfigError> {
++        self.wall_particles.validate()?;
++        let invalid = |why: &str| ConfigError::Parse(format!("tiles: {why}"));
++        if self.edge <= 1 || self.entries.is_empty() {
++            return Err(invalid(
++                "edge must exceed 1 block and entries must not be empty",
++            ));
++        }
++        if !config.switch_carry_position {
++            return Err(invalid("switch-carry-position must be true"));
++        }
++        for (i, tile) in self.entries.iter().enumerate() {
++            if self.entries[..i]
++                .iter()
++                .any(|t| t.index == tile.index || t.backend == tile.backend)
++            {
++                return Err(invalid("duplicate tile index or backend"));
++            }
++            if config.backend(&tile.backend).is_none()
++                || !config.sidecars.iter().any(|s| s.backend == tile.backend)
++            {
++                return Err(invalid("every tile needs a known backend with a sidecar"));
++            }
++        }
++        if !self
++            .entries
++            .iter()
++            .any(|t| t.backend == config.default_backend)
++        {
++            return Err(invalid("default backend must own a tile"));
++        }
++        Ok(())
++    }
++
++    /// Floor block coordinates, then div_euclid, as in goliath-model TileGeometry.
++    /// Reject non-finite and out-of-world coordinates before converting to integers.
++    pub fn tile_at(&self, position: [f64; 3]) -> Option<[i32; 2]> {
++        if position
++            .iter()
++            .any(|p| !p.is_finite() || p.abs() > 30_000_000.0)
++            || self.edge <= 1
++        {
++            return None;
++        }
++        Some([0, 2].map(|axis| {
++            let origin = i64::from(self.origin[usize::from(axis == 2)]);
++            ((position[axis].floor() as i64 - origin).div_euclid(i64::from(self.edge))) as i32
++        }))
++    }
++
++    /// A new owner is eligible only at least half a block inside both tile axes.
++    /// Standing on, jittering around, or walking exactly along a wall keeps the owner.
++    pub fn destination(&self, position: [f64; 3]) -> Option<&Tile> {
++        let index = self.tile_at(position)?;
++        for (axis, origin) in [(0, self.origin[0]), (2, self.origin[1])] {
++            let within = (position[axis] - f64::from(origin)).rem_euclid(f64::from(self.edge));
++            if within < 0.5 || within > f64::from(self.edge) - 0.5 {
++                return None;
++            }
++        }
++        self.entries.iter().find(|t| t.index == index)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn map() -> TileMap {
++        TileMap {
++            origin: [0, 0],
++            edge: 64,
++            wall_particles: WallParticles::default(),
++            entries: vec![
++                Tile {
++                    index: [0, 0],
++                    backend: "a".into(),
++                },
++                Tile {
++                    index: [-1, 0],
++                    backend: "b".into(),
++                },
++                Tile {
++                    index: [-1, -1],
++                    backend: "c".into(),
++                },
++                Tile {
++                    index: [0, -1],
++                    backend: "d".into(),
++                },
++            ],
++        }
++    }
++
++    #[test]
++    fn wall_particles_are_opt_in_and_bounded() {
++        let defaults: WallParticles = toml::from_str("").unwrap();
++        assert!(!defaults.enabled);
++        assert_eq!(defaults.colour, 0x3388ff);
++        assert_eq!(defaults.particle, WallParticle::Dust);
++        assert!(defaults.validate().is_ok());
++        let changed: WallParticles =
++            toml::from_str("enabled = true\nparticle = 'end_rod'\nspacing = 2\ndistance = 4")
++                .unwrap();
++        assert!(changed.enabled);
++        assert_eq!(changed.particle, WallParticle::EndRod);
++        for text in [
++            "spacing = 0",
++            "spacing = 9",
++            "distance = 0",
++            "distance = 33",
++            "colour = 0x1000000",
++        ] {
++            assert!(
++                toml::from_str::<WallParticles>(text)
++                    .unwrap()
++                    .validate()
++                    .is_err()
++            );
++        }
++        assert!(toml::from_str::<WallParticles>("particle = 'unknown'").is_err());
++    }
++
++    #[test]
++    fn euclidean_negative_coordinates_and_shifted_origin() {
++        let mut map = map();
++        for (p, expected) in [
++            (-64.01, -2),
++            (-64.0, -1),
++            (-0.01, -1),
++            (0.0, 0),
++            (63.99, 0),
++            (64.0, 1),
++        ] {
++            assert_eq!(map.tile_at([p, 4.0, p]), Some([expected, expected]));
++        }
++        map.origin = [10, -10];
++        assert_eq!(map.tile_at([9.99, 4.0, -10.01]), Some([-1, -1]));
++        assert_eq!(map.tile_at([10.0, 4.0, -10.0]), Some([0, 0]));
++        assert_eq!(map.tile_at([f64::NAN, 4.0, 0.0]), None);
++        assert_eq!(map.tile_at([30_000_001.0, 4.0, 0.0]), None);
++    }
++
++    #[test]
++    fn walls_jitter_parallel_walking_and_diagonal_corner() {
++        let map = map();
++        for p in [
++            [0.0, 4.0, 2.0],
++            [0.0, 4.0, -2.0],
++            [-0.49, 4.0, 2.0],
++            [0.49, 4.0, -2.0],
++        ] {
++            assert!(map.destination(p).is_none());
++        }
++        assert_eq!(map.destination([-0.5, 4.0, -0.5]).unwrap().backend, "c");
++        assert_eq!(map.destination([0.5, 4.0, 0.5]).unwrap().backend, "a");
++        assert!(map.destination([65.0, 4.0, 2.0]).is_none());
++    }
++}
+diff --git a/crates/meridian-proxy/src/walls.rs b/crates/meridian-proxy/src/walls.rs
+new file mode 100644
+index 0000000..50fe153
+--- /dev/null
++++ b/crates/meridian-proxy/src/walls.rs
+@@ -0,0 +1,115 @@
++//! Serialized wall handoffs with a single, coalesced deferred destination per player.
++use crate::{
++    log::{info, warning},
++    switching::{self, Switcher},
++};
++use meridian_config::Config;
++use meridian_handoff::SessionHandle;
++use std::{
++    net::IpAddr,
++    sync::{Arc, Mutex},
++};
++
++#[derive(Default)]
++struct Pending {
++    latest: Option<[f64; 3]>,
++    running: bool,
++    refused: bool,
++    outside: bool,
++}
++
++pub fn hook(
++    config: Arc<Config>,
++    switcher: Arc<Switcher>,
++    handle: SessionHandle,
++    name: String,
++    address: IpAddr,
++) -> Arc<dyn Fn([f64; 3]) + Send + Sync> {
++    let pending = Arc::new(Mutex::new(Pending::default()));
++    Arc::new(move |position| {
++        let Some(map) = &config.tiles else {
++            return;
++        };
++        let mut state = pending.lock().expect("wall state poisoned");
++        state.latest = Some(position);
++        let outside = map
++            .tile_at(position)
++            .is_none_or(|index| !map.entries.iter().any(|t| t.index == index));
++        if outside && !state.outside {
++            handle.tell("E4 wall deferred unmapped or invalid position; current backend retained");
++        }
++        state.outside = outside;
++        if state.running || state.refused {
++            return;
++        }
++        let Some(tile) = map.destination(position) else {
++            return;
++        };
++        if tile.backend == handle.backend() {
++            return;
++        }
++        state.running = true;
++        let (config, switcher, handle, name, pending) = (
++            Arc::clone(&config),
++            Arc::clone(&switcher),
++            handle.clone(),
++            name.clone(),
++            Arc::clone(&pending),
++        );
++        let refusal_handle = handle.clone();
++        let spawned = std::thread::Builder::new()
++            .name(format!("wall-{name}"))
++            .spawn(move || {
++                loop {
++                    let (position, target) = {
++                        let mut state = pending.lock().expect("wall state poisoned");
++                        let next = state.latest.and_then(|p| {
++                            config
++                                .tiles
++                                .as_ref()?
++                                .destination(p)
++                                .map(|t| (p, t.backend.clone()))
++                        });
++                        match next {
++                            Some(next) if next.1 != handle.backend() => next,
++                            _ => {
++                                state.running = false;
++                                return;
++                            }
++                        }
++                    };
++                    // No pending/state lock is held while sidecars or session locks wait.
++                    info!("{name}: wall trigger to {target} at {position:?}");
++                    handle.tell(&format!("E4 wall start {target}"));
++                    match switching::wall(
++                        &config, &switcher, &handle, &name, address, &target, position,
++                    ) {
++                        Ok(moved) if moved.alert.is_none() => {
++                            info!("{}", moved.describe(&name));
++                            handle.tell(&format!("E4 wall arrived {target}"));
++                        }
++                        result => {
++                            let why = match result {
++                                Ok(m) => m.alert.unwrap_or_default(),
++                                Err(e) => e,
++                            };
++                            warning!("wall routing stopped: {why}");
++                            handle.tell(&format!("E4 wall refused {why}"));
++                            let mut state = pending.lock().expect("wall state poisoned");
++                            state.refused = true;
++                            state.running = false;
++                            return;
++                        }
++                    }
++                    // Re-read the latest movement after commit. A reversal or another crossing
++                    // during the switch is deferred, never run concurrently. Intermediate tile
++                    // requests coalesce deliberately; this is not an input replay queue.
++                }
++            });
++        if let Err(error) = spawned {
++            state.running = false;
++            state.refused = true;
++            refusal_handle.tell(&format!("E4 wall refused cannot start worker: {error}"));
++        }
++    })
++}
+diff --git a/crates/meridian-proxy/src/wall_particles.rs b/crates/meridian-proxy/src/wall_particles.rs
+new file mode 100644
+index 0000000..0bfbe29
+--- /dev/null
++++ b/crates/meridian-proxy/src/wall_particles.rs
+@@ -0,0 +1,188 @@
++//! Bounded, throttled cosmetic particle patches on the walls nearest one player.
++use crate::log::info;
++use horizon_protocol::{
++    entity_data::{Particle, ParticleData},
++    packets::play,
++};
++use meridian_config::{Config, TileMap, WallParticle};
++use meridian_handoff::SessionHandle;
++use std::{
++    sync::{Arc, Mutex},
++    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
++};
++
++const INTERVAL: Duration = Duration::from_millis(500);
++const RADIUS: i32 = 4;
++const MAX_PARTICLES: usize = 128;
++type PositionHook = Arc<dyn Fn([f64; 3]) + Send + Sync>;
++
++pub fn with_drawing(routing: PositionHook, config: &Config, handle: SessionHandle) -> PositionHook {
++    let Some(map) = config
++        .tiles
++        .as_ref()
++        .filter(|m| m.wall_particles.enabled)
++        .cloned()
++    else {
++        return routing;
++    };
++    let last = Mutex::new(None);
++    Arc::new(move |position| {
++        routing(position);
++        let now = Instant::now();
++        if !due(&mut last.lock().expect("particle throttle poisoned"), now) {
++            return;
++        }
++        let particles = patch(&map, position);
++        if particles.is_empty() {
++            return;
++        }
++        if let Ok(bytes) = handle.send_particles(&particles)
++            && bytes > 0
++        {
++            let ns = SystemTime::now()
++                .duration_since(UNIX_EPOCH)
++                .unwrap_or_default()
++                .as_nanos();
++            info!(
++                "E4_PARTICLES {}",
++                serde_json::json!({"ns":ns,"packets":particles.len(),"wire_bytes":bytes,"player_pos":position})
++            );
++        }
++    })
++}
++
++fn due(last: &mut Option<Instant>, now: Instant) -> bool {
++    if last.is_some_and(|previous| now.duration_since(previous) < INTERVAL) {
++        return false;
++    }
++    *last = Some(now);
++    true
++}
++
++fn patch(map: &TileMap, position: [f64; 3]) -> Vec<play::LevelParticles> {
++    let Some(index) = map.tile_at(position) else {
++        return Vec::new();
++    };
++    if !map.entries.iter().any(|entry| entry.index == index) {
++        return Vec::new();
++    }
++    let settings = &map.wall_particles;
++    let particle = match settings.particle {
++        // Verified against the pinned 26.3 Particle codec and prepared registry.
++        WallParticle::Dust => Particle {
++            id: 21,
++            data: Some(ParticleData::ColorScale(settings.colour as i32, 1.0)),
++        },
++        WallParticle::EndRod => Particle { id: 27, data: None },
++    };
++    let mut packets = Vec::new();
++    for (axis, grid_axis) in [(0, 0), (2, 1)] {
++        let lower =
++            f64::from(map.origin[grid_axis]) + f64::from(index[grid_axis]) * f64::from(map.edge);
++        for wall in [lower, lower + f64::from(map.edge)] {
++            if (position[axis] - wall).abs() > f64::from(settings.distance) {
++                continue;
++            }
++            let along = if axis == 0 { 2 } else { 0 };
++            for offset in (-RADIUS..=RADIUS).step_by(usize::from(settings.spacing)) {
++                for height in (0..=3).step_by(usize::from(settings.spacing)) {
++                    if packets.len() == MAX_PARTICLES {
++                        return packets;
++                    }
++                    let mut pos = position;
++                    pos[axis] = wall;
++                    pos[along] += f64::from(offset);
++                    pos[1] += 0.2 + f64::from(height);
++                    packets.push(play::LevelParticles {
++                        particle: particle.clone(),
++                        override_limiter: false,
++                        always_show: false,
++                        pos,
++                        dist: [0.0; 3],
++                        max_speed: [0.0; 3],
++                        count: 1,
++                        randomization: 0,
++                    });
++                }
++            }
++        }
++    }
++    packets
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use meridian_config::{Tile, WallParticles};
++
++    fn map() -> TileMap {
++        TileMap {
++            origin: [0, 0],
++            edge: 64,
++            entries: vec![Tile {
++                index: [0, 0],
++                backend: "a".into(),
++            }],
++            wall_particles: WallParticles {
++                enabled: true,
++                ..WallParticles::default()
++            },
++        }
++    }
++
++    #[test]
++    fn near_blue_dust_far_none_and_bounded_patch() {
++        let map = map();
++        let packets = patch(&map, [1.0, -60.0, 1.0]);
++        assert_eq!(packets.len(), 72);
++        for p in &packets {
++            assert!(p.pos[0] == 0.0 || p.pos[2] == 0.0);
++            assert!(p.pos[0].abs() <= 5.0 && p.pos[2].abs() <= 5.0);
++            assert!((0.2..=3.21).contains(&(p.pos[1] + 60.0)));
++            assert_eq!(
++                p.particle.data,
++                Some(ParticleData::ColorScale(0x3388ff, 1.0))
++            );
++            let encoded = play::Clientbound::LevelParticles(p.clone()).encode();
++            assert!(matches!(
++                play::Clientbound::decode(48, &encoded[1..]).unwrap(),
++                play::Clientbound::LevelParticles(_)
++            ));
++        }
++        assert!(patch(&map, [16.0, -60.0, 16.0]).is_empty());
++        assert!(patch(&map, [f64::NAN, 0.0, 0.0]).is_empty());
++        let mut tiny = map.clone();
++        tiny.edge = 2;
++        assert_eq!(patch(&tiny, [1.0, 0.0, 1.0]).len(), MAX_PARTICLES);
++    }
++
++    #[test]
++    fn spacing_type_colour_and_throttle() {
++        let mut map = map();
++        map.wall_particles.spacing = 2;
++        map.wall_particles.particle = WallParticle::EndRod;
++        assert_eq!(patch(&map, [1.0, 0.0, 1.0]).len(), 20);
++        assert!(
++            patch(&map, [1.0, 0.0, 1.0])
++                .iter()
++                .all(|p| p.particle.id == 27 && p.particle.data.is_none())
++        );
++        let now = Instant::now();
++        let mut last = None;
++        assert!(due(&mut last, now));
++        assert!(!due(&mut last, now + Duration::from_millis(499)));
++        assert!(due(&mut last, now + INTERVAL));
++    }
++
++    #[test]
++    fn particles_default_to_off() {
++        let config = Config::default();
++        assert!(
++            config
++                .tiles
++                .as_ref()
++                .filter(|m| m.wall_particles.enabled)
++                .is_none()
++        );
++    }
++}
+diff --git a/crates/meridian-testkit/src/bin/e4-client.rs b/crates/meridian-testkit/src/bin/e4-client.rs
+new file mode 100644
+index 0000000..bc19861
+--- /dev/null
++++ b/crates/meridian-testkit/src/bin/e4-client.rs
+@@ -0,0 +1,246 @@
++//! E4's kinematic waypoint player. No Minecraft command packets are sent.
++// Copyright (c) 2026 Akirabane. MIT license, as in this workspace's LICENSE.
++use horizon_protocol::{
++    connection::Connection,
++    ids,
++    packets::{Empty, configuration as cfg, play},
++};
++use meridian_testkit::{client::FakeClient, trace::Recorder};
++use serde_json::json;
++use std::{
++    collections::HashMap,
++    io::{self, BufRead, Write},
++    sync::{atomic::Ordering, mpsc},
++    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
++};
++
++fn now() -> u128 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap()
++        .as_nanos()
++}
++fn emit(value: serde_json::Value) {
++    println!("{value}");
++    io::stdout().flush().unwrap();
++}
++
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let port: u16 = std::env::args().nth(1).ok_or("port required")?.parse()?;
++    let mut connection = Connection::connect("127.0.0.1", port, Duration::from_secs(5))?;
++    let client = FakeClient {
++        host: "127.0.0.1".into(),
++        port,
++        ..FakeClient::named("E4Probe")
++    };
++    client.run(&mut connection, &Recorder::new())?;
++    let counters = connection.reader.counters.clone();
++    connection
++        .reader
++        .set_read_timeout(Some(Duration::from_millis(2)))?;
++    connection.send(
++        &cfg::Serverbound::ClientInformation(cfg::ClientInformation {
++            language: "en_us".into(),
++            view_distance: 3,
++            chat_visibility: 0,
++            chat_colors: true,
++            model_customisation: 127,
++            main_hand: 1,
++            text_filtering: false,
++            allows_listing: true,
++            particle_status: 0,
++        })
++        .encode(),
++    )?;
++    let (tx, rx) = mpsc::channel();
++    std::thread::spawn(move || {
++        for line in io::stdin().lock().lines() {
++            match line {
++                Ok(line) => {
++                    if tx.send(line).is_err() {
++                        break;
++                    }
++                }
++                Err(_) => break,
++            }
++        }
++    });
++    let mut playing = false;
++    let mut loaded = false;
++    let mut pose = [0.0; 3];
++    let mut goal: Option<(String, [f64; 2])> = None;
++    let mut reached = false;
++    let mut next = Instant::now();
++    loop {
++        while let Ok(order) = rx.try_recv() {
++            if order == "quit" {
++                connection.writer.shutdown();
++                return Ok(());
++            }
++            let parts: Vec<_> = order.split_whitespace().collect();
++            match parts.as_slice() {
++                ["walk", token, x, z] => {
++                    goal = Some((token.to_string(), [x.parse()?, z.parse()?]));
++                    reached = false;
++                    emit(
++                        json!({"kind":"walk", "token":token, "ns":now(), "from":pose, "to":[x.parse::<f64>()?,z.parse::<f64>()?]}),
++                    );
++                }
++                ["snapshot", token] => {
++                    emit(json!({"kind":"snapshot", "token":token, "ns":now(), "pos":pose}))
++                }
++                _ => return Err("expected walk TOKEN X Z, snapshot TOKEN, or quit".into()),
++            }
++        }
++        if playing && loaded && Instant::now() >= next {
++            next = Instant::now() + Duration::from_millis(50);
++            if let Some((_, destination)) = &goal {
++                let dx = destination[0] - pose[0];
++                let dz = destination[1] - pose[2];
++                let length = dx.hypot(dz);
++                let scale = if length > 0.0 {
++                    (0.28 / length).min(1.0)
++                } else {
++                    0.0
++                };
++                pose[0] += dx * scale;
++                pose[2] += dz * scale;
++                if length <= 0.28 && !reached {
++                    reached = true;
++                    emit(
++                        json!({"kind":"reached", "token":goal.as_ref().unwrap().0, "ns":now(), "pos":pose}),
++                    );
++                }
++            }
++            emit(json!({"kind":"move", "ns":now(), "pos":pose}));
++            connection.send(
++                &play::Serverbound::MovePlayerPos(play::MovePlayerPos {
++                    x: pose[0],
++                    y: pose[1],
++                    z: pose[2],
++                    flags: 1,
++                })
++                .encode(),
++            )?;
++            connection.send(&play::Serverbound::ClientTickEnd(Empty).encode())?;
++        }
++        let (id, payload) = match connection.recv() {
++            Ok(value) => value,
++            Err(e) if e.is_timed_out() => continue,
++            Err(e) => {
++                emit(json!({"kind":"disconnect", "ns":now(), "error":e.to_string()}));
++                return Err(e.into());
++            }
++        };
++        if !playing {
++            let reply = match id {
++                ids::configuration::clientbound::KEEP_ALIVE => {
++                    match cfg::Clientbound::decode(id, &payload)? {
++                        cfg::Clientbound::KeepAlive(p) => {
++                            Some(cfg::Serverbound::KeepAlive(p).encode())
++                        }
++                        _ => None,
++                    }
++                }
++                ids::configuration::clientbound::PING => {
++                    match cfg::Clientbound::decode(id, &payload)? {
++                        cfg::Clientbound::Ping(p) => Some(cfg::Serverbound::Pong(p).encode()),
++                        _ => None,
++                    }
++                }
++                ids::configuration::clientbound::SELECT_KNOWN_PACKS => Some(
++                    cfg::Serverbound::SelectKnownPacks(cfg::SelectKnownPacks { packs: vec![] })
++                        .encode(),
++                ),
++                ids::configuration::clientbound::CODE_OF_CONDUCT => {
++                    Some(cfg::Serverbound::AcceptCodeOfConduct(Empty).encode())
++                }
++                ids::configuration::clientbound::FINISH_CONFIGURATION => {
++                    playing = true;
++                    Some(cfg::Serverbound::FinishConfiguration(Empty).encode())
++                }
++                _ => None,
++            };
++            if let Some(reply) = reply {
++                connection.send(&reply)?;
++            }
++            continue;
++        }
++        match id {
++            ids::play::clientbound::LEVEL_PARTICLES => {
++                if let play::Clientbound::LevelParticles(p) =
++                    play::Clientbound::decode(id, &payload)?
++                {
++                    let colour = match p.particle.data {
++                        Some(horizon_protocol::entity_data::ParticleData::ColorScale(
++                            colour,
++                            _,
++                        )) => Some(colour),
++                        _ => None,
++                    };
++                    emit(
++                        json!({"kind":"particle", "ns":now(), "id":p.particle.id, "colour":colour, "pos":p.pos, "count":p.count}),
++                    );
++                }
++            }
++            ids::play::clientbound::KEEP_ALIVE => {
++                if let play::Clientbound::KeepAlive(p) = play::Clientbound::decode(id, &payload)? {
++                    connection.send(&play::Serverbound::KeepAlive(p).encode())?;
++                }
++            }
++            ids::play::clientbound::PING => {
++                if let play::Clientbound::Ping(p) = play::Clientbound::decode(id, &payload)? {
++                    connection.send(&play::Serverbound::Pong(p).encode())?;
++                }
++            }
++            ids::play::clientbound::CHUNK_BATCH_FINISHED => {
++                connection.send(
++                    &play::Serverbound::ChunkBatchReceived(play::ChunkBatchReceived {
++                        chunks_per_tick: 64.0,
++                    })
++                    .encode(),
++                )?;
++            }
++            ids::play::clientbound::PLAYER_POSITION => {
++                if let play::Clientbound::PlayerPosition(p) =
++                    play::Clientbound::decode(id, &payload)?
++                {
++                    let before = pose;
++                    if p.relatives != 0 {
++                        return Err("relative teleport unsupported".into());
++                    }
++                    pose = p.position;
++                    reached = false;
++                    emit(
++                        json!({"kind":"teleport", "ns":now(), "before":before, "pos":pose, "delta":p.delta, "flags":p.relatives, "bytes":counters.bytes_in.load(Ordering::Relaxed)}),
++                    );
++                    connection.send(
++                        &play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {
++                            id: p.teleport,
++                            x: pose[0],
++                            y: pose[1],
++                            z: pose[2],
++                            yaw: p.yaw,
++                            pitch: p.pitch,
++                        })
++                        .encode(),
++                    )?;
++                    connection.send(&play::Serverbound::PlayerLoaded(Empty).encode())?;
++                    loaded = true;
++                }
++            }
++            ids::play::clientbound::SYSTEM_CHAT => {
++                if let play::Clientbound::SystemChat(p) = play::Clientbound::decode(id, &payload)? {
++                    emit(
++                        json!({"kind":"chat", "ns":now(), "text":horizon_protocol::text::plain(&p.content,&HashMap::new()), "bytes":counters.bytes_in.load(Ordering::Relaxed)}),
++                    );
++                }
++            }
++            ids::play::clientbound::START_CONFIGURATION | ids::play::clientbound::DISCONNECT => {
++                emit(json!({"kind":"disconnect", "ns":now(), "id":id}));
++                return Err("unexpected disconnect or reconfiguration".into());
++            }
++            _ => {}
++        }
++    }
++}

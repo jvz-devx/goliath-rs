@@ -1,7 +1,63 @@
 //! Owns deterministic replay, shrinking and hostile crash-cut tests.
 
 use goliath_model::{ItemId, PlayerId, Policy, TileId};
-use goliath_sim::{Action, Fault, FaultAt, SETUPS, Scenario, run, shrink};
+use goliath_sim::{
+    Action, Fault, FaultAt, Mutation, SETUPS, Scenario, Settings, run, run_with_settings, shrink,
+};
+
+#[test]
+fn every_permanent_protocol_mutation_is_caught() {
+    for (mutation, policy) in Mutation::CASES {
+        let caught = SETUPS.into_iter().any(|latency| {
+            (0..512).any(|seed| {
+                let scenario = Scenario::seeded(seed, latency);
+                let result = run_with_settings(
+                    &scenario,
+                    policy,
+                    false,
+                    Settings {
+                        mutation,
+                        ..Settings::default()
+                    },
+                );
+                result.violated() || result.losses > 0
+            })
+        });
+        assert!(caught, "{mutation:?} escaped the independent checker");
+    }
+}
+
+#[test]
+fn delayed_abort_exposes_a_stale_cas_without_perfect_failure_detection() {
+    let scenario = Scenario::seeded(14, SETUPS[0]);
+    let safe = run(&scenario, Policy::P2, false);
+    assert!(!safe.violated() && safe.losses == 0);
+    let broken = run_with_settings(
+        &scenario,
+        Policy::P2,
+        false,
+        Settings {
+            mutation: Mutation::UnfencedCas,
+            ..Settings::default()
+        },
+    );
+    assert!(broken.stale_writes > 0);
+}
+
+#[test]
+fn instant_abort_reproduction_preserves_e1_trace_hash() {
+    let scenario = Scenario::seeded(6, SETUPS[0]);
+    let old = run_with_settings(
+        &scenario,
+        Policy::P1,
+        false,
+        Settings {
+            abort_delay_ms: 0,
+            ..Settings::default()
+        },
+    );
+    assert_eq!(old.hash, 0x4934_31a8_a166_6ee6);
+}
 
 #[test]
 fn same_seed_has_bit_identical_trace_hash_and_trace() {
@@ -16,15 +72,15 @@ fn same_seed_has_bit_identical_trace_hash_and_trace() {
 }
 
 #[test]
-fn p0_and_p1_fail_on_the_same_workload_safe_policies_survive() {
-    let mut failures = [0; 5];
+fn unsafe_controls_fail_on_the_same_workload_p2_p4_p5_survive() {
+    let mut failures = [0; 6];
     for seed in 0..48 {
         for (i, policy) in Policy::ALL.into_iter().enumerate() {
             let outcome = run(&Scenario::seeded(seed, SETUPS[0]), policy, false);
             if outcome.violated() {
                 failures[i] += 1;
             }
-            if i >= 2 {
+            if matches!(policy, Policy::P2 | Policy::P4 | Policy::P5) {
                 assert!(
                     !outcome.violated(),
                     "{policy:?} seed={seed}: {:?}",
@@ -35,6 +91,10 @@ fn p0_and_p1_fail_on_the_same_workload_safe_policies_survive() {
         }
     }
     assert!(failures[0] > 0 && failures[1] > 0);
+    assert!(
+        failures[3] > 0,
+        "P3's speculative rollback needs immediate global aborts"
+    );
 }
 
 #[test]
@@ -63,7 +123,7 @@ fn shrunk_counterexample_replays_and_is_one_minimal() {
 
 #[test]
 fn crash_every_millisecond_through_handover_and_checkpoint() {
-    for policy in [Policy::P2, Policy::P3, Policy::P4] {
+    for policy in [Policy::P2, Policy::P3, Policy::P4, Policy::P5] {
         for tile in 0..3 {
             for at in 0..180 {
                 let scenario = Scenario {
@@ -83,7 +143,17 @@ fn crash_every_millisecond_through_handover_and_checkpoint() {
                         (18, PlayerId(2), Action::Cross(TileId(2)), ItemId(4)),
                     ],
                 };
-                let outcome = run(&scenario, policy, false);
+                let outcome = run_with_settings(
+                    &scenario,
+                    policy,
+                    false,
+                    Settings {
+                        // Retain E1's P3 crash-cut regression, and test its delayed
+                        // abort failure independently rather than claiming it safe.
+                        abort_delay_ms: if policy == Policy::P3 { 0 } else { 40 },
+                        ..Settings::default()
+                    },
+                );
                 assert!(
                     !outcome.violated(),
                     "{policy:?} tile={tile} at={at}: {:?}",
@@ -92,6 +162,33 @@ fn crash_every_millisecond_through_handover_and_checkpoint() {
             }
         }
     }
+}
+
+#[test]
+fn p3_speculative_route_duplicates_when_cluster_abort_is_delayed() {
+    let scenario = Scenario {
+        seed: 0,
+        latency: SETUPS[0],
+        inputs: vec![
+            (0, PlayerId(1), Action::Take, ItemId(0)),
+            (6, PlayerId(1), Action::Cross(TileId(1)), ItemId(0)),
+        ],
+        faults: vec![FaultAt {
+            at: 18,
+            fault: Fault::Crash(TileId(0)),
+        }],
+    };
+    assert!(run(&scenario, Policy::P3, false).duplicates > 0);
+    let old = run_with_settings(
+        &scenario,
+        Policy::P3,
+        false,
+        Settings {
+            abort_delay_ms: 0,
+            ..Settings::default()
+        },
+    );
+    assert!(!old.violated() && old.losses == 0);
 }
 
 #[test]

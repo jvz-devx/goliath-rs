@@ -1,0 +1,2193 @@
+diff --git a/crates/horizon-client-render/src/block_entities.rs b/crates/horizon-client-render/src/block_entities.rs
+index 8a09fe4f3..92d30a806 100644
+--- a/crates/horizon-client-render/src/block_entities.rs
++++ b/crates/horizon-client-render/src/block_entities.rs
+@@ -45,6 +45,9 @@ pub enum Ticking {
+ 
+ #[derive(Default)]
+ pub struct BlockEntities {
++    /// E6 is opt-in. Every mutable borrow is conservatively a possible item change.
++    cut_revisions: Option<HashMap<(i32, i32), u64>>,
++    cut_unloads: u64,
+     map: HashMap<Pos, BlockEntity>,
+     attachments: HashMap<Pos, horizon_world::attachments::Attachments>,
+     /// `Level.blockEntityTickers`: positions and the slot each was given.
+@@ -104,6 +107,31 @@ fn chunk_of((x, _, z): Pos) -> (i32, i32) {
+     (x >> 4, z >> 4)
+ }
+ 
++#[cfg(test)]
++mod cut_tests {
++    use super::*;
++    #[test]
++    fn mutable_container_access_tracks_without_a_chunk_block_edit() {
++        let mut entities = BlockEntities::default();
++        let p = (8, 70, 8);
++        entities.insert(p, BlockEntity::Chest(vec![None; 27]));
++        entities.track_cuts();
++        let before = entities.cut_revision((0, 0));
++        entities.get_mut(&p).unwrap().slots_mut()[0] = None;
++        assert!(entities.cut_revision((0, 0)) > before);
++        let before = entities.cut_revision((0, 0));
++        let value = entities.take(&p).unwrap();
++        entities.put(p, value);
++        assert!(entities.cut_revision((0, 0)) > before);
++        let before = entities.cut_revision((0, 0));
++        entities.attachments_mut(p).unwrap();
++        assert!(entities.cut_revision((0, 0)) > before);
++        let before = entities.cut_revision((0, 0));
++        entities.clear();
++        assert!(entities.cut_revision((0, 0)) > before);
++    }
++}
++
+ /// Takes `pos` out of its chunk's mod block entity set.
+ fn forget_mod(mods: &mut FxHashMap<(i32, i32), FxHashSet<Pos>>, pos: Pos) {
+     let chunk = chunk_of(pos);
+@@ -185,6 +213,37 @@ pub fn chunk_map_order(positions: impl IntoIterator<Item = Pos>) -> Vec<Pos> {
+ }
+ 
+ impl BlockEntities {
++    pub fn track_cuts(&mut self) {
++        self.cut_revisions.get_or_insert_with(HashMap::new);
++    }
++    pub fn cut_unloads(&self) -> u64 {
++        self.cut_unloads
++    }
++    pub fn cut_revision(&self, key: (i32, i32)) -> u64 {
++        self.cut_revisions
++            .as_ref()
++            .and_then(|m| m.get(&key))
++            .copied()
++            .unwrap_or(0)
++    }
++    fn cut_changed(&mut self, pos: Pos) {
++        // Compile-time fault injection, never a runtime performance option.
++        if option_env!("HORIZON_E6_SKIP_CONTAINERS").is_some() {
++            return;
++        }
++        if let Some(revisions) = &mut self.cut_revisions {
++            let revision = revisions.entry(chunk_of(pos)).or_default();
++            *revision = revision.saturating_add(1);
++        }
++    }
++    fn cut_changed_all(&mut self) {
++        if self.cut_revisions.is_some() {
++            let positions: Vec<_> = self.map.keys().copied().collect();
++            for pos in positions {
++                self.cut_changed(pos);
++            }
++        }
++    }
+     /// Whether the ticking table has been built.
+     pub fn has_states(&self) -> bool {
+         !self.states.is_empty()
+@@ -243,6 +302,7 @@ impl BlockEntities {
+         if !self.map.contains_key(&pos) && !self.out.contains(&pos) {
+             return None;
+         }
++        self.cut_changed(pos);
+         Some(self.attachments.entry(pos).or_default())
+     }
+     /// Attachment maps in a loaded chunk, for a save snapshot.
+@@ -259,6 +319,7 @@ impl BlockEntities {
+     }
+     /// Restore a loaded block entity's attachment map.
+     pub fn restore_attachments(&mut self, pos: Pos, data: horizon_world::attachments::Attachments) {
++        self.cut_changed(pos);
+         if self.map.contains_key(&pos) {
+             self.attachments.insert(pos, data);
+         }
+@@ -299,14 +360,17 @@ impl BlockEntities {
+         self.map.get(pos)
+     }
+     pub fn get_mut(&mut self, pos: &Pos) -> Option<&mut BlockEntity> {
++        self.cut_changed(*pos);
+         self.asleep.remove(pos);
+         self.map.get_mut(pos)
+     }
+     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&Pos, &mut BlockEntity)> {
++        self.cut_changed_all();
+         self.asleep.clear();
+         self.map.iter_mut()
+     }
+     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut BlockEntity> {
++        self.cut_changed_all();
+         self.asleep.clear();
+         self.map.values_mut()
+     }
+@@ -324,6 +388,7 @@ impl BlockEntities {
+     /// `/data merge block`), where vanilla keeps the object, so its
+     /// attachments stay; any other replacement starts them over.
+     pub fn insert(&mut self, pos: Pos, entity: BlockEntity) -> Option<BlockEntity> {
++        self.cut_changed(pos);
+         let new_is_mod = matches!(entity, BlockEntity::Mod(_));
+         let same_type = |old: &BlockEntity| match (old, &entity) {
+             (BlockEntity::Mod(old), BlockEntity::Mod(new)) => old.id == new.id,
+@@ -356,6 +421,7 @@ impl BlockEntities {
+         pos: Pos,
+         make: impl FnOnce() -> BlockEntity,
+     ) -> &mut BlockEntity {
++        self.cut_changed(pos);
+         let absent = !self.map.contains_key(&pos);
+         if absent {
+             self.add(pos);
+@@ -372,6 +438,7 @@ impl BlockEntities {
+     }
+     /// `LevelChunk.removeBlockEntity`: the block entity and its slot.
+     pub fn remove(&mut self, pos: &Pos) -> Option<BlockEntity> {
++        self.cut_changed(*pos);
+         self.attachments.remove(pos);
+         self.asleep.remove(pos);
+         self.cancel(pos);
+@@ -385,6 +452,7 @@ impl BlockEntities {
+     /// The block entity at `pos`, out of the map for a while: its slot stays
+     /// for `put` to bring it back (a tick working on it).
+     pub fn take(&mut self, pos: &Pos) -> Option<BlockEntity> {
++        self.cut_changed(*pos);
+         self.asleep.remove(pos);
+         let taken = self.map.remove(pos);
+         if taken.is_some() {
+@@ -394,6 +462,7 @@ impl BlockEntities {
+     }
+     /// Brings back what `take` took, in its slot.
+     pub fn put(&mut self, pos: Pos, entity: BlockEntity) {
++        self.cut_changed(pos);
+         self.out.remove(&pos);
+         self.asleep.remove(&pos);
+         if matches!(entity, BlockEntity::Mod(_)) {
+@@ -411,6 +480,9 @@ impl BlockEntities {
+     /// the positions `gone` names and changes none it keeps, so those that
+     /// sleep stay asleep (a moving player unloads chunks most ticks).
+     pub fn unload(&mut self, mut gone: impl FnMut(&Pos) -> bool) {
++        if self.cut_revisions.is_some() {
++            self.cut_unloads = self.cut_unloads.saturating_add(1);
++        }
+         let asleep = std::mem::take(&mut self.asleep);
+         self.retain(|p, _| !gone(p));
+         self.asleep = asleep;
+@@ -420,6 +492,7 @@ impl BlockEntities {
+     /// Removes the block entities `keep` refuses, and their slots
+     /// (`clearAllBlockEntities` of unloaded chunks).
+     pub fn retain(&mut self, mut keep: impl FnMut(&Pos, &mut BlockEntity) -> bool) {
++        self.cut_changed_all();
+         let (live, pending, freed, attachments) = (
+             &mut self.live,
+             &mut self.pending,
+@@ -441,6 +514,7 @@ impl BlockEntities {
+         });
+     }
+     pub fn clear(&mut self) {
++        self.cut_changed_all();
+         self.attachments.clear();
+         self.map.clear();
+         self.mods.clear();
+@@ -462,6 +536,7 @@ impl BlockEntities {
+     pub fn load_chunk(&mut self, entities: Vec<(Pos, BlockEntity)>) {
+         let order = chunk_map_order(entities.iter().map(|(p, _)| *p));
+         for (p, e) in entities {
++            self.cut_changed(p);
+             self.attachments.remove(&p);
+             self.asleep.remove(&p);
+             let new_is_mod = matches!(e, BlockEntity::Mod(_));
+diff --git a/crates/horizon-client/src/command_storage.rs b/crates/horizon-client/src/command_storage.rs
+index 560423e90..faf0b27d1 100644
+--- a/crates/horizon-client/src/command_storage.rs
++++ b/crates/horizon-client/src/command_storage.rs
+@@ -46,7 +46,7 @@ impl CommandStorage {
+         s
+     }
+     pub fn save(&mut self, root: &Path) {
+-        if !self.dirty {
++        if !self.dirty && !save::cut_active() {
+             return;
+         }
+         self.dirty = false;
+diff --git a/crates/horizon-client/src/game/bossbars.rs b/crates/horizon-client/src/game/bossbars.rs
+index 7320174d7..21c284533 100644
+--- a/crates/horizon-client/src/game/bossbars.rs
++++ b/crates/horizon-client/src/game/bossbars.rs
+@@ -110,7 +110,8 @@ impl Game<'_> {
+         if !self.bosses.loaded || self.remote.is_some() {
+             return;
+         }
+-        if self.bosses.bars.bars.is_empty() && !self.bossbar_path().exists() {
++        if !save::cut_active() && self.bosses.bars.bars.is_empty() && !self.bossbar_path().exists()
++        {
+             return;
+         }
+         if let Err(e) = save::write_dat(
+diff --git a/crates/horizon-client/src/game/dedicated.rs b/crates/horizon-client/src/game/dedicated.rs
+index c5adbc1ae..5c80bf9b5 100644
+--- a/crates/horizon-client/src/game/dedicated.rs
++++ b/crates/horizon-client/src/game/dedicated.rs
+@@ -38,6 +38,7 @@ pub(super) mod events;
+ mod management;
+ mod report;
+ mod status;
++mod tile_cut;
+ mod transfer;
+ 
+ /// What the tick loop tells `ServerWatchdog`: when the tick in progress was
+@@ -792,6 +793,8 @@ fn append(to: &mut Tag, sibling: Tag) {
+ 
+ /// What the server loop keeps between ticks.
+ struct ServerState {
++    /// E6's snapshot history and single grouped log writer.
++    tile_cut: Option<tile_cut::Runtime>,
+     lists: Arc<Mutex<Lists>>,
+     console: mpsc::Receiver<String>,
+     empty_ticks: i32,
+@@ -917,6 +920,7 @@ impl Game<'_> {
+         // Main's WorldLoader: a new world's dimensions come from
+         // server.properties before the server starts.
+         let world_dir = std::env::current_dir()?.join(&universe).join(&level_name);
++        tile_cut::restore_configured(&world_dir)?;
+         let new_world = !world_dir.join("level.dat").exists();
+         if new_world {
+             self.write_world_gen(&world_dir, &props)?;
+@@ -1258,6 +1262,7 @@ impl Game<'_> {
+         // The dedicated server's open is complete before its first tick.
+         self.native_lifecycle_world_ready();
+         let mut state = ServerState {
++            tile_cut: None,
+             lists,
+             console,
+             empty_ticks: 0,
+@@ -1283,6 +1288,8 @@ impl Game<'_> {
+         let watchdog = Watchdog::start(props.max_tick_time);
+         let mut braked = Instant::now();
+         let mut overload_warned: Option<Instant> = None;
++        let fast_cut_control = std::env::var_os("HORIZON_E3_CUT_DIR").is_some();
++        let mut idle_control_work = Duration::ZERO;
+         // `/stop`, or a stop signal (the shutdown hook's `halt`): either way the players and levels are
+         // saved below.
+         while !state.lists.lock().unwrap().stop && horizon_threads::stop_requests() == 0 {
+@@ -1388,7 +1395,11 @@ impl Game<'_> {
+                 self.kick_idle(idle_timeout);
+             }
+             // MinecraftServer.tickServer records each tick's time, for /tick query (and the status).
+-            self.clock.record(tick_start.elapsed());
++            let measured_tick = tick_start.elapsed() + std::mem::take(&mut idle_control_work);
++            self.clock.record(measured_tick);
++            if std::env::var_os("HORIZON_E3_TIMINGS").is_some() {
++                eprintln!("E3_TICK {}", measured_tick.as_secs_f64() * 1000.0);
++            }
+             // The far ring's brake, once a second on the average tick.
+             if braked.elapsed() >= Duration::from_secs(1)
+                 && let Some(host) = self.lan.as_mut()
+@@ -1401,7 +1412,28 @@ impl Game<'_> {
+             state.ticked(Instant::now());
+             // MinecraftServer.runServer: a server more than a second's ticks
+             // behind skips them and says so, at most every 15 seconds.
+-            if let Some(behind) = self.wait_for_next_server_tick(&mut next, paused)
++            let waited = if fast_cut_control {
++                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                    self.wait_for_next_server_tick_with(
++                        &mut next,
++                        paused,
++                        Some(&mut |game| {
++                            let start = Instant::now();
++                            game.poll_server_control(&mut state);
++                            idle_control_work += start.elapsed();
++                        }),
++                    )
++                })) {
++                    Ok(behind) => behind,
++                    Err(payload) => {
++                        crashed = Some(panic_message(payload.as_ref()));
++                        break;
++                    }
++                }
++            } else {
++                self.wait_for_next_server_tick(&mut next, paused)
++            };
++            if let Some(behind) = waited
+                 && overload_warned.is_none_or(|at| at.elapsed() >= OVERLOAD_WARNING_INTERVAL)
+             {
+                 overload_warned = Some(Instant::now());
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+index f09139d0e..63abe5846 100644
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -47,6 +47,11 @@ impl Game<'_> {
+             // A `console stop` just before stops this server for the next request too.
+             self.note_stopping(state.lists.lock().unwrap().stop);
+             let reply = match request.line.trim().split_once(' ') {
++                Some(("tile-cut", args)) => {
++                    self.tile_cut_request(args, request.reply.clone(), &mut state.tile_cut);
++                    continue;
++                }
++                Some(("tile-fence", args)) => super::tile_cut::fence_request(args),
+                 _ if request.line.trim() == "server-status" => self.server_status(state),
+                 // A proxy reading whether it may send players here (transfer.rs).
+                 _ if request.line.trim() == "transfer-status" => self.transfer_status(),
+diff --git a/crates/horizon-client/src/game/dedicated/tile_cut.rs b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+new file mode 100644
+index 000000000..a1c5aa0f7
+--- /dev/null
++++ b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+@@ -0,0 +1,735 @@
++//! E6's tick-boundary snapshots. The sole worker owns encoding, append and compaction.
++use crate::game::Game;
++use horizon_client::{
++    Result,
++    biome::Biomes,
++    chunk::{Chunk, LevelShape},
++    save::{self, Level, SaveTables},
++};
++use horizon_core::position::ChunkPos;
++use horizon_world::{
++    compression::Compression,
++    nbt::{self, Limits, NamedTag, Tag},
++    registry::BlockRegistry,
++};
++use serde_json::{Value, json};
++use std::{
++    collections::{HashMap, HashSet},
++    path::{Path, PathBuf},
++    sync::{
++        Arc, Weak,
++        mpsc::{self, Receiver, Sender},
++    },
++    time::Instant,
++};
++mod store;
++
++fn configured() -> Result<(PathBuf, String)> {
++    let root = std::env::var_os("HORIZON_E3_CUT_DIR").ok_or("tile cuts are off")?;
++    let fence = std::env::var("HORIZON_E3_FENCE")?;
++    if fence.is_empty() || fence == "-" || fence.chars().any(char::is_whitespace) {
++        return Err("the process needs a nonempty opaque fence".into());
++    }
++    Ok((PathBuf::from(root), fence))
++}
++pub(super) fn fence_request(args: &str) -> Value {
++    let result = (|| -> Result<()> {
++        let (root, _) = configured()?;
++        let parts: Vec<_> = args.split_whitespace().collect();
++        if parts.len() != 2 || parts[1] == "-" {
++            return Err("tile-fence needs expected-token new-token".into());
++        }
++        store::claim(&root, parts[0], parts[1])
++    })();
++    match result {
++        Ok(()) => json!({"ok":true}),
++        Err(e) => json!({"error":e.to_string()}),
++    }
++}
++pub(super) fn restore_configured(world: &Path) -> Result<()> {
++    if std::env::var_os("HORIZON_E3_CUT_DIR").is_none() {
++        return Ok(());
++    }
++    let (root, token) = configured()?;
++    if !root.is_absolute() || root.starts_with(world) || world.starts_with(&root) {
++        return Err("cut directory must be absolute and outside the working world".into());
++    }
++    let _session = save::SessionLock::acquire(world)?;
++    if let Some(head) = store::restore(&root, &token, world)? {
++        eprintln!("E3_RESTORED {}", serde_json::to_string(&head)?);
++    }
++    Ok(())
++}
++type Key = (String, i32, i32);
++struct Seen {
++    chunk: Weak<Chunk>,
++    revision: u64,
++    pistons: bool,
++}
++pub(super) struct Runtime {
++    send: Sender<Work>,
++    done: Receiver<std::result::Result<(), String>>,
++    seen: HashMap<Key, Seen>,
++    names: HashMap<String, Vec<((i32, i32, i32), String)>>,
++    unloads: HashMap<String, u64>,
++    players: Option<HashSet<u128>>,
++    pending: usize,
++    poisoned: bool,
++    initialized: bool,
++}
++struct Terrain {
++    prefix: String,
++    chunks: Vec<Arc<Chunk>>,
++    metadata: Vec<ChunkMetadata>,
++    entities: Vec<((i32, i32), Vec<Tag>)>,
++    registry: &'static BlockRegistry,
++    biomes: Arc<Biomes>,
++    tables: Option<Arc<SaveTables>>,
++    shape: LevelShape,
++    forced: HashSet<(i32, i32)>,
++}
++struct ChunkMetadata {
++    key: [i32; 2],
++    time: i64,
++    inhabited: i64,
++    blocks: Vec<horizon_core::ticks::SavedTick>,
++    fluids: Vec<horizon_core::ticks::SavedTick>,
++}
++struct Work {
++    tick: i64,
++    terrain: Vec<Terrain>,
++    tags: Vec<(String, Tag)>,
++    json: Vec<(String, Value)>,
++    level: Level,
++    clock: (f32, f32, bool),
++    bootstrap: Option<store::Files>,
++    start: Instant,
++    tick_ms: f64,
++    capture_ms: f64,
++    export: Option<Value>,
++    reply: Sender<String>,
++}
++impl Runtime {
++    fn new(root: PathBuf, token: String) -> Result<Self> {
++        let (send, receive) = mpsc::channel();
++        let (done_tx, done) = mpsc::channel();
++        std::thread::Builder::new()
++            .name("e6-cut-writer".into())
++            .spawn(move || worker(root, token, receive, done_tx))?;
++        Ok(Self {
++            send,
++            done,
++            seen: HashMap::new(),
++            names: HashMap::new(),
++            unloads: HashMap::new(),
++            players: None,
++            pending: 0,
++            poisoned: false,
++            initialized: false,
++        })
++    }
++    fn ready(&mut self) -> Result<()> {
++        while let Ok(result) = self.done.try_recv() {
++            self.pending -= 1;
++            if result.is_err() {
++                self.poisoned = true;
++            }
++        }
++        if self.poisoned {
++            return Err(
++                "cut writer failed; restart from the durable log before another cut".into(),
++            );
++        }
++        if self.pending >= 8 {
++            return Err("cut queue is full".into());
++        }
++        Ok(())
++    }
++}
++fn gzip(tag: Tag) -> Result<Vec<u8>> {
++    Ok(Compression::Gzip.encode(
++        &nbt::write_named(
++            &NamedTag {
++                name: "".into(),
++                tag,
++            },
++            Limits::saved(),
++        )
++        .map_err(|e| e.to_string())?,
++    )?)
++}
++fn region(prefix: &str, folder: &str, x: i32, z: i32) -> String {
++    format!("{prefix}/{folder}/r.{}.{}.mca", x >> 5, z >> 5)
++}
++fn encode(
++    work: &mut Work,
++    staging: &Path,
++    pois: &mut HashMap<Key, Option<NamedTag>>,
++) -> Result<Vec<store::Change>> {
++    let mut changes = Vec::new();
++    if let Some(files) = work.bootstrap.take() {
++        // The cold bootstrap includes unloaded saved state. Seed only metadata used by existing
++        // codecs; no staging world writer, region thread or fsync is on the steady cut path.
++        for (name, bytes) in files {
++            if !name.ends_with(".mca") || name.contains("/poi/") {
++                let path = staging.join(&name);
++                std::fs::create_dir_all(path.parent().ok_or("missing parent")?)?;
++                std::fs::write(path, &bytes)?;
++            }
++            changes.push(store::Change::file(name, bytes));
++        }
++    }
++    for terrain in &work.terrain {
++        for chunk in &terrain.chunks {
++            let tag = save::encode_with(
++                chunk,
++                terrain.registry,
++                &terrain.biomes,
++                terrain.tables.as_deref(),
++                terrain.shape,
++            );
++            let bytes = nbt::write_named(&tag, Limits::saved()).map_err(|e| e.to_string())?;
++            changes.push(store::Change::chunk(
++                region(&terrain.prefix, "region", chunk.x, chunk.z),
++                [chunk.x, chunk.z],
++                Compression::Zlib.encode(&bytes)?,
++            ));
++            if let Some(tables) = &terrain.tables {
++                let key = (terrain.prefix.clone(), chunk.x, chunk.z);
++                if let std::collections::hash_map::Entry::Vacant(entry) = pois.entry(key.clone()) {
++                    let path = staging.join(region(&terrain.prefix, "poi", chunk.x, chunk.z));
++                    let old = match horizon_world::region::RegionFile::open(path) {
++                        Ok(mut file) => file
++                            .read(ChunkPos::new(chunk.x, chunk.z))?
++                            .map(|r| r.nbt(Limits::saved()))
++                            .transpose()?,
++                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
++                        Err(e) => return Err(e.into()),
++                    };
++                    entry.insert(old);
++                }
++                let mut poi = save::encode_poi(chunk, tables);
++                if let (Some(next), Some(Some(previous))) = (&mut poi, pois.get(&key)) {
++                    save::keep_claims(next, previous);
++                }
++                pois.insert(key, poi.clone());
++                let bytes = poi
++                    .map(|tag| nbt::write_named(&tag, Limits::saved()))
++                    .transpose()
++                    .map_err(|e| e.to_string())?;
++                changes.push(store::Change::chunk(
++                    region(&terrain.prefix, "poi", chunk.x, chunk.z),
++                    [chunk.x, chunk.z],
++                    bytes
++                        .map(|b| Compression::Zlib.encode(&b))
++                        .transpose()?
++                        .unwrap_or_default(),
++                ));
++            }
++        }
++        for meta in &terrain.metadata {
++            let tag = save::cut_chunk_metadata(
++                meta.time,
++                meta.inhabited,
++                &meta.blocks,
++                &meta.fluids,
++                terrain.tables.as_deref(),
++            );
++            let bytes = nbt::write_named(
++                &NamedTag {
++                    name: "".into(),
++                    tag,
++                },
++                Limits::saved(),
++            )
++            .map_err(|e| e.to_string())?;
++            changes.push(store::Change::overlay(
++                region(&terrain.prefix, "region", meta.key[0], meta.key[1]),
++                meta.key,
++                Compression::Zlib.encode(&bytes)?,
++            ));
++        }
++        for ((x, z), entities) in &terrain.entities {
++            let tag = Tag::compound([
++                ("DataVersion", Tag::Int(horizon_world::DATA_VERSION)),
++                ("Position", Tag::IntArray(vec![*x, *z])),
++                ("Entities", Tag::List(entities.clone())),
++            ]);
++            let bytes = if entities.is_empty() {
++                Vec::new()
++            } else {
++                Compression::Zlib.encode(
++                    &nbt::write_named(
++                        &NamedTag {
++                            name: "".into(),
++                            tag,
++                        },
++                        Limits::saved(),
++                    )
++                    .map_err(|e| e.to_string())?,
++                )?
++            };
++            changes.push(store::Change::chunk(
++                region(&terrain.prefix, "entities", *x, *z),
++                [*x, *z],
++                bytes,
++            ));
++        }
++    }
++    let (_, tags) = save::cut_tags(|| {
++        work.level.write_without_player(staging)?;
++        for terrain in &work.terrain {
++            let save = save::SaveDir::new(staging.join(&terrain.prefix), terrain.shape);
++            save.save_forced_chunks(&terrain.forced)?;
++        }
++        Ok(())
++    })?;
++    for (path, mut tag) in tags {
++        let name = path
++            .strip_prefix(staging)?
++            .to_str()
++            .ok_or("non-UTF8 save path")?
++            .to_owned();
++        if name == "data/minecraft/world_clocks.dat"
++            && let Some(Tag::Compound(clock)) = tag
++                .get_mut("data")
++                .and_then(|d| d.get_mut("minecraft:overworld"))
++        {
++            clock.insert("partial_tick".into(), Tag::Float(work.clock.0.to_bits()));
++            clock.insert("rate".into(), Tag::Float(work.clock.1.to_bits()));
++            clock.insert("paused".into(), Tag::Byte(i8::from(work.clock.2)));
++        }
++        let bytes = gzip(tag)?;
++        // Keep metadata reads on the worker consistent with earlier queued cuts.
++        std::fs::create_dir_all(path.parent().ok_or("missing metadata parent")?)?;
++        std::fs::write(path, &bytes)?;
++        changes.push(store::Change::file(name, bytes));
++    }
++    for (name, tag) in std::mem::take(&mut work.tags) {
++        changes.push(store::Change::file(name, gzip(tag)?));
++    }
++    for (name, value) in std::mem::take(&mut work.json) {
++        changes.push(store::Change::file(name, serde_json::to_vec(&value)?));
++    }
++    Ok(changes)
++}
++fn worker(
++    root: PathBuf,
++    token: String,
++    receive: Receiver<Work>,
++    done: Sender<std::result::Result<(), String>>,
++) {
++    let staging = root.join("metadata-work");
++    let mut writer = None;
++    let mut pois = HashMap::new();
++    let mut failure = None;
++    while let Ok(first) = receive.recv() {
++        let mut batch = vec![first];
++        batch.extend(receive.try_iter().take(7));
++        let off = Instant::now();
++        let mut encode_ms = 0.;
++        let result = (|| -> Result<_> {
++            if let Some(error) = &failure {
++                return Err(format!("cut writer poisoned: {error}").into());
++            }
++            if writer.is_none() {
++                writer = Some(store::Writer::open(&root, &token)?);
++            }
++            let mut cuts = Vec::new();
++            for work in &mut batch {
++                cuts.push((work.tick, encode(work, &staging, &mut pois)?));
++            }
++            // A capture that arrives during encoding joins this same durable barrier.
++            while batch.len() < 8 {
++                let Ok(mut work) = receive.try_recv() else {
++                    break;
++                };
++                cuts.push((work.tick, encode(&mut work, &staging, &mut pois)?));
++                batch.push(work);
++            }
++            encode_ms = off.elapsed().as_secs_f64() * 1000.;
++            let writer = writer.as_mut().ok_or("cut writer missing")?;
++            writer.append(&root, &token, cuts)
++        })();
++        match result {
++            Ok(receipts) => {
++                let group = receipts.len();
++                let mut last = None;
++                for (work, (head, bytes, io_ms)) in batch.into_iter().zip(receipts) {
++                    let value = json!({"ok":true,"sequence":head.sequence,"tick":head.tick,"tick_ms":work.tick_ms,"capture_ms":work.capture_ms,
++                        "off_ms":off.elapsed().as_secs_f64()*1000.,"server_ms":work.start.elapsed().as_secs_f64()*1000.,
++                        "bytes_written":bytes,"install_io_ms":io_ms,"encode_ms":encode_ms,"group_size":group,"export":work.export});
++                    let _ = work.reply.send(value.to_string());
++                    let _ = done.send(Ok(()));
++                    last = Some(head);
++                }
++                if let (Some(writer), Some(head)) = (&mut writer, last)
++                    && let Err(e) = writer.compact(&root, &token, head)
++                {
++                    failure = Some(e.to_string());
++                }
++            }
++            Err(e) => {
++                let error = e.to_string();
++                failure = Some(error.clone());
++                for work in batch {
++                    let _ = work.reply.send(json!({"error":error}).to_string());
++                    let _ = done.send(Err(error.clone()));
++                }
++            }
++        }
++    }
++}
++
++impl Game<'_> {
++    /// The cold bootstrap remains E3's full barrier. It must finish before budgeted crossings.
++    fn tile_bootstrap(&mut self) -> Result<store::Files> {
++        let back = self.dim;
++        let dims = self.levels.parked_dims();
++        for dim in dims.iter().copied().chain(std::iter::once(back)) {
++            self.enter_level(None, dim)?;
++            let start = Instant::now();
++            while !self.streaming.poll_save(&mut self.world) {
++                if start.elapsed().as_secs() >= 30 {
++                    return Err("terrain save barrier timed out".into());
++                }
++                std::thread::yield_now();
++            }
++            self.world
++                .modified
++                .extend(self.world.chunks.keys().copied());
++        }
++        self.enter_level(None, back)?;
++        self.save_game_with(true)?;
++        self.finish_player_autosaves(true)?;
++        store::capture(&self.world_root)
++    }
++    fn tile_close_menus(&mut self) -> Result<()> {
++        let back = self.dim;
++        if let Some(mut host) = self.lan.take() {
++            let players: Vec<_> = host
++                .hub
++                .guests
++                .iter()
++                .filter(|g| g.placed)
++                .map(|g| (g.conn, crate::game::Dim::from_id(&g.dimension)))
++                .collect();
++            for (conn, dim) in players {
++                if let Err(e) = self.enter_level(Some(&mut host), dim) {
++                    self.lan = Some(host);
++                    return Err(e);
++                }
++                self.guest_close_all(&mut host, conn);
++                self.lan_crafting_closed(&mut host, conn, Some(0));
++            }
++            self.lan = Some(host);
++        }
++        self.enter_level(None, back)
++    }
++    pub(super) fn tile_cut_request(
++        &mut self,
++        args: &str,
++        reply: Sender<String>,
++        runtime: &mut Option<Runtime>,
++    ) {
++        let start = Instant::now();
++        let mut capture_started = false;
++        let result = (|| -> Result<_> {
++            let (root, token) = configured()?;
++            if !horizon_client::mod_api::mods().is_empty() {
++                return Err("E6 has no snapshot contract for native mod callbacks".into());
++            }
++            let mut parts = args.split_whitespace();
++            if parts.next() != Some(token.as_str()) {
++                return Err("request fence does not match this process".into());
++            }
++            let player = parts.next().map(str::to_owned);
++            if parts.next().is_some() {
++                return Err("tile-cut takes token and optional departing UUID".into());
++            }
++            if !root.is_absolute()
++                || root.starts_with(&self.world_root)
++                || self.world_root.starts_with(&root)
++            {
++                return Err("cut directory must be absolute and outside the working world".into());
++            }
++            if runtime.is_none() {
++                *runtime = Some(Runtime::new(root.clone(), token)?);
++            }
++            let state = runtime.as_mut().ok_or("cut runtime missing")?;
++            state.ready()?;
++            if state.initialized {
++                let back = self.dim;
++                for dim in self
++                    .levels
++                    .parked_dims()
++                    .into_iter()
++                    .chain(std::iter::once(back))
++                {
++                    self.enter_level(None, dim)?;
++                    let loading = self.streaming.terrain_loading();
++                    let pending = self.world.loaded_entities.len();
++                    if loading || pending != 0 {
++                        self.enter_level(None, back)?;
++                        return Err(format!("terrain work still in flight: loading={loading}, pending entity chunks={pending}; retry after a tick").into());
++                    }
++                }
++                self.enter_level(None, back)?;
++            }
++            capture_started = true;
++            store::phase(&root, "capture-begin")?;
++            let export = if let Some(player) = player {
++                let value = self.player_request("player-export", &format!("{player} freeze"));
++                if !value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
++                    return Err(value.to_string().into());
++                }
++                Some(value)
++            } else {
++                None
++            };
++            self.tile_close_menus()?;
++            let players: HashSet<_> = self
++                .lan
++                .as_ref()
++                .map(|h| {
++                    h.hub
++                        .guests
++                        .iter()
++                        .filter(|g| g.placed && !g.released)
++                        .map(|g| g.uuid)
++                        .collect()
++                })
++                .unwrap_or_default();
++            if state
++                .players
++                .as_ref()
++                .is_some_and(|previous| previous != &players)
++            {
++                return Err("tile cut requires a fixed resident player set; restart after joins or departures".into());
++            }
++            state.players = Some(players);
++            let bootstrap = if state.initialized {
++                None
++            } else {
++                Some(self.tile_bootstrap()?)
++            };
++            let capture = Instant::now();
++            let back = self.dim;
++            let dims = self.levels.parked_dims();
++            let mut terrain = Vec::new();
++            let (_, tags) = save::cut_tags(|| {
++                for dim in dims.into_iter().chain(std::iter::once(back)) {
++                    self.enter_level(None, dim)?;
++                    self.world.block_entities.track_cuts();
++                    let prefix = save::dimension_dir(&self.world_root, dim.id())
++                        .strip_prefix(&self.world_root)?
++                        .to_str()
++                        .ok_or("non-UTF8 dimension")?
++                        .to_owned();
++                    let unloads = self.world.block_entities.cut_unloads();
++                    if state
++                        .unloads
++                        .get(&prefix)
++                        .is_some_and(|old| *old != unloads || unloads == u64::MAX)
++                    {
++                        return Err("tile cut observed an unload since its base; restart to include unloaded state".into());
++                    }
++                    state.unloads.insert(prefix.clone(), unloads);
++                    let mut keys: HashSet<_> = self.world.chunks.keys().copied().collect();
++                    self.tile_entity_keys(&mut keys);
++                    if keys.iter().any(|key| !self.world.chunks.contains_key(key)) {
++                        return Err("tile cut requires every live entity chunk to be resident; load the missing chunks before retrying".into());
++                    }
++                    // No unobserved unload can silently discard changed containers or entities.
++                    if state
++                        .seen
++                        .keys()
++                        .any(|(p, x, z)| p == &prefix && !keys.contains(&(*x, *z)))
++                    {
++                        return Err("tile cut requires the previous footprint resident; restart before changing the footprint".into());
++                    }
++                    let mut names: Vec<_> = self
++                        .world
++                        .block_names
++                        .iter()
++                        .map(|(p, n)| (*p, n.clone()))
++                        .collect();
++                    names.sort();
++                    let names_changed = state.names.get(&prefix) != Some(&names);
++                    state.names.insert(prefix.clone(), names);
++                    let mut dirty = Vec::new();
++                    let mut metadata = Vec::new();
++                    for (&(x, z), chunk) in self.world.chunks.iter() {
++                        let revision = self.world.block_entities.cut_revision((x, z));
++                        let inhabited = self.world.inhabited.get(&(x, z)).copied().unwrap_or(0);
++                        let old = state.seen.get(&(prefix.clone(), x, z));
++                        // Scheduler state always gets a small overlay, including empty lists.
++                        let pos = ChunkPos::new(x, z);
++                        let blocks = self
++                            .block_ticks
++                            .blocks
++                            .chunk(pos)
++                            .map(|t| t.pack(self.world.game_time))
++                            .unwrap_or_else(|| {
++                                chunk
++                                    .saved
++                                    .as_ref()
++                                    .map(|s| s.block_ticks.clone())
++                                    .unwrap_or_default()
++                            });
++                        let fluids = self
++                            .block_ticks
++                            .fluids
++                            .chunk(pos)
++                            .map(|t| t.pack(self.world.game_time))
++                            .unwrap_or_else(|| {
++                                chunk
++                                    .saved
++                                    .as_ref()
++                                    .map(|s| s.fluid_ticks.clone())
++                                    .unwrap_or_default()
++                            });
++                        metadata.push(ChunkMetadata {
++                            key: [x, z],
++                            time: self.world.game_time,
++                            inhabited,
++                            blocks,
++                            fluids,
++                        });
++                        let pistons = !self.block_ticks.moving_pistons.is_empty();
++                        if names_changed
++                            || revision == u64::MAX
++                            || old.is_none_or(|old| {
++                                old.chunk.as_ptr() != Arc::as_ptr(chunk)
++                                    || old.revision != revision
++                                    || old.pistons
++                            })
++                            || pistons
++                            || self
++                                .be_anims
++                                .gateway_servers
++                                .keys()
++                                .any(|p| p[0] >> 4 == x && p[2] >> 4 == z)
++                        {
++                            dirty.push(chunk.clone());
++                        }
++                        state.seen.insert(
++                            (prefix.clone(), x, z),
++                            Seen {
++                                chunk: Arc::downgrade(chunk),
++                                revision,
++                                pistons,
++                            },
++                        );
++                    }
++                    let chunks = self.with_entities(&dirty);
++                    let entities = self.entity_chunks(&keys, false);
++                    self.save_border();
++                    self.save_raids();
++                    self.save.save_attachments(&self.world.attachments)?;
++                    terrain.push(Terrain {
++                        prefix,
++                        chunks,
++                        metadata,
++                        entities,
++                        registry: self.pack.assets.registry,
++                        biomes: world_biomes!(self).clone(),
++                        tables: self.save.tables.get().cloned(),
++                        shape: self.save.shape,
++                        forced: self.streaming.forced.clone(),
++                    });
++                }
++                self.enter_level(None, back)?;
++                self.save_maps();
++                self.save_random_sequences();
++                self.save_fight();
++                self.save_wandering_trader();
++                self.save_portal_arrivals();
++                self.save_scoreboard();
++                self.save_bossbars();
++                self.save_schedule();
++                self.save_warden_tracker();
++                self.sync_level();
++                Ok(())
++            })?;
++            let mut tags: Vec<_> = tags
++                .into_iter()
++                .map(|(path, tag)| {
++                    Ok((
++                        path.strip_prefix(&self.world_root)?
++                            .to_str()
++                            .ok_or("non-UTF8 metadata")?
++                            .to_owned(),
++                        tag,
++                    ))
++                })
++                .collect::<Result<_>>()?;
++            let mut json = Vec::new();
++            if let Some(mut host) = self.lan.take() {
++                for guest in host
++                    .hub
++                    .guests
++                    .iter_mut()
++                    .filter(|g| g.placed && !g.released)
++                {
++                    self.guest_attachments_into(guest);
++                    let uuid = horizon_protocol::crypto::uuid_string(guest.uuid);
++                    tags.push((
++                        format!("players/data/{uuid}.dat"),
++                        horizon_client::lan::playerdata::player_tag(guest),
++                    ));
++                    json.push((
++                        format!("players/advancements/{uuid}.json"),
++                        guest
++                            .advancements
++                            .to_json(&self.adv.tree, horizon_world::DATA_VERSION),
++                    ));
++                    if let Some(play) = host.play.get(&guest.conn) {
++                        json.push((format!("players/stats/{uuid}.json"), play.stats.to_json()));
++                    }
++                }
++                self.lan = Some(host);
++            }
++            store::phase(&root, "captured")?;
++            let capture_ms = capture.elapsed().as_secs_f64() * 1000.;
++            Ok(Work {
++                tick: self.world.game_time,
++                terrain,
++                tags,
++                json,
++                level: self.level.clone(),
++                clock: (
++                    self.ui.clock.partial,
++                    self.ui.clock.rate,
++                    self.ui.clock.paused,
++                ),
++                bootstrap,
++                start,
++                tick_ms: start.elapsed().as_secs_f64() * 1000.,
++                capture_ms,
++                export,
++                reply: reply.clone(),
++            })
++        })();
++        match result {
++            Ok(work) => {
++                if let Some(state) = runtime {
++                    state.initialized = true;
++                    state.pending += 1;
++                    if state.send.send(work).is_err() {
++                        state.poisoned = true;
++                        let _ = reply.send(json!({"error":"cut writer stopped"}).to_string());
++                    }
++                }
++            }
++            Err(e) => {
++                if let Some(state) = runtime
++                    && capture_started
++                {
++                    state.poisoned = true;
++                }
++                let _ = reply.send(json!({"error":e.to_string()}).to_string());
++            }
++        }
++    }
++}
+diff --git a/crates/horizon-client/src/game/dedicated/tile_cut/store.rs b/crates/horizon-client/src/game/dedicated/tile_cut/store.rs
+new file mode 100644
+index 000000000..82bae3eb7
+--- /dev/null
++++ b/crates/horizon-client/src/game/dedicated/tile_cut/store.rs
+@@ -0,0 +1,762 @@
++//! Fenced cut records. Only a checksummed log prefix selects a recovered image.
++use horizon_client::Result;
++use horizon_core::position::ChunkPos;
++use horizon_world::{
++    compression::Compression,
++    region::{ChunkRecord, RegionFile},
++};
++use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
++use std::{
++    collections::BTreeMap,
++    fs::{self, File, OpenOptions},
++    io::Write,
++    path::{Component, Path},
++    time::Instant,
++};
++
++const MAGIC: &[u8; 8] = b"E6CUT001";
++const MAX_RECORD: usize = 512 * 1024 * 1024;
++pub(super) type Files = Vec<(String, Vec<u8>)>;
++
++pub(super) fn phase(root: &Path, name: &str) -> Result<()> {
++    if std::env::var_os("HORIZON_E3_TEST_PHASES").is_none() {
++        return Ok(());
++    }
++    fs::write(root.join("PHASE"), name)?;
++    let start = Instant::now();
++    while root.join(format!("gate-{name}")).exists() {
++        if start.elapsed().as_secs() > 30 {
++            return Err("E6 test gate timed out".into());
++        }
++        std::thread::sleep(std::time::Duration::from_millis(1));
++    }
++    Ok(())
++}
++
++#[derive(Clone, Serialize, Deserialize)]
++pub(super) struct Head {
++    pub sequence: u64,
++    pub tick: i64,
++    fence: String,
++}
++#[derive(Serialize, Deserialize)]
++struct Entry {
++    path: String,
++    chunk: Option<[i32; 2]>,
++    len: usize,
++    #[serde(default)]
++    overlay: bool,
++}
++#[derive(Serialize, Deserialize)]
++struct Header {
++    head: Head,
++    entries: Vec<Entry>,
++}
++pub(super) struct Change {
++    path: String,
++    chunk: Option<[i32; 2]>,
++    bytes: Vec<u8>,
++    overlay: bool,
++}
++impl Change {
++    pub fn file(path: String, bytes: Vec<u8>) -> Self {
++        Self {
++            path,
++            chunk: None,
++            bytes,
++            overlay: false,
++        }
++    }
++    /// A zlib-compressed Anvil chunk. Empty bytes delete the chunk.
++    pub fn chunk(path: String, key: [i32; 2], bytes: Vec<u8>) -> Self {
++        Self {
++            path,
++            chunk: Some(key),
++            bytes,
++            overlay: false,
++        }
++    }
++    pub fn overlay(path: String, key: [i32; 2], bytes: Vec<u8>) -> Self {
++        Self {
++            path,
++            chunk: Some(key),
++            bytes,
++            overlay: true,
++        }
++    }
++}
++fn lock(root: &Path) -> Result<File> {
++    fs::create_dir_all(root)?;
++    let file = OpenOptions::new()
++        .create(true)
++        .truncate(false)
++        .read(true)
++        .write(true)
++        .open(root.join("LOCK"))?;
++    file.lock()?;
++    Ok(file)
++}
++fn sync(file: &File) -> Result<()> {
++    file.sync_all()?;
++    #[cfg(target_os = "macos")]
++    rustix::fs::fcntl_fullfsync(file)?;
++    Ok(())
++}
++fn fence(root: &Path, token: &str) -> Result<()> {
++    if fs::read_to_string(root.join("FENCE"))? != token {
++        return Err("stale tile fence".into());
++    }
++    Ok(())
++}
++pub(super) fn claim(root: &Path, expected: &str, token: &str) -> Result<()> {
++    let _lock = lock(root)?;
++    let current = match fs::read_to_string(root.join("FENCE")) {
++        Ok(s) => s,
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "-".into(),
++        Err(e) => return Err(e.into()),
++    };
++    if current != expected {
++        return Err("fence CAS conflict".into());
++    }
++    let mut file = File::create(root.join("FENCE.new"))?;
++    file.write_all(token.as_bytes())?;
++    file.sync_all()?;
++    fs::rename(root.join("FENCE.new"), root.join("FENCE"))?;
++    File::open(root)?.sync_all()?;
++    sync(&file)
++}
++fn relative(path: &str) -> Result<&Path> {
++    let path = Path::new(path);
++    if path.as_os_str().is_empty()
++        || path
++            .components()
++            .any(|c| !matches!(c, Component::Normal(_)))
++    {
++        return Err("invalid cut path".into());
++    }
++    Ok(path)
++}
++pub(super) fn capture(world: &Path) -> Result<Files> {
++    fn walk(base: &Path, path: &Path, out: &mut Files) -> Result<()> {
++        for entry in fs::read_dir(path)? {
++            let entry = entry?;
++            let kind = entry.file_type()?;
++            if kind.is_symlink() {
++                return Err("symlinks are not allowed in cut worlds".into());
++            }
++            if kind.is_dir() {
++                walk(base, &entry.path(), out)?;
++            } else if kind.is_file() {
++                let name = entry.file_name().to_string_lossy().into_owned();
++                if name != "session.lock"
++                    && !["_old", "_new", ".corrupt"]
++                        .iter()
++                        .any(|s| name.ends_with(s))
++                {
++                    out.push((
++                        entry
++                            .path()
++                            .strip_prefix(base)?
++                            .to_str()
++                            .ok_or("non-UTF8 save path")?
++                            .to_owned(),
++                        fs::read(entry.path())?,
++                    ));
++                }
++            }
++        }
++        Ok(())
++    }
++    let mut out = Vec::new();
++    walk(world, world, &mut out)?;
++    out.sort_by(|a, b| a.0.cmp(&b.0));
++    Ok(out)
++}
++fn encode(head: Head, changes: &[Change]) -> Result<Vec<u8>> {
++    let header = serde_json::to_vec(&Header {
++        head,
++        entries: changes
++            .iter()
++            .map(|c| Entry {
++                path: c.path.clone(),
++                chunk: c.chunk,
++                len: c.bytes.len(),
++                overlay: c.overlay,
++            })
++            .collect(),
++    })?;
++    let mut payload = Vec::new();
++    payload.extend_from_slice(&(header.len() as u64).to_le_bytes());
++    payload.extend_from_slice(&header);
++    for c in changes {
++        relative(&c.path)?;
++        payload.extend_from_slice(&c.bytes);
++    }
++    if payload.len() > MAX_RECORD {
++        return Err("cut record exceeds size limit".into());
++    }
++    let mut frame = Vec::with_capacity(payload.len() + 48);
++    frame.extend_from_slice(MAGIC);
++    frame.extend_from_slice(&(payload.len() as u64).to_le_bytes());
++    let mut hash = Sha256::new();
++    hash.update((payload.len() as u64).to_le_bytes());
++    hash.update(&payload);
++    frame.extend_from_slice(&hash.finalize());
++    frame.extend_from_slice(&payload);
++    Ok(frame)
++}
++fn decode(payload: &[u8]) -> Result<(Head, Vec<Change>)> {
++    let len = u64::from_le_bytes(payload.get(..8).ok_or("short cut header")?.try_into()?) as usize;
++    let end = 8usize.checked_add(len).ok_or("cut header overflow")?;
++    let header: Header = serde_json::from_slice(payload.get(8..end).ok_or("short cut header")?)?;
++    let mut at = end;
++    let mut changes = Vec::new();
++    for entry in header.entries {
++        relative(&entry.path)?;
++        if let Some([x, z]) = entry.chunk
++            && !entry
++                .path
++                .ends_with(&format!("/r.{}.{}.mca", x >> 5, z >> 5))
++        {
++            return Err("cut chunk path mismatch".into());
++        }
++        let end = at.checked_add(entry.len).ok_or("cut entry overflow")?;
++        changes.push(Change {
++            path: entry.path,
++            chunk: entry.chunk,
++            bytes: payload.get(at..end).ok_or("short cut entry")?.to_vec(),
++            overlay: entry.overlay,
++        });
++        at = end;
++    }
++    if at != payload.len() {
++        return Err("trailing cut payload".into());
++    }
++    Ok((header.head, changes))
++}
++type Image = BTreeMap<(String, Option<[i32; 2]>, bool), Vec<u8>>;
++fn baseline(root: &Path, image: &mut Image) -> Result<Option<Head>> {
++    let path = root.join("BASE");
++    let (head, len) = scan(&path, None, image)?;
++    if path.exists() && (head.is_none() || fs::metadata(path)?.len() != len) {
++        return Err("corrupt installed cut base".into());
++    }
++    Ok(head)
++}
++fn merge(image: &mut Image, changes: Vec<Change>) {
++    for c in changes {
++        if c.chunk.is_none() {
++            image.retain(|(name, _, _), _| name != &c.path);
++        }
++        if c.chunk.is_some() && !c.overlay {
++            image.remove(&(c.path.clone(), c.chunk, true));
++        }
++        image.insert((c.path, c.chunk, c.overlay), c.bytes);
++    }
++}
++/// Drop a torn final record, but never a bad record in the middle of the log.
++fn scan(path: &Path, mut head: Option<Head>, image: &mut Image) -> Result<(Option<Head>, u64)> {
++    let bytes = match fs::read(path) {
++        Ok(b) => b,
++        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((head, 0)),
++        Err(e) => return Err(e.into()),
++    };
++    let mut at = 0;
++    while bytes.len() - at >= 48 {
++        if &bytes[at..at + 8] != MAGIC {
++            return Err("invalid cut frame magic".into());
++        }
++        let len = u64::from_le_bytes(bytes[at + 8..at + 16].try_into()?) as usize;
++        if len > MAX_RECORD {
++            return Err("invalid cut frame length".into());
++        }
++        let end = at.checked_add(48 + len).ok_or("cut frame overflow")?;
++        if end > bytes.len() {
++            break;
++        }
++        let mut hash = Sha256::new();
++        hash.update(&bytes[at + 8..at + 16]);
++        hash.update(&bytes[at + 48..end]);
++        if hash.finalize()[..] != bytes[at + 16..at + 48] {
++            if end == bytes.len() {
++                break;
++            }
++            return Err("cut checksum mismatch before tail".into());
++        }
++        let (next, changes) = decode(&bytes[at + 48..end])?;
++        if head.as_ref().is_none_or(|h| next.sequence > h.sequence) {
++            if head
++                .as_ref()
++                .is_some_and(|h| next.sequence != h.sequence + 1)
++            {
++                return Err("cut sequence gap".into());
++            }
++            merge(image, changes);
++            head = Some(next);
++        }
++        at = end;
++    }
++    Ok((head, at as u64))
++}
++pub(super) struct Writer {
++    file: File,
++    len: u64,
++    pub sequence: u64,
++    image: Image,
++}
++impl Writer {
++    fn current_log(&self, root: &Path) -> Result<bool> {
++        let opened = self.file.metadata()?;
++        let named = fs::metadata(root.join("LOG"))?;
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::MetadataExt;
++            if opened.dev() != named.dev() || opened.ino() != named.ino() {
++                return Ok(false);
++            }
++        }
++        Ok(opened.len() == self.len && named.len() == self.len)
++    }
++    pub fn open(root: &Path, token: &str) -> Result<Self> {
++        let _lock = lock(root)?;
++        fence(root, token)?;
++        let mut image = Image::new();
++        let base = baseline(root, &mut image)?;
++        let (head, len) = scan(&root.join("LOG"), base, &mut image)?;
++        let file = OpenOptions::new()
++            .create(true)
++            .truncate(false)
++            .read(true)
++            .append(true)
++            .open(root.join("LOG"))?;
++        if file.metadata()?.len() != len {
++            file.set_len(len)?;
++        }
++        File::open(root)?.sync_all()?;
++        sync(&file)?;
++        Ok(Self {
++            file,
++            len,
++            sequence: head.map_or(0, |h| h.sequence),
++            image,
++        })
++    }
++    pub fn append(
++        &mut self,
++        root: &Path,
++        token: &str,
++        cuts: Vec<(i64, Vec<Change>)>,
++    ) -> Result<Vec<(Head, u64, f64)>> {
++        let mut encoded = Vec::new();
++        for (i, (tick, changes)) in cuts.into_iter().enumerate() {
++            let sequence = self
++                .sequence
++                .checked_add(i as u64 + 1)
++                .ok_or("cut sequence exhausted")?;
++            let head = Head {
++                sequence,
++                tick,
++                fence: token.into(),
++            };
++            encoded.push((encode(head.clone(), &changes)?, head, changes));
++        }
++        phase(root, "pack-sync")?;
++        let _lock = lock(root)?;
++        fence(root, token)?;
++        if !self.current_log(root)? {
++            return Err("cut head CAS conflict".into());
++        }
++        let start = Instant::now();
++        phase(root, "pack-write")?;
++        for (bytes, _, _) in &encoded {
++            let mid = bytes.len() / 2;
++            self.file.write_all(&bytes[..mid])?;
++            phase(root, "mid-append")?;
++            self.file.write_all(&bytes[mid..])?;
++        }
++        phase(root, "head-write")?;
++        phase(root, "head-rename")?;
++        sync(&self.file)?;
++        phase(root, "head-renamed")?;
++        let elapsed = start.elapsed().as_secs_f64() * 1000.;
++        let mut out = Vec::new();
++        for (bytes, head, changes) in encoded {
++            self.len += bytes.len() as u64;
++            self.sequence = head.sequence;
++            merge(&mut self.image, changes);
++            out.push((head, bytes.len() as u64, elapsed));
++        }
++        phase(root, "installed")?;
++        Ok(out)
++    }
++    /// Called after replies. A crash before log truncation replays the new BASE and skips
++    /// its already compacted LOG prefix. The lock also prevents a new owner from interleaving.
++    pub fn compact(&mut self, root: &Path, token: &str, head: Head) -> Result<()> {
++        let limit = if std::env::var_os("HORIZON_E3_TEST_PHASES").is_some() {
++            std::env::var("HORIZON_E6_TEST_COMPACT_BYTES")
++                .ok()
++                .and_then(|s| s.parse().ok())
++                .unwrap_or(64 * 1024 * 1024)
++        } else {
++            64 * 1024 * 1024
++        };
++        self.compact_at(root, token, head, limit)
++    }
++    fn compact_at(&mut self, root: &Path, token: &str, head: Head, limit: u64) -> Result<()> {
++        if self.len < limit {
++            return Ok(());
++        }
++        let changes: Vec<_> = self
++            .image
++            .iter()
++            .map(|((path, chunk, overlay), bytes)| Change {
++                path: path.clone(),
++                chunk: *chunk,
++                bytes: bytes.clone(),
++                overlay: *overlay,
++            })
++            .collect();
++        let bytes = encode(head, &changes)?;
++        let _lock = lock(root)?;
++        fence(root, token)?;
++        if !self.current_log(root)? {
++            return Err("cut head CAS conflict".into());
++        }
++        let mut file = File::create(root.join("BASE.new"))?;
++        phase(root, "base-write")?;
++        file.write_all(&bytes)?;
++        phase(root, "base-sync")?;
++        file.sync_all()?;
++        phase(root, "base-rename")?;
++        fs::rename(root.join("BASE.new"), root.join("BASE"))?;
++        File::open(root)?.sync_all()?;
++        sync(&file)?;
++        phase(root, "log-rotate")?;
++        let next = OpenOptions::new()
++            .create(true)
++            .truncate(true)
++            .read(true)
++            .write(true)
++            .open(root.join("LOG.new"))?;
++        next.sync_all()?;
++        fs::rename(root.join("LOG.new"), root.join("LOG"))?;
++        File::open(root)?.sync_all()?;
++        sync(&next)?;
++        self.file = OpenOptions::new()
++            .read(true)
++            .append(true)
++            .open(root.join("LOG"))?;
++        self.len = 0;
++        Ok(())
++    }
++}
++pub(super) fn restore(root: &Path, token: &str, world: &Path) -> Result<Option<Head>> {
++    let _lock = lock(root)?;
++    if root.join("HEAD").exists() {
++        return Err("E3 archives require the E3 binary; E6 needs a fresh cut directory".into());
++    }
++    if !root.join("LOG").exists() && !root.join("BASE").exists() {
++        return Ok(None);
++    }
++    fence(root, token)?;
++    let mut image = Image::new();
++    let base = baseline(root, &mut image)?;
++    let (head, _) = scan(&root.join("LOG"), base, &mut image)?;
++    let Some(head) = head else {
++        return Ok(None);
++    };
++    for ((_, chunk, _), bytes) in &image {
++        if chunk.is_some() && !bytes.is_empty() {
++            ChunkRecord {
++                compression: Compression::Zlib,
++                compressed: bytes.clone(),
++                timestamp: 0,
++            }
++            .nbt(horizon_world::nbt::Limits::saved())?;
++        }
++    }
++    fs::create_dir_all(world)?;
++    for (name, _) in capture(world)? {
++        if !image.keys().any(|(p, _, _)| p == &name) {
++            fs::remove_file(world.join(name))?;
++        }
++    }
++    for ((name, chunk, overlay), mut bytes) in image {
++        let path = world.join(relative(&name)?);
++        fs::create_dir_all(path.parent().ok_or("cut file lacks parent")?)?;
++        if let Some([x, z]) = chunk {
++            let mut region = RegionFile::open_writable(path, true)?;
++            if overlay {
++                let pos = ChunkPos::new(x, z);
++                let mut previous = region
++                    .read(pos)?
++                    .ok_or("cut overlay lacks a base chunk")?
++                    .nbt(horizon_world::nbt::Limits::saved())?;
++                let overlay = ChunkRecord {
++                    compression: Compression::Zlib,
++                    compressed: bytes,
++                    timestamp: 0,
++                }
++                .nbt(horizon_world::nbt::Limits::saved())?;
++                let (
++                    horizon_world::nbt::Tag::Compound(previous),
++                    horizon_world::nbt::Tag::Compound(fields),
++                ) = (&mut previous.tag, overlay.tag)
++                else {
++                    return Err("invalid cut chunk overlay".into());
++                };
++                previous.extend(fields);
++                let tag = horizon_world::nbt::NamedTag {
++                    name: "".into(),
++                    tag: horizon_world::nbt::Tag::Compound(previous.clone()),
++                };
++                bytes = ChunkRecord::from_nbt(
++                    &tag,
++                    Compression::Zlib,
++                    0,
++                    horizon_world::nbt::Limits::saved(),
++                )?
++                .compressed;
++            }
++            if bytes.is_empty() {
++                region.clear(ChunkPos::new(x, z), 0)?;
++            } else {
++                region.write(
++                    ChunkPos::new(x, z),
++                    &ChunkRecord {
++                        compression: Compression::Zlib,
++                        compressed: bytes,
++                        timestamp: 0,
++                    },
++                )?;
++            }
++        } else {
++            fs::write(path, bytes)?;
++        }
++    }
++    Ok(Some(head))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn scratch() -> std::path::PathBuf {
++        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++        let base = std::env::var_os("E3_TEST_ROOT").expect("isolated E3_TEST_ROOT required");
++        let dir = Path::new(&base).join(format!(
++            "e6-store-{}-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .unwrap()
++                .as_nanos()
++        ));
++        fs::create_dir_all(&dir).unwrap();
++        dir
++    }
++    fn image(n: u8) -> Vec<Change> {
++        ["chest", "drop", "player-a", "player-b", "level"]
++            .into_iter()
++            .map(|p| Change::file(p.into(), vec![n; 32]))
++            .collect()
++    }
++    #[test]
++    fn every_byte_torn_tail_restores_one_complete_cut() {
++        let dir = scratch();
++        claim(&dir, "-", "a").unwrap();
++        let mut writer = Writer::open(&dir, "a").unwrap();
++        writer.append(&dir, "a", vec![(1, image(1))]).unwrap();
++        let before = fs::read(dir.join("LOG")).unwrap();
++        writer.append(&dir, "a", vec![(2, image(2))]).unwrap();
++        let complete = fs::read(dir.join("LOG")).unwrap();
++        drop(writer);
++        for end in before.len()..=complete.len() {
++            fs::write(dir.join("LOG"), &complete[..end]).unwrap();
++            let world = dir.join("world");
++            fs::create_dir_all(&world).unwrap();
++            fs::write(world.join("future"), b"discard").unwrap();
++            let head = restore(&dir, "a", &world).unwrap().unwrap();
++            let wanted = if end == complete.len() { 2 } else { 1 };
++            assert_eq!(head.sequence, wanted);
++            for c in image(wanted as u8) {
++                assert_eq!(fs::read(world.join(c.path)).unwrap(), c.bytes);
++            }
++            assert!(!world.join("future").exists());
++        }
++        fs::remove_dir_all(dir).unwrap();
++    }
++    #[test]
++    fn stale_writer_cannot_append_after_fence_change() {
++        let dir = scratch();
++        claim(&dir, "-", "a").unwrap();
++        let mut old = Writer::open(&dir, "a").unwrap();
++        old.append(&dir, "a", vec![(1, image(1))]).unwrap();
++        claim(&dir, "a", "b").unwrap();
++        let before = fs::read(dir.join("LOG")).unwrap();
++        assert!(old.append(&dir, "a", vec![(2, image(2))]).is_err());
++        assert_eq!(fs::read(dir.join("LOG")).unwrap(), before);
++        let mut next = Writer::open(&dir, "b").unwrap();
++        next.append(&dir, "b", vec![(3, image(3))]).unwrap();
++        assert_eq!(
++            restore(&dir, "b", &dir.join("world"))
++                .unwrap()
++                .unwrap()
++                .sequence,
++            2
++        );
++        fs::remove_dir_all(dir).unwrap();
++    }
++    #[test]
++    fn grouped_records_and_interrupted_compaction_replay() {
++        let dir = scratch();
++        claim(&dir, "-", "a").unwrap();
++        let mut writer = Writer::open(&dir, "a").unwrap();
++        let out = writer
++            .append(&dir, "a", vec![(1, image(1)), (2, image(2))])
++            .unwrap();
++        assert_eq!(out[0].2, out[1].2);
++        fs::write(
++            dir.join("BASE"),
++            encode(out[1].0.clone(), &image(2)).unwrap(),
++        )
++        .unwrap();
++        assert_eq!(
++            restore(&dir, "a", &dir.join("world"))
++                .unwrap()
++                .unwrap()
++                .sequence,
++            2
++        );
++        fs::remove_dir_all(dir).unwrap();
++    }
++    #[test]
++    fn compaction_rotates_log_identity_and_rejects_an_old_writer() {
++        let dir = scratch();
++        claim(&dir, "-", "a").unwrap();
++        let mut old = Writer::open(&dir, "a").unwrap();
++        let mut writer = Writer::open(&dir, "a").unwrap();
++        let out = writer
++            .append(&dir, "a", vec![(1, image(1)), (2, image(2))])
++            .unwrap();
++        writer.compact_at(&dir, "a", out[1].0.clone(), 0).unwrap();
++        assert_eq!(fs::metadata(dir.join("LOG")).unwrap().len(), 0);
++        assert!(old.append(&dir, "a", vec![(3, image(3))]).is_err());
++        writer.append(&dir, "a", vec![(3, image(3))]).unwrap();
++        assert_eq!(
++            restore(&dir, "a", &dir.join("world"))
++                .unwrap()
++                .unwrap()
++                .sequence,
++            3
++        );
++        fs::remove_dir_all(dir).unwrap();
++    }
++    #[test]
++    fn corrupt_base_or_interior_record_fails_before_touching_world() {
++        let dir = scratch();
++        claim(&dir, "-", "a").unwrap();
++        let mut writer = Writer::open(&dir, "a").unwrap();
++        writer
++            .append(&dir, "a", vec![(1, image(1)), (2, image(2))])
++            .unwrap();
++        let mut bytes = fs::read(dir.join("LOG")).unwrap();
++        bytes[60] ^= 1;
++        fs::write(dir.join("LOG"), bytes).unwrap();
++        let world = dir.join("world");
++        fs::create_dir_all(&world).unwrap();
++        fs::write(world.join("keep"), b"untouched").unwrap();
++        assert!(restore(&dir, "a", &world).is_err());
++        assert_eq!(fs::read(world.join("keep")).unwrap(), b"untouched");
++        fs::write(dir.join("BASE"), b"torn").unwrap();
++        assert!(restore(&dir, "a", &world).is_err());
++        assert!(relative("../../escape").is_err());
++        fs::remove_dir_all(dir).unwrap();
++    }
++    #[test]
++    fn chunk_metadata_overlay_survives_compaction_and_new_terrain_replaces_it() {
++        use horizon_world::nbt::{Limits, NamedTag, Tag};
++        let dir = scratch();
++        claim(&dir, "-", "a").unwrap();
++        let mut writer = Writer::open(&dir, "a").unwrap();
++        let path = "dimensions/minecraft/overworld/region/r.0.0.mca";
++        let compressed = |time, count| {
++            ChunkRecord::from_nbt(
++                &NamedTag {
++                    name: "".into(),
++                    tag: Tag::compound([
++                        ("LastUpdate", Tag::Long(time)),
++                        ("chest", Tag::Int(count)),
++                    ]),
++                },
++                Compression::Zlib,
++                0,
++                Limits::saved(),
++            )
++            .unwrap()
++            .compressed
++        };
++        writer
++            .append(
++                &dir,
++                "a",
++                vec![(
++                    1,
++                    vec![Change::chunk(path.into(), [0, 0], compressed(1, 7))],
++                )],
++            )
++            .unwrap();
++        let overlay = ChunkRecord::from_nbt(
++            &NamedTag {
++                name: "".into(),
++                tag: Tag::compound([("LastUpdate", Tag::Long(2))]),
++            },
++            Compression::Zlib,
++            0,
++            Limits::saved(),
++        )
++        .unwrap()
++        .compressed;
++        let receipt = writer
++            .append(
++                &dir,
++                "a",
++                vec![(2, vec![Change::overlay(path.into(), [0, 0], overlay)])],
++            )
++            .unwrap();
++        writer
++            .compact_at(&dir, "a", receipt[0].0.clone(), 0)
++            .unwrap();
++        let world = dir.join("world");
++        restore(&dir, "a", &world).unwrap();
++        let read = |world: &Path| {
++            RegionFile::open(world.join(path))
++                .unwrap()
++                .read(ChunkPos::new(0, 0))
++                .unwrap()
++                .unwrap()
++                .nbt(Limits::saved())
++                .unwrap()
++                .tag
++        };
++        let tag = read(&world);
++        assert_eq!(tag.get("LastUpdate"), Some(&Tag::Long(2)));
++        assert_eq!(tag.get("chest"), Some(&Tag::Int(7)));
++        writer
++            .append(
++                &dir,
++                "a",
++                vec![(
++                    3,
++                    vec![Change::chunk(path.into(), [0, 0], compressed(3, 31))],
++                )],
++            )
++            .unwrap();
++        restore(&dir, "a", &world).unwrap();
++        let tag = read(&world);
++        assert_eq!(tag.get("LastUpdate"), Some(&Tag::Long(3)));
++        assert_eq!(tag.get("chest"), Some(&Tag::Int(31)));
++        fs::remove_dir_all(dir).unwrap();
++    }
++}
+diff --git a/crates/horizon-client/src/game/dragon.rs b/crates/horizon-client/src/game/dragon.rs
+index 5512dc4a3..e01251a00 100644
+--- a/crates/horizon-client/src/game/dragon.rs
++++ b/crates/horizon-client/src/game/dragon.rs
+@@ -1057,7 +1057,7 @@ impl Game<'_> {
+         })
+     }
+     pub(super) fn save_fight(&mut self) {
+-        if !self.fight.loaded || !self.fight.dirty {
++        if !self.fight.loaded || (!self.fight.dirty && !horizon_client::save::cut_active()) {
+             return;
+         }
+ 
+diff --git a/crates/horizon-client/src/game/functions.rs b/crates/horizon-client/src/game/functions.rs
+index 8f3076e89..701f82a2d 100644
+--- a/crates/horizon-client/src/game/functions.rs
++++ b/crates/horizon-client/src/game/functions.rs
+@@ -347,7 +347,7 @@ impl Game<'_> {
+                 ])
+             })
+             .collect();
+-        if events.is_empty() && !self.schedule_path().exists() {
++        if !save::cut_active() && events.is_empty() && !self.schedule_path().exists() {
+             return;
+         }
+         let _ = save::write_dat(
+diff --git a/crates/horizon-client/src/game/levels.rs b/crates/horizon-client/src/game/levels.rs
+index 57b177ba0..fd13f2df2 100644
+--- a/crates/horizon-client/src/game/levels.rs
++++ b/crates/horizon-client/src/game/levels.rs
+@@ -654,6 +654,17 @@ impl Game<'_> {
+         &mut self,
+         next: &mut Instant,
+         paused: bool,
++    ) -> Option<Duration> {
++        self.wait_for_next_server_tick_with(next, paused, None)
++    }
++
++    /// E6 may run its control prelude while pacing, still strictly between simulation ticks.
++    /// The caller accounts this work in MSPT. Ordinary/integrated servers keep the old wait.
++    pub(super) fn wait_for_next_server_tick_with(
++        &mut self,
++        next: &mut Instant,
++        paused: bool,
++        mut idle: Option<&mut dyn FnMut(&mut Self)>,
+     ) -> Option<Duration> {
+         if let Some(report) = self.clock.take_sprint_report() {
+             // ServerTickRateManager.finishTickSprint: the server's sendSuccess.
+@@ -673,6 +684,18 @@ impl Game<'_> {
+         }
+         *next += self.clock.tick_duration();
+         if *next > now {
++            if let Some(idle) = idle.as_mut() {
++                while Instant::now() < *next {
++                    idle(self);
++                    let until = (*next).min(Instant::now() + Duration::from_millis(1));
++                    self.pump_chunks(until, paused);
++                    let now = Instant::now();
++                    if until > now {
++                        std::thread::sleep(until - now);
++                    }
++                }
++                return None;
++            }
+             // The chunks loading (the players', force-loaded ones, a
+             // `/pregen` task) keep the workers fed until the next tick.
+             self.pump_chunks(*next, paused);
+diff --git a/crates/horizon-client/src/game/maps.rs b/crates/horizon-client/src/game/maps.rs
+index 4cb48a83c..90f86daa4 100644
+--- a/crates/horizon-client/src/game/maps.rs
++++ b/crates/horizon-client/src/game/maps.rs
+@@ -1661,7 +1661,7 @@ impl Game<'_> {
+     /// Writes changed maps and the id counter (`MapItemSavedData`, `MapIndex`).
+     pub(super) fn save_maps(&mut self) {
+         for (id, m) in &mut self.maps.data {
+-            if m.dirty {
++            if m.dirty || horizon_client::save::cut_active() {
+                 let path = self
+                     .world_root
+                     .join("data/minecraft/maps")
+diff --git a/crates/horizon-client/src/game/nether_portal.rs b/crates/horizon-client/src/game/nether_portal.rs
+index 3e648c6c3..504336a32 100644
+--- a/crates/horizon-client/src/game/nether_portal.rs
++++ b/crates/horizon-client/src/game/nether_portal.rs
+@@ -1338,7 +1338,7 @@ impl Game<'_> {
+     }
+     /// Write the waiting entities when they changed.
+     pub(super) fn save_portal_arrivals(&mut self) {
+-        if !self.portals.dirty || self.remote.is_some() {
++        if (!self.portals.dirty && !horizon_client::save::cut_active()) || self.remote.is_some() {
+             return;
+         }
+         let list = self
+diff --git a/crates/horizon-client/src/game/persist.rs b/crates/horizon-client/src/game/persist.rs
+index 0ffa30635..9833a784d 100644
+--- a/crates/horizon-client/src/game/persist.rs
++++ b/crates/horizon-client/src/game/persist.rs
+@@ -1635,7 +1635,13 @@ impl Game<'_> {
+     /// without `saveAll`'s flush.
+     pub(super) fn save_entities(&mut self, wait: bool) -> Result<()> {
+         self.spawn_loaded_entities();
+-        let keys: HashSet<(i32, i32)> = self.world.chunks.keys().copied().collect();
++        let mut keys: HashSet<(i32, i32)> = self.world.chunks.keys().copied().collect();
++        if std::env::var_os("HORIZON_E3_CUT_DIR").is_some() {
++            self.tile_entity_keys(&mut keys);
++            if keys.iter().any(|key| !self.world.chunks.contains_key(key)) {
++                return Err("tile cut requires every live entity chunk to be resident; load the missing chunks before retrying".into());
++            }
++        }
+         let chunks = self.entity_chunks(&keys, false);
+         self.prune_entity_memory();
+         if wait {
+@@ -1644,6 +1650,56 @@ impl Game<'_> {
+             self.save.save_entities_later(chunks)
+         }
+     }
++    /// Check every live entity position, not only the resident chunk map. Commands can summon
++    /// outside it. Such a cut must fail: overwriting an unloaded chunk's entity record would
++    /// otherwise either lose its old residents or duplicate an earlier copy. Load it first.
++    pub(super) fn tile_entity_keys(&self, keys: &mut HashSet<ChunkKey>) {
++        use super::entity::{Entity as _, entity_lists_of, for_each_entity};
++        keys.extend(
++            self.world
++                .block_entities
++                .keys()
++                .map(|p| (p.0 >> 4, p.2 >> 4)),
++        );
++        keys.extend(
++            self.block_ticks
++                .moving_pistons
++                .iter()
++                .map(|(p, _)| (p.x >> 4, p.z >> 4)),
++        );
++        for_each_entity!(entity_lists_of!(self), entity => {
++            keys.insert(chunk_of(entity.position()));
++        });
++        for position in self
++            .cushions
++            .iter()
++            .map(|e| e.position)
++            .chain(self.others.iter().map(|e| e.position))
++            .chain(self.crystals.iter().map(|e| e.position))
++            .chain(self.dragon.iter().map(|e| e.position))
++        {
++            keys.insert(chunk_of(position));
++        }
++        keys.extend(self.paintings.iter().map(|e| chunk_of(painting_center(e))));
++        for frame in &self.item_frames {
++            let (lo, hi) = frame.bounds();
++            keys.insert(chunk_of(Vec3::new(
++                (lo[0] + hi[0]) / 2.0,
++                (lo[1] + hi[1]) / 2.0,
++                (lo[2] + hi[2]) / 2.0,
++            )));
++        }
++        for position in self
++            .fangs
++            .list
++            .iter()
++            .map(|e| e.pos)
++            .chain(self.ominous_spawners.iter().map(|e| e.position))
++        {
++            keys.insert(chunk_of(Vec3::new(position[0], position[1], position[2])));
++        }
++        keys.extend(self.persist.unknown.keys().copied());
++    }
+     /// The ids of every entity in the level now.
+     fn live_entity_ids(&self) -> HashSet<u32> {
+         use super::entity::{Entity as _, entity_lists_of, for_each_entity};
+diff --git a/crates/horizon-client/src/game/raids.rs b/crates/horizon-client/src/game/raids.rs
+index 6e8245b8d..3fe30f5b6 100644
+--- a/crates/horizon-client/src/game/raids.rs
++++ b/crates/horizon-client/src/game/raids.rs
+@@ -293,7 +293,9 @@ impl Game<'_> {
+         let Some(dim) = self.raiding.loaded else {
+             return;
+         };
+-        if !self.raiding.raids.dirty || self.remote.is_some() {
++        if (!self.raiding.raids.dirty && !horizon_client::save::cut_active())
++            || self.remote.is_some()
++        {
+             return;
+         }
+         let tag = horizon_world::nbt::Tag::compound([
+diff --git a/crates/horizon-client/src/game/scoreboard.rs b/crates/horizon-client/src/game/scoreboard.rs
+index f84182ecf..56e5e4813 100644
+--- a/crates/horizon-client/src/game/scoreboard.rs
++++ b/crates/horizon-client/src/game/scoreboard.rs
+@@ -124,7 +124,8 @@ impl Game<'_> {
+         if !self.score.loaded || self.remote.is_some() {
+             return;
+         }
+-        if self.border != horizon_client::worldborder::WorldBorder::default()
++        if (save::cut_active()
++            || self.border != horizon_client::worldborder::WorldBorder::default())
+             && let Err(e) = save::write_dat(
+                 &self.border_path(self.dim),
+                 Tag::compound([
+@@ -164,7 +165,7 @@ impl Game<'_> {
+         // The border is saved with its level (`save_level`).
+         let path = self.scoreboard_path();
+         let board = &self.score.board;
+-        if board == &Scoreboard::default() && !path.exists() {
++        if !save::cut_active() && board == &Scoreboard::default() && !path.exists() {
+             return;
+         }
+         if let Err(e) = save::write_dat(
+diff --git a/crates/horizon-client/src/game/trading.rs b/crates/horizon-client/src/game/trading.rs
+index a6711b01e..407ef4a06 100644
+--- a/crates/horizon-client/src/game/trading.rs
++++ b/crates/horizon-client/src/game/trading.rs
+@@ -131,7 +131,9 @@ impl Game<'_> {
+     }
+     /// `RandomSequences` as `random_sequences.dat` (not on a server's guest).
+     pub(super) fn save_random_sequences(&mut self) {
+-        if self.remote.is_some() || self.rand_sequences.ids().is_empty() {
++        if self.remote.is_some()
++            || (self.rand_sequences.ids().is_empty() && !horizon_client::save::cut_active())
++        {
+             return;
+         }
+         let tag = horizon_world::nbt::Tag::compound([
+diff --git a/crates/horizon-client/src/game/wandering_trader.rs b/crates/horizon-client/src/game/wandering_trader.rs
+index 3e3a70f8c..f6934f03c 100644
+--- a/crates/horizon-client/src/game/wandering_trader.rs
++++ b/crates/horizon-client/src/game/wandering_trader.rs
+@@ -63,7 +63,9 @@ impl Game<'_> {
+         t.loaded = true;
+     }
+     pub(super) fn save_wandering_trader(&mut self) {
+-        if !self.creatures.trader.loaded || !self.creatures.trader.dirty {
++        if !self.creatures.trader.loaded
++            || (!self.creatures.trader.dirty && !horizon_client::save::cut_active())
++        {
+             return;
+         }
+         let t = &self.creatures.trader;
+diff --git a/crates/horizon-client/src/save.rs b/crates/horizon-client/src/save.rs
+index 63b350bd9..8212db878 100644
+--- a/crates/horizon-client/src/save.rs
++++ b/crates/horizon-client/src/save.rs
+@@ -51,6 +51,39 @@ use std::{
+ 
+ pub const VERSION_NAME: &str = horizon_core::VANILLA_VERSION;
+ 
++pub fn cut_active() -> bool {
++    CUT_TAGS.with(|tags| tags.borrow().is_some())
++}
++
++thread_local! {
++    /// E6 borrows the existing metadata builders, but never their file writers.
++    static CUT_TAGS: std::cell::RefCell<Option<Vec<(PathBuf, Tag)>>> = const { std::cell::RefCell::new(None) };
++}
++
++/// Collect metadata tags on this thread without encoding or writing them. A panic clears the
++/// scope too. Background region/player writers on other threads are deliberately unaffected.
++pub fn cut_tags<T>(build: impl FnOnce() -> Result<T>) -> Result<(T, Vec<(PathBuf, Tag)>)> {
++    struct Clear;
++    impl Drop for Clear {
++        fn drop(&mut self) {
++            CUT_TAGS.with(|tags| {
++                tags.borrow_mut().take();
++            });
++        }
++    }
++    CUT_TAGS.with(|tags| -> Result<()> {
++        if tags.borrow().is_some() {
++            return Err("nested cut metadata capture".into());
++        }
++        *tags.borrow_mut() = Some(Vec::new());
++        Ok(())
++    })?;
++    let _clear = Clear;
++    let value = build()?;
++    let tags = CUT_TAGS.with(|tags| tags.borrow_mut().take().unwrap_or_default());
++    Ok((value, tags))
++}
++
+ mod gateway;
+ #[cfg(test)]
+ mod loot_tests;
+@@ -565,6 +598,29 @@ fn tick_list(ticks: &[SavedTick], name: impl Fn(u32) -> Option<String>) -> Tag {
+             .collect(),
+     )
+ }
++
++/// E6's small persisted chunk overlay. Terrain and containers remain in their COW record.
++pub fn cut_chunk_metadata(
++    time: i64,
++    inhabited: i64,
++    blocks: &[SavedTick],
++    fluids: &[SavedTick],
++    tables: Option<&SaveTables>,
++) -> Tag {
++    let mut tag = Tag::compound([
++        ("LastUpdate", Tag::Long(time)),
++        ("InhabitedTime", Tag::Long(inhabited)),
++    ]);
++    if let Some(tables) = tables {
++        put(
++            &mut tag,
++            "block_ticks",
++            tick_list(blocks, |k| tables.block_names.get(k as usize).cloned()),
++        );
++        put(&mut tag, "fluid_ticks", tick_list(fluids, fluid_name));
++    }
++    tag
++}
+ fn read_ticks(
+     tag: Option<&Tag>,
+     chunk: (i32, i32),
+@@ -1185,7 +1241,7 @@ pub fn encode_poi(chunk: &Chunk, tables: &SaveTables) -> Option<NamedTag> {
+ }
+ /// A record's `free_tickets` from the POI file the chunk had, while the same
+ /// POI is still there: a bed or job site a villager claimed stays claimed.
+-fn keep_claims(saved: &mut NamedTag, old: &NamedTag) {
++pub fn keep_claims(saved: &mut NamedTag, old: &NamedTag) {
+     let key = |r: &Tag| match (r.get("pos"), text(r.get("type"))) {
+         (Some(Tag::IntArray(pos)), Some(kind)) => Some((pos.clone(), kind)),
+         _ => None,
+@@ -2474,7 +2530,7 @@ impl SaveDir {
+     ) -> Result<()> {
+         let path = self.attachments_path();
+         let data = attachments.to_nbt();
+-        if data.is_empty() && !path.exists() {
++        if !cut_active() && data.is_empty() && !path.exists() {
+             return Ok(());
+         }
+         write_dat(
+@@ -3173,6 +3229,17 @@ fn sync_folder(path: &Path) -> std::io::Result<()> {
+ }
+ 
+ fn write_dat_as(path: &Path, tag: Tag, durable: bool) -> Result<()> {
++    let tag = CUT_TAGS.with(|tags| {
++        if let Some(tags) = tags.borrow_mut().as_mut() {
++            tags.push((path.to_owned(), tag));
++            None
++        } else {
++            Some(tag)
++        }
++    });
++    let Some(tag) = tag else {
++        return Ok(());
++    };
+     if let Some(dir) = path.parent() {
+         fs::create_dir_all(dir)?;
+     }
+diff --git a/crates/horizon-client/src/stopwatches.rs b/crates/horizon-client/src/stopwatches.rs
+index b058e9d79..10947ad87 100644
+--- a/crates/horizon-client/src/stopwatches.rs
++++ b/crates/horizon-client/src/stopwatches.rs
+@@ -57,7 +57,7 @@ impl Stopwatches {
+         s
+     }
+     pub fn save(&mut self, root: &Path) {
+-        if !self.dirty && self.watches.is_empty() {
++        if !save::cut_active() && !self.dirty && self.watches.is_empty() {
+             return;
+         }
+         self.dirty = false;

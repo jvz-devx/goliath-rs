@@ -1,7 +1,7 @@
 //! Owns independent worker processes and deterministic metric aggregation.
 
 use goliath_model::Policy;
-use goliath_sim::{Outcome, SETUPS, Scenario, run};
+use goliath_sim::{Mutation, Outcome, SETUPS, Scenario, Settings, run_with_settings};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt::Write;
@@ -29,10 +29,11 @@ struct Totals {
 }
 
 impl Totals {
-    fn add(&mut self, seed: u64, outcome: Outcome) {
+    fn add(&mut self, seed: u64, outcome: Outcome, policy: Policy) {
         self.seeds += 1;
-        self.failures += u64::from(outcome.violated());
-        if outcome.violated() {
+        let failed = outcome.violated() || (policy == Policy::P5 && outcome.losses > 0);
+        self.failures += u64::from(failed);
+        if failed {
             self.first_failure = Some(self.first_failure.map_or(seed, |s| s.min(seed)));
         }
         self.duplicates += outcome.duplicates;
@@ -170,6 +171,7 @@ pub(super) fn worker(
     workers: u64,
     count: u64,
     calm: bool,
+    abort_delay_ms: u64,
 ) -> Result<(), Box<dyn Error>> {
     if workers == 0 {
         return Err("worker count must be positive".into());
@@ -182,7 +184,19 @@ pub(super) fn worker(
                 if calm {
                     scenario.faults.clear();
                 }
-                totals.add(seed, run(&scenario, policy, false));
+                totals.add(
+                    seed,
+                    run_with_settings(
+                        &scenario,
+                        policy,
+                        false,
+                        Settings {
+                            abort_delay_ms,
+                            ..Settings::default()
+                        },
+                    ),
+                    policy,
+                );
             }
             println!("{setting},{}:{}", policy.name(), totals.encode());
         }
@@ -190,14 +204,19 @@ pub(super) fn worker(
     Ok(())
 }
 
-pub(super) fn sweep(count: u64, path: &str, calm: bool) -> Result<(), Box<dyn Error>> {
+pub(super) fn sweep(
+    count: u64,
+    path: &str,
+    calm: bool,
+    abort_delay_ms: u64,
+) -> Result<(), Box<dyn Error>> {
     if count == 0 {
         return Err("seed count must be positive".into());
     }
     let workers = std::thread::available_parallelism()?.get() as u64;
     eprintln!(
         "{} scenario-seeds, {workers} independent OS processes; assumed latencies",
-        count * 15
+        count * 18
     );
     let executable = std::env::current_exe()?;
     let mut children = Vec::new();
@@ -210,13 +229,14 @@ pub(super) fn sweep(count: u64, path: &str, calm: bool) -> Result<(), Box<dyn Er
                     &workers.to_string(),
                     &count.to_string(),
                     if calm { "calm" } else { "faults" },
+                    &abort_delay_ms.to_string(),
                 ])
                 .stdout(Stdio::piped())
                 .spawn()?,
         );
     }
     let mut totals: Vec<Vec<Totals>> = (0..3)
-        .map(|_| (0..5).map(|_| Totals::default()).collect())
+        .map(|_| (0..6).map(|_| Totals::default()).collect())
         .collect();
     for child in children {
         let output = child.wait_with_output()?;
@@ -283,9 +303,50 @@ pub(super) fn sweep(count: u64, path: &str, calm: bool) -> Result<(), Box<dyn Er
     }
     if totals
         .iter()
-        .any(|row| row[2..].iter().any(|t| t.failures > 0))
+        .any(|row| row[2..].iter().any(|t| t.failures > 0 || t.losses > 0))
     {
         return Err("a candidate zero-duplication policy failed; replay the CSV seed".into());
+    }
+    Ok(())
+}
+
+pub(super) fn mutations(count: u64, path: &str) -> Result<(), Box<dyn Error>> {
+    let mut csv = String::from("mutation,policy,setting,seeds,failing_seeds,first_seed\n");
+    let mut escaped = false;
+    for (mutation, policy) in Mutation::CASES {
+        let mut caught = false;
+        for (setting, latency) in SETUPS.into_iter().enumerate() {
+            let mut failures = 0;
+            let mut first = None;
+            for seed in 0..count {
+                let result = run_with_settings(
+                    &Scenario::seeded(seed, latency),
+                    policy,
+                    false,
+                    Settings {
+                        mutation,
+                        ..Settings::default()
+                    },
+                );
+                if result.violated() || result.losses > 0 {
+                    failures += 1;
+                    first.get_or_insert(seed);
+                }
+            }
+            caught |= failures > 0;
+            writeln!(
+                &mut csv,
+                "{mutation:?},{},{setting},{count},{failures},{}",
+                policy.name(),
+                first.map_or_else(|| "-".into(), |s| s.to_string())
+            )?;
+        }
+        escaped |= !caught;
+    }
+    std::fs::write(path, &csv)?;
+    print!("{csv}");
+    if escaped {
+        return Err("a mutation escaped the invariant checker".into());
     }
     Ok(())
 }

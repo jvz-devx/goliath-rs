@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Offline mutations of E4's acceptance checker, using the retained 14-crossing pilot."""
+import copy
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import unittest
+
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader("e4", str(ROOT / "scripts/e4-walls"))
+spec = importlib.util.spec_from_loader("e4", loader)
+e4 = importlib.util.module_from_spec(spec)
+loader.exec_module(e4)
+
+
+class Acceptance(unittest.TestCase):
+    def setUp(self):
+        self.result = json.loads((ROOT / "docs/experiments/data/E4/pilot.json").read_text())
+
+    def test_original_passes(self):
+        e4.verify(self.result, 14)
+
+    def test_skipped_crossing_fails(self):
+        self.result["trials"].pop(5)
+        with self.assertRaisesRegex(RuntimeError, "skipped"):
+            e4.verify(self.result, 14)
+
+    def test_wrong_actual_arrival_fails(self):
+        self.result["arrival_sequence"] = [t["target"] for t in self.result["trials"]]
+        self.result["arrival_sequence"][3] = "b"
+        with self.assertRaisesRegex(RuntimeError, "actual handoff"):
+            e4.verify(self.result, 14)
+
+    def test_corrupted_measurements_fail(self):
+        changes = [("input_gap_ms", -1), ("inventory_after", "wrong"),
+                   ("inventory_count_after", 18), ("arrival_error_blocks", 100), ("total_ms", -1)]
+        for key, value in changes:
+            result = copy.deepcopy(self.result)
+            result["trials"][4][key] = value
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                e4.verify(result, 14)
+
+    def test_bad_summary_and_disconnect_fail(self):
+        self.result["summary"]["total_ms"]["p50"] += 1
+        with self.assertRaisesRegex(RuntimeError, "percentiles"):
+            e4.verify(self.result, 14)
+        self.result["disconnects"] = 1
+        with self.assertRaisesRegex(RuntimeError, "disconnect"):
+            e4.verify(self.result, 14)
+
+    def test_particle_evidence_and_cost(self):
+        for name in ("particles-on", "particles-off"):
+            result = json.loads((ROOT / f"docs/experiments/data/E4/{name}.json").read_text())
+            e4.verify_particles(result)
+        result["particle_packets"] = 1
+        with self.assertRaises(RuntimeError):
+            e4.verify_particles(result)
+
+    def test_particle_delivery_mutation(self):
+        result = json.loads((ROOT / "docs/experiments/data/E4/particles-on.json").read_text())
+        result["particle_windows"][0]["received_packets"] = 0
+        with self.assertRaises(RuntimeError):
+            e4.verify_particles(result)
+
+    def test_particle_byte_mutation(self):
+        result = json.loads((ROOT / "docs/experiments/data/E4/particles-on.json").read_text())
+        result["particle_windows"][0]["wire_bytes"] += 1
+        with self.assertRaises(RuntimeError):
+            e4.verify_particles(result)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,17 @@
+{
+  "date": "2026-11-07T16:48:18+0100",
+  "source_commit": "fc2868b2b26d56ec76e17414909fe58a3b87bb92",
+  "candidate_binary_sha256": "8774d48415f5305389a7dc726ede5e80d0c70f8eb0ecafd92e4bab84d47b6d9f",
+  "accepted_as_benchmark": false,
+  "world": "normal terrain, seed 12345",
+  "bot_position": [96.5, 169.0, -31.5],
+  "resident_chunks": 121,
+  "fixture_pigs_live_selector_count": 64,
+  "fixture_pigs_in_saved_entity_regions": 32,
+  "saved_fixture_pig_x_range": [16.5, 22.5],
+  "missing_fixture_pig_x_range": [8.5, 14.5],
+  "fixture_chests_in_save": 128,
+  "all_block_entities_in_save": 334,
+  "diagnosis": "Ordinary entity save keys came only from world.chunks. The normal-world safe spawn was away from the origin fixture, so half the pigs were live in nonresident chunks and were omitted.",
+  "resolution": "The opt-in E3 save scans the complete live footprint and fails the cut if a required chunk is not resident. It does not acknowledge this partial image. Benchmark bots are explicitly teleported to the fixture before population."
+}

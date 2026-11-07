@@ -1,0 +1,658 @@
+#!/usr/bin/env python3
+"""E3 native checkpoint measurements and real Horizon SIGKILL/restart checks.
+
+All game data lives in owned TemporaryDirectories under .local/runs. Prepared
+resources are read-only. No launcher, account, network download or git command.
+Default: python3 -B scripts/e3-cut, using retained binaries, 20 samples per cell
+and 200 kills. --section smoke|bench|kills|fsync narrows a reproduction.
+"""
+import argparse
+import base64
+from collections import Counter
+import ctypes
+import fcntl
+import gzip
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import platform
+import random
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import uuid
+import zlib
+
+ROOT = Path(__file__).resolve().parent.parent
+RUNS = ROOT / '.local/runs'
+DATA = ROOT / 'docs/experiments/data/E3'
+BINS = ROOT / '.local/bin/horizon-e3'
+BASE = ROOT / '.local/bin/horizon-fc2868b2b'
+RESOURCES = Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'
+TOKEN = 'e3-local-process-a'
+sys.path.insert(0, str(ROOT / '.local/src/horizon/tools'))
+from server_transfer_e2e import read_nbt, items_in, Relay, SECRET  # MIT Horizon harness
+
+
+def sanitize(text):
+    return str(text).replace(str(ROOT), '$REPO').replace(str(Path.home()), '$HOME')
+
+
+def save(name, value):
+    DATA.mkdir(parents=True, exist_ok=True)
+    (DATA / name).write_text(sanitize(json.dumps(value, indent=2)) + '\n')
+
+
+def pct(values):
+    ordered = sorted(values)
+    return {f'p{p}': ordered[max(0, math.ceil(len(ordered)*p/100)-1)] for p in (50, 95, 99)} if ordered else {}
+
+
+def disk_kib(path):
+    return int(subprocess.check_output(['du', '-sk', path], text=True).split()[0])
+
+
+class Usage(ctypes.Structure):
+    _fields_ = [('uuid', ctypes.c_ubyte*16), ('values', ctypes.c_uint64*18)]
+
+
+def io_bytes(pid):
+    """Kernel process disk IO, rusage_info_v2, not the logical pack byte count."""
+    if sys.platform != 'darwin':
+        return None
+    value = Usage()
+    lib = ctypes.CDLL('/usr/lib/libproc.dylib')
+    if lib.proc_pid_rusage(pid, 2, ctypes.byref(value)) != 0:
+        raise RuntimeError('proc_pid_rusage failed')
+    return value.values[17]
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+class Engine:
+    def __init__(self, scratch, patched=True, phases=False, normal_terrain=False, extra_env=None):
+        self.scratch = scratch
+        self.normal_terrain = normal_terrain
+        self.game = scratch / 'game'
+        self.game.mkdir(parents=True, exist_ok=True)
+        self.cut = scratch / 'cuts'
+        self.endpoint = self.game / '.horizon/engine.json'
+        self.endpoint.parent.mkdir(exist_ok=True)
+        self.endpoint.unlink(missing_ok=True)
+        self.port = free_port()
+        properties = {'online-mode': 'false', 'white-list': 'false', 'enforce-whitelist': 'false',
+            'server-ip': '127.0.0.1', 'server-port': self.port,
+            'level-type': 'minecraft\\:normal' if normal_terrain else 'minecraft\\:flat',
+            'level-seed': 12345, 'generate-structures': 'false',
+            'generator-settings': json.dumps({'layers':[{'block':'minecraft:bedrock','height':1},
+                {'block':'minecraft:dirt','height':2},{'block':'minecraft:grass_block','height':1}],
+                'biome':'minecraft:plains','features':False,'lakes':False,'structure_overrides':[]}),
+            'gamemode': 'creative', 'force-gamemode': 'true', 'allow-flight': 'true',
+            'spawn-protection': 0, 'view-distance': 3, 'simulation-distance': 3,
+            'max-players': 60, 'pause-when-empty-seconds': 0, 'max-tick-time': 0}
+        (self.game / 'server.properties').write_text(''.join(f'{k}={v}\n' for k,v in properties.items()))
+        (self.game / 'eula.txt').write_text('eula=true\n')
+        (self.game / 'forwarding.secret').write_bytes(SECRET+b'\n')
+        env = {k:v for k,v in os.environ.items() if not k.startswith(('HORIZON_', 'XDG_'))}
+        for key in ('HORIZON_HOME', 'HORIZON_LAUNCHER_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME',
+                    'HORIZON_LAUNCHER_TRASH', 'HORIZON_LAUNCHER_CLIPBOARD', 'HORIZON_LAUNCHER_DESKTOP'):
+            path = scratch / key.lower()
+            path.mkdir(exist_ok=True)
+            env[key] = str(path)
+        env.update(HORIZON_LAUNCHER_NO_SELF_UPDATE='1', HORIZON_NO_AUDIO='1')
+        if patched:
+            env.update(HORIZON_E3_CUT_DIR=str(self.cut), HORIZON_E3_FENCE=TOKEN, HORIZON_E3_TIMINGS='1')
+        if phases:
+            env['HORIZON_E3_TEST_PHASES'] = '1'
+        env.update(extra_env or {})
+        self.env = env
+        self.lines, self.bots = [], None
+        self.log = (scratch / 'server.log').open('w')
+        binary = BINS / 'horizon-client' if patched else BASE / 'horizon-client-baseline'
+        self.process = subprocess.Popen([binary, '--resources', RESOURCES, '--control-socket', self.endpoint,
+            '--transfers', 'max_freeze_seconds=60', '--dedicated', '--nogui'], cwd=self.game, env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.reader = threading.Thread(target=self.read, daemon=True)
+        self.reader.start()
+        self.control = None
+        self.relay = None
+        try:
+            self.ready()
+            self.relay = Relay(self.port, lambda line: None)
+        except Exception:
+            self.stop(killed=True)
+            raise
+
+    def read(self):
+        for line in self.process.stdout:
+            self.lines.append(line.rstrip())
+            self.log.write(line)
+            self.log.flush()
+
+    def ready(self):
+        deadline = time.monotonic() + 180
+        while not any(']: Done (' in line for line in self.lines):
+            if self.process.poll() is not None:
+                raise RuntimeError('server exited: ' + '\n'.join(self.lines[-20:]))
+            if time.monotonic() > deadline:
+                raise RuntimeError('server startup timed out')
+            time.sleep(.05)
+        self.control = self.connect()
+        self.ask('server-status')
+
+    def connect(self):
+        endpoint = json.loads(self.endpoint.read_text())
+        sock = socket.create_connection(('127.0.0.1', endpoint['port']), timeout=120)
+        stream = sock.makefile('r', encoding='utf8')
+        sock.sendall(f'auth {endpoint["token"]}\n'.encode())
+        if not json.loads(stream.readline()).get('ok'):
+            raise RuntimeError('control authentication failed')
+        return sock, stream
+
+    def ask(self, line, connection=None):
+        sock, stream = connection or self.control
+        sock.sendall((line+'\n').encode())
+        raw = stream.readline()
+        if not raw:
+            raise RuntimeError('control closed')
+        return json.loads(raw)
+
+    def console(self, line):
+        value = self.ask('console '+line)
+        if 'error' in value:
+            raise RuntimeError(value['error'])
+        return value.get('output', [])
+
+    def commands(self, commands):
+        self.process.stdin.write('\n'.join(commands)+'\n')
+        self.process.stdin.flush()
+        # The console reader enqueues asynchronously. A marker proves it was drained.
+        marker = 'E3MARK'+str(time.monotonic_ns())
+        self.process.stdin.write('say '+marker+'\n')
+        self.process.stdin.flush()
+        deadline = time.monotonic()+30
+        while not any(marker in line for line in self.lines):
+            if self.process.poll() is not None or time.monotonic()>deadline:
+                raise RuntimeError('fixture console marker timed out')
+            time.sleep(.02)
+
+    def join(self, count, warm_seconds=2):
+        self.bot_log = (self.scratch/'bots.log').open('w')
+        self.bots = subprocess.Popen([BASE/'horizon-bots', '--server', f'127.0.0.1:{self.relay.port}',
+            '--bots', str(count), '--behaviour', 'stand' if self.normal_terrain else 'idle',
+            '--seconds', '7200', '--join-every', '.02',
+            '--view-distance', '3', '--name', 'E3Bot', '--seed', '12345'], cwd=self.game,
+            env=self.env, stdout=self.bot_log, stderr=subprocess.STDOUT)
+        deadline = time.monotonic()+120
+        while True:
+            status = self.ask('server-status')
+            if len(status['players']) == count and status['chunks'] >= 25:
+                break
+            if self.bots.poll() is not None or time.monotonic()>deadline:
+                raise RuntimeError('bots failed to load: '+(self.scratch/'bots.log').read_text()[-2000:])
+            time.sleep(.2)
+        if warm_seconds<2:
+            for i in range(count):
+                ident=uuid.UUID(bytes=hashlib.md5(f'OfflinePlayer:E3Bot{i}'.encode()).digest(),version=3)
+                ready_by=time.monotonic()+10
+                while not self.ask(f'player-export {ident}').get('ok'):
+                    if time.monotonic()>ready_by:
+                        raise RuntimeError('bot did not finish placement')
+                    time.sleep(.05)
+        time.sleep(warm_seconds)
+        return status
+
+    def cut_now(self):
+        deadline = time.monotonic()+60
+        retries = 0
+        before = io_bytes(self.process.pid)
+        start = time.monotonic()
+        while True:
+            value = self.ask('tile-cut '+TOKEN)
+            value['rtt_ms'] = (time.monotonic()-start)*1000
+            after = io_bytes(self.process.pid)
+            value['disk_write_bytes'] = after-before if before is not None else None
+            value['retries'] = retries
+            if value.get('ok'):
+                return value
+            retryable=any(reason in value.get('error','') for reason in ('terrain work','every live entity chunk'))
+            if not retryable or time.monotonic()>deadline:
+                raise RuntimeError(str(value))
+            retries += 1
+            time.sleep(.1)
+
+    def bot_status(self):
+        rows=[]
+        for line in (self.scratch/'bots.log').read_text().splitlines():
+            try:
+                row=json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row,dict) and 'online' in row:
+                rows.append(row)
+        if not rows:
+            raise RuntimeError('no real-bot status sample')
+        return rows[-1]
+
+    def stop_bots(self):
+        if self.bots is not None:
+            self.bots.terminate()
+            try:
+                self.bots.wait(5)
+            except subprocess.TimeoutExpired:
+                self.bots.kill()
+                self.bots.wait()
+            self.bot_log.close()
+            self.bots = None
+
+    def stop(self, killed=False):
+        if self.process.poll() is None:
+            if killed:
+                self.process.kill()
+            else:
+                try:
+                    self.process.stdin.write('stop\n')
+                    self.process.stdin.flush()
+                except BrokenPipeError:
+                    self.process.kill()
+            try:
+                self.process.wait(60)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        self.stop_bots()
+        if self.relay is not None:
+            try:
+                self.relay.listener.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self.relay.close()
+        if self.control:
+            self.control[0].close()
+            self.control[1].close()
+        self.reader.join(5)
+        self.log.close()
+
+
+def fixture(engine, populated=False):
+    y=301 if engine.normal_terrain else -60
+    # Keep pinned 26.3 defaults: respawn_radius=10, spawn_mobs/mob_drops/advance_weather=true.
+    # Earlier legacy rule names were rejected, so removing them changes no measured setting.
+    commands = ['difficulty peaceful', 'kill @e[type=!minecraft:player]', f'setworldspawn 0 {y} 0']
+    if populated:
+        if engine.normal_terrain:
+            commands += [f'fill -16 {y-1} -16 40 {y-1} 40 minecraft:stone']
+        commands += [f'fill 20 {y} 20 35 {y} 27 minecraft:chest{{Items:[{{Slot:0b,id:"minecraft:diamond",count:9}}]}}']
+        commands += [f'summon minecraft:pig {8+i%8*2} {y} {8+i//8*2} {{PersistenceRequired:1b,Tags:["e3_fixture"]}}' for i in range(64)]
+    engine.commands(commands)
+
+
+def marker(engine, n):
+    engine.commands([f'clear E3Bot0', f'give E3Bot0 minecraft:diamond {n}',
+        f'clear E3Bot1', f'give E3Bot1 minecraft:gold_ingot {n+1}',
+        f'setblock 8 -60 8 minecraft:chest{{Items:[{{Slot:0b,id:"minecraft:iron_ingot",count:{n+2}}}]}}',
+        'kill @e[type=minecraft:item]',
+        f'summon minecraft:item 12 -58 12 {{Item:{{id:"minecraft:emerald",count:{n+3}}},PickupDelay:32767s,Age:-32768s,NoGravity:1b}}'])
+
+
+def region_tags(world, kind):
+    out = []
+    for path in world.glob(f'dimensions/minecraft/*/{kind}/*.mca'):
+        data = path.read_bytes()
+        for i in range(1024):
+            loc = int.from_bytes(data[i*4:i*4+4], 'big')
+            offset = (loc>>8)*4096
+            if offset == 0:
+                continue
+            length = int.from_bytes(data[offset:offset+4], 'big')
+            mode = data[offset+4]
+            payload = data[offset+5:offset+4+length]
+            if mode == 1:
+                payload = gzip.decompress(payload)
+            elif mode == 2:
+                payload = zlib.decompress(payload)
+            elif mode != 3:
+                raise RuntimeError(f'unsupported Anvil compression {mode}')
+            out.append(read_nbt(payload))
+    return out
+
+
+def population(world, fixture_y):
+    chunks=region_tags(world,'region')
+    containers=[e for tag in chunks for e in tag.get('block_entities',[])]
+    entities=[e for tag in region_tags(world,'entities') for e in tag.get('Entities',[])]
+    return {'containers':len(containers),
+        'fixture_chests':sum(e.get('id')=='minecraft:chest' and e.get('y')==fixture_y
+            and 20<=e.get('x',0)<=35 and 20<=e.get('z',0)<=27 for e in containers),
+        'fixture_pigs':sum(e.get('id')=='minecraft:pig' and 'e3_fixture' in e.get('Tags',[]) for e in entities),
+        'entities_by_type':dict(Counter(e.get('id','unknown') for e in entities))}
+
+
+def inspect_world(world):
+    players = []
+    for name, item in [('E3Bot0', 'minecraft:diamond'), ('E3Bot1', 'minecraft:gold_ingot')]:
+        ident = uuid.UUID(bytes=hashlib.md5(('OfflinePlayer:'+name).encode()).digest(), version=3)
+        tag = read_nbt(gzip.decompress((world/f'players/data/{ident}.dat').read_bytes()))
+        players.append(items_in(tag, item))
+    chunks = region_tags(world, 'region')
+    containers = [e for tag in chunks for e in tag.get('block_entities', [])]
+    chest = next(e for e in containers if (e.get('x'), e.get('y'), e.get('z')) == (8, -60, 8))
+    iron = sum(s.get('count', 1) for s in chest['Items'] if s['id']=='minecraft:iron_ingot')
+    entities = [e for tag in region_tags(world, 'entities') for e in tag.get('Entities', [])]
+    emerald = sum(e.get('Item',{}).get('count', 1) for e in entities if e.get('id')=='minecraft:item' and e.get('Item',{}).get('id')=='minecraft:emerald')
+    level = read_nbt(gzip.decompress((world/'level.dat').read_bytes()))
+    return {'players': players, 'chest': iron, 'drop': emerald, 'containers':len(containers),
+        'entities':len(entities), 'level_time':level.get('Data',level).get('Time')}
+
+
+def expected(n, observed):
+    assert observed['players']==[n,n+1] and observed['chest']==n+2 and observed['drop']==n+3, observed
+
+
+def live_check(engine, n):
+    inventories=[]
+    for name,item in [('E3Bot0','minecraft:diamond'),('E3Bot1','minecraft:gold_ingot')]:
+        ident=uuid.UUID(bytes=hashlib.md5(('OfflinePlayer:'+name).encode()).digest(),version=3)
+        reply=engine.ask('player-export '+str(ident))
+        inventories.append(items_in(read_nbt(base64.b64decode(reply['record']['player'])),item))
+    assert inventories==[n,n+1],inventories
+    chest=engine.console(f'execute if block 8 -60 8 minecraft:chest{{Items:[{{id:"minecraft:iron_ingot",count:{n+2}}}]}} run say E3_LIVE_CHEST_OK')
+    drop_tag='{Item:{id:"minecraft:emerald",count:%d}}' % (n+3)
+    drop=engine.console(f'execute if entity @e[type=minecraft:item,nbt={drop_tag}] run say E3_LIVE_DROP_OK')
+    assert any('E3_LIVE_CHEST_OK' in line for line in chest),chest
+    assert any('E3_LIVE_DROP_OK' in line for line in drop),drop
+    return {'players':inventories,'chest':True,'drop':True}
+
+
+def fsync_probe(samples=200):
+    rows = {}
+    with tempfile.TemporaryDirectory(prefix='E3-fsync-', dir=RUNS) as temporary:
+        path = Path(temporary)/'sync'
+        with path.open('wb', buffering=0) as stream:
+            for kind in ('fsync', 'fullfsync'):
+                timings=[]
+                for i in range(samples):
+                    stream.seek(0)
+                    stream.write(bytes([i%251])*65536)
+                    start=time.monotonic()
+                    if kind=='fsync':
+                        os.fsync(stream.fileno())
+                    else:
+                        os.fsync(stream.fileno())
+                        fcntl.fcntl(stream.fileno(), 51)  # SDK F_FULLFSYNC, Darwin
+                    timings.append((time.monotonic()-start)*1000)
+                rows[kind]={'samples':timings, 'ms':pct(timings)}
+    save('fsync.json', {'bytes':65536, 'count':samples, 'load':os.getloadavg(), 'results':rows})
+    print('fsync', {key:value['ms'] for key,value in rows.items()}, flush=True)
+
+
+def benchmark(samples, only=None):
+    results=[]
+    for populated in (False, True):
+        for bots in (1,25,50):
+            label=f'{"populated" if populated else "flat"}-{bots}'
+            if only and only!=label:
+                continue
+            row={'case':label, 'bots':bots, 'populated':populated, 'load_start':os.getloadavg()}
+            for patched in (False,True):
+                with tempfile.TemporaryDirectory(prefix=f'E3-{label}-', dir=RUNS) as temporary:
+                    engine=None
+                    try:
+                        engine=Engine(Path(temporary), patched=patched, normal_terrain=populated)
+                        fixture(engine)
+                        engine.join(bots)
+                        if populated:
+                            engine.console('tp @a 0 301 0')
+                            time.sleep(3)
+                            # /fill refuses unloaded chunks. Populate after the real bot views load.
+                            fixture(engine, True)
+                            engine.console('tp @a 0 301 0')
+                            time.sleep(2)
+                        if not patched:
+                            time.sleep(6)
+                            row['baseline_status']=engine.ask('server-status')
+                            row['baseline_bots']=engine.bot_status()
+                            assert row['baseline_bots']['online']==bots and row['baseline_bots']['chunks']>0
+                            engine.console('save-all flush')
+                            row['baseline_population']=population(engine.game/'world',301 if populated else -60)
+                            continue
+                        assert engine.ask('tile-fence - '+TOKEN).get('ok')
+                        row['cut_bots']=engine.bot_status()
+                        assert row['cut_bots']['online']==bots and row['cut_bots']['chunks']>0
+                        first=engine.cut_now()
+                        row['initial_cut']=first
+                        row['cut_population']=population(engine.game/'world',301 if populated else -60)
+                        if populated:
+                            assert row['cut_population']['fixture_chests']==128,row['cut_population']
+                            assert row['cut_population']['fixture_pigs']==64,row['cut_population']
+                            assert row['baseline_population']['fixture_chests']==128,row['baseline_population']
+                            assert row['baseline_population']['fixture_pigs']==64,row['baseline_population']
+                        row['cells']=[]
+                        for interval in (0,1,5):
+                            cuts=[]
+                            startline=len(engine.lines)
+                            load=os.getloadavg()
+                            for i in range(samples):
+                                if interval:
+                                    time.sleep(interval)
+                                cut=engine.cut_now()
+                                cut['load']=os.getloadavg()
+                                cuts.append(cut)
+                            status=engine.ask('server-status')
+                            ticks=[float(line.split()[1]) for line in engine.lines[startline:] if line.startswith('E3_TICK ')]
+                            cell={'interval_s':interval, 'samples':cuts, 'load_start':load, 'load_end':os.getloadavg(),
+                                'status':status, 'whole_loop_mspt':pct(ticks), 'tick_count':len(ticks),
+                                'whole_loop_max_ms':max(ticks) if ticks else None}
+                            for key in ('rtt_ms','tick_ms','off_ms','install_io_ms','bytes_written','disk_write_bytes'):
+                                cell[key]=pct([c[key] for c in cuts if c.get(key) is not None])
+                            row['cells'].append(cell)
+                            print(label, interval, 'request',cell['rtt_ms'],'tick',cell['tick_ms'],flush=True)
+                            save('bench-running.json',results+[row])
+                        if any(c['rtt_ms']['p95'] >= 136 or c['tick_ms']['p95'] >= 128 for c in row['cells']):
+                            paired=[]
+                            ident=uuid.UUID(bytes=hashlib.md5(b'OfflinePlayer:E3Bot0').digest(),version=3)
+                            for i in range(samples):
+                                approach=engine.cut_now()
+                                time.sleep(.25)
+                                freeze_start=time.monotonic()
+                                frozen=engine.ask(f'player-export {ident} freeze')
+                                if not frozen.get('ok'):
+                                    raise RuntimeError(str(frozen))
+                                delta=engine.cut_now()
+                                delta['freeze_to_install_upper_ms']=(time.monotonic()-freeze_start)*1000
+                                handover=frozen['record']['handover']
+                                released=engine.ask(f'player-release {ident} {handover} abort')
+                                if not released.get('ok'):
+                                    raise RuntimeError(str(released))
+                                paired.append({'approach':approach,'frozen_delta':delta})
+                            row['precut']={'approach_s':.25,'samples':paired,
+                                'delta_rtt_ms':pct([p['frozen_delta']['rtt_ms'] for p in paired]),
+                                'delta_tick_ms':pct([p['frozen_delta']['tick_ms'] for p in paired]),
+                                'freeze_to_install_upper_ms':pct([p['frozen_delta']['freeze_to_install_upper_ms'] for p in paired])}
+                            print(label,'precut',row['precut']['delta_rtt_ms'],flush=True)
+                        row['peak_run_kib']=disk_kib(Path(temporary))
+                    finally:
+                        if engine:
+                            engine.stop()
+            row['load_end']=os.getloadavg()
+            results.append(row)
+            save(f'bench-{label}.json',row)
+            save('bench.json',results)
+    (DATA/'bench-running.json').unlink(missing_ok=True)
+    return results
+
+
+def coherence():
+    with tempfile.TemporaryDirectory(prefix='E3-coherence-', dir=RUNS) as temporary:
+        scratch=Path(temporary)
+        engine=None
+        try:
+            engine=Engine(scratch, phases=True)
+            fixture(engine)
+            engine.join(2)
+            assert engine.ask('tile-fence - '+TOKEN).get('ok')
+            marker(engine,7)
+            cut=engine.cut_now()
+            before=inspect_world(engine.game/'world')
+            expected(7,before)
+            engine.commands(['summon minecraft:pig 4096 -60 4096 {NoAI:1b,Tags:["e3_outside"]}',
+                'summon minecraft:item 4098 -58 4098 {Item:{id:"minecraft:obsidian",count:5},PickupDelay:32767s,Age:-32768s,NoGravity:1b,Tags:["e3_outside"]}'])
+            outside_rejected=engine.ask('tile-cut '+TOKEN)
+            assert 'every live entity chunk' in outside_rejected.get('error',''),outside_rejected
+            assert json.loads((engine.cut/'HEAD').read_text())['sequence']==cut['sequence']
+            marker(engine,21)
+            # Kill without saving the newer image, then restart from HEAD.
+            engine.stop(killed=True)
+            engine=Engine(scratch, phases=True)
+            restored=inspect_world(engine.game/'world')
+            expected(7,restored)
+            assert restored['level_time']==cut['tick'],restored
+            engine.join(2)
+            live=live_check(engine,7)
+            # Revoke while old work is paused before it owns the install lock.
+            gate=engine.cut/'gate-pack-sync'
+            gate.touch()
+            (engine.cut/'PHASE').unlink(missing_ok=True)
+            connection=engine.connect()
+            connection[0].sendall(('tile-cut '+TOKEN+'\n').encode())
+            deadline=time.monotonic()+30
+            while not (engine.cut/'PHASE').exists() or (engine.cut/'PHASE').read_text()!='pack-sync':
+                if time.monotonic()>deadline:
+                    raise RuntimeError('fence gate timed out')
+                time.sleep(.01)
+            changed=engine.ask('tile-fence '+TOKEN+' e3-local-process-b')
+            assert changed.get('ok'),changed
+            gate.unlink()
+            rejected=json.loads(connection[1].readline())
+            assert rejected.get('error')=='stale tile fence',rejected
+            assert json.loads((engine.cut/'HEAD').read_text())['sequence']==cut['sequence']
+            connection[0].close()
+            connection[1].close()
+            save('coherence.json',{'cut':cut,'before':before,'restored':restored,'live_players':live,
+                'unloaded_entities_rejected':outside_rejected,'unsafe_head_unchanged':True,
+                'revoked_inflight_cut':rejected,'head_unchanged':True,'load':os.getloadavg()})
+            print('coherence and in-flight fencing passed',flush=True)
+        finally:
+            if engine:
+                engine.stop(killed=True)
+
+
+def kills(count):
+    rng=random.Random(20261107)
+    phases=['capture-begin','captured','pack-write','pack-sync','head-write','head-rename','head-renamed','installed']
+    rows=[]
+    with tempfile.TemporaryDirectory(prefix='E3-kills-',dir=RUNS) as temporary:
+        scratch=Path(temporary)
+        engine=None
+        try:
+            engine=Engine(scratch,phases=True)
+            fixture(engine)
+            engine.join(2,.5)
+            assert engine.ask('tile-fence - '+TOKEN).get('ok')
+            marker(engine,1)
+            engine.cut_now()
+            for i in range(count):
+                before=json.loads((engine.cut/'HEAD').read_text())
+                old=inspect_world(engine.game/'world')['players'][0]
+                new=old%50+1
+                marker(engine,new)
+                phase=rng.choice(phases)
+                gate=engine.cut/f'gate-{phase}'
+                gate.touch()
+                phasefile=engine.cut/'PHASE'
+                phasefile.unlink(missing_ok=True)
+                engine.control[0].sendall(('tile-cut '+TOKEN+'\n').encode())
+                deadline=time.monotonic()+30
+                while not phasefile.exists() or phasefile.read_text()!=phase:
+                    if time.monotonic()>deadline:
+                        raise RuntimeError(f'kill {i} missed phase {phase}')
+                    time.sleep(.001)
+                # Half kill at the held boundary. Half release and kill at a random
+                # point up to 3 ms later, covering writes and either side of install.
+                delay=rng.random()*.003 if i%2 else 0
+                if delay:
+                    gate.unlink()
+                    time.sleep(delay)
+                observed_phase=phasefile.read_text()
+                engine.stop(killed=True)
+                gate.unlink(missing_ok=True)
+                after=json.loads((scratch/'cuts/HEAD').read_text())
+                assert after['sequence'] in (before['sequence'],before['sequence']+1)
+                wanted=old if after['sequence']==before['sequence'] else new
+                engine=Engine(scratch,phases=True)
+                observed=inspect_world(engine.game/'world')
+                expected(wanted,observed)
+                assert observed['level_time']==after['tick'],observed
+                engine.join(2,.5)
+                live=live_check(engine,wanted)
+                rows.append({'trial':i,'gate':phase,'delay_ms':delay*1000,'last_phase':observed_phase,
+                    'previous_sequence':before['sequence'],'restored_sequence':after['sequence'],
+                    'restored_tick':after['tick'],'expected_marker':wanted,'observed':observed,'live':live,
+                    'load':os.getloadavg()})
+                save('kills-running.json',rows)
+                if (i+1)%10==0:
+                    print('kills',i+1,'/',count,'passed',flush=True)
+            save('kills.json',{'requested':count,'passed':len(rows),'partial_loads':0,'trials':rows,
+                'peak_run_kib':disk_kib(scratch)})
+            (DATA/'kills-running.json').unlink(missing_ok=True)
+        finally:
+            if engine:
+                engine.stop(killed=True)
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--section',choices=['all','smoke','bench','kills','fsync'],default='all')
+    parser.add_argument('--samples',type=int,default=20)
+    parser.add_argument('--kills',type=int,default=200)
+    parser.add_argument('--only',choices=[f'{w}-{n}' for w in ('flat','populated') for n in (1,25,50)])
+    args=parser.parse_args()
+    RUNS.mkdir(parents=True,exist_ok=True)
+    if not (RESOURCES/'horizon-resources.json').is_file():
+        raise RuntimeError('prepared read-only 26.3 resources missing')
+    meta={'date':time.strftime('%Y-%m-%dT%H:%M:%S%z'),'command':['python3','-B','scripts/e3-cut']+sys.argv[1:],
+        'horizon':'fc2868b2b26d56ec76e17414909fe58a3b87bb92','machine':platform.platform(),
+        'cpu':subprocess.check_output(['sysctl','-n','machdep.cpu.brand_string'],text=True).strip(),
+        'cpu_threads':int(subprocess.check_output(['sysctl','-n','hw.ncpu'],text=True)),
+        'ram_bytes':int(subprocess.check_output(['sysctl','-n','hw.memsize'],text=True)),
+        'load':os.getloadavg(),'samples':args.samples,'kills':args.kills,
+        'driver_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        'binary_sha256':{str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in [BINS/'horizon-client',BASE/'horizon-client-baseline',BASE/'horizon-bots'] if path.exists()},
+        'local_kib_before':disk_kib(ROOT/'.local')}
+    save('environment.json',meta)
+    save(f'environment-{args.section}.json',meta)
+    if args.section in ('all','fsync'):
+        fsync_probe()
+    if args.section in ('all','smoke'):
+        coherence()
+    if args.section in ('all','bench'):
+        benchmark(args.samples,args.only)
+    if args.section in ('all','kills'):
+        kills(args.kills)
+    print('E3 complete',args.section,flush=True)
+
+
+if __name__=='__main__':
+    if '--e6' in sys.argv:
+        import runpy
+        sys.argv.remove('--e6')
+        runpy.run_path(str(ROOT/'scripts/e6-cut'), run_name='__main__')
+        sys.exit(0)
+    try:
+        main()
+    except Exception as error:
+        print(sanitize(f'E3 FAILED: {type(error).__name__}: {error}'),file=sys.stderr,flush=True)
+        raise

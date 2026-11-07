@@ -13,10 +13,11 @@ pub enum Policy {
     P2,
     P3,
     P4,
+    P5,
 }
 
 impl Policy {
-    pub const ALL: [Self; 5] = [Self::P0, Self::P1, Self::P2, Self::P3, Self::P4];
+    pub const ALL: [Self; 6] = [Self::P0, Self::P1, Self::P2, Self::P3, Self::P4, Self::P5];
     pub fn name(self) -> &'static str {
         match self {
             Self::P0 => "P0",
@@ -24,6 +25,7 @@ impl Policy {
             Self::P2 => "P2",
             Self::P3 => "P3",
             Self::P4 => "P4",
+            Self::P5 => "P5",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -190,7 +192,11 @@ impl Cluster {
     /// Lose volatile state and replace the process. Store access is a later input.
     pub fn crash(&mut self, tile: TileId) {
         self.directory.replace(tile);
-        self.tiles[tile.0].recover();
+        if self.policy == Policy::P5 {
+            self.tiles[tile.0].live = self.tiles[tile.0].cut_log.recover(false);
+        } else {
+            self.tiles[tile.0].recover();
+        }
     }
 
     /// Called only after the adapter can read the shared directory/store.
@@ -255,7 +261,12 @@ impl Cluster {
         result.duplicate_identities = result.counts.iter().filter(|n| **n > 1).count() as u64;
         result.missing_identities = result.counts.iter().filter(|n| **n == 0).count() as u64;
         result.player_owner_violations = owners.iter().filter(|n| **n > 1).count() as u64;
-        result.stale_writes = self.store.stale_accepted;
+        result.stale_writes = self.store.stale_accepted
+            + self
+                .tiles
+                .iter()
+                .map(|t| t.cut_log.stale_accepted)
+                .sum::<u64>();
         result
     }
 }

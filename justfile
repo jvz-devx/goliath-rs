@@ -7,3 +7,8 @@ sweep seeds="66667":
 
 replay policy seed setting="0":
     cargo run --release -p goliath-sim -- replay {{policy}} {{seed}} {{setting}}
+
+# Long, real-process durability and latency experiment. Never part of `test`.
+store-torture kills="1000":
+    cargo build --release -p goliath-store --features fault-injection
+    python3 -B scripts/e5-store.py --kills {{kills}}

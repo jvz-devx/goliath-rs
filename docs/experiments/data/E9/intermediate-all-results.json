@@ -1,0 +1,251 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "9737cfa5816aa0648e537e86ce29840417fdbbbad487ece4458eb8bb4dd60a55",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --kills 1000",
+  "load_average_before": [
+    22.80078125,
+    16.974609375,
+    9.7783203125
+  ],
+  "fence": {
+    "delayed_cas": 32,
+    "rejected": 32,
+    "accepted_stale": 0,
+    "checker_failure": null,
+    "safety_check": "PASS"
+  },
+  "fence_control": {
+    "delayed_cas": 32,
+    "rejected": 0,
+    "accepted_stale": 32,
+    "checker_failure": "stale CAS accepted: 32/32",
+    "safety_check": "FAIL as required"
+  },
+  "tail": {
+    "record_bytes": 154,
+    "truncations": 154,
+    "corruptions": 154,
+    "restarts": 617,
+    "failures": 0
+  },
+  "barrier": {
+    "acknowledged": 1,
+    "recovered": 1,
+    "checker_failure": null,
+    "file_layer": "real disk barrier"
+  },
+  "early_ack_control": {
+    "acknowledged": 1,
+    "recovered": 0,
+    "checker_failure": "lost acknowledgement after unflushed cache loss",
+    "file_layer": "volatile writes dropped before barrier"
+  },
+  "kills": [
+    {
+      "seed": 5001,
+      "kills": 500,
+      "clients": 8,
+      "load_acknowledgements": 7388,
+      "transport_unknown": 3990,
+      "retries_completed_missing": 2306,
+      "distinct_snapshots": 171,
+      "lost_acknowledgements": 0,
+      "backwards_generations": 0,
+      "owner_violations": 0,
+      "observation_sha256": "a439ec2a29b327060df8f81fccf9627147fddfa76bf925269270aa44b4eb1c44"
+    },
+    {
+      "seed": 5002,
+      "kills": 500,
+      "clients": 8,
+      "load_acknowledgements": 7598,
+      "transport_unknown": 3988,
+      "retries_completed_missing": 2194,
+      "distinct_snapshots": 175,
+      "lost_acknowledgements": 0,
+      "backwards_generations": 0,
+      "owner_violations": 0,
+      "observation_sha256": "ab0b3b99259e817e100f6ce050b60b12c0837c96d7d42f2df65a5f38ca61f0dc"
+    }
+  ],
+  "latency": [
+    {
+      "mode": "fsync",
+      "clients": 1,
+      "samples": 256,
+      "blob_bytes": 256,
+      "p50_ms": 0.998542,
+      "p95_ms": 1.0805,
+      "p99_ms": 1.143542,
+      "max_ms": 1.748125,
+      "wall_seconds": 0.261,
+      "load_average_before": [
+        18.54931640625,
+        16.93115234375,
+        10.54296875
+      ],
+      "load_average_after": [
+        18.54931640625,
+        16.93115234375,
+        10.54296875
+      ]
+    },
+    {
+      "mode": "fsync",
+      "clients": 8,
+      "samples": 512,
+      "blob_bytes": 256,
+      "p50_ms": 2.381834,
+      "p95_ms": 4.107667,
+      "p99_ms": 6.754833,
+      "max_ms": 7.77675,
+      "wall_seconds": 0.175,
+      "load_average_before": [
+        18.54931640625,
+        16.93115234375,
+        10.54296875
+      ],
+      "load_average_after": [
+        18.54931640625,
+        16.93115234375,
+        10.54296875
+      ]
+    },
+    {
+      "mode": "fsync",
+      "clients": 64,
+      "samples": 1024,
+      "blob_bytes": 256,
+      "p50_ms": 21.190916,
+      "p95_ms": 34.110708,
+      "p99_ms": 39.714125,
+      "max_ms": 63.921042,
+      "wall_seconds": 0.389,
+      "load_average_before": [
+        18.54931640625,
+        16.93115234375,
+        10.54296875
+      ],
+      "load_average_after": [
+        18.3447265625,
+        16.91552734375,
+        10.57470703125
+      ]
+    },
+    {
+      "mode": "fsync",
+      "clients": 256,
+      "samples": 2048,
+      "blob_bytes": 256,
+      "p50_ms": 75.592708,
+      "p95_ms": 130.372333,
+      "p99_ms": 163.398666,
+      "max_ms": 219.005125,
+      "wall_seconds": 0.789,
+      "load_average_before": [
+        18.3447265625,
+        16.91552734375,
+        10.57470703125
+      ],
+      "load_average_after": [
+        18.3447265625,
+        16.91552734375,
+        10.57470703125
+      ]
+    },
+    {
+      "mode": "full",
+      "clients": 1,
+      "samples": 256,
+      "blob_bytes": 256,
+      "p50_ms": 3.997292,
+      "p95_ms": 6.018458,
+      "p99_ms": 9.0295,
+      "max_ms": 18.941375,
+      "wall_seconds": 1.102,
+      "load_average_before": [
+        18.3447265625,
+        16.91552734375,
+        10.57470703125
+      ],
+      "load_average_after": [
+        18.3447265625,
+        16.91552734375,
+        10.57470703125
+      ]
+    },
+    {
+      "mode": "full",
+      "clients": 8,
+      "samples": 512,
+      "blob_bytes": 256,
+      "p50_ms": 7.718417,
+      "p95_ms": 12.022834,
+      "p99_ms": 15.46325,
+      "max_ms": 20.080541,
+      "wall_seconds": 0.495,
+      "load_average_before": [
+        18.3447265625,
+        16.91552734375,
+        10.57470703125
+      ],
+      "load_average_after": [
+        18.3447265625,
+        16.91552734375,
+        10.57470703125
+      ]
+    },
+    {
+      "mode": "full",
+      "clients": 64,
+      "samples": 1024,
+      "blob_bytes": 256,
+      "p50_ms": 20.241709,
+      "p95_ms": 32.258083,
+      "p99_ms": 36.95225,
+      "max_ms": 46.649625,
+      "wall_seconds": 0.393,
+      "load_average_before": [
+        18.3447265625,
+        16.91552734375,
+        10.57470703125
+      ],
+      "load_average_after": [
+        18.3447265625,
+        16.91552734375,
+        10.57470703125
+      ]
+    },
+    {
+      "mode": "full",
+      "clients": 256,
+      "samples": 2048,
+      "blob_bytes": 256,
+      "p50_ms": 61.819583,
+      "p95_ms": 101.155583,
+      "p99_ms": 124.07675,
+      "max_ms": 152.895542,
+      "wall_seconds": 0.653,
+      "load_average_before": [
+        18.3447265625,
+        16.91552734375,
+        10.57470703125
+      ],
+      "load_average_after": [
+        18.71728515625,
+        17.01611328125,
+        10.6474609375
+      ]
+    }
+  ],
+  "wall_seconds": 105.919,
+  "peak_sampled_run_allocated_bytes": 8392704,
+  "target_allocated_bytes_at_end": 279207936,
+  "load_average_after": [
+    18.71728515625,
+    17.01611328125,
+    10.6474609375
+  ]
+}

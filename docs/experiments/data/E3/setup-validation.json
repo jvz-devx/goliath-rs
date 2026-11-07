@@ -1,0 +1,24 @@
+{
+  "measured_driver_sha256": "71aa0c38427f7f800b49d90012605d2ab746772060d2372365df823efd507abe",
+  "measured_driver_snapshot": "driver-measured.txt",
+  "rejected_noop_setup_commands": [
+    "gamerule spawn_radius 0",
+    "gamerule do_mob_spawning false",
+    "gamerule do_weather_cycle false",
+    "gamerule do_mob_loot false"
+  ],
+  "observed_feedback": "Incorrect argument for command",
+  "verification": "Read the normal-50 working save's data/minecraft/game_rules.dat after acknowledged cuts; independently checked pinned horizon-client-core/src/gamerules.rs.",
+  "data_version": 5023,
+  "observed_effective_values": {
+    "minecraft:respawn_radius": 10,
+    "minecraft:spawn_mobs": 1,
+    "minecraft:mob_drops": 1,
+    "minecraft:advance_weather": 1,
+    "minecraft:random_tick_speed": 3
+  },
+  "difficulty": "peaceful",
+  "applies_to": "Both baseline and cut runs used the same fresh default rules. The rejected commands changed no state.",
+  "delivered_driver_sha256": "9b5fc18acc72795f3f702360206d70c369acda5ae68edce5bff5bbccf0ddd6c6",
+  "post_measurement_cleanup": "Only the four rejected no-op setup commands were removed. Effective world settings, benchmark logic, capture protocol and crash checks were not changed. The delivered driver passed the live smoke, resident-footprint rejection and stale-fence checks again."
+}

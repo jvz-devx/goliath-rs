@@ -5,11 +5,12 @@ use std::collections::BinaryHeap;
 use std::fmt::Write;
 
 use goliath_model::{
-    Checkpoint, Cluster, Delta, Epoch, Generation, Handover, ITEMS, Image, ItemId, PLAYERS, Place,
-    PlayerId, Policy, Record, TILES, TileId,
+    Checkpoint, Cluster, Cut, CutId, Delta, Epoch, Generation, Handover, ITEMS, Image, ItemId,
+    PLAYERS, Place, PlayerId, Policy, Record, TILES, TileId,
 };
 
 use crate::scenario::{Action, Fault, FaultAt, Link, Scenario, mix};
+use crate::{Mutation, Settings};
 
 const END: u64 = 2_000;
 
@@ -25,6 +26,10 @@ enum Event {
     Recover(TileId, Epoch, u64),
     Release(usize, u64),
     Wal(TileId, Epoch, Vec<Delta>),
+    Abort(usize),
+    CutAppend(Cut),
+    CutFlush(TileId, Epoch, u64),
+    CutCompact(TileId, Epoch, CutId, Image),
 }
 
 impl Event {
@@ -74,6 +79,7 @@ struct Flight {
     committed: bool,
     finished: bool,
     aborted: bool,
+    cut: Option<CutId>,
 }
 
 #[derive(Clone, Debug)]
@@ -128,9 +134,20 @@ struct Simulator<'a> {
     duplicate_seen: [bool; ITEMS],
     outcome: Outcome,
     verbose: bool,
+    settings: Settings,
+    cut_flushing: [bool; TILES],
 }
 
 pub fn run(scenario: &Scenario, policy: Policy, verbose: bool) -> Outcome {
+    run_with_settings(scenario, policy, verbose, Settings::default())
+}
+
+pub fn run_with_settings(
+    scenario: &Scenario,
+    policy: Policy,
+    verbose: bool,
+    settings: Settings,
+) -> Outcome {
     let mut sim = Simulator {
         scenario,
         cluster: Cluster::new(policy),
@@ -152,7 +169,12 @@ pub fn run(scenario: &Scenario, policy: Policy, verbose: bool) -> Outcome {
             ..Outcome::default()
         },
         verbose,
+        settings,
+        cut_flushing: [false; TILES],
     };
+    if settings.mutation == Mutation::UnfencedCas {
+        sim.cluster.directory.fencing = false;
+    }
     for &(at, player, action, item) in &scenario.inputs {
         sim.schedule(at, Event::Input(player, action, item, at));
     }
@@ -181,7 +203,9 @@ pub fn run(scenario: &Scenario, policy: Policy, verbose: bool) -> Outcome {
     sim.abort_branch();
     let before = sim.cluster.audit();
     for t in 0..TILES {
-        sim.cluster.recover(TileId(t));
+        sim.crash_tile(TileId(t));
+        sim.cluster.reconcile(TileId(t));
+        sim.mutate_recovery(TileId(t));
     }
     sim.outcome.rollback += before.difference(&sim.cluster.audit());
     sim.check("2000 final recovery cut", true);
@@ -225,7 +249,9 @@ impl Simulator<'_> {
             .owner_violations
             .max(audit.player_owner_violations);
         self.outcome.stale_writes = audit.stale_writes;
-        if audit.violated() && self.outcome.first_failure.is_none() {
+        if (audit.violated() || audit.missing_identities > 0)
+            && self.outcome.first_failure.is_none()
+        {
             self.outcome.first_failure = Some(format!("{description}: {audit:?}"));
         }
         // Explicit stable hash, not RandomState or platform-dependent DefaultHasher.
@@ -279,8 +305,11 @@ impl Simulator<'_> {
             Event::CheckpointDone(checkpoint, flight) => {
                 let tile = checkpoint.fence.tile;
                 if self.cluster.directory.accepts(checkpoint.fence)
-                    && self.cluster.tiles[tile.0]
-                        .install_checkpoint(&checkpoint, self.cluster.directory.current(tile).epoch)
+                    && ((self.settings.mutation == Mutation::P2MissingInstall && flight.is_some())
+                        || self.cluster.tiles[tile.0].install_checkpoint(
+                            &checkpoint,
+                            self.cluster.directory.current(tile).epoch,
+                        ))
                     && let Some(id) = flight
                     && !self.flights[id].aborted
                 {
@@ -302,6 +331,7 @@ impl Simulator<'_> {
                         );
                     } else {
                         self.cluster.reconcile(tile);
+                        self.mutate_recovery(tile);
                         self.recovering[tile.0] = false;
                     }
                 }
@@ -311,6 +341,59 @@ impl Simulator<'_> {
                 if self.cluster.directory.current(tile).epoch == epoch {
                     self.cluster.tiles[tile.0].commit_delta(changes);
                     self.wal_busy[tile.0] = None;
+                }
+            }
+            Event::Abort(id) => {
+                if !self.flights[id].committed {
+                    self.abort_flight(id);
+                }
+            }
+            Event::CutAppend(cut) => {
+                let tile = cut.fence.tile;
+                let current = self.cluster.directory.current(tile);
+                if self.cluster.tiles[tile.0].cut_log.append(
+                    cut,
+                    current,
+                    self.settings.mutation == Mutation::P5StaleAppend,
+                ) {
+                    self.start_cut_flush(tile);
+                }
+            }
+            Event::CutFlush(tile, epoch, end) => {
+                if self.cluster.directory.current(tile).epoch == epoch {
+                    let log = &mut self.cluster.tiles[tile.0].cut_log;
+                    log.flush(end);
+                    let (id, image) = log.compaction();
+                    let newer = log.written() > end;
+                    self.cut_flushing[tile.0] = false;
+                    self.schedule(
+                        self.now + self.scenario.latency.checkpoint_ms,
+                        Event::CutCompact(tile, epoch, id, image),
+                    );
+                    for id in 0..self.flights.len() {
+                        let flight = &self.flights[id];
+                        if !flight.aborted
+                            && !flight.committed
+                            && flight.handover.source == tile
+                            && flight.handover.source_fence.epoch == epoch
+                            && flight
+                                .cut
+                                .is_some_and(|c| self.cluster.tiles[tile.0].cut_log.covers(c))
+                        {
+                            self.schedule(
+                                self.now + self.scenario.latency.network_ms,
+                                Event::Commit(id, 0),
+                            );
+                        }
+                    }
+                    if newer {
+                        self.start_cut_flush(tile);
+                    }
+                }
+            }
+            Event::CutCompact(tile, epoch, id, image) => {
+                if self.cluster.directory.current(tile).epoch == epoch {
+                    self.cluster.tiles[tile.0].cut_log.compact(id, image);
                 }
             }
         }
@@ -351,10 +434,12 @@ impl Simulator<'_> {
                 committed: false,
                 finished: false,
                 aborted: false,
+                cut: None,
             });
             self.frozen[player.0] = Some(id);
             match self.cluster.policy {
                 Policy::P2 => self.checkpoint(tile, Some(id)),
+                Policy::P5 => self.checkpoint(tile, Some(id)),
                 Policy::P3 => {
                     self.branch = Some(Branch {
                         flight: id,
@@ -411,13 +496,95 @@ impl Simulator<'_> {
 
     fn checkpoint(&mut self, tile: TileId, flight: Option<usize>) {
         let fence = self.cluster.directory.current(tile);
-        let checkpoint = if self.cluster.policy == Policy::P4 {
+        if self.cluster.policy == Policy::P5 {
+            let image = self.cluster.tiles[tile.0].live;
+            let cut = self.cluster.tiles[tile.0].cut_log.capture(
+                image,
+                fence,
+                self.settings.mutation == Mutation::P5SkipChest,
+            );
+            if let Some(id) = flight {
+                self.flights[id].cut = Some(cut.id);
+                if self.settings.mutation == Mutation::P5EarlyCommit {
+                    self.schedule(
+                        self.now + self.scenario.latency.network_ms,
+                        Event::Commit(id, 0),
+                    );
+                }
+            }
+            // Workers can complete captures in reverse order. The workload and
+            // fault schedule stay the same as E1. This is IO variance, not input tuning.
+            let delay = 1 + mix(self.scenario.seed ^ cut.id.0 ^ (tile.0 as u64 * 719))
+                % self.scenario.latency.checkpoint_ms.max(1);
+            self.schedule(self.now + delay, Event::CutAppend(cut));
+            return;
+        }
+        let mut checkpoint = if self.cluster.policy == Policy::P4 {
             self.cluster.tiles[tile.0].prepare_logged_checkpoint(fence)
         } else {
             self.cluster.tiles[tile.0].prepare_checkpoint(fence)
         };
+        if self.settings.mutation == Mutation::P2SplitSave {
+            let old = self.cluster.tiles[tile.0]
+                .prepare_logged_checkpoint(fence)
+                .image;
+            checkpoint.image.players = old.players;
+            for (places, previous) in checkpoint.image.items.iter_mut().zip(old.items) {
+                places[2..].copy_from_slice(&previous[2..]);
+            }
+        }
+        if self.settings.mutation == Mutation::P2EarlyCommit
+            && let Some(id) = flight
+        {
+            self.schedule(
+                self.now + self.scenario.latency.network_ms,
+                Event::Commit(id, 0),
+            );
+        }
         let delay = self.scenario.latency.checkpoint_ms + self.scenario.latency.fsync_ms;
         self.schedule(self.now + delay, Event::CheckpointDone(checkpoint, flight));
+    }
+
+    fn start_cut_flush(&mut self, tile: TileId) {
+        if !self.cut_flushing[tile.0] {
+            self.cut_flushing[tile.0] = true;
+            self.schedule(
+                self.now + self.scenario.latency.fsync_ms,
+                Event::CutFlush(
+                    tile,
+                    self.cluster.directory.current(tile).epoch,
+                    self.cluster.tiles[tile.0].cut_log.written(),
+                ),
+            );
+        }
+    }
+
+    fn crash_tile(&mut self, tile: TileId) {
+        let mut bad_image = None;
+        if self.cluster.policy == Policy::P5 {
+            self.cluster.tiles[tile.0].cut_log.tear_unflushed_tail();
+            if self.settings.mutation == Mutation::P5ReplayPastTorn {
+                bad_image = Some(self.cluster.tiles[tile.0].cut_log.recover(true));
+            }
+        }
+        self.cluster.crash(tile);
+        if let Some(image) = bad_image {
+            self.cluster.tiles[tile.0].live = image;
+        }
+    }
+
+    fn mutate_recovery(&mut self, tile: TileId) {
+        if self.settings.mutation == Mutation::OlderStoreRecovery {
+            for (p, record) in self.cluster.store.records.iter().enumerate() {
+                if record.owner == tile {
+                    self.cluster.tiles[tile.0].live.insert_player(
+                        PlayerId(p),
+                        record.generation,
+                        record.inventory,
+                    );
+                }
+            }
+        }
     }
 
     fn blocked(&self, link: Link, id: usize, attempt: u64) -> bool {
@@ -629,9 +796,17 @@ impl Simulator<'_> {
     fn fault(&mut self, fault: Fault) {
         match fault {
             Fault::Crash(tile) => {
-                self.abort_branch();
+                if self.settings.abort_delay_ms == 0 {
+                    self.abort_branch();
+                } else if let Some(branch) = &self.branch {
+                    self.schedule(
+                        self.now + self.settings.abort_delay_ms,
+                        Event::Abort(branch.flight),
+                    );
+                }
                 let before = self.cluster.audit();
-                self.cluster.crash(tile);
+                self.crash_tile(tile);
+                self.mutate_recovery(tile);
                 self.recovering[tile.0] = true;
                 self.schedule(
                     self.now + self.scenario.latency.network_ms,
@@ -639,13 +814,21 @@ impl Simulator<'_> {
                 );
                 self.outcome.rollback += before.difference(&self.cluster.audit());
                 self.wal_busy[tile.0] = None;
+                self.cut_flushing[tile.0] = false;
                 for id in 0..self.flights.len() {
                     let f = &self.flights[id];
                     if !f.committed
                         && !f.aborted
                         && (f.handover.source == tile || f.handover.target == tile)
                     {
-                        self.abort_flight(id);
+                        if self.settings.abort_delay_ms == 0 {
+                            self.abort_flight(id);
+                        } else {
+                            self.schedule(
+                                self.now + self.settings.abort_delay_ms,
+                                Event::Abort(id),
+                            );
+                        }
                     }
                 }
             }
@@ -678,8 +861,10 @@ pub fn shrink(scenario: &Scenario, policy: Policy) -> Scenario {
             result.duplicates > 0
         } else if original.owner_violations > 0 {
             result.owner_violations > 0
-        } else {
+        } else if original.stale_writes > 0 {
             result.stale_writes > 0
+        } else {
+            result.losses > 0
         }
     };
     if !fails(&reduced) {

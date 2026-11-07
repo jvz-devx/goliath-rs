@@ -11,7 +11,7 @@ How to keep this file:
 
 ## Current state
 
-M0 is finished and verified. Next is M1. Crossings work on real servers, but the walking input gap P95 is about 480 ms against a 150 ms target, and P2 needs a coherent tile-wide cut that Horizon does not have yet.
+Working on M1. Automatic crossings, a real fenced store and a correct but slow tile cut exist. E6 (fast cut), E7 (tile ownership) and E8 (fast crossing) are running. E3, E4, E5 and E9 are verified.
 
 ## M0. First evidence
 
@@ -52,7 +52,8 @@ Four real Horizon servers own a 2 by 2 grid of one coordinate space. A player wa
 - [ ] Coherent tile-wide cut built on Horizon and timed under load, with chunks, containers, drops and every resident player.
 - [ ] Each server refuses to simulate or write outside its tile, proven by a test that tries to.
 - [ ] Unloaded chunks past a wall can't read as air to simulation code, proven by a test.
-- [ ] Crossing a wall triggers the handover with no command typed.
+- [x] Crossing a wall triggers the handover with no command typed. Verified: E4, 1,000 of 1,000 crossings in two runs, all eight borders and the diagonals, no command typed.
+- [x] Optional visible wall: the proxy draws particles near a tile wall when enabled, off by default, with no cost when off, proven by a client in and out of range. Verified: 720 packets in range, 0 out of range, 0 when off, in two runs. Rendered look in a stock client is unverified.
 - [ ] One shared store holds player records, using the policy chosen in D6 with a fence on every CAS.
 - [ ] 1,000 consecutive crossings by a scripted walking player with no disconnect and no inventory change.
 - [ ] All four tiles restart with their world and every player intact.
@@ -66,6 +67,7 @@ Four real Horizon servers own a 2 by 2 grid of one coordinate space. A player wa
 - [ ] A real physics client, Horizon's own under `horizon-ctl`, walks through a wall and keeps its speed.
 - [ ] A stock Java Edition 26.3 client crosses a wall, confirmed by the maintainer in person.
 - [ ] Riding players cross with their vehicle.
+- [ ] Store group commit: commit P95 under 20 ms at 64 concurrent clients with `F_FULLFSYNC`. E5 measured 223 ms.
 
 ## M3. Crashes and partitions
 
@@ -81,6 +83,9 @@ The baseline is one plain Horizon process with the same seed, view distance, bot
 - [ ] `horizon-bots` can walk set paths and survive a backend switch, using a patch or a wrapper.
 - [ ] A tick digest compares a tile with plain Horizon, and a redstone, piston and TNT fixture inside one tile ends identical.
 - [ ] 1, 2 and 4 tiles measured with identical load, with mob counts reported so less gameplay work can't pass as speed.
+- [ ] Capacity and latency numbers come from optimised release builds, not the `fast` development profile.
+- [ ] The proxy adds under 5 ms P95 per packet at the target player count, with its CPU and thread count reported. Meridian uses 3 blocking threads per player today.
+- [ ] A tick profile of the busiest tile is recorded, and nothing we added costs over 5% of the tick.
 - [ ] Four tiles hold at least 3 times the baseline's player capacity at 20 TPS with tick P99 under 50 ms. The spec's floor was 1.5 times.
 - [ ] A 30-minute soak at that load with crossings running shows no duplicates, no owner violations and no growth in memory beyond 10%.
 - [ ] Baseline rerun against Horizon's parallel tick if it has landed by then. If it hasn't, say so.
@@ -106,3 +111,11 @@ The baseline is one plain Horizon process with the same seed, view distance, bot
 - 2026-11-07: E1 finished. The reviewer reproduced the sweep byte for byte and caught 4 planted P2 bugs. D6 chose P2.
 - 2026-11-07: E2 finished. The reviewer reproduced it: 100 of 100 moves, walking gap P95 495 ms and 477 ms. M0 closed.
 - 2026-11-07: M1 to M4 tightened into pass lines. Baseline fixed as plain Horizon at equal CPU, target raised to 3 times, divergence defined as a tick digest on a fixture.
+- 2026-11-07: Built E5's local durable store and shared fence/CAS kernel, pending review. The 1,000-kill run and every-byte tail checks passed, and the disabled-fence control failed as required. Full-barrier commit P95 was 3.954, 34.080 and 222.896 ms at 1, 8 and 64 clients. E1's sweep hash is unchanged. Evidence: `experiments/E5-store.md`. No milestone boxes ticked.
+- 2026-11-07: Optional particle wall added to M1.
+- 2026-11-07: Completed E4, pending review. Four real engines, all eight directed borders and four diagonal directions, 1,000/1,000 final crossings with no disconnect or inventory change. Particle-off run received zero particle packets. Input gap P50/P95/P99 was 177.100/247.261/251.105 ms. Optional blue dust passed near/far/off delivery checks, about 9.0 KiB/s at a two-wall corner. Missing-trigger fault failed as required; the earlier dead-player refusal and unrelated Rust-suite failures remain in the report. Evidence: `experiments/E4-wall-crossing.md`. No milestone boxes ticked.
+- 2026-11-07: Speed pass lines added: store group commit, release builds, proxy overhead and tick cost of our own additions.
+- 2026-11-07: Completed E3, pending review. The final binary passed 200/200 SIGKILL/restart trials plus stale-fence and unloaded-footprint rejection checks. Normal-50 request-to-install P95 was 160.2 ms; the approach pre-cut's frozen delta was 169.7 ms. Internal durable work P95 was at most 119.5 ms, so dispatch/queueing remains part of the failure. A lower-load normal-one-bot repeat also missed. Evidence: `experiments/E3-coherent-cut.md`. Build cleanup freed 1,847 MiB; observed `.local` peak was 3,113 MiB. No milestone boxes ticked, no commit or push.
+- 2026-11-07: Implemented E9, pending review. Group commit passed the final 1,000-kill, stale-fence, every-byte torn-tail and early-ack file-cache controls. Full-barrier commit P95 at 64 clients was 18.233 ms with the Rust driver but 35.398 ms with the original Python driver, so the store latency milestone remains open. P5 had zero duplicates, losses, owner violations or stale writes in the 1,200,006-scenario sweep. Applying 40 ms crash aborts to all policies exposed P3 duplicates; the sweep reports that failure rather than hiding it. Instant-abort P0-P4 rows still reproduce E1 byte for byte. Every permanent mutation was caught. Evidence: `experiments/E9-group-commit-and-p5.md`. No milestone boxes ticked, no commit or push.
+- 2026-11-07: Built E8, pending review. Each of four cumulative Meridian configurations completed 1,000 walking crossings, plus a separate earlier 1,000-crossing stage-4 run. The final rebuild measured input gap P50/P95/P99 129.569/146.954/170.060 ms with no client arrival correction, disconnect or inventory change. Real death/respawn, E4 edge probes, abandoned preparations and live block sequences passed. The 80 ms handoff share is still missed before adding D6. A five-minute four-engine clock run with 128 bots showed up to 72 ticks of incremental drift. Scoped Rust checks passed except E2's existing formatting failure; full tick-wait attribution and physical momentum remain unverified. Evidence: `experiments/E8-fast-crossing.md`. Cleanup freed 4,150 MiB; sampled shared-project peak was 5,918 MiB. No milestone boxes ticked, no commit or push.
+- 2026-11-07: E3, E4, E5 and E9 verified by the reviewer. The E3 cut missed its budget, so D6 now uses P5, a log-structured cut. Store group commit stays open until a quiet rerun.

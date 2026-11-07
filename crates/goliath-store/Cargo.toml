@@ -1,0 +1,17 @@
+[package]
+name = "goliath-store"
+default-run = "goliath-store"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+goliath-model = { path = "../goliath-model" }
+
+[features]
+# Deliberately unsafe controls. Never enable this in a deployed store.
+fault-injection = []
+
+[lints]
+workspace = true

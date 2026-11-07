@@ -11,14 +11,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     match args.first().map(String::as_str) {
         Some("sweep" | "calm") => {
             let count = args.get(1).map(|v| v.parse()).transpose()?.unwrap_or(66_667);
-            let output = args.get(2).map(String::as_str).unwrap_or("docs/experiments/data/E1-results.csv");
-            sweep::sweep(count, output, args[0] == "calm")?;
+            let output = args.get(2).map(String::as_str).unwrap_or("docs/experiments/data/E9/sweep.csv");
+            let abort_delay = args.get(3).map(|v| v.parse()).transpose()?.unwrap_or(40);
+            sweep::sweep(count, output, args[0] == "calm", abort_delay)?;
         }
         Some("worker") => {
-            sweep::worker(args[1].parse()?, args[2].parse()?, args[3].parse()?, args.get(4).is_some_and(|s| s == "calm"))?;
+            sweep::worker(args[1].parse()?, args[2].parse()?, args[3].parse()?, args.get(4).is_some_and(|s| s == "calm"), args[5].parse()?)?;
+        }
+        Some("mutations") => {
+            let count = args.get(1).map(|v| v.parse()).transpose()?.unwrap_or(20_000);
+            let output = args.get(2).map(String::as_str).unwrap_or("docs/experiments/data/E9/mutations.csv");
+            sweep::mutations(count, output)?;
         }
         Some("replay") => {
-            let policy = args.get(1).and_then(|s| Policy::parse(s)).ok_or("expected policy P0..P4")?;
+            let policy = args.get(1).and_then(|s| Policy::parse(s)).ok_or("expected policy P0..P5")?;
             let seed = args.get(2).ok_or("expected seed")?.parse()?;
             let setting: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(0);
             let latency = *SETUPS.get(setting).ok_or("setting must be 0, 1 or 2")?;
@@ -35,7 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             println!("reduced hash={:016x} first_failure={:?}", result.hash, result.first_failure);
         }
-        _ => return Err("usage: goliath-sim sweep|calm [seeds_per_policy_setting=66667] [csv_path] | replay P0..P4 seed [setting=0]".into()),
+        _ => return Err("usage: goliath-sim sweep|calm [seeds=66667] [csv_path] [abort_delay_ms=40] | replay P0..P5 seed [setting=0] | mutations [seeds=20000] [csv_path]".into()),
     }
     Ok(())
 }

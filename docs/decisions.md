@@ -51,3 +51,13 @@ This is a modelled result, so it holds only if real Horizon delivers what the mo
 
 P3 is rejected. Its fast first route needs a cluster-wide rollback domain and embargoes further crossings.
 
+## D7. Visible wall
+
+Walls are invisible by default, so a crossing goes unnoticed. An optional particle wall, drawn by the proxy, can show the boundary, like the blue wall players report on DonutSMP. It helps explain why mobs and other players vanish at that line.
+
+## D6 update
+
+E3 built the cut as a full re-serialisation and missed the budget: 160 ms to durable and up to 94 ms of tick stall at 50 bots. The cost was the prototype's capture path, not disk flushes, which take about 4 ms. D6's rule stays, but its implementation changes to P5: capture references to dirty state at the freeze tick, append one delta to a per-tile log, and flush once. E9 found zero duplicates and losses for P5 across 200,001 scenarios, and caught every planted bug. E6 tests whether it meets the budget on real Horizon. If it can't, the fallback is still P4.
+
+P3 is now rejected on safety as well: with crash notices 40 ms late, it duplicates items.
+

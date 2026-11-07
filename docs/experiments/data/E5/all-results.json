@@ -1,0 +1,125 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "binary_sha256": "b9f037e97382871b082b03a01f839bd4bf6b5879023a615b0bd914f9e07b3f10",
+  "durability": "F_FULLFSYNC",
+  "command": "scripts/e5-store.py --kills 1000",
+  "fence": {
+    "delayed_cas": 32,
+    "rejected": 32,
+    "accepted_stale": 0,
+    "safety_check": "PASS"
+  },
+  "fence_control": {
+    "delayed_cas": 32,
+    "rejected": 0,
+    "accepted_stale": 32,
+    "safety_check": "FAIL as required"
+  },
+  "tail": {
+    "record_bytes": 154,
+    "truncations": 154,
+    "corruptions": 154,
+    "restarts": 617,
+    "failures": 0
+  },
+  "kills": [
+    {
+      "seed": 5001,
+      "kills": 500,
+      "clients": 8,
+      "load_acknowledgements": 2082,
+      "transport_unknown": 4000,
+      "retries_completed_missing": 3502,
+      "distinct_snapshots": 95,
+      "lost_acknowledgements": 0,
+      "backwards_generations": 0,
+      "owner_violations": 0,
+      "observation_sha256": "4cad6093072181142d72d7dfbefdb30658ac5f53013e075fd3e39860a1a59b60"
+    },
+    {
+      "seed": 5002,
+      "kills": 500,
+      "clients": 8,
+      "load_acknowledgements": 2137,
+      "transport_unknown": 3988,
+      "retries_completed_missing": 3486,
+      "distinct_snapshots": 95,
+      "lost_acknowledgements": 0,
+      "backwards_generations": 0,
+      "owner_violations": 0,
+      "observation_sha256": "a2143d0b2adbb5dc73800ef5b27f295c6405610f70bfb7f74def5e7d6274c491"
+    }
+  ],
+  "latency": [
+    {
+      "mode": "fsync",
+      "clients": 1,
+      "samples": 1024,
+      "blob_bytes": 256,
+      "p50_ms": 0.160084,
+      "p95_ms": 0.210458,
+      "p99_ms": 0.257333,
+      "max_ms": 2.895541,
+      "wall_seconds": 0.179
+    },
+    {
+      "mode": "fsync",
+      "clients": 8,
+      "samples": 1024,
+      "blob_bytes": 256,
+      "p50_ms": 1.941958,
+      "p95_ms": 3.102459,
+      "p99_ms": 3.692208,
+      "max_ms": 5.355584,
+      "wall_seconds": 0.26
+    },
+    {
+      "mode": "fsync",
+      "clients": 64,
+      "samples": 2048,
+      "blob_bytes": 256,
+      "p50_ms": 12.587583,
+      "p95_ms": 22.794208,
+      "p99_ms": 28.78775,
+      "max_ms": 36.168791,
+      "wall_seconds": 0.458
+    },
+    {
+      "mode": "full",
+      "clients": 1,
+      "samples": 1024,
+      "blob_bytes": 256,
+      "p50_ms": 2.999375,
+      "p95_ms": 3.954375,
+      "p99_ms": 6.066833,
+      "max_ms": 39.246375,
+      "wall_seconds": 3.296
+    },
+    {
+      "mode": "full",
+      "clients": 8,
+      "samples": 1024,
+      "blob_bytes": 256,
+      "p50_ms": 24.033625,
+      "p95_ms": 34.079708,
+      "p99_ms": 39.854417,
+      "max_ms": 42.889208,
+      "wall_seconds": 3.272
+    },
+    {
+      "mode": "full",
+      "clients": 64,
+      "samples": 2048,
+      "blob_bytes": 256,
+      "p50_ms": 196.030625,
+      "p95_ms": 222.895708,
+      "p99_ms": 228.977833,
+      "max_ms": 234.848125,
+      "wall_seconds": 6.643
+    }
+  ],
+  "wall_seconds": 89.264,
+  "peak_sampled_run_allocated_bytes": 4341760,
+  "target_allocated_bytes_at_end": 108388352
+}

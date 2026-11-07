@@ -1,0 +1,300 @@
+{
+  "profile_environment": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_FAST_INHERITS": "release",
+    "CARGO_PROFILE_FAST_LTO": "false",
+    "CARGO_PROFILE_FAST_CODEGEN_UNITS": "16",
+    "CI": "unset"
+  },
+  "platform": {
+    "model": "Mac17,8",
+    "os": "macOS 26.5.2",
+    "build": "25F84",
+    "cpu_count": 18,
+    "memory_bytes": 51539607552,
+    "shared_machine": true
+  },
+  "checks": [
+    {
+      "command": "cargo build --locked --profile fast -p meridian-proxy --bin meridian -p meridian-testkit --bin e4-client",
+      "exit": 101,
+      "phase": "initial implementation",
+      "error": "E0308: Arc::clone(config) expected &Arc<Config>, found &Config",
+      "resolution": "Use Arc::new(config.clone()) at borrowed-config session entry point"
+    },
+    {
+      "command": "cargo build --locked --profile fast -p meridian-proxy --bin meridian -p meridian-testkit --bin e4-client",
+      "exit": 0,
+      "phase": "final pre-particle build",
+      "reported_seconds": 2.03
+    },
+    {
+      "command": "cargo test --locked --profile fast -p meridian-config -p meridian-handoff -p meridian-proxy --lib --bins",
+      "exit": 101,
+      "results": [
+        {
+          "crate": "meridian-config",
+          "passed": 201,
+          "failed": 0
+        },
+        {
+          "crate": "meridian-handoff",
+          "passed": 80,
+          "failed": 0
+        },
+        {
+          "crate": "meridian-proxy",
+          "passed": 556,
+          "failed": 1
+        }
+      ],
+      "failure": {
+        "test": "serve::tests::the_listener_queues_a_large_burst",
+        "location": "crates/meridian-proxy/src/serve.rs:645",
+        "error": "refused after 128 connections: connection timed out",
+        "touched": false
+      }
+    },
+    {
+      "command": "cargo clippy --locked --profile fast -p meridian-config -p meridian-handoff -p meridian-proxy -p meridian-testkit --all-targets -- -D warnings",
+      "exit": 101,
+      "phase": "first clippy",
+      "error": "clippy::too_many_arguments in new attempt signature",
+      "resolution": "Group destination backend and optional crossing position, no routing behavior change"
+    },
+    {
+      "command": "cargo clippy --locked --profile fast -p meridian-config -p meridian-handoff -p meridian-proxy -p meridian-testkit --all-targets -- -D warnings",
+      "exit": 0,
+      "phase": "after argument grouping"
+    },
+    {
+      "command": "cargo fmt --all --check",
+      "exit": 1,
+      "error": "Only existing E2 e2-client.rs is unformatted; not modified by E4"
+    },
+    {
+      "command": "cargo test --locked --profile fast --workspace --quiet -- --skip serve::tests::the_listener_queues_a_large_burst",
+      "exit": 101,
+      "completed_target_counts": [
+        {
+          "passed": 37,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "passed": 201,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 91,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 33,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 80,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 99,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "passed": 14,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 20,
+          "failed": 1,
+          "ignored": 0
+        }
+      ],
+      "failure": {
+        "test": "the_whole_bench_starts_servers_sidecars_proxy_and_stops_in_reverse",
+        "location": "crates/meridian-panel/tests/panel.rs:122",
+        "error": "fake game2 process AddrInUse on 20050, timed out waiting for all online",
+        "touched": false
+      },
+      "later_targets_reached": false
+    },
+    {
+      "command": "python3 -B scripts/e4-runner-test",
+      "exit": 0,
+      "tests": 5
+    },
+    {
+      "command": "git apply --check and git apply, E2 then E4, in clean 902dcf1 archive; cmp implementation files",
+      "exit": 0
+    },
+    {
+      "command": "cargo build --locked --profile fast -p meridian-proxy --bin meridian -p meridian-testkit --bin e4-client",
+      "exit": 0,
+      "phase": "with optional visible wall",
+      "reported_seconds": 25.53
+    },
+    {
+      "command": "cargo test --locked --profile fast -p meridian-config -p meridian-handoff -p meridian-proxy --lib --bins --quiet -- --skip serve::tests::the_listener_queues_a_large_burst",
+      "exit": 0,
+      "phase": "with optional visible wall",
+      "results": [
+        {
+          "crate": "meridian-config",
+          "passed": 202
+        },
+        {
+          "crate": "meridian-handoff",
+          "passed": 80
+        },
+        {
+          "crate": "meridian-proxy",
+          "passed": 559,
+          "filtered": 1
+        }
+      ]
+    },
+    {
+      "command": "cargo clippy --locked --profile fast -p meridian-config -p meridian-handoff -p meridian-proxy -p meridian-testkit --all-targets -- -D warnings",
+      "exit": 0,
+      "phase": "with optional visible wall",
+      "reported_seconds": 9.1
+    },
+    {
+      "command": "rustfmt --check --edition 2024 --config skip_children=true, all eleven E4 Rust files; git diff --check",
+      "exit": 0
+    },
+    {
+      "command": "python3 -B scripts/e4-runner-test",
+      "exit": 0,
+      "phase": "with particle delivery and cost mutations",
+      "tests": 8
+    },
+    {
+      "command": "python3 -B scripts/e4-walls --crossings 1 --fault-skip --timeout 3 --name fault-skip",
+      "exit": 2,
+      "expected": true,
+      "observed": "silently skipped crossing 0 a->b: client event timed out",
+      "disconnects": 0
+    },
+    {
+      "command": "python3 -B scripts/e4-walls --particle-evidence --wall-particles",
+      "exit": 0,
+      "artifact": "particles-on.json"
+    },
+    {
+      "command": "python3 -B scripts/e4-walls --particle-evidence",
+      "exit": 0,
+      "artifact": "particles-off.json"
+    },
+    {
+      "command": "python3 -B scripts/e4-walls --verify docs/experiments/data/E4/particles-on.json; same for particles-off.json",
+      "exit": 0
+    },
+    {
+      "command": "git apply --check and git apply, E2 then final E4 with particles, in clean 902dcf1 archive; cmp all eleven E4 source files",
+      "exit": 0
+    },
+    {
+      "command": "python3 -B scripts/e4-walls --edge-cases",
+      "exit": 0,
+      "phase": "final patch, particles off",
+      "completed": 1000,
+      "disconnects": 0,
+      "inventory_changes": 0,
+      "particle_packets": 0,
+      "seconds": 1243.20125312
+    },
+    {
+      "command": "python3 -B scripts/e4-walls --verify docs/experiments/data/E4/trials.json",
+      "exit": 0
+    },
+    {
+      "command": "independent jq nearest-rank percentile calculation from final trial arrays",
+      "exit": 0,
+      "agrees_with_stored_summary": true
+    },
+    {
+      "command": "jq binary_sha256 equality across particles-on.json, particles-off.json and trials.json",
+      "exit": 0,
+      "equal": true
+    },
+    {
+      "command": "scripts/clean-builds --all",
+      "exit": 0,
+      "freed_mib": 378,
+      "horizon_target": "skipped, in use by another agent"
+    },
+    {
+      "command": "check E4 runtime directories and processes; test Meridian target absent",
+      "exit": 0,
+      "e4_run_directories": 0,
+      "e4_processes": 0,
+      "meridian_target_exists": false
+    }
+  ],
+  "live_property_readback": {
+    "all_four_engines": {
+      "difficulty": "peaceful",
+      "gamemode": "survival",
+      "level_seed": "12345",
+      "level_type": "flat",
+      "view_distance": 3,
+      "simulation_distance": 3
+    }
+  },
+  "disk_sample_high_water_mib": {
+    "local_shared": 3105,
+    "meridian_target": 560,
+    "note": "Sampled, not continuously monitored. Other agents also build below .local. Meridian target was later removed by shared cleanup while no Cargo command used it."
+  },
+  "protocol_particle_evidence": {
+    "revision": "0d21d5520ec26c49b774bf1533e53ea8af81278d",
+    "sources": [
+      "horizon-protocol/src/entity_data.rs",
+      "horizon-protocol/src/packets/play.rs",
+      "prepared 26.3 registries.json"
+    ],
+    "dust_id": 21,
+    "dust_data": "ParticleData::ColorScale(RGB, scale)",
+    "end_rod_id": 27,
+    "default_rgb": 3377407,
+    "near_two_walls_bytes_per_second": 9213.497614048025,
+    "byte_definition": "ConnWriter framed bytes_out delta while holding exclusive client writer lock; excludes unrelated traffic and TCP/IP/Ethernet headers"
+  },
+  "tooling_correction": {
+    "command": "python3 -B scripts/e4-runner-test",
+    "wrong_cwd": "$REPO/.local/src/meridian",
+    "exit": 2,
+    "error": "script path not found",
+    "corrected_cwd": "$REPO",
+    "corrected_exit": 0
+  },
+  "final_fingerprints": {
+    "runner_sha256": "4a9830c3f7a986730bc0e552a5b7e44f3c059429f514aa351635286358509a55",
+    "patch_sha256": "87468885e90981666b3df2a478f648774f50fdc42d72216a8439c781610b17c0",
+    "proxy_sha256": "fd5661cd1755c4da93ae1f89ba4b94bd88e5be8ba1539546a45cdac4fdcb0194",
+    "client_sha256": "f7a576d58d757e41910666aa42e8b82a446ff3da7bcc484f13216db58093d472"
+  }
+}

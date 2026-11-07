@@ -56,16 +56,76 @@ impl Directory {
     }
 
     pub fn accepts(&self, fence: Fence) -> bool {
-        !self.fencing || self.current(fence.tile) == fence
+        !self.fencing || accepts_fence(Some(self.current(fence.tile)), fence)
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Record {
+pub struct Record<B = [u8; ITEMS]> {
     pub generation: Generation,
     pub owner: TileId,
     /// Entry inventory, not a second authoritative copy during normal play.
-    pub inventory: [u8; ITEMS],
+    pub inventory: B,
+}
+
+/// The ownership part of a handover, independent of player-state encoding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OwnershipCas {
+    pub generation: Generation,
+    pub source: Fence,
+    pub target: Fence,
+}
+
+pub fn accepts_fence(current: Option<Fence>, supplied: Fence) -> bool {
+    current == Some(supplied)
+}
+
+impl OwnershipCas {
+    pub fn check_fences(
+        self,
+        source: Option<Fence>,
+        target: Option<Fence>,
+    ) -> Result<(), StoreError> {
+        if !accepts_fence(source, self.source) || !accepts_fence(target, self.target) {
+            return Err(StoreError::StaleFence);
+        }
+        Ok(())
+    }
+
+    /// Checks both fences before even recognizing an idempotent delivery.
+    pub fn commit<B: Clone + PartialEq>(
+        self,
+        record: &mut Record<B>,
+        inventory: &B,
+        source: Option<Fence>,
+        target: Option<Fence>,
+    ) -> Result<bool, StoreError> {
+        self.check_fences(source, target)?;
+        let next = self
+            .generation
+            .0
+            .checked_add(1)
+            .ok_or(StoreError::GenerationConflict)?;
+        if self.source.tile == self.target.tile {
+            return Err(StoreError::GenerationConflict);
+        }
+        if record.generation == Generation(next) && record.owner == self.target.tile {
+            return if record.inventory == *inventory {
+                Ok(false)
+            } else {
+                Err(StoreError::GenerationConflict)
+            };
+        }
+        if record.generation != self.generation || record.owner != self.source.tile {
+            return Err(StoreError::GenerationConflict);
+        }
+        *record = Record {
+            generation: Generation(next),
+            owner: self.target.tile,
+            inventory: inventory.clone(),
+        };
+        Ok(true)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -97,21 +157,31 @@ impl Store {
         {
             self.stale_accepted += 1;
         }
-        let record = &mut self.records[handover.player.0];
-        if record.generation == Generation(handover.generation.0 + 1)
-            && record.owner == handover.target
-        {
-            return Ok(false); // Idempotent duplicate delivery, no second mutation.
-        }
-        if record.generation != handover.generation || record.owner != handover.source {
-            self.rejected += 1;
-            return Err(StoreError::GenerationConflict);
-        }
-        *record = Record {
-            generation: Generation(record.generation.0 + 1),
-            owner: handover.target,
-            inventory: handover.inventory,
+        let cas = OwnershipCas {
+            generation: handover.generation,
+            source: handover.source_fence,
+            target: handover.target_fence,
         };
-        Ok(true)
+        // The simulator's explicit mutation substitutes the supplied fences.
+        let source = if directory.fencing {
+            directory.current(handover.source)
+        } else {
+            cas.source
+        };
+        let target = if directory.fencing {
+            directory.current(handover.target)
+        } else {
+            cas.target
+        };
+        let result = cas.commit(
+            &mut self.records[handover.player.0],
+            &handover.inventory,
+            Some(source),
+            Some(target),
+        );
+        if result.is_err() {
+            self.rejected += 1;
+        }
+        result
     }
 }

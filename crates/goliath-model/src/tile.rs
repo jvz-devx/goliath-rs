@@ -113,7 +113,7 @@ impl Delta {
         changes
     }
 
-    fn apply(&self, image: &mut Image) {
+    pub(crate) fn apply(&self, image: &mut Image) {
         match *self {
             Self::Item { item, places } => image.items[item.0] = places,
             Self::Player { player, actor } => image.players[player.0] = actor,
@@ -131,6 +131,7 @@ pub struct Checkpoint {
 #[derive(Clone, Debug)]
 pub struct Tile {
     pub live: Image,
+    pub cut_log: crate::CutLog,
     durable_head: Image,
     checkpoint: Image,
     checkpoint_sequence: u64,
@@ -142,6 +143,7 @@ impl Tile {
     pub fn new(image: Image) -> Self {
         Self {
             live: image,
+            cut_log: crate::CutLog::new(image),
             durable_head: image,
             checkpoint: image,
             checkpoint_sequence: 0,
