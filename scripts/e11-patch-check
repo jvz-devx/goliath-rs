@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Check E11 patch order in a private index without changing any working source."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+from e11_support import ROOT,RUNS,DATA,save
+
+SOURCE=ROOT/'.local/src/horizon-tiles'
+
+
+def main():
+    RUNS.mkdir(parents=True,exist_ok=True)
+    results=[]
+    with tempfile.TemporaryDirectory(prefix='e11-patches-',dir=RUNS) as folder:
+        env=dict(os.environ,GIT_INDEX_FILE=str(Path(folder)/'index'))
+        def git(*args):
+            return subprocess.check_output(['git',*args],cwd=SOURCE,env=env)
+        for order in [
+            ['e2-horizon-input-trace.patch','horizon-03-bots.patch','horizon-04-digest.patch'],
+            ['e2-horizon-input-trace.patch','horizon-02-tile-ownership.patch','horizon-03-bots.patch','horizon-04-digest.patch'],
+            ['e2-horizon-input-trace.patch','horizon-03-bots.patch','horizon-04-digest.patch','horizon-02-tile-ownership.patch']]:
+            git('read-tree','fc2868b2b26d56ec76e17414909fe58a3b87bb92')
+            for name in order:
+                git('apply','--cached','--check',str(ROOT/'patches'/name))
+                git('apply','--cached',str(ROOT/'patches'/name))
+            tree=git('write-tree').strip().decode()
+            mismatches=[]
+            if 'horizon-02-tile-ownership.patch' in order:
+                paths=git('diff','--name-only','HEAD',tree).decode().splitlines()
+                for path in paths:
+                    expected=git('rev-parse',f'{tree}:{path}').strip()
+                    actual=git('hash-object','--',path).strip()
+                    if expected!=actual: mismatches.append(path)
+            results.append({'order':order,'tree':tree,'working_source_mismatches':mismatches})
+    value={'passed':all(not r['working_source_mismatches'] for r in results),
+        'orders':results,'patch_sha256':{name:hashlib.sha256((ROOT/'patches'/name).read_bytes()).hexdigest()
+            for name in ['horizon-03-bots.patch','horizon-04-digest.patch']}}
+    save(DATA/'patch-check.json',value)
+    print(json.dumps(value,indent=2))
+    if not value['passed']: raise SystemExit(1)
+
+
+if __name__=='__main__': main()

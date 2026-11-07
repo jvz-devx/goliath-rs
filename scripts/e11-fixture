@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Step a bounded mechanical fixture, self-diff plain Horizon, then compare E7 with distant walls."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+from e11_support import ROOT,RUNS,DATA,BINS,Engine,complete_json_lines,private_env,save,wait
+
+BOX='-32,-61,-12,32,-48,12'
+COMPONENTS={'clock':'-26,-60,-2,-20,-55,4','pistons':'-2,-60,-2,4,-54,7','tnt':'13,-60,-7,27,-48,7'}
+
+
+def commands():
+    rows=['gamerule spawn_mobs false','gamerule random_tick_speed 0',
+        'gamerule advance_weather false','gamerule advance_time false','gamerule block_drops false',
+        'kill @e[type=!minecraft:player]', 'fill -32 -60 -12 32 -60 12 minecraft:stone',
+        'fill -32 -59 -12 32 -48 12 minecraft:air']
+    # A four-corner loop, with two delayed repeaters facing around it.
+    for x,z in [(-24,0),(-22,0),(-24,1),(-22,1),(-24,2),(-22,2)]:
+        rows.append(f'setblock {x} -59 {z} minecraft:redstone_wire')
+    rows += ['setblock -23 -59 0 minecraft:repeater[facing=east,delay=2]',
+        'setblock -23 -59 2 minecraft:repeater[facing=west,delay=2]',
+        'setblock -25 -59 0 minecraft:redstone_lamp',
+        'setblock 0 -59 0 minecraft:piston[facing=east]',
+        'setblock 1 -59 0 minecraft:stone',
+        'setblock 0 -59 5 minecraft:sticky_piston[facing=east]',
+        'setblock 1 -59 5 minecraft:gold_block',
+        # Blast-resistant chamber, with a small destructible core. Drop randomness is excluded.
+        'fill 13 -60 -7 27 -60 7 minecraft:bedrock',
+        'fill 19 -59 -1 21 -57 1 minecraft:oak_planks',
+        'setblock 20 -58 0 minecraft:air']
+    return rows
+
+
+def run(label,binary,mask,ticks):
+    RUNS.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='e11-fixture-',dir=RUNS) as folder:
+        folder=Path(folder)
+        env={'HORIZON_TILE':'-1024,-1024,2048,0,0'} if mask else {}
+        config={'seed':12345,'view_distance':3,'servers':[{'command':[str(binary),'--resources','{resources}',
+            '--control-socket','{endpoint}','--dedicated','--nogui'],'env':env}]}
+        engine=Engine(folder/'server',config)
+        bot=None; log=None
+        try:
+            engine.console('gamerule spawn_mobs false')
+            engine.console('tick freeze')
+            engine.console('forceload add -48 -32 48 32')
+            log=(folder/'bots.log').open('w')
+            bot=subprocess.Popen([BINS/'horizon-bots','--event-loop','--server',f'127.0.0.1:{engine.port}',
+                '--bots','1','--behaviour','stand','--seconds','600','--view-distance','3'],
+                cwd=folder,env=private_env(folder/'bot-home'),stdout=log,stderr=subprocess.STDOUT)
+            wait(lambda:len(engine.ask('server-status')['players'])==1,60,'fixture bot join timed out')
+            time.sleep(3)
+            engine.console('tp E11Bot0 0 -55 0')
+            setup=commands()
+            replies=[engine.console(c) for c in setup]
+            initial=engine.ask('e11-digest '+BOX+' every')
+            engine.ask('e11-samples')
+            frames=[]; actions=[]
+            for step in range(1,ticks+1):
+                current=[]
+                if step==1:
+                    current += ['setblock -24 -59 -1 minecraft:redstone_block',
+                        'summon minecraft:tnt 20 -58 0 {fuse:8s,NoGravity:1b,Motion:[0.0d,0.0d,0.0d]}']
+                if step==2: current += ['setblock -24 -59 -1 minecraft:air']
+                if step%12==1:
+                    current += ['setblock -1 -59 0 minecraft:redstone_block','setblock -1 -59 5 minecraft:redstone_block']
+                if step%12==7:
+                    current += ['setblock -1 -59 0 minecraft:air','setblock -1 -59 5 minecraft:air']
+                for command in current:
+                    actions.append({'step':step,'command':command,'reply':engine.console(command)})
+                before=engine.ask('e11-digest '+BOX+' once')['game_time']
+                engine.console('tick step 1')
+                wait(lambda:engine.ask('e11-digest '+BOX+' once')['game_time']==before+1,5,'fixture step did not complete')
+                frame=engine.ask('e11-digest '+BOX+' once')
+                frame['step']=step
+                frame['components']={name:engine.ask('e11-digest '+bounds+' once') for name,bounds in COMPONENTS.items()}
+                frames.append(frame)
+            trace=engine.ask('e11-samples')
+            automatic={row['game_time']:row for row in trace['digests'] if 'error' not in row}
+            automatic_matches=all(automatic.get(row['game_time'],{}).get('hash')==row['hash'] for row in frames)
+            # A deliberate interior edit must be visible in the digest.
+            before=engine.ask('e11-digest '+BOX+' once')
+            engine.console('setblock 30 -59 10 minecraft:diamond_block')
+            fault=engine.ask('e11-digest '+BOX+' once')
+            clock_changes=len({f['components']['clock']['blocks'] for f in frames})
+            piston_motion=max(f['components']['pistons']['block_entity_count'] for f in frames)>0
+            tnt_seen=any(f['components']['tnt']['entity_count']>0 for f in frames)
+            tnt_finished=frames[-1]['components']['tnt']['entity_count']==0
+            tnt_changed=len({f['components']['tnt']['blocks'] for f in frames})>1
+            return {'label':label,'binary':str(binary.relative_to(ROOT)),'tile_mask':mask,
+                'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
+                'initial':initial,'frames':frames,'automatic_trace':trace['digests'],'setup':setup,'setup_replies':replies,
+                'actions':actions,'fault_control_detected':before['hash']!=fault['hash'],
+                'feature_evidence':{'clock_distinct_states':clock_changes,'moving_piston_seen':piston_motion,
+                    'live_tnt_seen':tnt_seen,'tnt_finished':tnt_finished,'blast_changed_blocks':tnt_changed},
+                'automatic_trace_matches':automatic_matches,
+                'dropped_samples':trace['dropped'],'final_players':len(engine.ask('server-status')['players'])}
+        finally:
+            if bot and bot.poll() is None: bot.terminate(); bot.wait()
+            if log: log.close()
+            engine.stop()
+
+
+def compare(a,b):
+    keys=['blocks','block_entities','entities','hash','entity_count','block_entity_count']
+    differences=[{'step':x['step'],'different':[key for key in keys if x[key]!=y[key]]}
+        for x,y in zip(a['frames'],b['frames']) if any(x[key]!=y[key] for key in keys)]
+    return {'compared_ticks':min(len(a['frames']),len(b['frames'])),'different_ticks':len(differences),
+        'differences':differences,'final_equal':all(a['frames'][-1][key]==b['frames'][-1][key] for key in keys)}
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ticks',type=int,default=80)
+    parser.add_argument('--plain-only',action='store_true')
+    parser.add_argument('--resume',action='store_true',help='reuse retained plain pair after checking binary identity and tick count')
+    args=parser.parse_args()
+    if args.resume:
+        previous=json.loads((DATA/'fixture.json').read_text())
+        a,b=previous['runs'][:2]
+        sha=hashlib.sha256((BINS/'horizon-client').read_bytes()).hexdigest()
+        if any(row['binary_sha256']!=sha or len(row['frames'])!=args.ticks for row in [a,b]):
+            raise RuntimeError('retained plain pair does not match current binary or requested tick count')
+    else:
+        a=run('plain-a',BINS/'horizon-client',False,args.ticks)
+        b=run('plain-b',BINS/'horizon-client',False,args.ticks)
+    output={'runs':[a,b],'self_diff':compare(a,b)}
+    for row in output['runs']:
+        automatic={frame['game_time']:frame for frame in row['automatic_trace'] if 'error' not in frame}
+        row['automatic_trace_matches']=all(automatic.get(frame['game_time'],{}).get('hash')==frame['hash'] for frame in row['frames'])
+    save(DATA/'fixture.json',output)
+    if args.plain_only:
+        print(json.dumps(output['self_diff'],indent=2))
+        if output['self_diff']['different_ticks']:
+            raise SystemExit(1)
+        return
+    tile=run('e7-interior',BINS/'horizon-client-tile',True,args.ticks)
+    output['runs'].append(tile)
+    output['tile_diff']=compare(a,tile)
+    output['passed']=output['self_diff']['different_ticks']==0 and output['tile_diff']['different_ticks']==0 and all(
+        row['fault_control_detected'] and row['final_players']==1 and not row['dropped_samples'] and row['automatic_trace_matches']
+        and row['feature_evidence']['clock_distinct_states']>2 and all(v for k,v in row['feature_evidence'].items() if k!='clock_distinct_states')
+        for row in output['runs'])
+    save(DATA/'fixture.json',output)
+    print(json.dumps({k:v for k,v in output.items() if k!='runs'},indent=2))
+    if not output['passed']: raise SystemExit(1)
+
+
+if __name__=='__main__': main()

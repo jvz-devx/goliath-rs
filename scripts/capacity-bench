@@ -1,0 +1,433 @@
+#!/usr/bin/env python3
+"""E11 load staircase, game-time TPS, raw tick P99 and independent CPU budgets."""
+import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import tempfile
+import time
+
+from e11_support import (ROOT,RUNS,DATA,BINS,Control,Engine,CpuBudget,complete_json_lines,
+    percentile,private_env,sanitize,save,usage,wait)
+
+
+def game_time(engine):
+    before=time.monotonic()
+    reply=engine.console('time query gametime')
+    after=time.monotonic()
+    text=' '.join(reply.get('output',[]))
+    values=re.findall(r'\b\d+\b',text)
+    if not values:
+        raise RuntimeError('no game time in console response: '+str(reply))
+    return {'ticks':int(values[-1]),'at':(before+after)/2,'rtt_s':after-before}
+
+
+def latest(path):
+    rows=[r for r in complete_json_lines(path) if 'online' in r]
+    if not rows:
+        return {}
+    return rows[-1]
+
+
+def route_anchor(index,count,seed,spread):
+    """The client's first patrol corner, used only to choose a spatial backend.
+
+    The live client's route preamble is checked against this calculation.
+    It does not control or substitute the client's actual movement.
+    """
+    mask=(1<<64)-1
+    state=(seed ^ ((index*0x2545_F491_4F6C_DD1D)&mask))&mask
+    side=math.ceil(math.sqrt(count))
+    values=[]
+    for axis,cell in enumerate([index%side,index//side]):
+        state=(state+0x9E37_79B9_7F4A_7C15)&mask
+        z=state
+        z=((z^(z>>30))*0xBF58_476D_1CE4_E5B9)&mask
+        z=((z^(z>>27))*0x94D0_49BB_1331_11EB)&mask
+        z=z^(z>>31)
+        jitter=(z>>11)/(1<<53)
+        values.append(spread[axis]+(cell+.25+jitter*.5)/side*(spread[axis+2]-spread[axis]))
+    radius=min(min(spread[2]-spread[0],spread[3]-spread[1])/side*.2,8)
+    return [v-radius for v in values]
+
+
+def spatial_quarters(anchors):
+    """Four equally sized spatial groups, using x then z median splits."""
+    count=len(anchors)
+    by_x=sorted(range(count),key=lambda i:anchors[i][0])
+    groups=[None]*count
+    split=count//2
+    for column,indices in enumerate([by_x[:split],by_x[split:]]):
+        by_z=sorted(indices,key=lambda i:anchors[i][1])
+        for row,part in enumerate([by_z[:len(by_z)//2],by_z[len(by_z)//2:]]):
+            for index in part: groups[index]=column+2*row
+    return groups
+
+
+def snapshot(engines, pids, bot_pid, bot_log):
+    before=time.monotonic()
+    stamps=[game_time(e) for e in engines]
+    statuses=[e.ask('server-status') for e in engines]
+    for status in statuses:
+        positions=[p['position'] for p in status['players']]
+        status['players']=len(positions)
+        status['player_bounds']=[[min(p[i] for p in positions),max(p[i] for p in positions)] for i in range(3)] if positions else None
+    cpu=[usage(pid) for pid in pids]
+    bot=usage(bot_pid)
+    return {'at':time.monotonic(),'request_start':before,'time':stamps,'tiles':statuses,
+        'server_usage':cpu,'bot_usage':bot,'bots':latest(bot_log),'load':os.getloadavg()}
+
+
+def steady_route_speed(config,count):
+    speed=config.get('speed',4)
+    if config.get('path'):
+        path=[tuple(map(float,p.split(','))) for p in config['path'].split(';')]
+        lengths=[math.hypot(b[0]-a[0],b[1]-a[1]) for a,b in zip(path,path[1:]+path[:1])]
+    else:
+        spread=config.get('spread',[-64,-64,64,64])
+        radius=min(min(spread[2]-spread[0],spread[3]-spread[1])/math.ceil(math.sqrt(count))*.2,8)
+        lengths=[2*radius]*4
+    ticks=sum(max(1,math.ceil(length/(speed/20)-1e-9)) for length in lengths)
+    if not sum(lengths): raise ValueError('capacity requires a moving route')
+    return sum(lengths)/ticks*20
+
+
+def evaluate(samples, raw, expected, server_cores, bot_cores, max_load, expected_mobs=64, config=None):
+    first,last=samples[0],samples[-1]
+    wall=last['at']-first['at']
+    server_cpu=sum(v['cpu_s'] for v in last['server_usage'])-sum(v['cpu_s'] for v in first['server_usage'])
+    bot_cpu=last['bot_usage']['cpu_s']-first['bot_usage']['cpu_s']
+    bot_cpu_peak=max((b['bot_usage']['cpu_s']-a['bot_usage']['cpu_s'])/(b['at']-a['at']) for a,b in zip(samples,samples[1:]))
+    tps=[(b['ticks']-a['ticks'])/(b['at']-a['at']) for a,b in zip(first['time'],last['time'])]
+    p99=[percentile([t['ms'] for t in r['ticks']],.99) for r in raw]
+    reasons=[]
+    counts=[sum(t['players'] for t in s['tiles']) for s in samples]
+    if any(c!=expected for c in counts): reasons.append('player count mismatch')
+    for sample in samples:
+        populations=[tile.get('e11_population') for tile in sample['tiles']]
+        if any(p is None for p in populations) or sum(level['mobs'] for p in populations if p for level in p)!=expected_mobs:
+            reasons.append('mob count mismatch')
+            break
+        if sum(level['entities'] for tile in sample['tiles'] for level in tile['levels'])!=expected_mobs:
+            reasons.append('non-player entity count mismatch')
+            break
+    if any(s['bots'].get('online')!=expected or s['bots'].get('failed',0) for s in samples): reasons.append('bot offline or failed')
+    late=last['bots'].get('late_rounds',0)-first['bots'].get('late_rounds',0)
+    if late: reasons.append('bots falling behind')
+    if bot_cpu/wall > .8*bot_cores or bot_cpu_peak>.8*bot_cores: reasons.append('bots over 80% CPU allotment')
+    if server_cpu/wall > server_cores*1.05: reasons.append('server CPU cap exceeded')
+    tps_floor=20-2/wall
+    if any(t<tps_floor for t in tps): reasons.append('game-time TPS below 20 minus two-tick query tolerance')
+    if any(v>=50 for v in p99): reasons.append('raw tick P99 at least 50 ms')
+    if any(r['dropped'] for r in raw): reasons.append('tick sample buffer overflow')
+    # A legitimately overloaded engine can run below 15 TPS. Check trace coverage
+    # against actual game-time progress, not against a minimum performance target.
+    for index,trace in enumerate(raw):
+        expected_ticks=last['time'][index]['ticks']-first['time'][index]['ticks']
+        ticks=trace['ticks']
+        if len(ticks)<max(1,expected_ticks-4):
+            reasons.append('too few raw ticks')
+            break
+        sequences=[tick['sequence'] for tick in ticks if 'sequence' in tick]
+        if sequences and any(b!=a+1 for a,b in zip(sequences,sequences[1:])):
+            reasons.append('raw tick sequence gap')
+            break
+    if max(s['load'][0] for s in samples)>max_load: reasons.append('disturbed host load')
+    if any(v['rtt_s']>.1 for s in samples for v in s['time']): reasons.append('game-time query uncertainty over 100 ms')
+    if last['bots'].get('elapsed',0)-first['bots'].get('elapsed',0)<wall-2:
+        reasons.append('stale bot telemetry')
+    waited=last['bots'].get('waited_ticks',0)-first['bots'].get('waited_ticks',0)
+    # Waiting on chunks means the offered movement load was not sustained.
+    if waited>expected*wall*.2: reasons.append('bots waiting for chunks over 1% of ticks')
+    distance=last['bots'].get('distance',0)-first['bots'].get('distance',0)
+    telemetry_seconds=last['bots'].get('elapsed',0)-first['bots'].get('elapsed',0)
+    expected_distance=steady_route_speed(config or {},expected)*expected*telemetry_seconds
+    if distance<.95*expected_distance: reasons.append('client route progress below 95% of offered movement')
+    overload_reasons={'game-time TPS below 20 minus two-tick query tolerance','raw tick P99 at least 50 ms'}
+    valid=not any(reason not in overload_reasons for reason in reasons)
+    return {'pass':not reasons,'valid':valid,'reasons':reasons,'seconds':wall,'tps':tps,'tick_p99_ms':p99,
+        'server_cpu_s':server_cpu,'server_cpu_cores':server_cpu/wall,
+        'bot_cpu_s':bot_cpu,'bot_cpu_cores':bot_cpu/wall,'bot_cpu_us_per_bot_tick':bot_cpu/(wall*20*expected)*1e6,
+        'bot_cpu_us_per_bot_second':bot_cpu/(wall*expected)*1e6,
+        'bot_cpu_allotment_used':bot_cpu/(wall*bot_cores),'bot_late_rounds':late,'bot_waited_ticks':waited,
+        'bot_cpu_peak_interval_cores':bot_cpu_peak,
+        'bot_distance':distance,'bot_threads':max(s['bot_usage']['threads'] for s in samples),
+        'bot_expected_distance':expected_distance,'bot_movement_fraction':distance/max(expected_distance,1e-9),
+        'load_1m_range':[min(s['load'][0] for s in samples),max(s['load'][0] for s in samples)],
+        'tps_floor':tps_floor,
+        'work_per_tile':[{'players':[s['tiles'][i]['players'] for s in samples],
+            'chunks':[s['tiles'][i]['chunks'] for s in samples],
+            'levels':[s['tiles'][i]['levels'] for s in samples],
+            'mob_count':[s['tiles'][i].get('e11_population') for s in samples]} for i in range(len(raw))]}
+
+
+def evaluate_bots(samples, expected, allotment, max_load):
+    first,last=samples[0],samples[-1]
+    wall=last['at']-first['at']
+    cpu=last['bot_usage']['cpu_s']-first['bot_usage']['cpu_s']
+    peak=max((b['bot_usage']['cpu_s']-a['bot_usage']['cpu_s'])/(b['at']-a['at']) for a,b in zip(samples,samples[1:]))
+    late=last['bots'].get('late_rounds',0)-first['bots'].get('late_rounds',0)
+    reasons=[]
+    if any(s['bots'].get('online')!=expected or s['bots'].get('failed',0) for s in samples): reasons.append('bot offline or failed')
+    if cpu/wall>.8*allotment or peak>.8*allotment: reasons.append('bots over 80% CPU allotment')
+    if late: reasons.append('bots falling behind')
+    if max(s['load'][0] for s in samples)>max_load: reasons.append('disturbed host load')
+    return {'pass':not reasons,'reasons':reasons,'seconds':wall,'bot_cpu_s':cpu,'bot_cpu_cores':cpu/wall,
+        'bot_cpu_allotment_used':cpu/wall/allotment,'bot_late_rounds':late,
+        'bot_cpu_peak_interval_cores':peak,
+        'bot_cpu_us_per_bot_tick':cpu/(wall*20*expected)*1e6,
+        'bot_threads':max(s['bot_usage']['threads'] for s in samples),
+        'server_cpu_s':sum(b['cpu_s']-a['cpu_s'] for a,b in zip(first['server_usage'],last['server_usage'])),
+        'server_tps':[(b['ticks']-a['ticks'])/(b['at']-a['at']) for a,b in zip(first['time'],last['time'])]}
+
+
+def cell(config,count,repeat,args):
+    engines=[]; bot=None; bot_log=None; limits=[]
+    RUNS.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='e11-capacity-',dir=RUNS) as folder:
+        folder=Path(folder)
+        try:
+            quiet_marker=Path(args.quiet_marker) if args.quiet_marker else None
+            window_lost=False
+            if quiet_marker and not quiet_marker.exists():
+                raise RuntimeError('quiet window marker missing at cell start')
+            external=config.get('mode')=='external'
+            if external:
+                engines=[Control(Path(s['endpoint']).expanduser()) for s in config['servers']]
+                pids=[s['pid'] for s in config['servers']]+config.get('proxy_pids',[])+config.get('service_pids',[])
+                targets=config['bot_targets']
+            else:
+                for i in range(args.servers):
+                    engines.append(Engine(folder/f'server-{i}',config,i))
+                pids=[e.pid for e in engines]
+                targets=[f'127.0.0.1:{e.port}' for e in engines]
+            target_engines=list(range(len(targets)))
+            anchors=None
+            if not external and len(engines)==4 and not config.get('path'):
+                anchors=[route_anchor(i,count,config.get('seed',12345),config.get('spread',[-64,-64,64,64])) for i in range(count)]
+                target_engines=spatial_quarters(anchors)
+                targets=[targets[i] for i in target_engines]
+            if not args.uncapped_servers:
+                limits.append(CpuBudget(pids,args.server_cores).start())
+            for e in engines:
+                e.console('gamerule spawn_mobs false')
+                e.console('gamerule respawn_radius 0')
+                e.console('gamerule advance_weather false')
+                e.console('gamerule advance_time false')
+                e.console('time set day')
+            bot_path=folder/'bots.jsonl'
+            bot_log=bot_path.open('w')
+            command=[str(BINS/'horizon-bots'),'--event-loop','--servers',','.join(targets),'--bots',str(count),
+                '--behaviour','route','--seconds','7200','--join-every',str(args.join_every),
+                '--view-distance',str(config.get('view_distance',3)),'--seed',str(config.get('seed',12345)),
+                '--spread',','.join(map(str,config.get('spread',[-64,-64,64,64]))),'--speed',str(config.get('speed',4)),
+                '--height','2','--name','E11Bot']
+            if config.get('path'):
+                command += ['--path',config['path']]
+            bot=subprocess.Popen(command,cwd=folder,env=private_env(folder/'bot-home'),stdout=bot_log,stderr=subprocess.STDOUT)
+            limits.append(CpuBudget([bot.pid],args.bot_cores).start())
+            def joined():
+                if bot.poll() is not None:
+                    raise RuntimeError('bots exited during join: '+sanitize(bot_path.read_text()[-1800:]))
+                return latest(bot_path).get('online')==count and sum(len(e.ask('server-status')['players']) for e in engines)==count
+            wait(joined,max(120,count*args.join_every+60),'bot join timeout')
+            routes=next(r['routes'] for r in complete_json_lines(bot_path) if 'routes' in r)
+            if anchors and any(abs(a-b)>1e-9 for route,anchor in zip(routes,anchors) for a,b in zip(route['start'],anchor)):
+                raise RuntimeError('client route preamble disagrees with spatial backend planning')
+            if not config.get('skip_spread_teleport',False):
+                placements=[[] for _ in engines]
+                for route in routes:
+                    x,z=route['start']
+                    placements[target_engines[route['server']]].append(f'tp {route["name"]} {x} -58 {z}')
+                for engine,commands in zip(engines,placements):
+                    if isinstance(engine,Engine): engine.console_many(commands)
+                    else:
+                        for command in commands: engine.console(command)
+            # Same fixed total population, not a fresh population per server. AI stays enabled.
+            total_mobs=config.get('mobs',64)
+            for i,e in enumerate(engines):
+                e.console('kill @e[type=!minecraft:player]')
+                mx,mz=config.get('mob_origins',[[0,0] for _ in engines])[i]
+                for j in range(total_mobs//len(engines)+(i<total_mobs%len(engines))):
+                    e.console(f'summon minecraft:pig {mx+j%8-4} -60 {mz+j//8-4} {{Invulnerable:1b,PersistenceRequired:1b}}')
+            print(f'cell servers={len(engines)} bots={count} repeat={repeat}: warmup {args.warmup}s',flush=True)
+            until=time.monotonic()+args.warmup
+            while time.monotonic()<until:
+                if quiet_marker and not quiet_marker.exists(): window_lost=True
+                time.sleep(min(1,max(0,until-time.monotonic())))
+            if not args.bot_only:
+                for e in engines:
+                    e.ask('e11-samples')
+            limiter_start=[limit.report() for limit in limits]
+            samples=[snapshot(engines,pids,bot.pid,bot_path)]
+            end=time.monotonic()+args.seconds
+            while time.monotonic()<end:
+                if quiet_marker and not quiet_marker.exists(): window_lost=True
+                time.sleep(min(args.sample_every,max(0,end-time.monotonic())))
+                samples.append(snapshot(engines,pids,bot.pid,bot_path))
+            raw=[] if args.bot_only else [e.ask('e11-samples') for e in engines]
+            result=evaluate_bots(samples,count,args.bot_cores,args.max_load) if args.bot_only else evaluate(
+                samples,raw,count,float('inf') if args.uncapped_servers else args.server_cores,args.bot_cores,
+                float('inf') if args.uncapped_servers else args.max_load,config.get('mobs',64),config)
+            if quiet_marker and (window_lost or not quiet_marker.exists()):
+                result['pass']=False
+                result['valid']=False
+                result['reasons'].append('quiet window marker vanished during cell')
+            result.update(bots=count,servers=len(engines),repeat=repeat,config=config,
+                uncapped_servers=args.uncapped_servers,cpu_limits=[limit.report() for limit in limits],samples=samples,raw_ticks=raw)
+            result['backend_assignment']='spatial quarters' if anchors else 'endpoint round-robin'
+            result['cpu_limits_measured']=[dict(limit.report(),stops=limit.stops-before['stops']) for limit,before in zip(limits,limiter_start)]
+            for limit in limits:
+                if limit.error:
+                    result['pass']=False
+                    result['valid']=False
+                    result['reasons'].append('CPU limiter failed')
+            return result
+        finally:
+            for limit in reversed(limits): limit.stop()
+            if bot and bot.poll() is None:
+                bot.terminate()
+                try: bot.wait(5)
+                except subprocess.TimeoutExpired: bot.kill(); bot.wait()
+            if bot_log: bot_log.close()
+            for e in reversed(engines):
+                if isinstance(e,Engine): e.stop()
+                else: e.close()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config',type=Path)
+    parser.add_argument('--servers',type=int,default=1)
+    parser.add_argument('--loads',default='25,50,100,200,400,800')
+    parser.add_argument('--repeat',type=int,default=2)
+    parser.add_argument('--warmup',type=float,default=30)
+    parser.add_argument('--seconds',type=float,default=60)
+    parser.add_argument('--sample-every',type=float,default=2)
+    parser.add_argument('--join-every',type=float,default=.01)
+    parser.add_argument('--server-cores',type=float,default=4)
+    parser.add_argument('--bot-cores',type=float,default=1)
+    parser.add_argument('--max-load',type=float,default=8)
+    parser.add_argument('--max-start-load',type=float,default=4,help='wait for this one-minute load before starting a cell')
+    parser.add_argument('--quiet-timeout',type=float,default=900)
+    parser.add_argument('--disturbed-retries',type=int,default=1)
+    parser.add_argument('--out',type=Path,default=DATA/'capacity.json')
+    parser.add_argument('--continue-after-fail',action='store_true')
+    parser.add_argument('--bot-only',action='store_true',help='measure client saturation, never publish server capacity')
+    parser.add_argument('--refine-step',type=int,default=25,help='bisect a valid overload bracket to this many bots; 0 disables')
+    parser.add_argument('--quiet-marker',help='reject a cell if this coordinated quiet-window file vanishes')
+    parser.add_argument('--uncapped-servers',action='store_true',help='low-load limiter artifact control only, not an equal-CPU capacity run')
+    args=parser.parse_args()
+    if args.seconds<5 or args.warmup<0 or args.servers<1 or args.repeat<1 or args.sample_every<=0:
+        parser.error('invalid duration, count or sampling interval')
+    config=json.loads(args.config.read_text()) if args.config else {'seed':12345,'view_distance':3,'speed':4,'mobs':64}
+    if config.get('mode')=='external':
+        args.servers=len(config['servers'])
+        if not config.get('release_verified') or not config.get('build'):
+            parser.error('external config requires release_verified=true and build provenance')
+    requested_loads=args.loads
+    reference_capacity=None
+    reference_path=DATA/'plain-staircase.json'
+    if args.quiet_marker and args.servers==4 and not args.bot_only and not args.uncapped_servers and args.loads!='4' and reference_path.exists():
+        reference=json.loads(reference_path.read_text())
+        reference_capacity=reference.get('capacity_lower_bound')
+        if reference_capacity:
+            # Spend the bounded quiet window on the one-, two-, three- and four-times
+            # baseline questions, rather than repeating already-small 100-bot cells.
+            args.loads=','.join(str(reference_capacity*factor) for factor in [1,2,3,4])
+    loads=[int(v) for v in args.loads.split(',')]
+    if loads!=sorted(set(loads)) or not loads or loads[0]<=0:
+        parser.error('loads must be positive, unique and ascending')
+    rows=[]
+    build=config.get('build') or json.loads((BINS/'horizon-client.json').read_text())
+    if config.get('mode')!='external' and not config.get('servers'):
+        actual=hashlib.sha256((BINS/'horizon-client').read_bytes()).hexdigest()
+        if actual!=build['binary_sha256']:
+            parser.error('server binary does not match retained release build provenance')
+    output={'kind':'goliath-e11-bot-scale' if args.bot_only else ('goliath-e11-limiter-control' if args.uncapped_servers else 'goliath-e11-capacity'),'build':build,'settings':vars(args).copy(),'machine':{
+        'cpu':subprocess.check_output(['sysctl','-n','machdep.cpu.brand_string'],text=True).strip(),
+        'logical_cpus':os.cpu_count(),'core_classes':[
+            {'name':subprocess.check_output(['sysctl','-n',f'hw.perflevel{i}.name'],text=True).strip(),
+             'physical':int(subprocess.check_output(['sysctl','-n',f'hw.perflevel{i}.physicalcpu'],text=True))} for i in range(2)]},'runs':rows}
+    output['settings']={k:str(v) if isinstance(v,Path) else v for k,v in output['settings'].items()}
+    output['settings']['requested_loads']=requested_loads
+    output['settings']['reference_capacity_lower_bound']=reference_capacity
+    save(args.out,output)
+    print('servers bots repeat TPS-min tick-P99-max server-cores bot-cores result',flush=True)
+    pending=list(loads)
+    lower=0
+    upper=None
+    while pending:
+        count=pending.pop(0)
+        accepted=[]
+        final_rows=[]
+        for repeat in range(args.repeat):
+            for attempt in range(args.disturbed_retries+1):
+                try:
+                    quiet_deadline=time.monotonic()+args.quiet_timeout
+                    next_notice=0.
+                    while os.getloadavg()[0]>args.max_start_load:
+                        now=time.monotonic()
+                        if now>=quiet_deadline:
+                            raise RuntimeError('host did not reach the quiet-start load threshold')
+                        if now>=next_notice:
+                            print(f'waiting for quiet host: load={os.getloadavg()[0]:.2f}, start threshold={args.max_start_load}',flush=True)
+                            next_notice=now+30
+                        time.sleep(5)
+                    output['active_cell']={'bots':count,'repeat':repeat,'attempt':attempt,'started_unix':time.time()}
+                    save(args.out,output)
+                    row=cell(config,count,repeat,args)
+                except Exception as error:
+                    row={'bots':count,'servers':args.servers,'repeat':repeat,'pass':False,'reasons':[sanitize(error)]}
+                row['attempt']=attempt
+                rows.append(row)
+                output.pop('active_cell',None)
+                save(args.out,output)
+                print(f'{args.servers} {count} {repeat} {min(row.get("tps",[0])):.3f} '
+                    f'{max(row.get("tick_p99_ms",[0])):.3f} {row.get("server_cpu_cores",0):.3f} '
+                    f'{row.get("bot_cpu_cores",0):.3f} {"PASS" if row["pass"] else row["reasons"]}',flush=True)
+                if 'disturbed host load' not in row['reasons']:
+                    break
+            accepted.append(row['pass'])
+            final_rows.append(row)
+        if all(accepted):
+            lower=max(lower,count)
+        elif not args.continue_after_fail:
+            if args.bot_only or any(not r.get('valid') for r in final_rows) or lower==0:
+                break
+            upper=count if upper is None else min(upper,count)
+        if upper is not None and not args.bot_only and not args.continue_after_fail:
+            if args.refine_step<=0 or upper-lower<=args.refine_step:
+                break
+            middle=((lower+upper)//(2*args.refine_step))*args.refine_step
+            if middle<=lower: middle=lower+args.refine_step
+            pending=[middle]
+    tested=sorted({r['bots'] for r in rows})
+    grouped={count:[r for r in rows if r['bots']==count and r.get('attempt')==max(
+        q['attempt'] for q in rows if q['bots']==count and q['repeat']==r['repeat'])] for count in tested}
+    passed=[count for count,group in grouped.items() if len(group)==args.repeat and all(r['pass'] for r in group)]
+    if args.uncapped_servers:
+        output['capacity_lower_bound']=None
+        output['control_only']=True
+        save(args.out,output)
+        print('uncapped low-load control complete; no equal-CPU capacity number',flush=True)
+        return
+    output['capacity_lower_bound']=None if args.bot_only else max(passed,default=0)
+    if args.bot_only:
+        output['largest_unbottlenecked_client_count']=max(passed,default=0)
+        save(args.out,output)
+        print(f'client-only result: {output["largest_unbottlenecked_client_count"]} bots without a measured client bottleneck',flush=True)
+        return
+    output['capacity_is_bracketed']=any(r['bots']>output['capacity_lower_bound'] and r.get('valid') and not r['pass'] for r in rows)
+    output['capacity_upper_bound_exclusive']=min((r['bots'] for r in rows if r.get('valid') and not r['pass'] and r['bots']>output['capacity_lower_bound']),default=None)
+    save(args.out,output)
+    print(f'capacity lower bound {output["capacity_lower_bound"]}; bracketed {output["capacity_is_bracketed"]}',flush=True)
+
+
+if __name__=='__main__':
+    main()

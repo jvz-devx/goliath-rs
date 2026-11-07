@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Render the tested capacity bounds without presenting a coarse step as an exact maximum."""
+import json
+from e11_support import DATA
+
+
+def main():
+    summary=json.loads((DATA/'summary.json').read_text())
+    series=[]
+    for key,label in [('plain-staircase','1 plain server'),('four-plain-staircase','4 plain servers')]:
+        item=summary.get(key,{})
+        series.append({'label':label,'low':item.get('accepted_tested_lower_bound',0),
+            'high':item.get('first_valid_overload')})
+    template='''<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html,body{margin:0;background:transparent;color:var(--foreground);font-family:var(--font-sans)}
+#e11-bounds{width:100%} h3{font-weight:500;margin:0 0 12px}
+.label{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:8px}
+.detail{color:var(--muted-foreground)} svg{display:block;width:100%;height:76px}
+svg text{font-size:12px;fill:var(--foreground);font-family:var(--font-sans)}
+.note{color:var(--muted-foreground);margin:6px 0 0}
+</style></head><body><div id="e11-bounds">
+<h3>Tested capacity bounds</h3><div id="e11-rows"></div>
+<p class="note">Equal four-core server budget. Nominal 20 TPS and capped tick P99 below 50 ms.</p>
+<p class="note">Solid bars passed both repeats. Dotted intervals are unrefined, not measured maxima.</p>
+</div><script>
+const data=__DATA__;
+const root=document.getElementById('e11-bounds');
+const rows=document.getElementById('e11-rows');
+const ns='http://www.w3.org/2000/svg';
+function draw(){
+ rows.replaceChildren();
+ const width=Math.max(280,Math.floor(root.getBoundingClientRect().width));
+ const end=Math.max(100,...data.map(d=>d.high||d.low));
+ const max=Math.ceil(end*1.15/100)*100;
+ const left=12,right=width-16,x=v=>left+(right-left)*v/max;
+ function add(svg,name,attrs,text){const n=document.createElementNS(ns,name);Object.entries(attrs).forEach(([k,v])=>n.setAttribute(k,v));if(text!==undefined)n.textContent=text;svg.append(n);return n;}
+ data.forEach((d,index)=>{
+  const label=document.createElement('div');label.className='label';
+  const name=document.createElement('span');name.textContent=d.label;
+  const detail=document.createElement('span');detail.className='detail';detail.textContent=`${d.low} passed; `+(d.high?`${d.high} overload`:'ceiling unmeasured');
+  label.append(name,detail);rows.append(label);
+  const svg=document.createElementNS(ns,'svg');svg.setAttribute('viewBox',`0 0 ${width} 76`);svg.setAttribute('role','img');
+  svg.setAttribute('aria-label',`${d.label}: ${d.low} bots passed both repeats. `+(d.high?`An overload was observed at ${d.high} bots.`:'No upper limit was measured.'));
+  add(svg,'rect',{x:left,y:8,width:right-left,height:34,fill:'none',stroke:'var(--border)','stroke-width':1,'data-chart-frame':''});
+  add(svg,'rect',{x:x(0),y:14,width:Math.max(0,x(d.low)-x(0)),height:22,fill:`var(--chart-${index+1})`,opacity:.75});
+  if(d.high){
+   add(svg,'line',{x1:x(d.low),x2:x(d.high),y1:25,y2:25,stroke:'var(--muted-foreground)','stroke-width':2,'stroke-dasharray':'3 5'});
+   const at=x(d.high);add(svg,'path',{d:`M${at-5},20 L${at+5},30 M${at-5},30 L${at+5},20`,fill:'none',stroke:'var(--foreground)','stroke-width':2});
+  }else if(d.low){
+   const at=x(d.low);add(svg,'path',{d:`M${at+3},25 L${at+15},25 M${at+10},20 L${at+15},25 L${at+10},30`,fill:'none',stroke:'var(--foreground)','stroke-width':1.5});
+  }
+  for(const value of [0,max/2,max])add(svg,'text',{x:x(value),y:59,'text-anchor':value===0?'start':value===max?'end':'middle'},String(value));
+  add(svg,'text',{x:(left+right)/2,y:74,'text-anchor':'middle','data-axis':'x',class:'axis-title'},'Total bots');
+  rows.append(svg);
+ });
+}
+new ResizeObserver(draw).observe(root);draw();
+</script></body></html>'''
+    (DATA/'capacity-bounds.html').write_text(template.replace('__DATA__',json.dumps(series))+'\n')
+
+
+if __name__=='__main__': main()

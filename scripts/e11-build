@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Build E11 release tools in the owned checkout, retaining the existing E7 changes."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon-tiles'
+BINS = ROOT / '.local/bin/horizon-e11'
+BUILD_ENV = dict(os.environ, CARGO_INCREMENTAL='0', CARGO_PROFILE_RELEASE_LTO='thin',
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1', CARGO_PROFILE_RELEASE_INCREMENTAL='false')
+
+
+def git(*args, env=None, data=None):
+    return subprocess.check_output(['git', *args], cwd=SOURCE, env=env, input=data)
+
+
+def patch(name, paths, scratch):
+    env = dict(os.environ, GIT_INDEX_FILE=str(scratch / 'index'))
+    git('read-tree', 'HEAD', env=env)
+    git('apply', '--cached', str(ROOT / 'patches/e2-horizon-input-trace.patch'), env=env)
+    base = git('write-tree', env=env).strip().decode()
+    for path in paths:
+        blob = git('hash-object', '-w', '--', path).strip().decode()
+        git('update-index', '--add', '--cacheinfo', '100644', blob, path, env=env)
+    end = git('write-tree', env=env).strip().decode()
+    content = git('diff', '--binary', base, end, '--', *paths, env=env)
+    (ROOT / 'patches' / name).write_bytes(content)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--tile', action='store_true', help='build instrumented E7 instead of plain Horizon')
+    parser.add_argument('--patch-only', action='store_true')
+    parser.add_argument('--bots-only', action='store_true')
+    args = parser.parse_args()
+    if git('rev-parse', 'HEAD').strip().decode() != 'fc2868b2b26d56ec76e17414909fe58a3b87bb92':
+        raise RuntimeError('unexpected Horizon revision')
+    if args.bots_only:
+        subprocess.run(['cargo','build','--release','-p','horizon-bots'],cwd=SOURCE,
+            env=BUILD_ENV,check=True)
+        BINS.mkdir(parents=True,exist_ok=True)
+        shutil.copy2(SOURCE/'target/release/horizon-bots',BINS/'horizon-bots')
+        sha=hashlib.sha256((BINS/'horizon-bots').read_bytes()).hexdigest()
+        for name in ['horizon-client.json','horizon-client-tile.json']:
+            path=BINS/name
+            if path.exists():
+                record=json.loads(path.read_text())
+                record['bots_sha256']=sha
+                path.write_text(json.dumps(record,indent=2)+'\n')
+        return
+    e7 = str(ROOT / 'patches/horizon-02-tile-ownership.patch')
+    # Reverse only the exact E7 patch, not the dirty index or unrelated edits. Always restore it.
+    git('apply', '--reverse', '--check', e7)
+    git('apply', '--reverse', e7)
+    try:
+        (ROOT / '.local/runs').mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='e11-build-', dir=ROOT / '.local/runs') as folder:
+            patch('horizon-03-bots.patch', ['Cargo.lock', 'crates/horizon-bots/Cargo.toml',
+                'crates/horizon-bots/src/main.rs', 'crates/horizon-bots/src/measured.rs'], Path(folder))
+            patch('horizon-04-digest.patch', ['crates/horizon-client/src/game.rs',
+                'crates/horizon-client/src/game/levels.rs', 'crates/horizon-client/src/game/dedicated/status.rs',
+                'crates/horizon-client/src/game/e11_measure.rs'], Path(folder))
+            if args.patch_only:
+                return
+            if args.tile:
+                git('apply', e7)
+            try:
+                subprocess.run(['cargo', 'build', '--release', '--no-default-features',
+                    '-p', 'horizon-client', '--bin', 'horizon-client', '-p', 'horizon-bots', '--bin', 'horizon-bots'],
+                    cwd=SOURCE, env=BUILD_ENV, check=True)
+                BINS.mkdir(parents=True, exist_ok=True)
+                name = 'horizon-client-tile' if args.tile else 'horizon-client'
+                shutil.copy2(SOURCE / 'target/release/horizon-client', BINS / name)
+                shutil.copy2(SOURCE / 'target/release/horizon-bots', BINS / 'horizon-bots')
+                record = {'base':'fc2868b2b', 'patches':['E2','E11-bots','E11-digest'] + (['E7'] if args.tile else []),
+                    'profile':'release', 'lto':'thin', 'codegen_units':1, 'incremental':False,
+                    'binary_sha256':hashlib.sha256((BINS / name).read_bytes()).hexdigest(),
+                    'bots_sha256':hashlib.sha256((BINS / 'horizon-bots').read_bytes()).hexdigest()}
+                (BINS / (name + '.json')).write_text(json.dumps(record, indent=2)+'\n')
+            finally:
+                if args.tile:
+                    git('apply', '--reverse', e7)
+    finally:
+        git('apply', e7)
+
+
+if __name__ == '__main__':
+    main()

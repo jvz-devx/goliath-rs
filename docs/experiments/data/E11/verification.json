@@ -1,0 +1,24 @@
+{
+  "parent_verification_required": true,
+  "commands": [
+    {"command": "python3 -B scripts/e11-build", "outcome": "passed after the documented save API correction", "profile": "release", "lto": "thin", "codegen_units": 1},
+    {"command": "python3 -B scripts/e11-build --tile", "outcome": "passed", "profile": "release", "lto": "thin", "codegen_units": 1},
+    {"command": "python3 -B scripts/e11-build --bots-only", "outcome": "passed for the final retained client"},
+    {"command": "CARGO_INCREMENTAL=0 cargo test --release -p horizon-bots", "outcome": "passed", "tests": 13},
+    {"command": "CARGO_INCREMENTAL=0 cargo fmt --all --check", "cwd": ".local/src/horizon-tiles", "outcome": "passed after correcting the new module declaration order"},
+    {"command": "CARGO_INCREMENTAL=0 cargo clippy --release --no-default-features -p horizon-bots -p horizon-client --lib --bins -- -D warnings", "cwd": ".local/src/horizon-tiles", "outcome": "passed"},
+    {"command": "CARGO_INCREMENTAL=0 cargo test --release --no-default-features -p horizon-client --bin horizon-client e11_measure::tests", "outcome": "zero tests selected; not counted as verification", "intended_target": "--lib"},
+    {"command": "python3 -B scripts/e11-tools-test", "outcome": "passed", "tests": 7},
+    {"command": "python3 -B scripts/e11-patch-check", "outcome": "passed", "orders": 3, "working_source_mismatches": 0},
+    {"command": "python3 -B scripts/e11-fixture --ticks 80 --plain-only", "outcome": "plain self-diff matched all 80 ticks"},
+    {"command": "python3 -B scripts/e11-fixture --ticks 80 --resume", "outcome": "E7 matched all 80 plain ticks; positive and injected-difference controls passed"},
+    {"command": "python3 -B scripts/e11-switch", "outcome": "four live Transfer reconnects with route continuation passed"},
+    {"command": "python3 -B scripts/e11-cpu-probe --seconds 5", "outcome": "final calibration passed; earlier failures are documented"},
+    {"command": "python3 -B scripts/e11-capacity-round", "outcome": "budget-limited; marker released after 44.686 minutes; second 800-bot four-server repeat interrupted during warmup"},
+    {"command": "python3 -B scripts/e11-summarise --write --compact-raw", "outcome": "raw values preserved, stricter CPU and movement validation passed for accepted cells"},
+    {"command": "scripts/clean-builds", "outcome": "passed; no --all", "freed_mb": 0, "owned_horizon_target_mb": 2480, "shared_project_mb": 7629}
+  ],
+  "remaining": ["four-server 800-bot repeat 1", "client saturation ceiling", "fine capacity frontiers", "live integrated seamless Meridian switch"],
+  "committed": false,
+  "published": false
+}

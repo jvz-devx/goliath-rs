@@ -1,0 +1,1187 @@
+{
+  "kind": "goliath-e11-capacity",
+  "build": {
+    "base": "fc2868b2b",
+    "patches": [
+      "E2",
+      "E11-bots",
+      "E11-digest"
+    ],
+    "profile": "release",
+    "lto": "thin",
+    "codegen_units": 1,
+    "incremental": false,
+    "binary_sha256": "8dbfabbecf16be8a19fd3297f29b976de4a60c610d8b848afdd0fdd3f53fc928",
+    "bots_sha256": "81c540591165b50ff0ffb00843d8c0490c3099fa8ec11b00de037c8555b60b15"
+  },
+  "settings": {
+    "config": null,
+    "servers": 1,
+    "loads": "4",
+    "repeat": 1,
+    "warmup": 2.0,
+    "seconds": 6.0,
+    "sample_every": 2,
+    "join_every": 0.01,
+    "server_cores": 4,
+    "bot_cores": 1,
+    "max_load": 30.0,
+    "disturbed_retries": 1,
+    "out": "docs/experiments/data/E11/smoke.json",
+    "continue_after_fail": false
+  },
+  "machine": {
+    "cpu": "Apple M5 Pro",
+    "logical_cpus": 18
+  },
+  "runs": [
+    {
+      "pass": true,
+      "valid": true,
+      "reasons": [],
+      "seconds": 6.099969834001968,
+      "tps": [
+        19.986451942732405
+      ],
+      "tick_p99_ms": [
+        0.717125
+      ],
+      "server_cpu_s": 21.582931458333327,
+      "server_cpu_cores": 3.5382029822553323,
+      "bot_cpu_s": 0.007721041666666664,
+      "bot_cpu_cores": 0.0012657507949676483,
+      "bot_cpu_us_per_bot_tick": 15.821884937095604,
+      "bot_cpu_allotment_used": 0.0012657507949676483,
+      "bot_late_rounds": 0,
+      "bot_waited_ticks": 0,
+      "bot_distance": 95.82741699796942,
+      "bot_threads": 1,
+      "load_1m_range": [
+        5.31591796875,
+        5.517578125
+      ],
+      "tps_floor": 19.67212952614097,
+      "work_per_tile": [
+        {
+          "players": [
+            4,
+            4,
+            4,
+            4
+          ],
+          "chunks": [
+            288,
+            290,
+            295,
+            295
+          ],
+          "levels": [
+            [
+              {
+                "chunks": 288,
+                "dimension": "minecraft:overworld",
+                "entities": 64
+              }
+            ],
+            [
+              {
+                "chunks": 290,
+                "dimension": "minecraft:overworld",
+                "entities": 64
+              }
+            ],
+            [
+              {
+                "chunks": 295,
+                "dimension": "minecraft:overworld",
+                "entities": 64
+              }
+            ],
+            [
+              {
+                "chunks": 295,
+                "dimension": "minecraft:overworld",
+                "entities": 64
+              }
+            ]
+          ],
+          "mob_count": [
+            [
+              {
+                "dimension": "minecraft:overworld",
+                "mobs": 64,
+                "mobs_by_kind": {
+                  "minecraft:pig": 64
+                }
+              }
+            ],
+            [
+              {
+                "dimension": "minecraft:overworld",
+                "mobs": 64,
+                "mobs_by_kind": {
+                  "minecraft:pig": 64
+                }
+              }
+            ],
+            [
+              {
+                "dimension": "minecraft:overworld",
+                "mobs": 64,
+                "mobs_by_kind": {
+                  "minecraft:pig": 64
+                }
+              }
+            ],
+            [
+              {
+                "dimension": "minecraft:overworld",
+                "mobs": 64,
+                "mobs_by_kind": {
+                  "minecraft:pig": 64
+                }
+              }
+            ]
+          ]
+        }
+      ],
+      "bots": 4,
+      "servers": 1,
+      "repeat": 0,
+      "config": {
+        "seed": 12345,
+        "view_distance": 3,
+        "speed": 4,
+        "mobs": 64
+      },
+      "cpu_limits": [
+        {
+          "cores": 4,
+          "stops": 0,
+          "max_debt_cpu_s": 0.0,
+          "error": null
+        },
+        {
+          "cores": 1,
+          "stops": 0,
+          "max_debt_cpu_s": 0.0,
+          "error": null
+        }
+      ],
+      "samples": [
+        {
+          "at": 90923.264507916,
+          "request_start": 90923.164609625,
+          "time": [
+            {
+              "ticks": 142,
+              "at": 90923.189564083,
+              "rtt_s": 0.04990483399888035
+            }
+          ],
+          "tiles": [
+            {
+              "chunks": 288,
+              "e11_population": [
+                {
+                  "dimension": "minecraft:overworld",
+                  "mobs": 64,
+                  "mobs_by_kind": {
+                    "minecraft:pig": 64
+                  }
+                }
+              ],
+              "levels": [
+                {
+                  "chunks": 288,
+                  "dimension": "minecraft:overworld",
+                  "entities": 64
+                }
+              ],
+              "max_players": 10000,
+              "mspt": {
+                "average": 0.594437,
+                "p50": 0.5565,
+                "p95": 0.776625,
+                "p99": 3.044083
+              },
+              "paused": false,
+              "players": 4,
+              "target_tps": 20.0,
+              "tps": 19.999261643421146,
+              "player_bounds": [
+                [
+                  -38.41986038332267,
+                  50.60618514377276
+                ],
+                [
+                  -56.0,
+                  -56.0
+                ],
+                [
+                  -50.142373311102105,
+                  42.01954210785317
+                ]
+              ]
+            }
+          ],
+          "server_usage": [
+            {
+              "cpu_s": 24.20576833333333,
+              "rss_mb": 317.734375,
+              "threads": 38
+            }
+          ],
+          "bot_usage": {
+            "cpu_s": 0.015053708333333332,
+            "rss_mb": 2.875,
+            "threads": 1
+          },
+          "bots": {
+            "bytes_in": 201528,
+            "bytes_out": 19153,
+            "chunks": 506,
+            "corrections": 4,
+            "distance": 93.99999999999913,
+            "elapsed": 6.00165925,
+            "event_loop": true,
+            "failed": 0,
+            "falling_behind": false,
+            "joined": 4,
+            "late_rounds": 0,
+            "max_lateness_ms": 0.0,
+            "online": 4,
+            "rounds": 121,
+            "switches": 0,
+            "threads": 1,
+            "transfers": 0,
+            "waited_ticks": 4
+          },
+          "load": [
+            5.517578125,
+            6.98974609375,
+            7.2158203125
+          ]
+        },
+        {
+          "at": 90925.364494041,
+          "request_start": 90925.272126333,
+          "time": [
+            {
+              "ticks": 184,
+              "at": 90925.293302937,
+              "rtt_s": 0.04235095799958799
+            }
+          ],
+          "tiles": [
+            {
+              "chunks": 290,
+              "e11_population": [
+                {
+                  "dimension": "minecraft:overworld",
+                  "mobs": 64,
+                  "mobs_by_kind": {
+                    "minecraft:pig": 64
+                  }
+                }
+              ],
+              "levels": [
+                {
+                  "chunks": 290,
+                  "dimension": "minecraft:overworld",
+                  "entities": 64
+                }
+              ],
+              "max_players": 10000,
+              "mspt": {
+                "average": 0.575829,
+                "p50": 0.546583,
+                "p95": 0.760125,
+                "p99": 0.815958
+              },
+              "paused": false,
+              "players": 4,
+              "target_tps": 20.0,
+              "tps": 20.00015766924297,
+              "player_bounds": [
+                [
+                  -44.89336685695217,
+                  50.60618514377276
+                ],
+                [
+                  -56.0,
+                  -56.0
+                ],
+                [
+                  -41.742373311101986,
+                  33.61954210785305
+                ]
+              ]
+            }
+          ],
+          "server_usage": [
+            {
+              "cpu_s": 31.582797499999998,
+              "rss_mb": 317.734375,
+              "threads": 38
+            }
+          ],
+          "bot_usage": {
+            "cpu_s": 0.017706499999999997,
+            "rss_mb": 2.875,
+            "threads": 1
+          },
+          "bots": {
+            "bytes_in": 236917,
+            "bytes_out": 25247,
+            "chunks": 515,
+            "corrections": 4,
+            "distance": 125.82741699796858,
+            "elapsed": 8.001672917,
+            "event_loop": true,
+            "failed": 0,
+            "falling_behind": false,
+            "joined": 4,
+            "late_rounds": 0,
+            "max_lateness_ms": 0.0,
+            "online": 4,
+            "rounds": 161,
+            "switches": 0,
+            "threads": 1,
+            "transfers": 0,
+            "waited_ticks": 4
+          },
+          "load": [
+            5.517578125,
+            6.98974609375,
+            7.2158203125
+          ]
+        },
+        {
+          "at": 90927.464468666,
+          "request_start": 90927.366171333,
+          "time": [
+            {
+              "ticks": 226,
+              "at": 90927.3903444375,
+              "rtt_s": 0.04834537499118596
+            }
+          ],
+          "tiles": [
+            {
+              "chunks": 295,
+              "e11_population": [
+                {
+                  "dimension": "minecraft:overworld",
+                  "mobs": 64,
+                  "mobs_by_kind": {
+                    "minecraft:pig": 64
+                  }
+                }
+              ],
+              "levels": [
+                {
+                  "chunks": 295,
+                  "dimension": "minecraft:overworld",
+                  "entities": 64
+                }
+              ],
+              "max_players": 10000,
+              "mspt": {
+                "average": 0.55842,
+                "p50": 0.539792,
+                "p95": 0.739667,
+                "p99": 0.794958
+              },
+              "paused": false,
+              "players": 4,
+              "target_tps": 20.0,
+              "tps": 20.00058868532701,
+              "player_bounds": [
+                [
+                  -53.29336685695229,
+                  44.00618514377267
+                ],
+                [
+                  -56.0,
+                  -56.0
+                ],
+                [
+                  -39.94237331110219,
+                  31.419542107853246
+                ]
+              ]
+            }
+          ],
+          "server_usage": [
+            {
+              "cpu_s": 39.008520874999995,
+              "rss_mb": 317.734375,
+              "threads": 38
+            }
+          ],
+          "bot_usage": {
+            "cpu_s": 0.02050295833333333,
+            "rss_mb": 2.890625,
+            "threads": 1
+          },
+          "bots": {
+            "bytes_in": 266984,
+            "bytes_out": 31369,
+            "chunks": 551,
+            "corrections": 4,
+            "distance": 157.82741699796833,
+            "elapsed": 10.001661875,
+            "event_loop": true,
+            "failed": 0,
+            "falling_behind": false,
+            "joined": 4,
+            "late_rounds": 0,
+            "max_lateness_ms": 0.0,
+            "online": 4,
+            "rounds": 201,
+            "switches": 0,
+            "threads": 1,
+            "transfers": 0,
+            "waited_ticks": 4
+          },
+          "load": [
+            5.517578125,
+            6.98974609375,
+            7.2158203125
+          ]
+        },
+        {
+          "at": 90929.36447775,
+          "request_start": 90929.272931875,
+          "time": [
+            {
+              "ticks": 264,
+              "at": 90929.2936990415,
+              "rtt_s": 0.04153308300010394
+            }
+          ],
+          "tiles": [
+            {
+              "chunks": 295,
+              "e11_population": [
+                {
+                  "dimension": "minecraft:overworld",
+                  "mobs": 64,
+                  "mobs_by_kind": {
+                    "minecraft:pig": 64
+                  }
+                }
+              ],
+              "levels": [
+                {
+                  "chunks": 295,
+                  "dimension": "minecraft:overworld",
+                  "entities": 64
+                }
+              ],
+              "max_players": 10000,
+              "mspt": {
+                "average": 0.540034,
+                "p50": 0.522334,
+                "p95": 0.730542,
+                "p99": 0.747666
+              },
+              "paused": false,
+              "players": 4,
+              "target_tps": 20.0,
+              "tps": 20.000420008820182,
+              "player_bounds": [
+                [
+                  -53.69336685695207,
+                  45.59271678692968
+                ],
+                [
+                  -56.0,
+                  -56.0
+                ],
+                [
+                  -39.94237331110219,
+                  31.419542107853246
+                ]
+              ]
+            }
+          ],
+          "server_usage": [
+            {
+              "cpu_s": 45.78869979166666,
+              "rss_mb": 317.734375,
+              "threads": 38
+            }
+          ],
+          "bot_usage": {
+            "cpu_s": 0.022774749999999996,
+            "rss_mb": 2.90625,
+            "threads": 1
+          },
+          "bots": {
+            "bytes_in": 275394,
+            "bytes_out": 37449,
+            "chunks": 551,
+            "corrections": 4,
+            "distance": 189.82741699796856,
+            "elapsed": 12.001628292,
+            "event_loop": true,
+            "failed": 0,
+            "falling_behind": false,
+            "joined": 4,
+            "late_rounds": 0,
+            "max_lateness_ms": 0.0,
+            "online": 4,
+            "rounds": 241,
+            "switches": 0,
+            "threads": 1,
+            "transfers": 0,
+            "waited_ticks": 4
+          },
+          "load": [
+            5.31591796875,
+            6.92333984375,
+            7.19091796875
+          ]
+        }
+      ],
+      "raw_ticks": [
+        {
+          "digests": [],
+          "dropped": 0,
+          "ticks": [
+            {
+              "game_time": 142,
+              "ms": 0.689917,
+              "sequence": 142
+            },
+            {
+              "game_time": 143,
+              "ms": 0.7004170000000001,
+              "sequence": 143
+            },
+            {
+              "game_time": 144,
+              "ms": 0.6585,
+              "sequence": 144
+            },
+            {
+              "game_time": 145,
+              "ms": 0.490167,
+              "sequence": 145
+            },
+            {
+              "game_time": 146,
+              "ms": 0.520791,
+              "sequence": 146
+            },
+            {
+              "game_time": 147,
+              "ms": 0.43512500000000004,
+              "sequence": 147
+            },
+            {
+              "game_time": 148,
+              "ms": 0.39225000000000004,
+              "sequence": 148
+            },
+            {
+              "game_time": 149,
+              "ms": 0.424958,
+              "sequence": 149
+            },
+            {
+              "game_time": 150,
+              "ms": 0.400084,
+              "sequence": 150
+            },
+            {
+              "game_time": 151,
+              "ms": 0.375292,
+              "sequence": 151
+            },
+            {
+              "game_time": 152,
+              "ms": 0.442875,
+              "sequence": 152
+            },
+            {
+              "game_time": 153,
+              "ms": 0.660834,
+              "sequence": 153
+            },
+            {
+              "game_time": 154,
+              "ms": 0.522,
+              "sequence": 154
+            },
+            {
+              "game_time": 155,
+              "ms": 0.515042,
+              "sequence": 155
+            },
+            {
+              "game_time": 156,
+              "ms": 0.5093749999999999,
+              "sequence": 156
+            },
+            {
+              "game_time": 157,
+              "ms": 0.445125,
+              "sequence": 157
+            },
+            {
+              "game_time": 158,
+              "ms": 0.5772499999999999,
+              "sequence": 158
+            },
+            {
+              "game_time": 159,
+              "ms": 0.6247079999999999,
+              "sequence": 159
+            },
+            {
+              "game_time": 160,
+              "ms": 0.712916,
+              "sequence": 160
+            },
+            {
+              "game_time": 161,
+              "ms": 0.635625,
+              "sequence": 161
+            },
+            {
+              "game_time": 162,
+              "ms": 0.56225,
+              "sequence": 162
+            },
+            {
+              "game_time": 163,
+              "ms": 0.620375,
+              "sequence": 163
+            },
+            {
+              "game_time": 164,
+              "ms": 0.492833,
+              "sequence": 164
+            },
+            {
+              "game_time": 165,
+              "ms": 0.553584,
+              "sequence": 165
+            },
+            {
+              "game_time": 166,
+              "ms": 0.673042,
+              "sequence": 166
+            },
+            {
+              "game_time": 167,
+              "ms": 0.49945800000000007,
+              "sequence": 167
+            },
+            {
+              "game_time": 168,
+              "ms": 0.49379100000000004,
+              "sequence": 168
+            },
+            {
+              "game_time": 169,
+              "ms": 0.42075,
+              "sequence": 169
+            },
+            {
+              "game_time": 170,
+              "ms": 0.437875,
+              "sequence": 170
+            },
+            {
+              "game_time": 171,
+              "ms": 0.38987499999999997,
+              "sequence": 171
+            },
+            {
+              "game_time": 172,
+              "ms": 0.429375,
+              "sequence": 172
+            },
+            {
+              "game_time": 173,
+              "ms": 0.607583,
+              "sequence": 173
+            },
+            {
+              "game_time": 174,
+              "ms": 0.5174580000000001,
+              "sequence": 174
+            },
+            {
+              "game_time": 175,
+              "ms": 0.617541,
+              "sequence": 175
+            },
+            {
+              "game_time": 176,
+              "ms": 0.62975,
+              "sequence": 176
+            },
+            {
+              "game_time": 177,
+              "ms": 0.58175,
+              "sequence": 177
+            },
+            {
+              "game_time": 178,
+              "ms": 0.535792,
+              "sequence": 178
+            },
+            {
+              "game_time": 179,
+              "ms": 0.43020800000000003,
+              "sequence": 179
+            },
+            {
+              "game_time": 180,
+              "ms": 0.514584,
+              "sequence": 180
+            },
+            {
+              "game_time": 181,
+              "ms": 0.45245799999999997,
+              "sequence": 181
+            },
+            {
+              "game_time": 182,
+              "ms": 0.391167,
+              "sequence": 182
+            },
+            {
+              "game_time": 183,
+              "ms": 0.558625,
+              "sequence": 183
+            },
+            {
+              "game_time": 184,
+              "ms": 0.48812500000000003,
+              "sequence": 184
+            },
+            {
+              "game_time": 185,
+              "ms": 0.459417,
+              "sequence": 185
+            },
+            {
+              "game_time": 186,
+              "ms": 0.43512500000000004,
+              "sequence": 186
+            },
+            {
+              "game_time": 187,
+              "ms": 0.41775,
+              "sequence": 187
+            },
+            {
+              "game_time": 188,
+              "ms": 0.375084,
+              "sequence": 188
+            },
+            {
+              "game_time": 189,
+              "ms": 0.35604199999999997,
+              "sequence": 189
+            },
+            {
+              "game_time": 190,
+              "ms": 0.389292,
+              "sequence": 190
+            },
+            {
+              "game_time": 191,
+              "ms": 0.406167,
+              "sequence": 191
+            },
+            {
+              "game_time": 192,
+              "ms": 0.396792,
+              "sequence": 192
+            },
+            {
+              "game_time": 193,
+              "ms": 0.579,
+              "sequence": 193
+            },
+            {
+              "game_time": 194,
+              "ms": 0.557958,
+              "sequence": 194
+            },
+            {
+              "game_time": 195,
+              "ms": 0.46025,
+              "sequence": 195
+            },
+            {
+              "game_time": 196,
+              "ms": 0.393291,
+              "sequence": 196
+            },
+            {
+              "game_time": 197,
+              "ms": 0.357833,
+              "sequence": 197
+            },
+            {
+              "game_time": 198,
+              "ms": 0.435417,
+              "sequence": 198
+            },
+            {
+              "game_time": 199,
+              "ms": 0.713208,
+              "sequence": 199
+            },
+            {
+              "game_time": 200,
+              "ms": 0.562416,
+              "sequence": 200
+            },
+            {
+              "game_time": 201,
+              "ms": 0.5125000000000001,
+              "sequence": 201
+            },
+            {
+              "game_time": 202,
+              "ms": 0.4865,
+              "sequence": 202
+            },
+            {
+              "game_time": 203,
+              "ms": 0.624,
+              "sequence": 203
+            },
+            {
+              "game_time": 204,
+              "ms": 0.7112499999999999,
+              "sequence": 204
+            },
+            {
+              "game_time": 205,
+              "ms": 0.6234580000000001,
+              "sequence": 205
+            },
+            {
+              "game_time": 206,
+              "ms": 0.638625,
+              "sequence": 206
+            },
+            {
+              "game_time": 207,
+              "ms": 0.58475,
+              "sequence": 207
+            },
+            {
+              "game_time": 208,
+              "ms": 0.551542,
+              "sequence": 208
+            },
+            {
+              "game_time": 209,
+              "ms": 0.446834,
+              "sequence": 209
+            },
+            {
+              "game_time": 210,
+              "ms": 0.48008300000000004,
+              "sequence": 210
+            },
+            {
+              "game_time": 211,
+              "ms": 0.470167,
+              "sequence": 211
+            },
+            {
+              "game_time": 212,
+              "ms": 0.446541,
+              "sequence": 212
+            },
+            {
+              "game_time": 213,
+              "ms": 0.657583,
+              "sequence": 213
+            },
+            {
+              "game_time": 214,
+              "ms": 0.47579099999999996,
+              "sequence": 214
+            },
+            {
+              "game_time": 215,
+              "ms": 0.440625,
+              "sequence": 215
+            },
+            {
+              "game_time": 216,
+              "ms": 0.397292,
+              "sequence": 216
+            },
+            {
+              "game_time": 217,
+              "ms": 0.539541,
+              "sequence": 217
+            },
+            {
+              "game_time": 218,
+              "ms": 0.650417,
+              "sequence": 218
+            },
+            {
+              "game_time": 219,
+              "ms": 0.628,
+              "sequence": 219
+            },
+            {
+              "game_time": 220,
+              "ms": 0.717125,
+              "sequence": 220
+            },
+            {
+              "game_time": 221,
+              "ms": 0.726375,
+              "sequence": 221
+            },
+            {
+              "game_time": 222,
+              "ms": 0.629666,
+              "sequence": 222
+            },
+            {
+              "game_time": 223,
+              "ms": 0.700958,
+              "sequence": 223
+            },
+            {
+              "game_time": 224,
+              "ms": 0.595541,
+              "sequence": 224
+            },
+            {
+              "game_time": 225,
+              "ms": 0.506458,
+              "sequence": 225
+            },
+            {
+              "game_time": 226,
+              "ms": 0.451792,
+              "sequence": 226
+            },
+            {
+              "game_time": 227,
+              "ms": 0.5475420000000001,
+              "sequence": 227
+            },
+            {
+              "game_time": 228,
+              "ms": 0.5436249999999999,
+              "sequence": 228
+            },
+            {
+              "game_time": 229,
+              "ms": 0.48208300000000004,
+              "sequence": 229
+            },
+            {
+              "game_time": 230,
+              "ms": 0.46299999999999997,
+              "sequence": 230
+            },
+            {
+              "game_time": 231,
+              "ms": 0.43600000000000005,
+              "sequence": 231
+            },
+            {
+              "game_time": 232,
+              "ms": 0.43729100000000004,
+              "sequence": 232
+            },
+            {
+              "game_time": 233,
+              "ms": 0.679625,
+              "sequence": 233
+            },
+            {
+              "game_time": 234,
+              "ms": 0.487167,
+              "sequence": 234
+            },
+            {
+              "game_time": 235,
+              "ms": 0.441125,
+              "sequence": 235
+            },
+            {
+              "game_time": 236,
+              "ms": 0.401917,
+              "sequence": 236
+            },
+            {
+              "game_time": 237,
+              "ms": 0.42579100000000003,
+              "sequence": 237
+            },
+            {
+              "game_time": 238,
+              "ms": 0.410334,
+              "sequence": 238
+            },
+            {
+              "game_time": 239,
+              "ms": 0.444041,
+              "sequence": 239
+            },
+            {
+              "game_time": 240,
+              "ms": 0.453625,
+              "sequence": 240
+            },
+            {
+              "game_time": 241,
+              "ms": 0.36987499999999995,
+              "sequence": 241
+            },
+            {
+              "game_time": 242,
+              "ms": 0.388083,
+              "sequence": 242
+            },
+            {
+              "game_time": 243,
+              "ms": 0.59325,
+              "sequence": 243
+            },
+            {
+              "game_time": 244,
+              "ms": 0.556792,
+              "sequence": 244
+            },
+            {
+              "game_time": 245,
+              "ms": 0.41100000000000003,
+              "sequence": 245
+            },
+            {
+              "game_time": 246,
+              "ms": 0.45379200000000003,
+              "sequence": 246
+            },
+            {
+              "game_time": 247,
+              "ms": 0.440666,
+              "sequence": 247
+            },
+            {
+              "game_time": 248,
+              "ms": 0.499,
+              "sequence": 248
+            },
+            {
+              "game_time": 249,
+              "ms": 0.621417,
+              "sequence": 249
+            },
+            {
+              "game_time": 250,
+              "ms": 0.598083,
+              "sequence": 250
+            },
+            {
+              "game_time": 251,
+              "ms": 0.668584,
+              "sequence": 251
+            },
+            {
+              "game_time": 252,
+              "ms": 0.514708,
+              "sequence": 252
+            },
+            {
+              "game_time": 253,
+              "ms": 0.64,
+              "sequence": 253
+            },
+            {
+              "game_time": 254,
+              "ms": 0.497667,
+              "sequence": 254
+            },
+            {
+              "game_time": 255,
+              "ms": 0.572875,
+              "sequence": 255
+            },
+            {
+              "game_time": 256,
+              "ms": 0.549,
+              "sequence": 256
+            },
+            {
+              "game_time": 257,
+              "ms": 0.386875,
+              "sequence": 257
+            },
+            {
+              "game_time": 258,
+              "ms": 0.493417,
+              "sequence": 258
+            },
+            {
+              "game_time": 259,
+              "ms": 0.432667,
+              "sequence": 259
+            },
+            {
+              "game_time": 260,
+              "ms": 0.635166,
+              "sequence": 260
+            },
+            {
+              "game_time": 261,
+              "ms": 0.587,
+              "sequence": 261
+            },
+            {
+              "game_time": 262,
+              "ms": 0.567208,
+              "sequence": 262
+            },
+            {
+              "game_time": 263,
+              "ms": 0.524375,
+              "sequence": 263
+            },
+            {
+              "game_time": 264,
+              "ms": 0.472625,
+              "sequence": 264
+            },
+            {
+              "game_time": 265,
+              "ms": 0.416166,
+              "sequence": 265
+            },
+            {
+              "game_time": 266,
+              "ms": 0.462167,
+              "sequence": 266
+            }
+          ]
+        }
+      ],
+      "attempt": 0
+    }
+  ],
+  "capacity_lower_bound": 4,
+  "capacity_is_bracketed": false
+}

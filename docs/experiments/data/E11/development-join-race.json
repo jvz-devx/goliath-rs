@@ -1,0 +1,49 @@
+{
+  "kind": "goliath-e11-capacity",
+  "build": {
+    "base": "fc2868b2b",
+    "patches": [
+      "E2",
+      "E11-bots",
+      "E11-digest"
+    ],
+    "profile": "release",
+    "lto": "thin",
+    "codegen_units": 1,
+    "incremental": false,
+    "binary_sha256": "8dbfabbecf16be8a19fd3297f29b976de4a60c610d8b848afdd0fdd3f53fc928",
+    "bots_sha256": "81c540591165b50ff0ffb00843d8c0490c3099fa8ec11b00de037c8555b60b15"
+  },
+  "settings": {
+    "config": null,
+    "servers": 1,
+    "loads": "25,50,100,200,400,800",
+    "repeat": 2,
+    "warmup": 30.0,
+    "seconds": 60.0,
+    "sample_every": 2,
+    "join_every": 0.01,
+    "server_cores": 4,
+    "bot_cores": 1,
+    "max_load": 8,
+    "disturbed_retries": 1,
+    "out": "docs/experiments/data/E11/plain-staircase.json",
+    "continue_after_fail": false
+  },
+  "machine": {
+    "cpu": "Apple M5 Pro",
+    "logical_cpus": 18
+  },
+  "runs": [
+    {
+      "bots": 25,
+      "servers": 1,
+      "repeat": 0,
+      "pass": false,
+      "reasons": [
+        "bot join timeout"
+      ],
+      "attempt": 0
+    }
+  ]
+}

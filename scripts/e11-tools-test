@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Focused tests for E11 result validity, live-log parsing and CPU units."""
+import copy
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import resource
+import tempfile
+import unittest
+from e11_support import complete_json_lines,usage
+
+loader=importlib.machinery.SourceFileLoader('capacity_bench',str(Path(__file__).with_name('capacity-bench')))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+bench=importlib.util.module_from_spec(spec)
+loader.exec_module(bench)
+
+
+class Tools(unittest.TestCase):
+    def test_spatial_backend_groups_are_equal_quarters(self):
+        for count in [4,100,200,400,800,1600]:
+            anchors=[bench.route_anchor(i,count,12345,[-64,-64,64,64]) for i in range(count)]
+            groups=bench.spatial_quarters(anchors)
+            self.assertEqual([groups.count(i) for i in range(4)],[count//4]*4)
+            bounds=[max(anchors[i][0] for i in range(count) if groups[i] in [0,2]),
+                min(anchors[i][0] for i in range(count) if groups[i] in [1,3])]
+            self.assertLess(bounds[0],bounds[1])
+    def test_partial_live_line_is_not_parsed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'log'
+            path.write_bytes(b'{"online":4}\n{"online":99}')
+            self.assertEqual(complete_json_lines(path),[{'online':4}])
+
+    def test_cpu_time_matches_independent_rusage(self):
+        a=usage(os.getpid())['cpu_s']
+        r=resource.getrusage(resource.RUSAGE_SELF)
+        sum(i*i for i in range(500_000))
+        b=usage(os.getpid())['cpu_s']
+        q=resource.getrusage(resource.RUSAGE_SELF)
+        self.assertAlmostEqual(b-a,q.ru_utime+q.ru_stime-r.ru_utime-r.ru_stime,delta=.002)
+
+    def samples(self):
+        first={'at':100.,'time':[{'at':100.,'ticks':1000,'rtt_s':.001}],
+            'tiles':[{'players':400,'chunks':144,'levels':[{'entities':64}],
+                'e11_population':[{'mobs':64}]}],
+            'server_usage':[{'cpu_s':100.}],'bot_usage':{'cpu_s':10.,'threads':1},
+            'bots':{'online':400,'failed':0,'late_rounds':0,'waited_ticks':0,'elapsed':100.,'distance':0.},'load':[1.,1.,1.]}
+        last=copy.deepcopy(first)
+        last.update(at=110.)
+        last['time'][0].update(at=110.,ticks=1200)
+        last['server_usage'][0]['cpu_s']+=20
+        last['bot_usage']['cpu_s']+=2
+        last['bots']['elapsed']+=10
+        last['bots']['distance']=16000.
+        raw=[{'ticks':[{'ms':10.,'sequence':i,'game_time':1000+i} for i in range(1,201)],'dropped':0}]
+        return [first,last],raw
+
+    def evaluate(self,samples,raw):
+        return bench.evaluate(samples,raw,400,4,1,8)
+
+    def test_saturated_or_late_bots_cannot_pass_or_bracket_capacity(self):
+        samples,raw=self.samples()
+        self.assertTrue(self.evaluate(samples,raw)['pass'])
+        samples[-1]['bot_usage']['cpu_s']=19.
+        result=self.evaluate(samples,raw)
+        self.assertFalse(result['pass'])
+        self.assertFalse(result['valid'])
+        self.assertIn('bots over 80% CPU allotment',result['reasons'])
+        samples[-1]['bot_usage']['cpu_s']=12.
+        samples[-1]['bots']['late_rounds']=1
+        self.assertFalse(self.evaluate(samples,raw)['valid'])
+
+    def test_online_clients_that_stop_walking_cannot_pass(self):
+        samples,raw=self.samples()
+        samples[-1]['bots']['distance']=0
+        result=self.evaluate(samples,raw)
+        self.assertFalse(result['pass'])
+        self.assertFalse(result['valid'])
+
+    def test_tick_overload_is_valid_but_missing_mobs_are_not(self):
+        samples,raw=self.samples()
+        raw[0]['ticks']=[{'ms':60.} for _ in range(200)]
+        result=self.evaluate(samples,raw)
+        self.assertFalse(result['pass'])
+        self.assertTrue(result['valid'])
+        samples[-1]['tiles'][0]['e11_population'][0]['mobs']=63
+        self.assertFalse(self.evaluate(samples,raw)['valid'])
+
+    def test_slow_server_is_a_valid_overload_when_the_trace_covers_real_ticks(self):
+        samples,raw=self.samples()
+        samples[-1]['time'][0]['ticks']=1130
+        raw[0]['ticks']=raw[0]['ticks'][:130]
+        result=self.evaluate(samples,raw)
+        self.assertFalse(result['pass'])
+        self.assertTrue(result['valid'])
+        samples[-1]['time'][0]['ticks']=1200
+        self.assertFalse(self.evaluate(samples,raw)['valid'])
+
+
+if __name__=='__main__': unittest.main()

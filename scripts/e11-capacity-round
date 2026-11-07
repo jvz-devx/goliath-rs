@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Run the coordinated E11 plain measurements, releasing E10's marker within 45 minutes."""
+import argparse
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+from e11_support import ROOT,DATA,save
+
+MARKER=ROOT/'.local/quiet-window'
+
+
+def terminate_group(process):
+    if process.poll() is not None:
+        return
+    # The child owns this new session. Never target the parent or E10's process group.
+    os.killpg(process.pid,signal.SIGINT)
+    try:
+        process.wait(12)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid,signal.SIGCONT)
+        os.killpg(process.pid,signal.SIGTERM)
+        try: process.wait(5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid,signal.SIGKILL)
+            process.wait()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--minutes',type=float,default=45)
+    args=parser.parse_args()
+    print('waiting for E10 quiet-window marker and load <= 4',flush=True)
+    next_notice=0.
+    while not MARKER.exists() or os.getloadavg()[0]>4:
+        if time.monotonic()>=next_notice:
+            print(f'quiet marker={MARKER.exists()} load={os.getloadavg()[0]:.2f}',flush=True)
+            next_notice=time.monotonic()+30
+        if MARKER.exists() and time.time()-MARKER.stat().st_mtime>=args.minutes*60-30:
+            MARKER.unlink(missing_ok=True)
+            raise RuntimeError('quiet window expired before load settled')
+        time.sleep(5)
+    identity=(MARKER.stat().st_ino,MARKER.stat().st_mtime_ns)
+    deadline=MARKER.stat().st_mtime+args.minutes*60-20
+    base=[sys.executable,'-B',str(ROOT/'scripts/capacity-bench'),'--quiet-marker',str(MARKER),
+        '--server-cores','4','--bot-cores','1','--max-start-load','4','--max-load','8',
+        '--quiet-timeout','120','--refine-step','0']
+    jobs=[
+        ('limiter-capped', ['--servers','4','--loads','4','--repeat','1','--warmup','30','--seconds','60']),
+        ('limiter-uncapped',['--servers','4','--loads','4','--repeat','1','--warmup','30','--seconds','60','--uncapped-servers']),
+        ('plain-staircase',['--servers','1','--loads','50,100,200,400,800','--repeat','2','--warmup','30','--seconds','60']),
+        ('four-plain-staircase',['--servers','4','--loads','100,200,400,800,1600','--repeat','2','--warmup','30','--seconds','60']),
+        ('bot-scale',['--servers','4','--loads','400,800,1600,3200','--repeat','1','--warmup','20','--seconds','30','--bot-only'])]
+    output={'kind':'goliath-e11-coordinated-round','quiet_marker_identity':list(identity),
+        'started_unix':time.time(),'deadline_unix':deadline,'jobs':[],'remaining':[name for name,_ in jobs]}
+    process=None
+    try:
+        for name,arguments in jobs:
+            if not MARKER.exists() or time.time()>=deadline-120:
+                break
+            command=base+arguments+['--out',str(DATA/f'{name}.json')]
+            print(f'BEGIN {name}; {int(deadline-time.time())} seconds remain in quiet window',flush=True)
+            started=time.time()
+            process=subprocess.Popen(command,cwd=ROOT,start_new_session=True)
+            disturbed=False
+            while process.poll() is None:
+                if not MARKER.exists() or time.time()>=deadline:
+                    disturbed=True
+                    terminate_group(process)
+                    break
+                time.sleep(.5)
+            output['jobs'].append({'name':name,'command':command,'seconds':time.time()-started,
+                'exit':process.returncode,'window_lost_or_expired':disturbed})
+            output['remaining'].remove(name)
+            save(DATA/'capacity-round.json',output)
+            if disturbed:
+                break
+            process=None
+    finally:
+        if process: terminate_group(process)
+        # Only release the marker we acquired. A replacement belongs to a later window.
+        if MARKER.exists() and (MARKER.stat().st_ino,MARKER.stat().st_mtime_ns)==identity:
+            MARKER.unlink()
+            output['released_marker']=True
+        else:
+            output['released_marker']=False
+            output['marker_vanished_or_replaced']=True
+        output['finished_unix']=time.time()
+        save(DATA/'capacity-round.json',output)
+        print('quiet window released; remaining jobs: '+str(output['remaining']),flush=True)
+
+
+if __name__=='__main__': main()

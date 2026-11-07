@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Derive compact E11 tables from raw samples without treating invalid cells as capacity."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+from e11_support import DATA,save
+
+loader=importlib.machinery.SourceFileLoader('capacity_bench',str(Path(__file__).with_name('capacity-bench')))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+bench=importlib.util.module_from_spec(spec)
+loader.exec_module(bench)
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--write',action='store_true')
+    parser.add_argument('--compact-raw',action='store_true',help='remove JSON whitespace from large retained files, preserving every value')
+    args=parser.parse_args()
+    output={}
+    for name in ['limiter-capped','limiter-uncapped','plain-staircase','four-plain-staircase','bot-scale']:
+        path=DATA/(name+'.json')
+        if not path.exists(): continue
+        document=json.loads(path.read_text())
+        settings=document['settings']
+        rows=[]
+        for row in document['runs']:
+            compact={key:row.get(key) for key in ['bots','servers','repeat','attempt']}
+            if not row.get('samples'):
+                compact.update(valid=False,passed=False,reasons=row['reasons'])
+                rows.append(compact)
+                continue
+            if name=='bot-scale':
+                checked=bench.evaluate_bots(row['samples'],row['bots'],settings['bot_cores'],settings['max_load'])
+            else:
+                checked=bench.evaluate(row['samples'],row['raw_ticks'],row['bots'],
+                    float('inf') if name=='limiter-uncapped' else settings['server_cores'],settings['bot_cores'],
+                    float('inf') if name=='limiter-uncapped' else settings['max_load'],row['config'].get('mobs',64),row['config'])
+            for reason in row['reasons']:
+                if reason=='too few raw ticks' and reason not in checked['reasons']:
+                    # Early baseline cells used the incorrect 15-TPS coverage floor.
+                    # Real game-time coverage and contiguous sequence numbers replace it.
+                    continue
+                if reason not in checked['reasons']:
+                    checked['reasons'].append(reason)
+                    checked['pass']=False
+                    checked['valid']=False
+            compact.update(passed=checked['pass'],valid=checked.get('valid'),reasons=checked['reasons'],
+                tps_min=min(checked.get('tps',checked.get('server_tps',[0]))),
+                tick_p99_max_ms=max(checked.get('tick_p99_ms',[0])),
+                server_cpu_cores=checked.get('server_cpu_cores',checked['server_cpu_s']/checked['seconds']),
+                bot_cpu_cores=checked['bot_cpu_cores'],bot_cpu_peak_interval_cores=checked['bot_cpu_peak_interval_cores'],
+                bot_cpu_us_per_bot_second=checked.get('bot_cpu_us_per_bot_second',checked['bot_cpu_cores']/row['bots']*1e6),
+                bot_late_rounds=checked['bot_late_rounds'],bot_threads=checked['bot_threads'])
+            compact['original_reasons']=row['reasons']
+            compact['validation_changed']=row.get('valid')!=checked.get('valid') or row['reasons']!=checked['reasons']
+            compact['total_chunks_range']=[min(sum(tile['chunks'] for tile in s['tiles']) for s in row['samples']),
+                max(sum(tile['chunks'] for tile in s['tiles']) for s in row['samples'])]
+            compact['load_1m_range']=[min(s['load'][0] for s in row['samples']),max(s['load'][0] for s in row['samples'])]
+            rows.append(compact)
+        final={}
+        for row in rows:
+            key=(row['bots'],row['repeat'])
+            if key not in final or row['attempt']>=final[key]['attempt']: final[key]=row
+        counts=sorted({row['bots'] for row in final.values()})
+        passed=[count for count in counts if len([r for r in final.values() if r['bots']==count])==settings['repeat'] and all(
+            r['passed'] for r in final.values() if r['bots']==count)]
+        lower=max(passed,default=0)
+        upper=min((r['bots'] for r in final.values() if r['bots']>lower and r['valid'] and not r['passed']),default=None)
+        output[name]={'rows':rows,'accepted_tested_lower_bound':lower,'first_valid_overload':upper,
+            'final_result_keys':[list(k) for k in final]}
+        print('\n'+name)
+        print('bots repeat TPS-min tick-P99-max server-CPU bot-CPU bot-peak result')
+        for row in rows:
+            print(f'{row["bots"]} {row["repeat"]} {row.get("tps_min",0):.3f} '
+                f'{row.get("tick_p99_max_ms",0):.3f} {row.get("server_cpu_cores",0):.3f} '
+                f'{row.get("bot_cpu_cores",0):.3f} {row.get("bot_cpu_peak_interval_cores",0):.3f} '
+                f'{"PASS" if row["passed"] else row["reasons"]}')
+        print(f'accepted lower bound {lower}, first valid overload {upper}')
+    if args.write:
+        save(DATA/'summary.json',output)
+        window_path=DATA/'capacity-round.json'
+        if window_path.exists():
+            window=json.loads(window_path.read_text())
+            missing=[]
+            four_path=DATA/'four-plain-staircase.json'
+            if four_path.exists():
+                four=json.loads(four_path.read_text())
+                completed={tuple(k) for k in output.get('four-plain-staircase',{}).get('final_result_keys',[])}
+                missing=[{'bots':int(count),'repeat':repeat} for count in four['settings']['loads'].split(',')
+                    for repeat in range(four['settings']['repeat']) if (int(count),repeat) not in completed]
+            save(DATA/'handoff.json',{'status':'partial-budget-limited','quiet_window_released':window.get('released_marker'),
+                'quiet_window_minutes':(window['finished_unix']-window['quiet_marker_identity'][1]/1e9)/60,
+                'unfinished_four_plain_cells':missing,'unrun_client_saturation_loads':[400,800,1600,3200],
+                'baseline_frontier_unresolved_between':[200,400],
+                'completed_measurements_revalidated_from_raw_ticks_and_bot_progress':True,
+                'integrated_seamless_proxy_switch':'unverified; owned by E10'})
+    if args.compact_raw:
+        sizes=[]
+        for path in DATA.glob('*.json'):
+            before=path.stat().st_size
+            if before<100_000: continue
+            value=json.loads(path.read_text())
+            payload=json.dumps(value,separators=(',',':'))+'\n'
+            if json.loads(payload)!=value: raise RuntimeError('JSON compaction changed values')
+            temporary=path.with_suffix('.compact.tmp')
+            temporary.write_text(payload)
+            temporary.replace(path)
+            sizes.append({'file':path.name,'before_bytes':before,'after_bytes':path.stat().st_size})
+        save(DATA/'data-size.json',{'files':sizes,'values_preserved':True})
+
+
+if __name__=='__main__': main()

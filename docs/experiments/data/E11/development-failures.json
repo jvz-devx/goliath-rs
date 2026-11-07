@@ -1,0 +1,34 @@
+{
+  "capacity_results": false,
+  "failures": [
+    {
+      "stage": "first release engine build",
+      "outcome": "compile error E0631",
+      "cause": "save::number takes Option<&Tag>, not &Tag",
+      "resolution": "Use the existing save API directly. Subsequent plain release build passed."
+    },
+    {
+      "stage": "CPU accounting sanity check",
+      "outcome": "0.000640 CPU seconds for 0.026661 wall seconds of busy computation",
+      "cause": "proc_taskinfo returns Mach absolute ticks on this machine",
+      "resolution": "Convert with mach_timebase_info and cross-check against getrusage."
+    },
+    {
+      "stage": "first CPU limiter calibration",
+      "outcome": "One capped busy worker used 0.858 cores; four shared workers used 0.987 cores.",
+      "cause": "Sub-millisecond accounting skew repeatedly stopped the single worker.",
+      "resolution": "A 5 ms-per-core hysteresis band. Retained final calibration passed."
+    },
+    {
+      "stage": "taskpolicy probe",
+      "outcome": "FileNotFoundError for /usr/bin/taskpolicy",
+      "resolution": "Resolve taskpolicy from PATH. This Mac has /usr/sbin/taskpolicy."
+    },
+    {
+      "stage": "first 25-bot capacity cell, before measurement",
+      "outcome": "22 joined bots and 3 failed bots in complete live telemetry",
+      "cause": "Movement rounds could write to a nonblocking socket before connection readiness.",
+      "resolution": "Gate the first write on writable readiness; repeat join smoke passed all 25 bots."
+    }
+  ]
+}

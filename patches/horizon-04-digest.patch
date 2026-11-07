@@ -1,0 +1,323 @@
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+index 45f23d6ac..e8fe12d09 100644
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -120,6 +120,7 @@ mod dispense_fixture;
+ mod dispenser;
+ mod dragon;
+ mod dynamic_lights;
++mod e11_measure;
+ mod emote_wheel;
+ mod emotes;
+ mod enchant_effects;
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+index f09139d0e..db2b870e0 100644
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -48,6 +48,8 @@ impl Game<'_> {
+             self.note_stopping(state.lists.lock().unwrap().stop);
+             let reply = match request.line.trim().split_once(' ') {
+                 _ if request.line.trim() == "server-status" => self.server_status(state),
++                Some(("e11-digest", rest)) => self.e11_digest_request(rest),
++                _ if request.line.trim() == "e11-samples" => self.e11_samples(),
+                 // A proxy reading whether it may send players here (transfer.rs).
+                 _ if request.line.trim() == "transfer-status" => self.transfer_status(),
+                 Some(("server-events", since)) => {
+@@ -168,6 +170,7 @@ impl Game<'_> {
+             "max_players": max_players,
+             "chunks": self.world.chunks.len(),
+             "levels": self.status_levels(),
++            "e11_population": self.e11_population(),
+             "paused": state.paused,
+         })
+     }
+diff --git a/crates/horizon-client/src/game/e11_measure.rs b/crates/horizon-client/src/game/e11_measure.rs
+new file mode 100644
+index 000000000..150f91bd0
+--- /dev/null
++++ b/crates/horizon-client/src/game/e11_measure.rs
+@@ -0,0 +1,252 @@
++//! Owns opt-in bounded E11 tick samples and canonical fixture-region state digests.
++use super::{
++    Game,
++    entity::{Entity, with_entity},
++};
++use horizon_world::nbt;
++use serde_json::{Value, json};
++use sha2::{Digest, Sha256};
++use std::{cell::RefCell, collections::VecDeque, sync::OnceLock, time::Instant};
++
++const LIMIT: usize = 8192;
++pub(super) fn enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var("HORIZON_E11_MEASURE").as_deref() == Ok("1"))
++}
++#[derive(Clone, Copy)]
++struct Region {
++    lo: [i32; 3],
++    hi: [i32; 3],
++}
++impl Region {
++    fn contains(self, at: [f64; 3]) -> bool {
++        (0..3).all(|i| at[i] >= f64::from(self.lo[i]) && at[i] < f64::from(self.hi[i]) + 1.)
++    }
++    fn parse(text: &str) -> Result<Self, String> {
++        let v: Vec<i32> = text
++            .split(',')
++            .map(|v| {
++                v.parse()
++                    .map_err(|_| "expected six integer coordinates".to_owned())
++            })
++            .collect::<Result<_, _>>()?;
++        let [x, y, z, a, b, c] = v[..] else {
++            return Err("expected x,y,z,maxx,maxy,maxz".into());
++        };
++        let region = Self {
++            lo: [x, y, z],
++            hi: [a, b, c],
++        };
++        let mut volume = 1i64;
++        for i in 0..3 {
++            let n = i64::from(region.hi[i]) - i64::from(region.lo[i]) + 1;
++            if !(1..=256).contains(&n)
++                || region.lo[i].abs_diff(0) > 30_000_000
++                || region.hi[i].abs_diff(0) > 30_000_000
++            {
++                return Err("region axis outside 1..256 blocks or world bounds".into());
++            }
++            volume *= n;
++        }
++        if volume > 1_048_576 {
++            return Err("digest limited to 1048576 blocks".into());
++        }
++        Ok(region)
++    }
++}
++#[derive(Default)]
++struct Probe {
++    region: Option<Region>,
++    dimension: String,
++    last: Option<(String, i64)>,
++    sequence: u64,
++    ticks: VecDeque<Value>,
++    digests: VecDeque<Value>,
++    dropped: u64,
++}
++thread_local! { static PROBE: RefCell<Probe> = RefCell::new(Probe::default()); }
++fn append(queue: &mut VecDeque<Value>, value: Value) -> bool {
++    let dropped = queue.len() == LIMIT;
++    if dropped {
++        queue.pop_front();
++    }
++    queue.push_back(value);
++    dropped
++}
++fn hex(bytes: impl AsRef<[u8]>) -> String {
++    bytes.as_ref().iter().map(|v| format!("{v:02x}")).collect()
++}
++fn hash_tags(mut rows: Vec<Vec<u8>>) -> String {
++    rows.sort();
++    let mut hash = Sha256::new();
++    for row in rows {
++        hash.update((row.len() as u64).to_le_bytes());
++        hash.update(row);
++    }
++    hex(hash.finalize())
++}
++impl Game<'_> {
++    pub(super) fn e11_population(&self) -> Value {
++        if !enabled() {
++            return Value::Null;
++        }
++        let census = |dim: &str, mobs: &[horizon_client::mobs::Mob]| {
++            let mut kinds = std::collections::BTreeMap::<&str, usize>::new();
++            for mob in mobs.iter().filter(|m| !m.removed) {
++                *kinds.entry(&mob.kind.id).or_default() += 1;
++            }
++            json!({"dimension":dim,"mobs_by_kind":kinds,"mobs":kinds.values().sum::<usize>()})
++        };
++        let mut rows = vec![census(self.dim.id(), &self.mobs)];
++        for dim in self.levels.parked_dims() {
++            if let Some(mobs) = self.levels.parked_mobs(dim) {
++                rows.push(census(dim.id(), mobs));
++            }
++        }
++        json!(rows)
++    }
++    pub(super) fn e11_ticked(&self, started: Instant) {
++        let ms = started.elapsed().as_secs_f64() * 1000.;
++        PROBE.with_borrow_mut(|p| {
++            p.sequence += 1;
++            if append(
++                &mut p.ticks,
++                json!({"sequence":p.sequence,"game_time":self.world.game_time,"ms":ms}),
++            ) {
++                p.dropped += 1;
++            }
++        });
++    }
++    pub(super) fn e11_digest_tick(&self) {
++        PROBE.with_borrow_mut(|p| {
++            let key = (self.dim.id().to_owned(), self.world.game_time);
++            if let Some(region) = p.region
++                && p.dimension == self.dim.id()
++                && p.last.as_ref() != Some(&key)
++            {
++                p.last = Some(key);
++                let value = self.e11_region_digest(region);
++                if append(&mut p.digests, value) {
++                    p.dropped += 1;
++                }
++            }
++        });
++    }
++    pub(super) fn e11_samples(&self) -> Value {
++        if !enabled() {
++            return json!({"error":"HORIZON_E11_MEASURE=1 is required"});
++        }
++        PROBE.with_borrow_mut(|p| json!({"ticks":p.ticks.drain(..).collect::<Vec<_>>(),
++            "digests":p.digests.drain(..).collect::<Vec<_>>(),"dropped":std::mem::take(&mut p.dropped)}))
++    }
++    pub(super) fn e11_digest_request(&self, rest: &str) -> Value {
++        if !enabled() {
++            return json!({"error":"HORIZON_E11_MEASURE=1 is required"});
++        }
++        if rest.trim() == "off" {
++            PROBE.with_borrow_mut(|p| p.region = None);
++            return json!({"ok":true});
++        }
++        let (bounds, mode) = rest.trim().split_once(' ').unwrap_or((rest.trim(), "once"));
++        let region = match Region::parse(bounds) {
++            Ok(r) => r,
++            Err(error) => return json!({"error":error}),
++        };
++        if !["once", "every"].contains(&mode) {
++            return json!({"error":"digest mode must be once or every"});
++        }
++        let value = self.e11_region_digest(region);
++        if mode == "every" && value.get("error").is_none() {
++            PROBE.with_borrow_mut(|p| {
++                p.region = Some(region);
++                p.dimension = self.dim.id().to_owned();
++                p.last = None;
++            });
++        }
++        value
++    }
++    fn e11_region_digest(&self, region: Region) -> Value {
++        let mut blocks = Sha256::new();
++        let mut keys = Vec::new();
++        for z in (region.lo[2] >> 4)..=(region.hi[2] >> 4) {
++            for x in (region.lo[0] >> 4)..=(region.hi[0] >> 4) {
++                let Some(chunk) = self.world.chunks.get(&(x, z)) else {
++                    return json!({"error":"digest region includes unloaded chunk","chunk":[x,z]});
++                };
++                keys.push(chunk);
++            }
++        }
++        for y in region.lo[1]..=region.hi[1] {
++            for z in region.lo[2]..=region.hi[2] {
++                for x in region.lo[0]..=region.hi[0] {
++                    blocks.update(self.world.block(x, y, z).0.to_le_bytes());
++                }
++            }
++        }
++        // Use the normal save view, without writing or mutating the simulation. This overlays live
++        // containers and moving-piston NBT on the chunk's saved block entities.
++        let mut block_entities = Vec::new();
++        for chunk in self.with_entities(keys) {
++            if let Some(extras) = &chunk.saved {
++                for tag in &extras.block_entities {
++                    let at = ["x", "y", "z"]
++                        .map(|k| horizon_client::save::number(tag.get(k)).unwrap_or(0) as f64);
++                    if region.contains(at) {
++                        match nbt::write_network(tag, nbt::Limits::default()) {
++                            Ok(bytes) => block_entities.push(bytes),
++                            Err(error) => return json!({"error":error.to_string()}),
++                        }
++                    }
++                }
++            }
++        }
++        let block_entity_count = block_entities.len();
++        let mut entities = Vec::new();
++        for handle in self.entity_handles() {
++            with_entity!(self,handle,e => {
++                let at=e.position();
++                if !e.is_removed() && region.contains([at.x,at.y,at.z]) {
++                    let mut row=e.native_type().as_bytes().to_vec(); row.push(0);
++                    for v in [at.x,at.y,at.z] { row.extend(v.to_bits().to_le_bytes()); }
++                    entities.push(row);
++                }
++            });
++        }
++        // These kinds are outside the shared entity-list visitor. Refuse a fixture containing
++        // them instead of silently claiming complete entity coverage.
++        if self.entity_ids_off_walk().next().is_some() {
++            return json!({"error":"digest does not support entities outside the shared entity lists"});
++        }
++        let entity_count = entities.len();
++        let blocks = hex(blocks.finalize());
++        let block_entities = hash_tags(block_entities);
++        let entities = hash_tags(entities);
++        let mut hash = Sha256::new();
++        hash.update(blocks.as_bytes());
++        hash.update(block_entities.as_bytes());
++        hash.update(entities.as_bytes());
++        json!({"game_time":self.world.game_time,"dimension":self.dim.id(),"region":[region.lo,region.hi],
++            "blocks":blocks,"block_entities":block_entities,"entities":entities,"hash":hex(hash.finalize()),
++            "block_entity_count":block_entity_count,"entity_count":entity_count})
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn region_is_bounded_and_inclusive() {
++        assert!(Region::parse("0,0,0,255,255,255").is_err());
++        assert!(Region::parse("1,0,0,0,0,0").is_err());
++        let r = Region::parse("-1,2,-3,4,5,6").unwrap();
++        assert!(r.contains([-1., 5.9, 6.9]));
++        assert!(!r.contains([-1.1, 3., 0.]));
++    }
++    #[test]
++    fn canonical_rows_keep_duplicates_but_not_iteration_order() {
++        assert_eq!(
++            hash_tags(vec![vec![2], vec![1]]),
++            hash_tags(vec![vec![1], vec![2]])
++        );
++        assert_ne!(hash_tags(vec![vec![1]]), hash_tags(vec![vec![1], vec![1]]));
++    }
++}
+diff --git a/crates/horizon-client/src/game/levels.rs b/crates/horizon-client/src/game/levels.rs
+index 57b177ba0..587344962 100644
+--- a/crates/horizon-client/src/game/levels.rs
++++ b/crates/horizon-client/src/game/levels.rs
+@@ -489,6 +489,7 @@ impl Game<'_> {
+     /// run. The native server tick hook brackets it (`ServerTickStart` before
+     /// the first level, `ServerTickEnd` after the last).
+     pub(super) fn tick_server(&mut self, paused: bool) -> Result<()> {
++        let e11_started = super::e11_measure::enabled().then(Instant::now);
+         // `tickRateManager.tick()` once per server tick, before any level
+         // (each `ServerLevel.tick` only reads `runsNormally`), and the native
+         // `ServerTickStart` before that level work, where NeoForge fires
+@@ -556,6 +557,9 @@ impl Game<'_> {
+                 self.native_level_tick_post(dim.id());
+             }
+             self.publish_server_debug(dim);
++            if e11_started.is_some() {
++                self.e11_digest_tick();
++            }
+             // An entity that crossed into a level that already ticked this
+             // server tick is in it when the tick ends (`addDuringTeleport`).
+             if running == Some(true) {
+@@ -589,6 +593,9 @@ impl Game<'_> {
+         if server {
+             self.diagnostics_packets_tick();
+         }
++        if let Some(started) = e11_started {
++            self.e11_ticked(started);
++        }
+         Ok(())
+     }
+ 

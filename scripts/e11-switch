@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Exercise Transfer reconnects and route continuation between real plain and retained E7 engines."""
+import json
+import subprocess
+import tempfile
+import time
+from e11_support import ROOT,RUNS,DATA,BINS,Engine,complete_json_lines,private_env,save,wait
+
+
+def main():
+    RUNS.mkdir(parents=True,exist_ok=True)
+    engines=[]; bot=None; log=None
+    with tempfile.TemporaryDirectory(prefix='e11-switch-',dir=RUNS) as folder:
+        folder=__import__('pathlib').Path(folder)
+        try:
+            config={'seed':12345,'view_distance':3,'servers':[
+                {'properties':{'accepts-transfers':'true'}},
+                {'properties':{'accepts-transfers':'true'},'command':[
+                    str(ROOT/'.local/bin/horizon-e7/horizon-client'),'--resources','{resources}',
+                    '--control-socket','{endpoint}','--dedicated','--nogui'],
+                    'env':{'HORIZON_TILE':'-1024,-1024,2048,0,0'}}]}
+            for i in range(2):
+                engines.append(Engine(folder/f'server-{i}',config,i))
+            for e in engines:
+                e.console('gamerule spawn_mobs false')
+                e.console('gamerule respawn_radius 0')
+            path=folder/'bots.log'
+            log=path.open('w')
+            report=folder/'report.json'
+            bot=subprocess.Popen([BINS/'horizon-bots','--event-loop','--server',f'127.0.0.1:{engines[0].port}',
+                '--bots','1','--behaviour','route','--path','-8,0;8,0','--speed','4','--height','2',
+                '--seconds','40','--name','TransferBot','--report',report],
+                cwd=folder,env=private_env(folder/'bot-home'),stdout=log,stderr=subprocess.STDOUT)
+            def state():
+                rows=[r for r in complete_json_lines(path) if 'online' in r]
+                return rows[-1] if rows else {}
+            wait(lambda:state().get('online')==1,60,'initial bot join failed')
+            rows=[]
+            active=0
+            for number in range(1,5):
+                time.sleep(2)
+                before=state()
+                target=1-active
+                reply=engines[active].console(f'transfer 127.0.0.1 {engines[target].port} TransferBot0')
+                wait(lambda:len(engines[target].ask('server-status')['players'])==1 and
+                    state().get('transfers')==number and state().get('online')==1,10,'transfer or configuration did not finish')
+                time.sleep(2)
+                after=state()
+                row={'number':number,'from':'plain' if active==0 else 'e7','to':'plain' if target==0 else 'e7',
+                    'reply':reply,'before':before,'after':after,
+                    'movement_resumed':after.get('distance',0)>before.get('distance',0),
+                    'source_players':len(engines[active].ask('server-status')['players']),
+                    'target_players':len(engines[target].ask('server-status')['players'])}
+                rows.append(row)
+                active=target
+            bot.wait(50)
+            summary=json.loads(report.read_text())
+            output={'kind':'goliath-e11-live-transfer','runs':rows,'bots':summary,
+                'passed':bot.returncode==0 and summary['online']==1 and summary['transfers']==4 and
+                    summary['per_bot'][0]['route']==[[-8.,0.],[8.,0.]] and all(
+                        r['movement_resumed'] and r['source_players']==0 and r['target_players']==1 for r in rows)}
+            save(DATA/'switch.json',output)
+            print(json.dumps({'passed':output['passed'],'transfers':summary['transfers'],'online':summary['online']},indent=2))
+            if not output['passed']: raise SystemExit(1)
+        finally:
+            if bot and bot.poll() is None: bot.terminate(); bot.wait()
+            if log: log.close()
+            for e in reversed(engines): e.stop()
+
+
+if __name__=='__main__': main()

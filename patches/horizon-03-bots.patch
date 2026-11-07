@@ -1,0 +1,974 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 3608829a5..0b4535b0b 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1407,6 +1407,7 @@ name = "horizon-bots"
+ version = "0.1.0"
+ dependencies = [
+  "horizon-protocol",
++ "mio",
+  "serde_json",
+ ]
+ 
+diff --git a/crates/horizon-bots/Cargo.toml b/crates/horizon-bots/Cargo.toml
+index 5a3e5e5c7..702701b23 100644
+--- a/crates/horizon-bots/Cargo.toml
++++ b/crates/horizon-bots/Cargo.toml
+@@ -9,6 +9,7 @@ description = "Load-test bots for Minecraft Java Edition 26.3 servers (docs/serv
+ [dependencies]
+ horizon-protocol = { path = "../horizon-protocol" }
+ serde_json = "1.0.151"
++mio = { version = "1", features = ["net", "os-poll"] }
+ 
+ [lints]
+ workspace = true
+diff --git a/crates/horizon-bots/src/main.rs b/crates/horizon-bots/src/main.rs
+index 944ee5ac8..e8f5ce2b1 100644
+--- a/crates/horizon-bots/src/main.rs
++++ b/crates/horizon-bots/src/main.rs
+@@ -25,6 +25,8 @@
+ //! The report also has wire bytes in and out (`bytes_in`, `bytes_out`, per bot and in total, after
+ //! compression) and join-time percentiles (`join_time`: p50, p99 and max in milliseconds).
+ 
++mod measured;
++
+ use horizon_protocol::{
+     PROTOCOL_VERSION,
+     buf::{Reader, Writer},
+@@ -1436,6 +1438,13 @@ fn behaviour_of(mode: &str, index: usize) -> Behaviour {
+ }
+ 
+ fn main() {
++    if std::env::args().any(|a| a == "--event-loop") {
++        if let Err(error) = measured::run() {
++            eprintln!("horizon-bots: {error}");
++            std::process::exit(1);
++        }
++        return;
++    }
+     let o = match options() {
+         Ok(o) => Arc::new(o),
+         Err(e) => {
+diff --git a/crates/horizon-bots/src/measured.rs b/crates/horizon-bots/src/measured.rs
+new file mode 100644
+index 000000000..e810a16e0
+--- /dev/null
++++ b/crates/horizon-bots/src/measured.rs
+@@ -0,0 +1,917 @@
++//! Owns the single-threaded measurement client's protocol lifecycle and routed movement.
++use horizon_protocol::{
++    PROTOCOL_VERSION,
++    buf::Reader,
++    crypto::offline_uuid,
++    frame, ids,
++    packets::{
++        Empty, configuration,
++        handshake::{self, Intention},
++        login::{self, ServerHello},
++        play,
++    },
++};
++use mio::{Events, Interest, Poll, Token, net::TcpStream};
++use serde_json::{Value, json};
++use std::{
++    collections::HashSet,
++    io::{Read, Write},
++    net::{SocketAddr, ToSocketAddrs},
++    time::{Duration, Instant},
++};
++
++type Result<T> = std::result::Result<T, String>;
++fn err(e: impl std::fmt::Display) -> String {
++    e.to_string()
++}
++
++struct Settings {
++    servers: Vec<SocketAddr>,
++    bots: usize,
++    seconds: f64,
++    join_every: f64,
++    seed: u64,
++    view: i8,
++    speed: f64,
++    height: f64,
++    ground: bool,
++    stand: bool,
++    spread: [f64; 4],
++    path: Vec<[f64; 2]>,
++    name: String,
++    report: Option<String>,
++}
++impl Settings {
++    fn read() -> Result<Self> {
++        let mut s = Self {
++            servers: vec!["127.0.0.1:25565".parse().map_err(err)?],
++            bots: 10,
++            seconds: 60.,
++            join_every: 0.02,
++            seed: 12345,
++            view: 3,
++            speed: 4.,
++            height: 0.,
++            ground: false,
++            stand: false,
++            spread: [-64., -64., 64., 64.],
++            path: vec![],
++            name: "E11Bot".into(),
++            report: None,
++        };
++        let mut args = std::env::args().skip(1);
++        while let Some(key) = args.next() {
++            match key.as_str() {
++                "--event-loop" => continue,
++                "--ground" => { s.ground = true; continue; }
++                "--help" | "-h" => return Err("--event-loop --servers HOST:PORT,... --bots N --behaviour route|stand --spread MINX,MINZ,MAXX,MAXZ --path 'X,Z;X,Z' --speed BLOCKS_PER_SECOND --height H --seed N --seconds S --join-every S --view-distance N --name PREFIX --report FILE".into()),
++                _ => {}
++            }
++            let v = args.next().ok_or_else(|| format!("{key} needs a value"))?;
++            match key.as_str() {
++                "--server" | "--servers" => {
++                    s.servers = v
++                        .split(',')
++                        .map(|address| {
++                            address
++                                .to_socket_addrs()
++                                .map_err(err)?
++                                .find(SocketAddr::is_ipv4)
++                                .ok_or_else(|| format!("no IPv4 address for {address}"))
++                        })
++                        .collect::<Result<_>>()?
++                }
++                "--bots" => s.bots = v.parse().map_err(err)?,
++                "--seconds" => s.seconds = v.parse().map_err(err)?,
++                "--join-every" => s.join_every = v.parse().map_err(err)?,
++                "--seed" => s.seed = v.parse().map_err(err)?,
++                "--view-distance" => s.view = v.parse().map_err(err)?,
++                "--speed" => s.speed = v.parse().map_err(err)?,
++                "--height" => s.height = v.parse().map_err(err)?,
++                "--spread" => s.spread = numbers(&v)?,
++                "--path" => s.path = v.split(';').map(numbers).collect::<Result<_>>()?,
++                "--behaviour" if v == "stand" || v == "route" => s.stand = v == "stand",
++                "--name" => s.name = v,
++                "--report" => s.report = Some(v),
++                _ => return Err(format!("unsupported event-loop option {key} {v}")),
++            }
++        }
++        if s.bots == 0
++            || s.servers.is_empty()
++            || !(2..=32).contains(&s.view)
++            || !s.seconds.is_finite()
++            || s.seconds <= 0.
++            || !s.join_every.is_finite()
++            || s.join_every < 0.
++            || !s.speed.is_finite()
++            || s.speed <= 0.
++            || s.speed > 100.
++            || !s.height.is_finite()
++            || s.spread[0] >= s.spread[2]
++            || s.spread[1] >= s.spread[3]
++        {
++            return Err("invalid measurement settings".into());
++        }
++        Ok(s)
++    }
++    fn route(&self, index: usize) -> Vec<[f64; 2]> {
++        if !self.path.is_empty() {
++            return self.path.clone();
++        }
++        let side = (self.bots as f64).sqrt().ceil() as usize;
++        let mut random =
++            super::Random(self.seed ^ (index as u64).wrapping_mul(0x2545_F491_4F6C_DD1D));
++        let mut at = [0.; 2];
++        for axis in 0..2 {
++            let cell = if axis == 0 {
++                index % side
++            } else {
++                index / side
++            };
++            let jitter = (random.next() >> 11) as f64 / ((1u64 << 53) as f64);
++            at[axis] = self.spread[axis]
++                + (cell as f64 + 0.25 + jitter * 0.5) / side as f64
++                    * (self.spread[axis + 2] - self.spread[axis]);
++        }
++        let radius = ((self.spread[2] - self.spread[0]).min(self.spread[3] - self.spread[1])
++            / side as f64
++            * 0.2)
++            .min(8.);
++        vec![
++            [at[0] - radius, at[1] - radius],
++            [at[0] + radius, at[1] - radius],
++            [at[0] + radius, at[1] + radius],
++            [at[0] - radius, at[1] + radius],
++        ]
++    }
++}
++fn numbers<const N: usize>(text: &str) -> Result<[f64; N]> {
++    let values: Vec<f64> = text
++        .split(',')
++        .map(|v| v.parse().map_err(err))
++        .collect::<Result<_>>()?;
++    if values
++        .iter()
++        .any(|v| !v.is_finite() || v.abs() > 30_000_000.)
++    {
++        return Err("nonfinite or out-of-world route".into());
++    }
++    values
++        .try_into()
++        .map_err(|_| format!("expected {N} coordinates"))
++}
++
++#[derive(Clone, Copy, PartialEq)]
++enum Phase {
++    Login,
++    Configuration,
++    Play,
++}
++struct Bot {
++    socket: TcpStream,
++    connected: bool,
++    phase: Phase,
++    threshold: Option<usize>,
++    inflater: frame::Inflater,
++    input: Vec<u8>,
++    output: Vec<u8>,
++    sent: usize,
++    held: HashSet<(i32, i32)>,
++    route: Vec<[f64; 2]>,
++    waypoint: usize,
++    position: Option<[f64; 3]>,
++    target_y: Option<f64>,
++    started: Instant,
++    joined: bool,
++    error: Option<String>,
++    ticks: u64,
++    waited: u64,
++    chunks: u64,
++    bytes_in: u64,
++    bytes_out: u64,
++    switches: u64,
++    transfers: u64,
++    corrections: u64,
++    distance: f64,
++    batch: super::BatchSize,
++    reconnect: Option<(String, u16)>,
++    cookies: std::collections::HashMap<String, Vec<u8>>,
++}
++impl Bot {
++    fn new(
++        s: &Settings,
++        index: usize,
++        poll: &Poll,
++        address: SocketAddr,
++        transfer: bool,
++    ) -> Result<Self> {
++        let mut socket = TcpStream::connect(address).map_err(err)?;
++        socket.set_nodelay(true).map_err(err)?;
++        poll.registry()
++            .register(
++                &mut socket,
++                Token(index),
++                Interest::READABLE | Interest::WRITABLE,
++            )
++            .map_err(err)?;
++        let mut b = Self {
++            socket,
++            connected: false,
++            phase: Phase::Login,
++            threshold: None,
++            inflater: frame::Inflater::default(),
++            input: vec![],
++            output: vec![],
++            sent: 0,
++            held: HashSet::new(),
++            route: s.route(index),
++            waypoint: index % 4,
++            position: None,
++            target_y: None,
++            started: Instant::now(),
++            joined: false,
++            error: None,
++            ticks: 0,
++            waited: 0,
++            chunks: 0,
++            bytes_in: 0,
++            bytes_out: 0,
++            switches: 0,
++            transfers: 0,
++            corrections: 0,
++            distance: 0.,
++            batch: super::BatchSize::new(),
++            reconnect: None,
++            cookies: Default::default(),
++        };
++        b.waypoint %= b.route.len();
++        b.send(
++            handshake::Serverbound::Intention(Intention {
++                protocol: PROTOCOL_VERSION,
++                host: address.ip().to_string(),
++                port: address.port(),
++                intent: if transfer { 3 } else { handshake::LOGIN },
++            })
++            .encode(),
++        )?;
++        let name = format!("{}{index}", s.name);
++        b.send(
++            login::Serverbound::Hello(ServerHello {
++                uuid: offline_uuid(&name),
++                name,
++            })
++            .encode(),
++        )?;
++        Ok(b)
++    }
++    fn send(&mut self, packet: Vec<u8>) -> Result<()> {
++        if self.output.len() - self.sent > 1_048_576 {
++            return Err("bot output backlog exceeds 1 MiB".into());
++        }
++        self.output
++            .extend(frame::encode(&packet, self.threshold).map_err(err)?);
++        Ok(())
++    }
++    fn clear_world(&mut self) {
++        self.held.clear();
++        self.position = None;
++        self.target_y = None;
++        self.batch = super::BatchSize::new();
++    }
++    fn configure(&mut self, s: &Settings) -> Result<()> {
++        self.phase = Phase::Configuration;
++        self.clear_world();
++        self.send(
++            configuration::Serverbound::ClientInformation(configuration::ClientInformation::new(
++                s.view,
++            ))
++            .encode(),
++        )
++    }
++    fn packet(&mut self, s: &Settings, id: i32, body: &[u8]) -> Result<()> {
++        match self.phase {
++            Phase::Login => match login::Clientbound::decode(id, body).map_err(err)? {
++                login::Clientbound::Compression(p) => {
++                    self.threshold = usize::try_from(p.threshold).ok()
++                }
++                login::Clientbound::LoginFinished(_) => {
++                    self.send(login::Serverbound::LoginAcknowledged(Empty).encode())?;
++                    self.configure(s)?;
++                }
++                login::Clientbound::CustomQuery(p) => self.send(
++                    login::Serverbound::CustomQueryAnswer(login::CustomQueryAnswer {
++                        transaction: p.transaction,
++                        payload: None,
++                    })
++                    .encode(),
++                )?,
++                login::Clientbound::CookieRequest(p) => self.send(
++                    login::Serverbound::CookieResponse(login::CookieResponse {
++                        payload: self.cookies.get(&p.key).cloned(),
++                        key: p.key,
++                    })
++                    .encode(),
++                )?,
++                login::Clientbound::Hello(_) => {
++                    return Err("online-mode encryption is unsupported".into());
++                }
++                login::Clientbound::Disconnect(p) => {
++                    return Err(format!("login refused: {}", p.reason_json));
++                }
++                _ => {}
++            },
++            Phase::Configuration => {
++                use ids::configuration::clientbound as cb;
++                if [
++                    cb::SELECT_KNOWN_PACKS,
++                    cb::KEEP_ALIVE,
++                    cb::PING,
++                    cb::CODE_OF_CONDUCT,
++                    cb::COOKIE_REQUEST,
++                    cb::STORE_COOKIE,
++                    cb::TRANSFER,
++                    cb::DISCONNECT,
++                    cb::FINISH_CONFIGURATION,
++                ]
++                .contains(&id)
++                {
++                    let reply = match configuration::Clientbound::decode(id, body).map_err(err)? {
++                        configuration::Clientbound::SelectKnownPacks(p) => {
++                            Some(configuration::Serverbound::SelectKnownPacks(p))
++                        }
++                        configuration::Clientbound::KeepAlive(p) => {
++                            Some(configuration::Serverbound::KeepAlive(p))
++                        }
++                        configuration::Clientbound::Ping(p) => {
++                            Some(configuration::Serverbound::Pong(p))
++                        }
++                        configuration::Clientbound::CodeOfConduct(_) => {
++                            Some(configuration::Serverbound::AcceptCodeOfConduct(Empty))
++                        }
++                        configuration::Clientbound::CookieRequest(p) => {
++                            Some(configuration::Serverbound::CookieResponse(
++                                configuration::CookieResponse {
++                                    payload: self.cookies.get(&p.key).cloned(),
++                                    key: p.key,
++                                },
++                            ))
++                        }
++                        configuration::Clientbound::StoreCookie(p) => {
++                            self.cookies.insert(p.key, p.payload);
++                            None
++                        }
++                        configuration::Clientbound::Transfer(p) => {
++                            self.reconnect = Some((p.host, p.port as u16));
++                            None
++                        }
++                        configuration::Clientbound::Disconnect(_) => {
++                            return Err("configuration disconnect".into());
++                        }
++                        configuration::Clientbound::FinishConfiguration(_) => {
++                            self.phase = Phase::Play;
++                            Some(configuration::Serverbound::FinishConfiguration(Empty))
++                        }
++                        _ => None,
++                    };
++                    if let Some(reply) = reply {
++                        self.send(reply.encode())?;
++                    }
++                }
++            }
++            Phase::Play => {
++                use ids::play::{clientbound as cb, serverbound as sb};
++                let mut r = Reader::new(body);
++                match id {
++                    cb::KEEP_ALIVE => {
++                        self.send(super::raw(sb::KEEP_ALIVE, |w| w.i64(r.i64().unwrap_or(0))))?
++                    }
++                    cb::PING => self.send(super::raw(sb::PONG, |w| w.i32(r.i32().unwrap_or(0))))?,
++                    cb::START_CONFIGURATION => {
++                        self.switches += 1;
++                        self.send(super::raw(sb::CONFIGURATION_ACKNOWLEDGED, |_| {}))?;
++                        self.configure(s)?;
++                    }
++                    cb::LOGIN => {
++                        self.clear_world();
++                    }
++                    cb::RESPAWN => {
++                        // A seamless proxy may suppress its synthetic arrival correction.
++                        // Keep the last pose while waiting for the new world's chunk cache.
++                        self.held.clear();
++                        self.batch = super::BatchSize::new();
++                    }
++                    cb::TRANSFER => {
++                        if let play::Clientbound::Transfer(p) =
++                            play::Clientbound::decode(id, body).map_err(err)?
++                        {
++                            self.reconnect = Some((p.host, p.port as u16));
++                        }
++                    }
++                    cb::STORE_COOKIE => {
++                        if let play::Clientbound::StoreCookie(p) =
++                            play::Clientbound::decode(id, body).map_err(err)?
++                        {
++                            self.cookies.insert(p.key, p.payload);
++                        }
++                    }
++                    cb::COOKIE_REQUEST => {
++                        if let play::Clientbound::CookieRequest(p) =
++                            play::Clientbound::decode(id, body).map_err(err)?
++                        {
++                            self.send(
++                                play::Serverbound::CookieResponse(configuration::CookieResponse {
++                                    payload: self.cookies.get(&p.key).cloned(),
++                                    key: p.key,
++                                })
++                                .encode(),
++                            )?;
++                        }
++                    }
++                    cb::PLAYER_POSITION => {
++                        if let play::Clientbound::PlayerPosition(p) =
++                            play::Clientbound::decode(id, body).map_err(err)?
++                        {
++                            let previous = self.position.unwrap_or([0.; 3]);
++                            let at = std::array::from_fn(|i| {
++                                p.position[i]
++                                    + if p.relatives & (1 << i) != 0 {
++                                        previous[i]
++                                    } else {
++                                        0.
++                                    }
++                            });
++                            if self.position.is_some() {
++                                self.corrections += 1;
++                            }
++                            self.position = Some(at);
++                            self.target_y = Some(at[1] + s.height);
++                            self.joined = true;
++                            self.send(
++                                play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {
++                                    id: p.teleport,
++                                    x: at[0],
++                                    y: at[1],
++                                    z: at[2],
++                                    yaw: p.yaw,
++                                    pitch: p.pitch,
++                                })
++                                .encode(),
++                            )?;
++                            self.send(super::raw(sb::PLAYER_LOADED, |_| {}))?;
++                            self.send(
++                                play::Serverbound::PlayerAbilities(play::PlayerAbilitiesRequest {
++                                    flags: 2,
++                                })
++                                .encode(),
++                            )?;
++                        }
++                    }
++                    cb::LEVEL_CHUNK_WITH_LIGHT => {
++                        self.chunks += 1;
++                        self.held
++                            .insert((r.i32().map_err(err)?, r.i32().map_err(err)?));
++                    }
++                    cb::FORGET_LEVEL_CHUNK => {
++                        if let play::Clientbound::ForgetLevelChunk(p) =
++                            play::Clientbound::decode(id, body).map_err(err)?
++                        {
++                            self.held.remove(&(p.pos[0], p.pos[1]));
++                        }
++                    }
++                    cb::CHUNK_BATCH_START => self.batch.started = Instant::now(),
++                    cb::CHUNK_BATCH_FINISHED => {
++                        self.batch.finished(r.varint().map_err(err)?);
++                        self.send(
++                            play::Serverbound::ChunkBatchReceived(play::ChunkBatchReceived {
++                                chunks_per_tick: self.batch.desired_chunks_per_tick(),
++                            })
++                            .encode(),
++                        )?;
++                    }
++                    cb::DISCONNECT => return Err("play disconnect".into()),
++                    _ => {}
++                }
++            }
++        }
++        Ok(())
++    }
++    fn read(&mut self, s: &Settings) -> Result<()> {
++        let mut scratch = [0; 65536];
++        loop {
++            match self.socket.read(&mut scratch) {
++                Ok(0) if self.reconnect.is_some() => return Ok(()),
++                Ok(0) => return Err("socket closed".into()),
++                Ok(n) => {
++                    self.bytes_in += n as u64;
++                    self.input.extend_from_slice(&scratch[..n]);
++                }
++                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
++                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
++                Err(e) => return Err(err(e)),
++            }
++            while let Some((prefix, size)) = frame::header(&self.input).map_err(err)? {
++                let end = prefix + size;
++                if self.input.len() < end {
++                    break;
++                }
++                let body =
++                    match frame::body(&self.input[prefix..end], self.threshold, &mut self.inflater)
++                        .map_err(err)?
++                    {
++                        frame::Body::Plain(at) => self.input[prefix + at..end].to_vec(),
++                        frame::Body::Inflated(body) => body,
++                    };
++                let mut r = Reader::new(&body);
++                let id = r.varint().map_err(err)?;
++                self.packet(s, id, &body[r.position()..])?;
++                self.input.drain(..end);
++                if self.reconnect.is_some() {
++                    return Ok(());
++                }
++            }
++        }
++    }
++    fn flush(&mut self) -> Result<()> {
++        if !self.connected {
++            return Ok(());
++        }
++        while self.sent < self.output.len() {
++            match self.socket.write(&self.output[self.sent..]) {
++                Ok(0) => return Err("zero-length socket write".into()),
++                Ok(n) => {
++                    self.sent += n;
++                    self.bytes_out += n as u64;
++                }
++                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
++                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
++                Err(e) => return Err(err(e)),
++            }
++        }
++        self.output.clear();
++        self.sent = 0;
++        Ok(())
++    }
++    fn tick(&mut self, s: &Settings) -> Result<()> {
++        if self.phase != Phase::Play {
++            return Ok(());
++        }
++        let Some(mut at) = self.position else {
++            return Ok(());
++        };
++        self.ticks += 1;
++        if !self
++            .held
++            .contains(&((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4))
++        {
++            self.waited += 1;
++        } else if !s.stand {
++            let to = self.route[self.waypoint];
++            let dx = to[0] - at[0];
++            let dz = to[1] - at[2];
++            let distance = dx.hypot(dz);
++            let step = (s.speed / 20.).min(distance);
++            if distance > 0. {
++                at[0] += dx / distance * step;
++                at[2] += dz / distance * step;
++            }
++            self.distance += step;
++            if distance <= s.speed / 20. {
++                self.waypoint = (self.waypoint + 1) % self.route.len();
++            }
++            if let Some(y) = self.target_y {
++                at[1] += (y - at[1]).clamp(-s.speed / 20., s.speed / 20.);
++            }
++        }
++        self.position = Some(at);
++        self.send(
++            play::Serverbound::MovePlayerPos(play::MovePlayerPos {
++                x: at[0],
++                y: at[1],
++                z: at[2],
++                flags: u8::from(s.ground || s.stand),
++            })
++            .encode(),
++        )?;
++        self.send(super::raw(ids::play::serverbound::CLIENT_TICK_END, |_| {}))
++    }
++}
++
++fn summary(bots: &[Option<Bot>], start: Instant, rounds: u64, late: u64, max_late: f64) -> Value {
++    let mut out = json!({"event_loop":true,"threads":1,"elapsed":start.elapsed().as_secs_f64(),"rounds":rounds,
++        "late_rounds":late,"max_lateness_ms":max_late,"falling_behind":late>0,
++        "online":0,"joined":0,"failed":0,"waited_ticks":0,"chunks":0,"bytes_in":0,"bytes_out":0,"switches":0,"transfers":0,"corrections":0,"distance":0.});
++    for b in bots.iter().flatten() {
++        if b.error.is_none() && b.joined {
++            out["online"] = json!(out["online"].as_u64().unwrap_or(0) + 1);
++        }
++        if b.joined {
++            out["joined"] = json!(out["joined"].as_u64().unwrap_or(0) + 1);
++        }
++        if b.error.is_some() {
++            out["failed"] = json!(out["failed"].as_u64().unwrap_or(0) + 1);
++        }
++        for (key, n) in [
++            ("waited_ticks", b.waited),
++            ("chunks", b.chunks),
++            ("bytes_in", b.bytes_in),
++            ("bytes_out", b.bytes_out),
++            ("switches", b.switches),
++            ("transfers", b.transfers),
++            ("corrections", b.corrections),
++        ] {
++            out[key] = json!(out[key].as_u64().unwrap_or(0) + n);
++        }
++        out["distance"] = json!(out["distance"].as_f64().unwrap_or(0.) + b.distance);
++    }
++    out["errors"] = json!(
++        bots.iter()
++            .enumerate()
++            .filter_map(|(i, b)| b
++                .as_ref()
++                .and_then(|b| b.error.as_ref())
++                .map(|e| format!("{i}: {e}")))
++            .take(10)
++            .collect::<Vec<_>>()
++    );
++    out
++}
++
++pub(super) fn run() -> Result<()> {
++    let s = Settings::read()?;
++    let mut poll = Poll::new().map_err(err)?;
++    let mut events = Events::with_capacity(4096);
++    let start = Instant::now();
++    let mut deadline = start;
++    let mut print_at = start + Duration::from_secs(1);
++    let mut bots: Vec<Option<Bot>> = (0..s.bots).map(|_| None).collect();
++    let (mut launched, mut rounds, mut late, mut max_late) = (0, 0, 0, 0f64);
++    println!(
++        "{}",
++        json!({"routes":(0..s.bots).map(|i| json!({"name":format!("{}{i}",s.name),"server":i%s.servers.len(),"start":s.route(i)[0]})).collect::<Vec<_>>()})
++    );
++    while start.elapsed().as_secs_f64() < s.seconds {
++        while launched < s.bots && start.elapsed().as_secs_f64() >= launched as f64 * s.join_every {
++            bots[launched] = Some(Bot::new(
++                &s,
++                launched,
++                &poll,
++                s.servers[launched % s.servers.len()],
++                false,
++            )?);
++            launched += 1;
++        }
++        let now = Instant::now();
++        if now >= deadline {
++            let lateness = now.duration_since(deadline).as_secs_f64() * 1000.;
++            // Never burst catch-up movement after a stall. Record a missed 50 ms deadline.
++            if lateness >= 50. {
++                late += 1;
++                max_late = max_late.max(lateness);
++                deadline = now;
++            }
++            rounds += 1;
++            deadline += Duration::from_millis(50);
++            for b in bots.iter_mut().flatten().filter(|b| b.error.is_none()) {
++                if let Err(e) = b.tick(&s).and_then(|_| b.flush()) {
++                    b.error = Some(e);
++                }
++            }
++        }
++        for (index, slot) in bots.iter_mut().enumerate() {
++            if let Some(b) = slot {
++                if b.error.is_none() && !b.joined && b.started.elapsed() > Duration::from_secs(60) {
++                    b.error = Some("join timeout".into());
++                }
++                if let Some((host, port)) = b.reconnect.take() {
++                    let address = (host.as_str(), port)
++                        .to_socket_addrs()
++                        .map_err(err)?
++                        .find(SocketAddr::is_ipv4)
++                        .ok_or("transfer has no IPv4 address")?;
++                    let _ = poll.registry().deregister(&mut b.socket);
++                    let mut new = Bot::new(&s, index, &poll, address, true)?;
++                    new.route = b.route.clone();
++                    new.waypoint = b.waypoint;
++                    new.cookies = std::mem::take(&mut b.cookies);
++                    new.transfers = b.transfers + 1;
++                    new.switches = b.switches;
++                    new.ticks = b.ticks;
++                    new.chunks = b.chunks;
++                    new.bytes_in = b.bytes_in;
++                    new.bytes_out = b.bytes_out;
++                    new.waited = b.waited;
++                    new.distance = b.distance;
++                    new.corrections = b.corrections;
++                    *b = new;
++                }
++                if b.error.is_some() {
++                    let _ = poll.registry().deregister(&mut b.socket);
++                } else {
++                    let interest = if b.sent < b.output.len() {
++                        Interest::READABLE | Interest::WRITABLE
++                    } else {
++                        Interest::READABLE
++                    };
++                    poll.registry()
++                        .reregister(&mut b.socket, Token(index), interest)
++                        .map_err(err)?;
++                }
++            }
++        }
++        if Instant::now() >= print_at {
++            println!("{}", summary(&bots, start, rounds, late, max_late));
++            print_at += Duration::from_secs(1);
++        }
++        if launched == s.bots && bots.iter().flatten().all(|b| b.error.is_some()) {
++            break;
++        }
++        let next_join = start + Duration::from_secs_f64(launched as f64 * s.join_every);
++        let wake = if launched < s.bots {
++            deadline.min(next_join).min(print_at)
++        } else {
++            deadline.min(print_at)
++        };
++        poll.poll(
++            &mut events,
++            Some(wake.saturating_duration_since(Instant::now())),
++        )
++        .map_err(err)?;
++        for event in events.iter() {
++            if let Some(b) = bots
++                .get_mut(event.token().0)
++                .and_then(Option::as_mut)
++                .filter(|b| b.error.is_none())
++            {
++                if event.is_writable() {
++                    b.connected = true;
++                }
++                let result = b
++                    .socket
++                    .take_error()
++                    .map_err(err)
++                    .and_then(|e| match e {
++                        Some(e) => Err(err(e)),
++                        None => Ok(()),
++                    })
++                    .and_then(|_| {
++                        if event.is_readable() {
++                            b.read(&s)
++                        } else {
++                            Ok(())
++                        }
++                    })
++                    .and_then(|_| b.flush());
++                if let Err(e) = result {
++                    b.error = Some(e);
++                }
++            }
++        }
++    }
++    let mut report = summary(&bots, start, rounds, late, max_late);
++    report["bots"] = json!(s.bots);
++    report["seed"] = json!(s.seed);
++    report["per_bot"] = json!(bots.iter().enumerate().map(|(i,b)| match b {
++        Some(b) => json!({"index":i,"error":b.error,"ticks":b.ticks,"waited_ticks":b.waited,"position":b.position,"route":b.route,"waypoint":b.waypoint,"switches":b.switches,"transfers":b.transfers}),
++        None => json!({"index":i,"error":"not launched"})
++    }).collect::<Vec<_>>());
++    if let Some(path) = s.report {
++        std::fs::write(path, format!("{report:#}\n")).map_err(err)?;
++    }
++    println!("{report}");
++    if report["online"].as_u64() != Some(s.bots as u64) {
++        return Err("not all bots remained online".into());
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn coordinates_reject_nonfinite_and_wrong_arity() {
++        assert!(numbers::<2>("nan,1").is_err());
++        assert!(numbers::<2>("1,2,3").is_err());
++        assert_eq!(numbers::<2>("-12.5,32").unwrap(), [-12.5, 32.]);
++    }
++
++    fn settings() -> Settings {
++        Settings {
++            servers: vec![],
++            bots: 400,
++            seconds: 1.,
++            join_every: 0.,
++            seed: 12345,
++            view: 3,
++            speed: 4.,
++            height: 0.,
++            ground: false,
++            stand: false,
++            spread: [-128., -128., 128., 128.],
++            path: vec![],
++            name: "Test".into(),
++            report: None,
++        }
++    }
++    fn feed(bot: &mut Bot, settings: &Settings, packet: Vec<u8>) {
++        let mut reader = Reader::new(&packet);
++        let id = reader.varint().unwrap();
++        bot.packet(settings, id, &packet[reader.position()..])
++            .unwrap();
++    }
++    #[test]
++    fn routes_are_seeded_spread_and_inside_the_requested_range() {
++        let s = settings();
++        let routes: Vec<_> = (0..s.bots).map(|i| s.route(i)).collect();
++        let centers: HashSet<_> = routes
++            .iter()
++            .map(|p| ((p[0][0] * 1000.) as i64, (p[0][1] * 1000.) as i64))
++            .collect();
++        assert_eq!(centers.len(), 400);
++        assert!(
++            routes
++                .iter()
++                .flatten()
++                .all(|p| p.iter().all(|v| (-128. ..128.).contains(v)))
++        );
++        assert_eq!(s.route(77), s.route(77));
++        let mut other = settings();
++        other.seed += 1;
++        assert_ne!(s.route(77), other.route(77));
++    }
++    #[test]
++    fn configuration_and_respawn_clear_chunks_but_keep_the_route_and_progress() {
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let s = settings();
++        let poll = Poll::new().unwrap();
++        let mut b = Bot::new(&s, 0, &poll, listener.local_addr().unwrap(), false).unwrap();
++        let _peer = listener.accept().unwrap();
++        // A periodic movement round may run before the nonblocking connect event.
++        // It must leave the queued handshake intact until write readiness arrives.
++        b.flush().unwrap();
++        assert_eq!(b.sent, 0);
++        assert!(!b.output.is_empty());
++        b.phase = Phase::Play;
++        b.position = Some([0., 64., 0.]);
++        b.held.insert((0, 0));
++        b.waypoint = 2;
++        let route = b.route.clone();
++        b.output.clear();
++        feed(
++            &mut b,
++            &s,
++            super::super::raw(ids::play::clientbound::START_CONFIGURATION, |_| {}),
++        );
++        assert!(b.held.is_empty());
++        assert!(b.position.is_none());
++        assert_eq!(b.switches, 1);
++        assert_eq!(b.route, route);
++        assert_eq!(b.waypoint, 2);
++        let (prefix, n) = frame::header(&b.output).unwrap().unwrap();
++        let mut reply = Reader::new(&b.output[prefix..prefix + n]);
++        assert_eq!(
++            reply.varint().unwrap(),
++            ids::play::serverbound::CONFIGURATION_ACKNOWLEDGED
++        );
++        feed(
++            &mut b,
++            &s,
++            configuration::Clientbound::FinishConfiguration(Empty).encode(),
++        );
++        feed(
++            &mut b,
++            &s,
++            play::Clientbound::PlayerPosition(play::PlayerPosition {
++                teleport: 17,
++                position: [0., 64., 0.],
++                delta: [0.; 3],
++                yaw: 0.,
++                pitch: 0.,
++                relatives: 0,
++            })
++            .encode(),
++        );
++        b.held.insert((0, 0));
++        let before = b.position;
++        b.tick(&s).unwrap();
++        assert_ne!(b.position, before);
++        assert_eq!(b.route, route);
++        feed(
++            &mut b,
++            &s,
++            super::super::raw(ids::play::clientbound::RESPAWN, |_| {}),
++        );
++        assert!(b.held.is_empty());
++        assert!(b.position.is_some());
++        assert_eq!(b.waypoint, 2);
++        feed(
++            &mut b,
++            &s,
++            play::Clientbound::Transfer(configuration::Transfer {
++                host: "127.0.0.1".into(),
++                port: 25566,
++            })
++            .encode(),
++        );
++        assert_eq!(b.reconnect, Some(("127.0.0.1".into(), 25566)));
++    }
++}
