@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Full E14 checker v2: only matched no-wall baselines and explicit coverage guards differ."""
+
+import argparse
+import hashlib
+import gzip
+import importlib.machinery
+import importlib.util
+import json
+import math
+from pathlib import Path
+import re
+
+from e14_snapshot_support import validate_snapshot
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E20/analysis-v2'
+EXPECTED = {
+    'plain-client': '6afe2161283d7a4741f390c9aa7b7b4becb9b91f960c37208a50325a8a43eb75',
+    'horizon-ctl': '6cc1188b8ff48bfe2a0f826e930a07c5b49c167bfcb2b8840cdf1fa8e5b05dbe',
+    'cluster-engine': '1c09787bab6a122c6663f9be402563d39036287b7e9efa14f87b609d8bacffac',
+    'cluster-proxy': '94d1dfad6e36146deff9d899340eac69e39fa902b99306b62c6de3514456c0c5',
+    'cluster-store': '299a7204d36b9b4a6f0f8126c9f53e7def036ed3e2dee370a288943449c4fed3',
+}
+ROUTE = ['b', 'c', 'd', 'a', 'd', 'c', 'b', 'a', 'c', 'a', 'd', 'b', 'd', 'a']
+MODES = ['walk', 'sprint', 'sprint-jump', 'fly']
+loader = importlib.machinery.SourceFileLoader('e14_build10_analysis', str(ROOT / 'scripts/e14-analyse'))
+spec = importlib.util.spec_from_loader('e14_build10_analysis', loader)
+analysis = importlib.util.module_from_spec(spec)
+loader.exec_module(analysis)
+
+v2_loader = importlib.machinery.SourceFileLoader('e20_full_check_v2', str(ROOT / 'scripts/e20-physics-v2'))
+v2_spec = importlib.util.spec_from_loader(v2_loader.name, v2_loader)
+v2 = importlib.util.module_from_spec(v2_spec)
+v2_loader.exec_module(v2)
+
+def matched_derived(run):
+    audited = v2.analyse_run(run)
+    return dict(analysis_version=2, trials=[row['v2'] for row in audited['rows']],
+        reference_windows=[row['v2'].get('matched_baseline', {}) for row in audited['rows']],
+        audit={key:value for key,value in audited.items() if key != 'rows'})
+
+
+def expected_for_snapshot(snapshot):
+    expected = dict(EXPECTED)
+    contract = validate_snapshot(snapshot) if snapshot is not None else None
+    if contract and contract['final'] is not None:
+        for key, name in [('cluster-engine', 'horizon-client'), ('cluster-proxy', 'meridian'),
+                          ('cluster-store', 'goliath-store')]:
+            expected[key] = contract['binaries'][name]
+    return expected, contract
+
+
+def sprint_present(attribute):
+    return any(modifier['id'] == 'minecraft:sprinting' and modifier['operation'] == 2
+               and math.isclose(modifier['amount'], .3, abs_tol=1e-6)
+               for modifier in attribute['modifiers'])
+
+
+def sprint_packets(run, leg):
+    activations = [phase for phase in run['phases'] if phase['phase'] == 'activation'
+                   and leg['began_ns'] <= phase.get('ns', 0) <= leg['ended_ns']]
+    if len(activations) != 1:
+        return {'pass': False, 'error': 'not exactly one recorded activation'}
+    activated = activations[0]['ns']
+    packets = [(packet, value) for packet in run['wire'] if packet['kind'] == 'attributes'
+               and leg['began_ns'] <= packet['ns'] <= leg['ended_ns']
+               for value in packet['values'] if value['attribute'] == 26]
+    before = [(packet, value) for packet, value in packets if packet['ns'] < activated]
+    after = [(packet, value) for packet, value in packets if packet['ns'] >= activated]
+    if not before or not after:
+        return {'pass': False, 'error': 'source or post-activation movement attribute is absent',
+                'source_packets': len(before), 'target_packets': len(after)}
+    source, target = before[-1], after[0]
+    return {'pass': sprint_present(source[1]) and all(sprint_present(value) for _, value in after),
+            'source_before_activation_ms': (source[0]['ns'] - activated) / 1e6,
+            'target_after_activation_ms': (target[0]['ns'] - activated) / 1e6,
+            'source_attribute': source[1], 'target_attribute': target[1],
+            'post_activation_packets': len(after),
+            'post_activation_packets_without_sprint': sum(not sprint_present(value) for _, value in after)}
+
+
+def corrections(run, leg):
+    packets = [packet for packet in run['wire'] if packet['kind'] == 'correction'
+               and leg['began_ns'] <= packet['ns'] <= leg['ended_ns'] + 100_000_000]
+    maximum = 0
+    for packet in packets:
+        before = next((row for row in reversed(run['wire']) if row['kind'] == 'sent_position'
+                       and leg['began_ns'] <= row['ns'] < packet['ns']), None)
+        if before is None:
+            return {'resolved': False, 'packets': len(packets), 'error': 'no preceding client position'}
+        changes = [packet['pos'][axis] if packet['relatives'] & (1 << axis)
+                   else packet['pos'][axis] - before['pos'][axis] for axis in (0, 2)]
+        maximum = max(maximum, -sum(a*b for a,b in zip(changes, leg['direction'])))
+    return {'resolved': True, 'packets': len(packets), 'maximum_backward_blocks': maximum}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('files', nargs=2, type=Path)
+    parser.add_argument('--output', type=Path, default=DATA / 'full-verification-v2.json')
+    parser.add_argument('--restoration', type=Path)
+    parser.add_argument('--snapshot', type=Path)
+    parser.add_argument('--coverage-report', type=Path, required=True)
+    args = parser.parse_args()
+    if args.output.exists():
+        parser.error('verification output exists; choose a new name')
+    expected, contract = expected_for_snapshot(args.snapshot)
+    result = {'runs': {}, 'failures': [], 'unresolved': [], 'sprint_packets': [],
+              'corrections': [], 'actual_crossings': 0}
+    particle_settings = set()
+    for path in args.files:
+        raw_bytes = gzip.decompress(path.read_bytes())
+        assert not re.search(rb'/Users/|/home/|E14Physics|(?i:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', raw_bytes)
+        run = json.loads(raw_bytes)
+        particle_settings.add(run['particles'])
+        assert run['binaries'] == expected and run['resources_manifest_unchanged']
+        if contract and contract['final'] is not None:
+            assert run.get('leased') == contract['leased']
+            assert run.get('snapshot_manifest') == contract['binaries']
+            assert run.get('final') == contract['final']
+            assert run['launcher_sha256'] == contract['final']['launcher']['sha256']
+        assert run['collection_complete'] and len(run['trials']) == 56 and not run['errors']
+        derived = matched_derived(run)
+        source = 'a'
+        for index, leg in enumerate(run['trials']):
+            assert leg['mode'] == MODES[index // 14] and leg['target'] == ROUTE[index % 14]
+            assert leg['source'] == leg['owner_before'] == source
+            assert leg['reached'] and leg['owner_after'] == leg['target']
+            assert leg['generation_before'] == index and leg['generation_after'] == index + 1
+            source = leg['target']
+            metrics = derived['trials'][index]
+            reference = derived['reference_windows'][index]
+            key = {'run': path.name, 'index': index, 'mode': leg['mode'],
+                   'source': leg['source'], 'target': leg['target']}
+            budget = corrections(run, leg)
+            result['corrections'].append(key | budget)
+            if not budget['resolved'] or budget.get('maximum_backward_blocks', 0) > .1:
+                result['failures'].append(key | {'kind': 'correction', 'budget': budget})
+            resolved = ('speed_ratio' in metrics and not metrics.get('timing_unresolved')
+                        and not metrics.get('missing_window_frames')
+                        and not any(metrics.get('missing_window_server_ticks', {}).values())
+                        and not reference.get('missing_window_frames')
+                        and not any(reference.get('missing_window_server_ticks', {}).values()))
+            if not resolved:
+                result['unresolved'].append(key | {'metrics': metrics})
+            elif metrics['speed_ratio'] < .95 or metrics['backward_correction_lower_bound_blocks'] > .1:
+                result['failures'].append(key | {'metrics': metrics})
+            if leg['mode'] == 'sprint':
+                result['sprint_packets'].append(key | sprint_packets(run, leg))
+        for mode in MODES:
+            assert len({(leg['source'], leg['target']) for leg in run['trials'] if leg['mode'] == mode}) == 12
+        assert bool(sum(packet['kind'] == 'particle' for packet in run['wire'])) == run['particles']
+        result['runs'][path.name] = derived
+        result['actual_crossings'] += len(run['trials'])
+    assert particle_settings == {False, True}
+    if args.restoration:
+        restored = json.loads(args.restoration.read_text())
+        assert restored['status_and_diff_identical'] and restored['all_file_bytes_identical']
+        result['restoration_exact'] = True
+    if args.snapshot:
+        manifest = contract['binaries']
+        assert manifest['horizon-client'] == expected['cluster-engine']
+        assert manifest['meridian'] == expected['cluster-proxy']
+        assert manifest['goliath-store'] == expected['cluster-store']
+        if contract['final'] is None:
+            assert manifest['meridian-sidecar'] == '8d300a00afaf7fa9fc3b4ef50d9a65f81276d8d8de71d712c3e69f5638c92705'
+            assert manifest['e4-client'] == '8afa1b47cfefed78ee7a738f21a338766b7660fe632724430b7270960fc3235b'
+        else:
+            result['final'] = contract['final']
+            result['leased'] = contract['leased']
+        result['snapshot_still_matches_ready'] = manifest
+    result['expected_binaries'] = expected
+    result['resolved_windows'] = result['actual_crossings'] - len(result['unresolved'])
+    result['sprint_packet_passes'] = sum(row['pass'] for row in result['sprint_packets'])
+    coverage = json.loads(args.coverage_report.read_text())
+    result['analysis_version'] = 2
+    result['v1_checker_sha256'] = hashlib.sha256((ROOT/'scripts/e14-build10-check').read_bytes()).hexdigest()
+    result['v2_analysis_sha256'] = hashlib.sha256((ROOT/'scripts/e20-physics-v2').read_bytes()).hexdigest()
+    result['coverage_report_sha256'] = hashlib.sha256(args.coverage_report.read_bytes()).hexdigest()
+    result['reference_coverage_failures'] = coverage['reference_coverage_failures']
+    result['v1_pass_v2_fail'] = coverage['v1_pass_v2_fail']
+    if result['reference_coverage_failures'] or result['v1_pass_v2_fail']:
+        result['failures'].append(dict(kind='accepted-reference coverage or passing-run regression'))
+    result['status'] = 'passed' if not result['failures'] and result['sprint_packet_passes'] == 28 else 'failed'
+    args.output.write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps({key: result[key] for key in ('status', 'actual_crossings', 'resolved_windows', 'sprint_packet_passes')}
+                     | {'failures': len(result['failures']), 'unresolved': len(result['unresolved'])}, indent=2))
+    return 0 if result['status'] == 'passed' else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

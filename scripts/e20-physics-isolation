@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Precommitted three-by-three physics isolation; retain every attempted run."""
+import argparse
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import statistics
+import subprocess
+import sys
+import time
+import e11_support as support
+from e14_snapshot_support import validate_snapshot
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E20'
+GROUPS={'reference':ROOT/'.local/bin/meridian-e18/reactor-1',
+    'proxy':ROOT/'.local/bin/meridian-e20/scheduler-2',
+    'tiles':ROOT/'.local/bin/horizon-e21-fc2868b2b/warmtick-2'}
+ORDERS=[['reference','proxy','tiles'],['proxy','tiles','reference'],['tiles','reference','proxy']]
+MODES=['walk','sprint','sprint-jump','fly']
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def load_checker():
+    loader=importlib.machinery.SourceFileLoader('e20_unchanged_physics_checker',str(ROOT/'scripts/e14-build10-check'))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module)
+    return module
+
+def summarize(record):
+    checker=load_checker();rows=[];invalid=[];inputs={}
+    groups={group:{mode:dict(ratios=[],unresolved=0,below_095=0,correction_failures=0) for mode in MODES} for group in GROUPS}
+    for run_record in record['runs']:
+        name=run_record['name'];path=DATA/'physics'/(name+'.json.gz');quiet_path=DATA/(name+'-quiet.json')
+        if not path.exists() or not quiet_path.exists():
+            invalid.append(dict(group=run_record['group'],round=run_record['round'],name=name,error='missing retained run or quiet record'));continue
+        inputs[str(path.relative_to(ROOT))]=sha(path);inputs[str(quiet_path.relative_to(ROOT))]=sha(quiet_path)
+        run=json.loads(gzip.decompress(path.read_bytes()));quiet=json.loads(quiet_path.read_text())
+        expected,contract=checker.expected_for_snapshot(GROUPS[run_record['group']])
+        valid=(run_record['exit']==0 and run.get('collection_complete') and len(run.get('trials',[]))==56 and not run.get('errors')
+            and not run['particles'] and run['binaries']==expected and run['snapshot_manifest']==contract['binaries']
+            and quiet.get('noise_valid') and quiet['load_start'][0]<=4 and quiet['seconds']<1800)
+        if not valid:
+            invalid.append(dict(group=run_record['group'],round=run_record['round'],name=name,error='collection, identity or quiet validity failed'))
+        derived=checker.analysis.analyse(run)
+        for index,leg in enumerate(run['trials']):
+            metrics=derived['trials'][index]
+            reference=next(row for row in derived['baselines'] if row['mode']==leg['mode'] and row['direction']==leg['direction'])
+            resolved=bool(valid and 'speed_ratio' in metrics and not metrics.get('timing_unresolved')
+                and not metrics.get('missing_window_frames') and not any(metrics.get('missing_window_server_ticks',{}).values())
+                and not reference.get('missing_window_frames') and not any(reference.get('missing_window_server_ticks',{}).values()))
+            budget=checker.corrections(run,leg)
+            correction_failed=not budget['resolved'] or budget.get('maximum_backward_blocks',0)>.1
+            row=dict(group=run_record['group'],round=run_record['round'],run=name,index=index,mode=leg['mode'],
+                source=leg['source'],target=leg['target'],resolved=resolved,speed_ratio=metrics.get('speed_ratio'),
+                below_095=resolved and metrics['speed_ratio']<.95,correction_budget=budget,metrics=metrics,baseline=reference)
+            rows.append(row);totals=groups[row['group']][row['mode']]
+            if resolved:
+                totals['ratios'].append(metrics['speed_ratio']);totals['below_095']+=int(row['below_095'])
+            else:totals['unresolved']+=1
+            totals['correction_failures']+=int(correction_failed)
+    for modes in groups.values():
+        for totals in modes.values():
+            ratios=totals['ratios'];totals.update(resolved=len(ratios),minimum=min(ratios,default=None),median=statistics.median(ratios) if ratios else None)
+    return dict(kind='E20-precommitted-physics-isolation-summary',attempted_runs=len(record['runs']),planned_runs=9,
+        groups=groups,invalid_runs=invalid,trials=rows,input_sha256=inputs,
+        method='unchanged e14 analysis and build10-check resolution/correction predicates; all resolved ratios kept in round/trial order',
+        pass_line=.95,metric_decision='reviewer decides; this comparison does not change the checker or accept a candidate')
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--name',required=True);parser.add_argument('--no-other-agents',action='store_true');args=parser.parse_args()
+    target=DATA/(args.name+'.json')
+    if target.exists():raise RuntimeError('fixed campaign already exists; do not replace or extend it')
+    snapshots={}
+    for group,bins in GROUPS.items():
+        contract=validate_snapshot(bins)
+        snapshots[group]=dict(path=str(bins.relative_to(ROOT)),candidate_sha256=sha(bins/'candidate.json'),binaries=contract['binaries'])
+    plan=[dict(group=group,round=round_index+1,name=f'{args.name}-{group}-r{round_index+1}-off') for round_index,order in enumerate(ORDERS) for group in order]
+    harnesses=['e20-physics-isolation','e20-physics','e20-window','e14-physics','e14-analyse','e14-build10-check','e14_support.py','e14_snapshot_support.py','e18_process.py','goliath-cluster']
+    record=dict(kind='E20-fixed-physics-isolation',status='precommitted',count_per_group=3,particles=False,full_suite_modes=MODES,
+        no_early_stop_for_ratios=True,plan=plan,snapshots=snapshots,harness_sha256={name:sha(ROOT/'scripts'/name) for name in harnesses},runs=[])
+    support.save(target,record) # Freeze count, order, bytes and names before the first run.
+    for planned in plan:
+        group=planned['group'];name=planned['name'];bins=GROUPS[group]
+        inner=[sys.executable,'-B',str(ROOT/'scripts/e20-physics'),'--snapshot',str(bins),'--variant','e12','--suite','--name',name]
+        command=[sys.executable,'-B',str(ROOT/'scripts/e20-window'),'--name',name,*(['--no-other-agents'] if args.no_other_agents else []),'--',*inner]
+        print('ISOLATION_START '+json.dumps(planned),flush=True);began=time.monotonic()
+        completed=subprocess.run(command,cwd=ROOT,capture_output=True,text=True)
+        output=(completed.stdout+'\n'+completed.stderr).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME')
+        log=DATA/(name+'-command.log.gz');log.write_bytes(gzip.compress(output.encode(),mtime=0))
+        row=dict(**planned,exit=completed.returncode,seconds=time.monotonic()-began,log=str(log.relative_to(ROOT)),log_sha256=sha(log),
+            command=[part.replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME') for part in command])
+        record['runs'].append(row);record['status']='running';support.save(target,record)
+        print('ISOLATION_END '+json.dumps({key:row[key] for key in ['group','round','name','exit','seconds']}),flush=True)
+        # A failed collection remains one of the three attempts. Never replace it.
+        for harness,digest in record['harness_sha256'].items():
+            if sha(ROOT/'scripts'/harness)!=digest:raise RuntimeError('isolation harness changed during fixed campaign')
+        for component,values in snapshots.items():
+            for executable,digest in values['binaries'].items():
+                if sha(GROUPS[component]/executable)!=digest:raise RuntimeError('isolation snapshot changed during fixed campaign')
+    record['status']='complete';support.save(target,record)
+    summary=summarize(record);support.save(DATA/(args.name+'-summary.json'),summary)
+    print('ISOLATION_SUMMARY '+json.dumps(summary['groups']),flush=True)
+
+if __name__=='__main__':main()

@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Own patch-07 provenance, release gates and immutable E20 snapshots."""
+import argparse
+import difflib
+import gzip
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
+import time
+from e14_snapshot_support import validate_snapshot
+
+ROOT=Path(__file__).resolve().parent.parent
+SOURCE=ROOT/'.local/src/meridian'
+DATA=ROOT/'docs/experiments/data/E20'
+BASE=ROOT/'.local/bin/meridian-e18/reactor-1'
+
+def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+def save(path,value): path.write_text(json.dumps(value,indent=2)+'\n')
+
+def patch(args):
+    frozen=json.loads((BASE/'candidate.json').read_text())['projects']['meridian']
+    stack=frozen['patches']
+    if args.after:
+        stack=json.loads((DATA/(args.after+'-patch.json')).read_text())['patches']
+    paths=set(subprocess.check_output(['git','-C',SOURCE,'ls-files','-co','--exclude-standard'],text=True).splitlines())
+    paths=sorted(p for p in paths if p.endswith(('.rs','.toml','.lock')))
+    output=ROOT/'patches'/('meridian-07-'+args.name+'.patch')
+    if output.exists():
+        if not args.replace_unfrozen:raise SystemExit('patch exists; use explicit --replace-unfrozen before any snapshot')
+        for candidate in (ROOT/'.local/bin/meridian-e20').glob('*/candidate.json'):
+            if any(p['path']==str(output.relative_to(ROOT)) for p in json.loads(candidate.read_text())['projects']['meridian']['patches']):
+                raise RuntimeError('a frozen snapshot references this patch; never overwrite it')
+        history=DATA/'unfrozen-patches';history.mkdir(exist_ok=True)
+        previous=history/(args.name+'-'+sha(output)+'.patch.gz')
+        previous.write_bytes(gzip.compress(output.read_bytes(),mtime=0))
+    with tempfile.TemporaryDirectory(prefix='E20-patch-',dir=ROOT/'.local/runs') as temporary:
+        tree=Path(temporary)
+        archive=subprocess.check_output(['git','-C',SOURCE,'archive',frozen['pin']])
+        with tarfile.open(fileobj=io.BytesIO(archive)) as bundle: bundle.extractall(tree,filter='data')
+        subprocess.run(['git','init','--quiet',tree],check=True)
+        for record in stack:
+            if sha(ROOT/record['path'])!=record['sha256']: raise RuntimeError('frozen patch changed')
+            subprocess.run(['git','apply',ROOT/record['path']],cwd=tree,check=True)
+        parts=[]; changed=[]
+        for name in paths:
+            old,new=tree/name,SOURCE/name
+            before=old.read_text() if old.exists() else ''
+            after=new.read_text() if new.exists() else ''
+            if before==after: continue
+            changed.append(name);parts.append(f'diff --git a/{name} b/{name}\n')
+            if not old.exists():parts.append('new file mode 100644\n')
+            parts.extend(difflib.unified_diff(before.splitlines(keepends=True),after.splitlines(keepends=True),
+                fromfile=f'a/{name}' if old.exists() else '/dev/null',tofile=f'b/{name}' if new.exists() else '/dev/null'))
+        output.write_text(''.join(parts))
+        subprocess.run(['git','apply','--check',output],cwd=tree,check=True)
+        subprocess.run(['git','apply',output],cwd=tree,check=True)
+        for name in paths:
+            if (tree/name).read_bytes()!=(SOURCE/name).read_bytes():raise RuntimeError('source mismatch: '+name)
+    result=dict(project='meridian',pin=frozen['pin'],patches=stack+[dict(path=str(output.relative_to(ROOT)),sha256=sha(output))],
+        source_files={name:sha(SOURCE/name) for name in paths},changed=changed,source_equality='passed',apply_check='passed')
+    save(DATA/(args.name+'-patch.json'),result)
+    print(json.dumps(dict(changed=changed,patch=str(output.relative_to(ROOT)),sha256=sha(output))))
+
+def verify(manifest):
+    for name,digest in manifest['source_files'].items():
+        if sha(SOURCE/name)!=digest:raise RuntimeError('source changed: '+name)
+    for record in manifest['patches']:
+        if sha(ROOT/record['path'])!=record['sha256']:raise RuntimeError('patch changed')
+
+def gates(args):
+    manifest=json.loads((DATA/(args.patch+'-patch.json')).read_text());verify(manifest)
+    files=[name for name in manifest['changed'] if name.endswith('.rs')]
+    packages=['meridian-config','meridian-ghost','meridian-handoff','meridian-net','meridian-proxy','meridian-sidecar']
+    selected=[arg for package in packages for arg in ['-p',package]]
+    commands=[['rustfmt','--edition','2024','--check',*files],
+        ['cargo','clippy','--locked','--release',*selected,'--all-targets','--','-D','warnings'],
+        ['cargo','test','--locked','--release',*selected,'--','--skip','serve::tests::the_listener_queues_a_large_burst'],
+        ['cargo','build','--locked','--release','-p','meridian-proxy','--bin','meridian','-p','meridian-sidecar','--bin','meridian-sidecar','-p','meridian-testkit','--bin','e4-client']]
+    env=dict(os.environ,CARGO_INCREMENTAL='0',CARGO_PROFILE_RELEASE_LTO='thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',CARGO_BUILD_JOBS='2')
+    env.pop('CI',None);env.pop('CARGO_TARGET_DIR',None)
+    rows=[]
+    for index,command in enumerate(commands):
+        if (ROOT/'.local/quiet-request').exists():raise RuntimeError('quiet request active; no gate started')
+        began=time.monotonic();run=subprocess.run(command,cwd=SOURCE,env=env,capture_output=True,text=True)
+        output=(run.stdout+'\n'+run.stderr).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME')
+        (DATA/f'{args.name}-{index}.log.gz').write_bytes(gzip.compress(output.encode(),mtime=0))
+        row=dict(command=command,exit=run.returncode,seconds=time.monotonic()-began,test_results=re.findall(r'test result: .*',output))
+        rows.append(row);save(DATA/(args.name+'.json'),dict(source_manifest_sha256=sha(DATA/(args.patch+'-patch.json')),
+            environment={key:env[key] for key in ['CARGO_INCREMENTAL','CARGO_PROFILE_RELEASE_LTO','CARGO_PROFILE_RELEASE_CODEGEN_UNITS','CARGO_BUILD_JOBS']},commands=rows))
+        print(json.dumps(row),flush=True)
+        if run.returncode:print(output[-6000:]);raise SystemExit(run.returncode)
+    verify(manifest)
+
+def freeze(args):
+    manifest=json.loads((DATA/(args.patch+'-patch.json')).read_text());verify(manifest)
+    gate_path=DATA/(args.gates+'.json');gate=json.loads(gate_path.read_text())
+    if gate['source_manifest_sha256']!=sha(DATA/(args.patch+'-patch.json')) or len(gate['commands'])!=4 or any(r['exit'] for r in gate['commands']):raise RuntimeError('release gates not complete for these bytes')
+    original=json.loads((BASE/'candidate.json').read_text())
+    for name,digest in original['binaries'].items():
+        if sha(BASE/name)!=digest:raise RuntimeError('reactor-1 prerequisite changed')
+    target=ROOT/'.local/bin/meridian-e20'/args.name;target.mkdir(parents=True,exist_ok=False)
+    for name in ['horizon-client','horizon-bots','goliath-store','LEASES','canonical.json']:
+        shutil.copy2(BASE/name,target/name)
+    for name in ['meridian','meridian-sidecar','e4-client']:shutil.copy2(SOURCE/'target/release'/name,target/name)
+    original['projects']['meridian']=manifest
+    original.update(binaries={name:sha(target/name) for name in original['binaries']},candidate=False,
+        status='frozen-release-awaiting-M2-regressions',gates=dict(path=str(gate_path.relative_to(ROOT)),sha256=sha(gate_path),commands=gate['commands']))
+    save(target/'candidate.json',original);save(DATA/(args.name+'-build.json'),original)
+    launcher=ROOT/'scripts/goliath-cluster'
+    shutil.copy2(launcher,target/'cluster-launcher.py')
+    required=['horizon-client','meridian','meridian-sidecar','e4-client','goliath-store']
+    records={name:sha(target/name) for name in required}
+    final=dict(schema_version=1,kind='E20-derived-release-awaiting-M2-not-M4-acceptance',
+        base_e12_final_sha256=original['final_sha256'],candidate_sha256=sha(target/'candidate.json'),
+        projects=original['projects'],measurement_patches=original.get('measurement_patches'),
+        binaries={name:dict(path=str((target/name).relative_to(ROOT)),sha256=digest) for name,digest in records.items()},
+        store_binary_sha256=records['goliath-store'],
+        launcher=dict(path='cluster-launcher.py',sha256=sha(launcher),leased_marker='LEASES'),
+        validation=dict(release_gates='passed',native_M2='pending',capacity='unverified'))
+    save(target/'FINAL.json',final);save(target/'manifest.json',records)
+    (target/'READY').write_text('E20 frozen release; M2 and capacity remain unverified.\n')
+    print(json.dumps(dict(directory=str(target.relative_to(ROOT)),binaries=original['binaries']),indent=2))
+
+def combine(args):
+    """Compose verified frozen bytes only; never edit either component snapshot."""
+    proxy=args.proxy_bins.resolve();tiles=args.tile_bins.resolve()
+    for folder in [proxy,tiles]:
+        validate_snapshot(folder)
+        record=json.loads((folder/'candidate.json').read_text())
+        if record['profile']!='release' or record['source_equality']!='passed':raise RuntimeError('component not release/source verified')
+        for name,digest in record['binaries'].items():
+            if sha(folder/name)!=digest:raise RuntimeError('component executable changed: '+name)
+        for project in record['projects'].values():
+            for patch in project['patches']:
+                if sha(ROOT/patch['path'])!=patch['sha256']:raise RuntimeError('component patch changed')
+    record=json.loads((proxy/'candidate.json').read_text())
+    tile_record=json.loads((tiles/'candidate.json').read_text())
+    if sha(tiles/'horizon-client')!=args.engine_sha256:raise RuntimeError('engine differs from reviewer selection')
+    proof=args.tile_proof.resolve()
+    if sha(proof)!=args.tile_proof_sha256:raise RuntimeError('tile source proof changed')
+    tile_build=json.loads((tiles/'build.json').read_text())
+    if tile_build['status']!='complete' or tile_build['source_proof_sha256']!=args.tile_proof_sha256:raise RuntimeError('tile build/proof identity mismatch')
+    for name in ['horizon-bots','goliath-store','meridian-sidecar','e4-client']:
+        if record['binaries'][name]!=tile_record['binaries'][name]:raise RuntimeError('prerequisite mismatch: '+name)
+    if sha(proxy/'LEASES')!=sha(tiles/'LEASES'):raise RuntimeError('lease marker mismatch')
+    target=ROOT/'.local/bin/meridian-e20'/args.name;target.mkdir(parents=True,exist_ok=False)
+    for name in record['binaries']:shutil.copy2((tiles if name=='horizon-client' else proxy)/name,target/name)
+    shutil.copy2(proxy/'LEASES',target/'LEASES');shutil.copy2(tiles/'canonical.json',target/'canonical.json')
+    record['projects']['horizon']=tile_record['projects']['horizon']
+    record['measurement_patches']=tile_record['measurement_patches']
+    record['e21_source_files']=tile_record['e21_source_files']
+    record.update(kind='E20-combined-scheduler-and-warmtick-release-awaiting-M2',candidate=False,status='frozen-release-awaiting-combined-M2',
+        prereqs_sha256=sha(target/'canonical.json'),binaries={name:sha(target/name) for name in record['binaries']},
+        component_sources=dict(proxy=dict(path=str(proxy.relative_to(ROOT)),candidate_sha256=sha(proxy/'candidate.json')),
+            tiles=dict(path=str(tiles.relative_to(ROOT)),candidate_sha256=sha(tiles/'candidate.json'),build_sha256=sha(tiles/'build.json'),
+                source_proof=str(proof.relative_to(ROOT)),source_proof_sha256=sha(proof))))
+    save(target/'candidate.json',record);save(DATA/(args.name+'-build.json'),record)
+    shutil.copy2(proxy/'cluster-launcher.py',target/'cluster-launcher.py')
+    if sha(target/'cluster-launcher.py')!=sha(tiles/'cluster-launcher.py'):raise RuntimeError('component launcher mismatch')
+    required=['horizon-client','meridian','meridian-sidecar','e4-client','goliath-store']
+    binaries={name:record['binaries'][name] for name in required}
+    final=dict(schema_version=1,kind='E20-combined-release-awaiting-M2-not-M4-acceptance',
+        base_e12_final_sha256=record['final_sha256'],candidate_sha256=sha(target/'candidate.json'),projects=record['projects'],measurement_patches=record['measurement_patches'],
+        binaries={name:dict(path=str((target/name).relative_to(ROOT)),sha256=digest) for name,digest in binaries.items()},
+        store_binary_sha256=binaries['goliath-store'],launcher=dict(path='cluster-launcher.py',sha256=sha(target/'cluster-launcher.py'),leased_marker='LEASES'),
+        validation=dict(component_release_gates='passed',combined_native_M2='pending',capacity='unverified'))
+    save(target/'FINAL.json',final);save(target/'manifest.json',binaries)
+    (target/'READY').write_text('E20 frozen combined release. Combined M2 and capacity remain unverified.\n')
+    validate_snapshot(target)
+    print(json.dumps(dict(directory=str(target.relative_to(ROOT)),binaries=record['binaries']),indent=2))
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest='action',required=True)
+    p=sub.add_parser('patch');p.add_argument('--name',required=True);p.add_argument('--after');p.add_argument('--replace-unfrozen',action='store_true')
+    p=sub.add_parser('gates');p.add_argument('--name',required=True);p.add_argument('--patch',required=True)
+    p=sub.add_parser('freeze');p.add_argument('--name',required=True);p.add_argument('--patch',required=True);p.add_argument('--gates',required=True)
+    p=sub.add_parser('combine');p.add_argument('--name',required=True);p.add_argument('--proxy-bins',type=Path,required=True);p.add_argument('--tile-bins',type=Path,required=True)
+    p.add_argument('--engine-sha256',required=True);p.add_argument('--tile-proof',type=Path,required=True);p.add_argument('--tile-proof-sha256',required=True)
+    args=parser.parse_args();DATA.mkdir(parents=True,exist_ok=True);globals()[args.action](args)
+
+if __name__=='__main__':main()

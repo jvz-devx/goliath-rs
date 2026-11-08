@@ -1,0 +1,96 @@
+{
+  "status": "complete",
+  "source": ".local/src/horizon",
+  "profile": "release",
+  "incremental": false,
+  "lto": "thin",
+  "codegen_units": 1,
+  "source_proof_sha256": "de438131a8d7be828cb36eb6cf18ac1de13f84bda7f50a8269d33f1d67bcb15e",
+  "patch10_sha256": "2ea13f3e6941a5b56306bde91943e42e9b520814378f9f692a45427ec48d4ce4",
+  "commands": [
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 5.981855249992805,
+      "test_results": [],
+      "reused_from": "warmtick-1"
+    },
+    {
+      "label": "unit",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "game::dedicated::tile_cut::tests::"
+      ],
+      "exit": 0,
+      "seconds": 350.31921195899486,
+      "test_results": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1252 filtered out; finished in 0.00s"
+      ],
+      "reused_from": "warmtick-1"
+    },
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 32.7112840829941,
+      "test_results": []
+    },
+    {
+      "label": "release",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--bin",
+        "horizon-client"
+      ],
+      "exit": 0,
+      "seconds": 248.29752833402017,
+      "test_results": []
+    }
+  ],
+  "resumed_from": {
+    "path": "docs/experiments/data/E21/warmtick-1-build.json",
+    "sha256": "6356cd28ee9e6d0282a2e1016a2e8e34947705928a0f885824c1ddb1512e8193",
+    "status": "failed"
+  },
+  "directory": ".local/bin/horizon-e21-fc2868b2b/warmtick-2",
+  "binaries": {
+    "horizon-client": "ea4537868c90771e0d030ccfff1dbe36dace215a2c70d652dd86b38b84434090",
+    "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+    "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+    "meridian": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+    "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+    "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025"
+  },
+  "seconds": 281.1593291659956
+}

@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Run E18's complete M2 command set on one immutable combined E20 snapshot."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+import time
+from e14_snapshot_support import validate_snapshot
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E20'
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+def save(path,value):path.write_text(json.dumps(value,indent=2)+'\n')
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--bins',type=Path,required=True)
+    parser.add_argument('--prefix',required=True)
+    parser.add_argument('--no-other-agents',action='store_true')
+    parser.add_argument('--actions',default='proof,terrain,items,borders,live,teleport,lifecycle,physics-off,physics-on,physics-verify')
+    args=parser.parse_args();bins=args.bins.resolve();validate_snapshot(bins)
+    target=DATA/(args.prefix+'-M2.json')
+    if target.exists():raise RuntimeError('campaign exists; use a new prefix, do not overwrite evidence')
+    identity={name:sha(bins/name) for name in ['horizon-client','meridian','meridian-sidecar','horizon-bots','goliath-store','e4-client']}
+    harnesses=['e20-m2','e20-window','e20-check','e20-physics','e18_fixtures.py','e12_fixtures.py','e17-m4','goliath-cluster',
+        'e14-physics','e14-analyse','e14_support.py','e14_snapshot_support.py','e14-build10-check','e11_support.py','e18_process.py']
+    record=dict(kind='E20-M2-regression-campaign',status='running',binaries=identity,snapshot_candidate_sha256=sha(bins/'candidate.json'),
+        harness_sha256={name:sha(ROOT/'scripts'/name) for name in harnesses},commands=[])
+    DATA.mkdir(parents=True,exist_ok=True);save(target,record)
+    try:
+        for action in args.actions.split(','):
+            if action in ['proof','terrain','items','borders','live','teleport','lifecycle']:
+                name=args.prefix+'-'+action
+                inner=[sys.executable,'-B',str(ROOT/'scripts/e20-check'),action,'--bins',str(bins),'--name',name]
+                if action in ['proof','terrain']:inner+=['--crossings','1000' if action=='proof' else '100']
+            elif action in ['physics-off','physics-on']:
+                name=args.prefix+'-'+action
+                inner=[sys.executable,'-B',str(ROOT/'scripts/e20-physics'),'--snapshot',str(bins),'--variant','e12','--suite','--name',name]
+                if action=='physics-on':inner+=['--particles']
+            elif action=='physics-verify':
+                name=args.prefix+'-physics-verify'
+                inner=[sys.executable,'-B',str(ROOT/'scripts/e14-build10-check'),str(DATA/'physics'/(args.prefix+'-physics-off.json.gz')),
+                    str(DATA/'physics'/(args.prefix+'-physics-on.json.gz')),'--snapshot',str(bins),'--output',str(DATA/'physics'/(args.prefix+'-verification.json'))]
+            else:raise RuntimeError('unknown M2 action: '+action)
+            command=inner if action=='physics-verify' else [sys.executable,'-B',str(ROOT/'scripts/e20-window'),'--name',name,*(['--no-other-agents'] if args.no_other_agents else []),'--',*inner]
+            print('M2_START '+action,flush=True);began=time.monotonic()
+            completed=subprocess.run(command,cwd=ROOT,capture_output=True,text=True)
+            output=(completed.stdout+'\n'+completed.stderr).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME')
+            log=DATA/(name+'-command.log.gz');log.write_bytes(gzip.compress(output.encode(),mtime=0))
+            row=dict(action=action,command=[part.replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME') for part in command],
+                exit=completed.returncode,seconds=time.monotonic()-began,log=str(log.relative_to(ROOT)),log_sha256=sha(log))
+            record['commands'].append(row);save(target,record)
+            print('M2_END '+json.dumps(row),flush=True)
+            for executable,digest in identity.items():
+                if sha(bins/executable)!=digest:raise RuntimeError('snapshot changed during campaign')
+            for harness,digest in record['harness_sha256'].items():
+                if sha(ROOT/'scripts'/harness)!=digest:raise RuntimeError('harness changed during campaign: '+harness)
+            if completed.returncode:
+                print(output[-6000:],flush=True)
+                raise RuntimeError('combined M2 action failed: '+action)
+        if args.actions=='proof,terrain,items,borders,live,teleport,lifecycle,physics-off,physics-on,physics-verify':
+            verification=json.loads((DATA/'physics'/(args.prefix+'-verification.json')).read_text())
+            record['physics_verification']=verification
+            record['complete_command_set']=True
+        else:record['complete_command_set']=False
+        record['status']='complete'
+    except BaseException as error:
+        record.update(status='failed',error=repr(error));raise
+    finally:save(target,record)
+
+if __name__=='__main__':main()

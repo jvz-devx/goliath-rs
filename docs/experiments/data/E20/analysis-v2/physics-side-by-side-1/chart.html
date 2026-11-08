@@ -1,0 +1,68 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{--viz-series-1:var(--chart-1);--viz-series-2:var(--chart-2);--viz-series-3:var(--chart-3);--viz-series-4:var(--chart-4);--viz-series-5:var(--chart-5)}
+html,body{margin:0;background:transparent;color:var(--foreground);font-family:var(--font-sans)}
+#e20-ratios{position:relative}
+#e20-ratios h3{font-weight:500;margin:0 0 12px}
+#e20-ratios .plots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+#e20-ratios figure{margin:0;min-width:0}
+#e20-ratios figcaption{font-weight:500;margin-bottom:4px}
+#e20-ratios svg{display:block;width:100%;overflow:visible}
+#e20-ratios svg text{fill:var(--foreground);font-size:12px;font-weight:400}
+#e20-ratios .axis path,#e20-ratios .axis line{stroke:var(--border)}
+#e20-ratios .key{margin:8px 0 0}
+#e20-ratios .tip{position:absolute;display:none;pointer-events:none;background:var(--popover);color:var(--popover-foreground);border:1px solid var(--border);border-radius:var(--radius);padding:8px;z-index:2}
+@media(max-width:620px){#e20-ratios .plots{grid-template-columns:1fr}}
+</style></head><body>
+<div id="e20-ratios">
+<h3>Resolved speed ratios · v1 and v2</h3>
+<div class="plots"></div>
+<div class="key">Circle: minimum · diamond: median · vertical line: 0.95. Original is the retained index-0 window.</div>
+<div class="tip" role="tooltip"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script>
+(function(){
+const data={"groups":{"reference":{"walk":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9848524389366328,"median":0.9999435005473621,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9664040959999878,"median":0.9999020799999943,"below_095":0}},"sprint":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9975089399281263,"median":1.0000351882036314,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9660840960000155,"median":1.000027985195412,"below_095":0}},"sprint-jump":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9963683805433857,"median":0.9997834764581678,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9655124132784931,"median":0.999849983999995,"below_095":0}},"fly":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9991657980125238,"median":1.0000552215025469,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9662855680000249,"median":0.999996928000008,"below_095":0}}},"proxy":{"walk":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9795376389489189,"median":0.999925111224438,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9659484159999974,"median":0.9998172159999947,"below_095":0}},"sprint":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9991964188902775,"median":1.0000129882678241,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9994628348930297,"median":1.0000611840000033,"below_095":0}},"sprint-jump":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9983558970588341,"median":1.0001832617623072,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9663354880000206,"median":1.0001614079999985,"below_095":0}},"fly":{"v1":{"resolved":42,"unresolved":0,"minimum":0.999496735330622,"median":1.00004076044016,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9664742399999642,"median":1.0000349440000182,"below_095":0}}},"tiles":{"walk":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9846020547165488,"median":0.9999118426194828,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9897067519999997,"median":0.999912831999993,"below_095":0}},"sprint":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9994536564917654,"median":1.000080949306819,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9666385920000032,"median":1.0000592640000092,"below_095":0}},"sprint-jump":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9963298254044693,"median":0.9999999999999982,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9631897136911459,"median":1.0000394240000043,"below_095":0}},"fly":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9989595123392135,"median":0.999904958819253,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9662223359999721,"median":0.9998612480000049,"below_095":0}}},"combined":{"walk":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9820922350874612,"median":0.9999986981302915,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9664727039999987,"median":0.9999671040000015,"below_095":0}},"sprint":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9995916506093149,"median":1.0000187633249737,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9664117760000166,"median":1.0000209022763191,"below_095":0}},"sprint-jump":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9964816347979626,"median":1.0000619781602917,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9964355977909805,"median":1.0000942079999984,"below_095":0}},"fly":{"v1":{"resolved":42,"unresolved":0,"minimum":0.9975470972293694,"median":0.9999553191168237,"below_095":0},"v2":{"resolved":42,"unresolved":0,"minimum":0.9651343359999962,"median":0.999964159999984,"below_095":0}}}},"original_index0":{"v1":{"ratio":0.9401973950468919,"resolved":true},"v2":{"ratio":0.9909601279999974,"resolved":true}}};
+const root=document.getElementById('e20-ratios'),plots=root.querySelector('.plots'),tip=root.querySelector('.tip');
+const labels={reference:'Reference',proxy:'Proxy',tiles:'Tiles',combined:'Combined'};
+const colours={reference:'var(--viz-series-1)',proxy:'var(--viz-series-2)',tiles:'var(--viz-series-3)',combined:'var(--viz-series-4)',original:'var(--viz-series-5)'};
+const modes=['walk','sprint','sprint-jump','fly'];
+const all=[];for(const group of Object.values(data.groups))for(const mode of Object.values(group))for(const value of Object.values(mode))all.push(value.minimum,value.median);
+all.push(.95,data.original_index0.v1.ratio,data.original_index0.v2.ratio);
+const extent=d3.extent(all),padding=(extent[1]-extent[0])*.09;
+const domain=[extent[0]-padding,extent[1]+padding];
+let pinned=false;
+function show(event,row){const bounds=root.getBoundingClientRect();tip.style.display='block';tip.textContent=row.label+' · min '+row.minimum.toFixed(6)+' · median '+row.median.toFixed(6)+' · '+row.resolved+' resolved / '+row.unresolved+' unresolved';const width=tip.getBoundingClientRect().width;tip.style.left=Math.max(0,Math.min(bounds.width-width,event.clientX-bounds.left+10))+'px';tip.style.top=(event.clientY-bounds.top+12)+'px'}
+function draw(figure,mode){
+ const width=Math.floor(figure.clientWidth);if(width<200)return;
+ const rows=[];for(const group of Object.keys(labels))for(const version of ['v1','v2'])rows.push({...data.groups[group][mode][version],group,version,label:labels[group]+' '+version});
+ if(mode==='walk')for(const version of ['v1','v2'])rows.push({minimum:data.original_index0[version].ratio,median:data.original_index0[version].ratio,resolved:1,unresolved:0,group:'original',version,label:'Original '+version});
+ const rowHeight=matchMedia('(pointer:coarse)').matches?44:34,margin={left:106,right:12,top:18,bottom:48},height=margin.top+rowHeight*rows.length+margin.bottom;
+ const svg=d3.select(figure).select('svg').attr('viewBox','0 0 '+width+' '+height).attr('height',height);
+ svg.selectAll('*').remove();svg.append('title').text(mode+' speed ratio minima and medians');
+ svg.append('desc').text(rows.map(r=>r.label+': minimum '+r.minimum+', median '+r.median+', resolved '+r.resolved+', unresolved '+r.unresolved).join('; '));
+ const x=d3.scaleLinear().domain(domain).range([margin.left+7,width-margin.right-7]),bottom=height-margin.bottom;
+ svg.append('rect').attr('data-chart-frame','').attr('x',margin.left).attr('y',margin.top).attr('width',width-margin.left-margin.right).attr('height',bottom-margin.top).attr('fill','none').attr('stroke','var(--border)');
+ svg.append('line').attr('x1',x(.95)).attr('x2',x(.95)).attr('y1',margin.top).attr('y2',bottom).attr('stroke','var(--foreground)').attr('stroke-width',1).attr('stroke-dasharray','4 3');
+ svg.append('text').attr('x',x(.95)+3).attr('y',margin.top-5).text('0.95');
+ const groups=svg.selectAll('g.row').data(rows).join('g').attr('class','row').attr('transform',(d,i)=>'translate(0,'+(margin.top+(i+.5)*rowHeight)+')');
+ groups.append('text').attr('x',margin.left-7).attr('dy','.35em').attr('text-anchor','end').text(d=>d.label);
+ groups.append('line').attr('x1',d=>x(d.minimum)).attr('x2',d=>x(d.median)).attr('stroke',d=>colours[d.group]).attr('stroke-width',2).attr('stroke-dasharray',d=>d.version==='v2'?'3 2':null);
+ groups.append('circle').attr('cx',d=>x(d.minimum)).attr('r',3.5).attr('fill',d=>colours[d.group]);
+ groups.append('path').attr('d',d3.symbol().type(d3.symbolDiamond).size(38)).attr('transform',d=>'translate('+x(d.median)+',0)').attr('fill',d=>colours[d.group]);
+ function anchor(value){return x(value)>width-margin.right-43?'end':'start'}
+ function textX(value){return x(value)+(anchor(value)==='end'?-5:5)}
+ groups.append('text').attr('x',d=>textX(d.minimum)).attr('y',-6).attr('text-anchor',d=>anchor(d.minimum)).text(d=>d.minimum.toFixed(4));
+ groups.append('text').attr('x',d=>textX(d.median)).attr('y',13).attr('text-anchor',d=>anchor(d.median)).text(d=>Math.abs(d.minimum-d.median)<1e-9?'':d.median.toFixed(4));
+ groups.append('rect').attr('data-chart-hit','').attr('x',margin.left).attr('y',-rowHeight/2).attr('width',width-margin.left-margin.right).attr('height',rowHeight).attr('fill','transparent')
+ .on('pointermove',function(event,d){if(!pinned)show(event,d)}).on('pointerleave',function(){if(!pinned)tip.style.display='none'}).on('pointerdown',function(event,d){pinned=!pinned;if(pinned)show(event,d);else tip.style.display='none'});
+ svg.append('g').attr('class','axis').attr('transform','translate(0,'+bottom+')').call(d3.axisBottom(x).ticks(width<400?3:4).tickFormat(d3.format('.3f')));
+ svg.append('text').attr('class','axis-title').attr('data-axis','x').attr('x',(margin.left+width-margin.right)/2).attr('y',height-7).attr('text-anchor','middle').text('Speed ratio (wall / no-wall)');
+ svg.append('text').attr('class','axis-title').attr('data-axis','y').attr('x',0).attr('y',11).text('Snapshot / analysis');
+ const textBounds=[...svg.node().querySelectorAll('text')].map(node=>node.getBBox());figure.dataset.measuredLabels=String(textBounds.length);
+}
+for(const mode of modes){const figure=document.createElement('figure');const caption=document.createElement('figcaption');caption.textContent=mode;figure.append(caption);const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('role','img');figure.append(svg);plots.append(figure);new ResizeObserver(()=>draw(figure,mode)).observe(figure)}
+})();
+</script></body></html>

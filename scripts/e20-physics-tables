@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Publish complete ratio arrays and per-run v1/v2 counts without replacing evidence."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import statistics
+import e11_support as support
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E20'
+MODES=['walk','sprint','sprint-jump','fly']
+NAMES={'reference':'Accepted reference','proxy':'Proxy change only','tiles':'Tile change only','combined':'Combined replication'}
+
+def stats(values,unresolved):
+    return dict(resolved=len(values),unresolved=unresolved,minimum=min(values,default=None),median=statistics.median(values) if values else None,
+        below_095=sum(value<.95 for value in values),ratios=values)
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--audit',type=Path,required=True);parser.add_argument('--name',required=True);args=parser.parse_args()
+    audit=args.audit.resolve();manifest=json.loads((audit/'manifest.json').read_text())
+    target=DATA/'analysis-v2'/args.name;target.mkdir(parents=True,exist_ok=False)
+    groups={group:{mode:{version:dict(values=[],unresolved=0) for version in ['v1','v2']} for mode in MODES} for group in NAMES}
+    original={};runs=[]
+    for entry in manifest['runs']:
+        if 'analysis_error' in entry:continue
+        derived=json.loads((audit/(entry['id']+'.json')).read_text());path=entry['path']
+        group=next((group for group in ['reference','proxy','tiles'] if f'physics-isolation1-{group}-' in path),None)
+        if 'physics-combined-replication1-' in path:group='combined'
+        for row in derived['rows']:
+            if group:
+                for version in ['v1','v2']:
+                    bucket=groups[group][row['mode']][version]
+                    if row[version+'_resolved']:bucket['values'].append(row[version]['speed_ratio'])
+                    else:bucket['unresolved']+=1
+        if path.endswith('/combined1-physics-off.json.gz'):
+            first=derived['rows'][0]
+            original={version:dict(ratio=first[version]['speed_ratio'],resolved=first[version+'_resolved']) for version in ['v1','v2']}
+        runs.append({key:entry.get(key) for key in ['id','path','trials','v1_resolved','v2_resolved','v1_failures','v2_failures','accepted_reference','reference_coverage_pass','lost_resolution']})
+    groups={group:{mode:{version:stats(value['values'],value['unresolved']) for version,value in versions.items()} for mode,versions in modes.items()} for group,modes in groups.items()}
+    result=dict(groups=groups,original_index0=original,runs=runs,audit_manifest_sha256=hashlib.sha256((audit/'manifest.json').read_bytes()).hexdigest())
+    support.save(target/'ratios-and-counts.json',result)
+    fmt=lambda value:'n/a' if value is None else f'{value:.6f}'
+    lines=['# E20. Physics analysis v1 and v2','',
+        'The fixed comparison has four groups of three full particle-off suites, plus the original combined run kept separately. No run was added or replaced after seeing its ratio. The 0.95 line is unchanged.','',
+        'V1 is unchanged. V2 keeps the trial window untouched and maps its physics-step offsets and observed endpoint placement onto the no-wall trajectory. It divides the matched baseline displacement by its own elapsed timestamps, never by a forced second or nominal tick rate. Missing corresponding observations remain unresolved.','',
+        f'Full precision arrays and per-run counts are in `data/E20/analysis-v2/{args.name}/ratios-and-counts.json`. Each list is in round/trial order; no resolved ratio is trimmed.','',
+        '| Group | Mode | V1 min | V1 median | V2 min | V2 median | Resolved v1/v2 | Unresolved v1/v2 | Below 0.95 v1/v2 |',
+        '| --- | --- | ---: | ---: | ---: | ---: | --- | --- | --- |']
+    for group,modes in groups.items():
+        for mode,versions in modes.items():
+            a,b=versions['v1'],versions['v2']
+            lines.append(f'| {NAMES[group]} | {mode} | {fmt(a["minimum"])} | {fmt(a["median"])} | {fmt(b["minimum"])} | {fmt(b["median"])} | {a["resolved"]}/{b["resolved"]} | {a["unresolved"]}/{b["unresolved"]} | {a["below_095"]}/{b["below_095"]} |')
+    lines+=['','## Every retained run','',
+        'A dash means no resolved budget failure. Historical failing runs remain failing; a newly failing window is included even when that run already failed v1.','',
+        '| Run | Input | Trials | Resolved v1/v2 | Failing indices v1 | Failing indices v2 | Lost resolution |',
+        '| --- | --- | ---: | --- | --- | --- | --- |']
+    for row in runs:
+        lines.append(f'| {row["id"]} | `{row["path"]}` | {row["trials"]} | {row["v1_resolved"]}/{row["v2_resolved"]} | {row["v1_failures"] or "-"} | {row["v2_failures"] or "-"} | {row["lost_resolution"] or "-"} |')
+    lines+=['','## Complete resolved ratio lists','',
+        'The following lists retain twelve significant digits for readability. The linked JSON retains the full floating-point values.','']
+    for group,modes in groups.items():
+        lines+=['### '+NAMES[group],'']
+        for mode,versions in modes.items():
+            for version,bucket in versions.items():
+                values=bucket['ratios'];lines+=['#### '+mode+' '+version,'','```text']
+                lines +=[', '.join(f'{value:.12g}' for value in values[index:index+7]) for index in range(0,len(values),7)]
+                lines+=['```','']
+    print('\n'.join(lines))
+
+if __name__=='__main__':main()

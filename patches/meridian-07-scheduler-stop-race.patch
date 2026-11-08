@@ -1,0 +1,63 @@
+diff --git a/crates/meridian-proxy/src/terrain.rs b/crates/meridian-proxy/src/terrain.rs
+--- a/crates/meridian-proxy/src/terrain.rs
++++ b/crates/meridian-proxy/src/terrain.rs
+@@ -230,6 +230,11 @@
+             return false;
+         }
+         if !work.busy.swap(true, Ordering::AcqRel) {
++            // The previous worker can finish between the first done check
++            // and this claim. Its release of busy makes done visible here.
++            if work.done.load(Ordering::Acquire) {
++                return false;
++            }
+             let next = Arc::clone(&work);
+             if !worker.submit(move || {
+                 let keep = (next.run.lock().expect("terrain reconciliation poisoned"))();
+@@ -362,6 +367,47 @@
+     }
+ 
+     #[test]
++    fn completed_shared_reconciliation_is_not_scheduled_again() {
++        let (pool, mut drivers) = Pool::new(1).unwrap();
++        let (tasks, mut workers) = Tasks::new(1, 4);
++        pool.install_tasks(&tasks);
++        let io = pool.affinity();
++        let calls = Arc::new(AtomicUsize::new(0));
++        let count = Arc::clone(&calls);
++        let (ran, done) = mpsc::channel();
++        schedule(
++            io.clone(),
++            || false,
++            move || {
++                count.fetch_add(1, Ordering::Relaxed);
++                ran.send(()).unwrap();
++                false
++            },
++        )
++        .unwrap();
++        let worker = thread::spawn(move || workers.pop().unwrap().run());
++        let driver = thread::spawn(move || drivers.pop().unwrap().run().unwrap());
++        done.recv_timeout(Duration::from_secs(2)).unwrap();
++        let (tick, ticks) = mpsc::channel();
++        let mut n = 0;
++        io.schedule(Duration::from_millis(20), move || {
++            n += 1;
++            if n == 3 {
++                tick.send(()).unwrap();
++            }
++            n < 3
++        })
++        .unwrap();
++        ticks.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert_eq!(calls.load(Ordering::Relaxed), 1);
++        assert!(done.try_recv().is_err());
++        pool.stop();
++        driver.join().unwrap();
++        tasks.stop();
++        worker.join().unwrap();
++    }
++
++    #[test]
+     fn an_interior_needs_no_foreign_reader() {
+         assert!(!near([256., 2., 256.], [0, 0], 512, [-1, 0], 5));
+         assert!(!near([256., 2., 256.], [0, 0], 512, [0, -1], 5));

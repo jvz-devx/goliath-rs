@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Audit one complete E20 M2 campaign without changing native samples or gates."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import e11_support as support
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E20'
+ACTIONS=['proof','terrain','items','borders','live','teleport','lifecycle','physics-off','physics-on','physics-verify']
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def summarize(prefix,bins):
+    path=DATA/(prefix+'-M2.json');campaign=json.loads(path.read_text())
+    failures=[]
+    complete_set=[row['action'] for row in campaign['commands']]==ACTIONS
+    if not complete_set:failures.append('M2 command order/set incomplete')
+    if campaign['status']!='complete':failures.append('native campaign failed')
+    if any(row['exit'] for row in campaign['commands']):failures.append('native command failed')
+    inputs={str(path.relative_to(ROOT)):sha(path)}
+    for executable,digest in campaign['binaries'].items():
+        if sha(bins/executable)!=digest:failures.append('snapshot changed: '+executable)
+    for action in ACTIONS[:-1]:
+        quiet_path=DATA/(prefix+'-'+action+'-quiet.json')
+        quiet=json.loads(quiet_path.read_text());inputs[str(quiet_path.relative_to(ROOT))]=sha(quiet_path)
+        if quiet['status']!='complete' or not quiet.get('noise_valid') or quiet['load_start'][0]>4 or quiet['seconds']>=1800:
+            failures.append('invalid quiet/noise window: '+action)
+        if action not in ['physics-off','physics-on']:
+            outcome_path=DATA/(prefix+'-'+action+'-outcome.json')
+            outcome=json.loads(outcome_path.read_text());inputs[str(outcome_path.relative_to(ROOT))]=sha(outcome_path)
+            if outcome['status']!='complete':failures.append('fixture incomplete: '+action)
+    proof_path=DATA/(prefix+'-proof.json');proof=json.loads(proof_path.read_text());inputs[str(proof_path.relative_to(ROOT))]=sha(proof_path)
+    summary=proof['summary'];gap=summary['input_gap_ms']
+    if len(proof['trials'])!=1000 or proof['disconnects'] or summary['cas_visible']!=1000:failures.append('crossing population/CAS/disconnect proof failed')
+    if gap['p95']>=150 or gap['p99']>=300:failures.append('M2 input-gap budget failed')
+    if summary['max_correction_blocks']>.1:failures.append('M2 correction budget failed')
+    if not proof['restart']['all_four_started'] or not proof['restart']['inventory_equal']:failures.append('all-tile restart failed')
+    verification_path=DATA/'physics'/(prefix+'-verification.json')
+    physics=json.loads(verification_path.read_text());inputs[str(verification_path.relative_to(ROOT))]=sha(verification_path)
+    if physics['status']!='passed' or physics['actual_crossings']!=112 or physics['sprint_packet_passes']!=28:failures.append('unchanged physics checker failed')
+    return dict(kind='E20-M2-derived-audit',command_set_complete=complete_set,native_campaign_status=campaign['status'],passed=not failures,failures=failures,
+        binaries=campaign['binaries'],input_sha256=inputs,crossings=len(proof['trials']),input_gap_ms=gap,
+        max_correction_blocks=summary['max_correction_blocks'],disconnects=proof['disconnects'],restart=proof['restart'],
+        physics=dict(status=physics['status'],actual_crossings=physics['actual_crossings'],resolved_windows=physics['resolved_windows'],
+            unresolved=physics['unresolved'],sprint_packet_passes=physics['sprint_packet_passes'],failures=physics['failures']),
+        acceptance='builder regression evidence; independent milestone acceptance remains separate')
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--prefix',required=True);parser.add_argument('--bins',type=Path,required=True);args=parser.parse_args()
+    result=summarize(args.prefix,args.bins.resolve())
+    support.save(DATA/(args.prefix+'-M2-summary.json'),result)
+    print(json.dumps({key:result[key] for key in ['passed','failures','crossings','input_gap_ms','max_correction_blocks']},indent=2))
+    print(json.dumps({key:result['physics'][key] for key in ['actual_crossings','resolved_windows','sprint_packet_passes']},indent=2))
+    raise SystemExit(0 if result['passed'] else 1)
+
+if __name__=='__main__':main()

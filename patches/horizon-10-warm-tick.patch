@@ -1,0 +1,84 @@
+diff --git a/crates/horizon-client/src/game/dedicated/tile_cut.rs b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+--- a/crates/horizon-client/src/game/dedicated/tile_cut.rs
++++ b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+@@ -91,6 +91,8 @@
+     pending: usize,
+     poisoned: bool,
+     initialized: bool,
++    /// Speculative encoding runs at most once per simulation tick, not per control poll.
++    warm_tick: Option<i64>,
+ }
+ struct Terrain {
+     prefix: String,
+@@ -204,6 +206,7 @@
+             pending: 0,
+             poisoned: false,
+             initialized: false,
++            warm_tick: None,
+         })
+     }
+     fn ready(&mut self) -> Result<()> {
+@@ -514,7 +517,10 @@
+         let Some(state) = runtime else {
+             return;
+         };
+-        if !state.initialized || state.poisoned || state.warming.swap(true, Ordering::AcqRel) {
++        if !state.initialized
++            || state.poisoned
++            || !reserve_warm_tick(&mut state.warm_tick, self.world.game_time, &state.warming)
++        {
+             return;
+         }
+         let back = self.dim;
+@@ -958,3 +964,51 @@
+         }
+     }
+ }
++
++/// The idle control prelude can run many times between ticks. Only speculative
++/// preparation is coalesced: real cuts still validate the live pointer and block
++/// entity revision, and encode a fresh image whenever this cache is stale.
++fn reserve_warm_tick(last: &mut Option<i64>, tick: i64, warming: &AtomicBool) -> bool {
++    if *last == Some(tick) || warming.swap(true, Ordering::AcqRel) {
++        return false;
++    }
++    *last = Some(tick);
++    true
++}
++
++#[cfg(test)]
++mod tests {
++    use super::reserve_warm_tick;
++    use std::sync::atomic::{AtomicBool, Ordering};
++
++    #[test]
++    fn completed_warm_pass_is_not_repeated_by_idle_control_polls() {
++        let mut last = None;
++        let warming = AtomicBool::new(false);
++        assert!(reserve_warm_tick(&mut last, 100, &warming));
++        warming.store(false, Ordering::Release);
++        for _ in 0..1_000 {
++            assert!(!reserve_warm_tick(&mut last, 100, &warming));
++        }
++        assert!(reserve_warm_tick(&mut last, 101, &warming));
++    }
++
++    #[test]
++    fn busy_worker_does_not_consume_the_next_ticks_opportunity() {
++        let mut last = None;
++        let warming = AtomicBool::new(false);
++        assert!(reserve_warm_tick(&mut last, 100, &warming));
++        assert!(!reserve_warm_tick(&mut last, 101, &warming));
++        warming.store(false, Ordering::Release);
++        assert!(reserve_warm_tick(&mut last, 101, &warming));
++    }
++
++    #[test]
++    fn reset_tick_still_prepares_a_new_image() {
++        let mut last = None;
++        let warming = AtomicBool::new(false);
++        assert!(reserve_warm_tick(&mut last, 100, &warming));
++        warming.store(false, Ordering::Release);
++        assert!(reserve_warm_tick(&mut last, 0, &warming));
++    }
++}

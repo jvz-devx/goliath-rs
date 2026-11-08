@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Three fixed combined-1 off suites through the unchanged isolation harness."""
+import hashlib
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+loader=importlib.machinery.SourceFileLoader('e20_combined_replication_base',str(ROOT/'scripts/e20-physics-isolation'))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+base=importlib.util.module_from_spec(spec);loader.exec_module(base)
+base.GROUPS={'combined':ROOT/'.local/bin/meridian-e20/combined-1'}
+base.ORDERS=[['combined'],['combined'],['combined']]
+original_summary=base.summarize
+original_save=base.support.save
+adapter_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+def summarize(record):
+    result=original_summary(record)
+    result.update(kind='E20-fixed-combined-replication-summary',planned_runs=3)
+    return result
+
+def save(path,value):
+    value['replication_adapter_sha256']=adapter_sha256
+    if 'harness_sha256' in value:value['harness_sha256']['e20-combined-replication']=adapter_sha256
+    if value.get('kind')=='E20-fixed-physics-isolation':value['kind']='E20-fixed-combined-replication'
+    return original_save(path,value)
+
+base.summarize=summarize
+base.support.save=save
+
+if __name__=='__main__':base.main()

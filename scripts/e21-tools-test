@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Owns E21's signal-free diagnostic and publication regression checks."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import unittest
+import subprocess
+import sys
+from types import SimpleNamespace
+from unittest.mock import Mock
+from unittest.mock import patch
+
+loader=importlib.machinery.SourceFileLoader('e21_profile',str(Path(__file__).with_name('e21-tile-profile')))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+profile=importlib.util.module_from_spec(spec)
+loader.exec_module(profile)
+
+
+class DiagnosticContract(unittest.TestCase):
+    def test_warm_cut_uses_the_server_stop_api_not_the_child_reader_api(self):
+        loader=importlib.machinery.SourceFileLoader('e21_check_contract',str(Path(__file__).with_name('e21-check')))
+        spec=importlib.util.spec_from_loader(loader.name,loader)
+        check=importlib.util.module_from_spec(spec);loader.exec_module(check)
+        process=SimpleNamespace(kill=Mock(),wait=Mock())
+        server=SimpleNamespace(process=process,stop=Mock())
+        sequence=iter(range(1,5))
+        def ask(command):
+            if command.startswith('tile-cut '):return dict(ok=True,sequence=next(sequence),tick=46)
+            return {'output':['E21_FRESH_AFTER_CRASH']} if 'execute if block' in command else {'output':[]}
+        tile=SimpleNamespace(marker=[8,8],token='fixture',ask=ask,server=server,
+            control=[SimpleNamespace(close=Mock()),SimpleNamespace(close=Mock())],start=Mock())
+        module=SimpleNamespace(save=Mock())
+        instance=SimpleNamespace(tiles={'a':tile},publish_state=Mock())
+        with patch.object(check.time,'sleep'):
+            check.warm_cut(module,instance,SimpleNamespace(name='fixture'))
+        process.kill.assert_called_once()
+        server.stop.assert_called_once()
+        tile.start.assert_called_once()
+        self.assertEqual(module.save.call_args.args[1]['status'],'complete')
+
+    def test_diagnostic_cli_help_is_well_formed(self):
+        result=subprocess.run([sys.executable,'-B',str(Path(__file__).with_name('e21-tile-profile')),'--help'],capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('--contained-crossers',result.stdout)
+
+    def test_stack_summary_counts_waiting_separately(self):
+        loader=importlib.machinery.SourceFileLoader('e21_stack_summary',str(Path(__file__).with_name('e21-sample-summary')))
+        spec=importlib.util.spec_from_loader(loader.name,loader)
+        summary=importlib.util.module_from_spec(spec);loader.exec_module(summary)
+        roots=summary.parse('    100 Thread_1: main\n    + 100 poll_server_control\n    + ! 70 __semwait_signal\n    + ! 30 hash_one\n')
+        result=summary.summarize(roots[0])
+        self.assertEqual(result['occupancy'],{'blocked_or_waiting':70,'control_including_inlined_generation_warming':30})
+        self.assertEqual(sum(result['occupancy'].values()),100)
+
+    def test_uncapped_budget_never_signals_or_starts_a_thread(self):
+        with patch('os.kill',side_effect=AssertionError('must not signal')),patch('threading.Thread.start',side_effect=AssertionError('must not start limiter')):
+            budget=profile.UncappedBudget([123],4).start()
+            self.assertTrue(budget.done.is_set())
+            self.assertEqual(budget.report()['stop_cycles'],0)
+            budget.stop()
+
+    def test_outside_names_redacted_without_losing_counters(self):
+        raw={'outside_process_names':{'90':'private-app'},'phases':{'steady':{'outside':[{'pid':90,'name':'private-app','cpu_s':12,'cores':.2}]},'warmup':None},'samples':[{'outside_cpu_s_delta':{'90':.1}}]}
+        with patch.object(profile.OriginalProcessSampler,'report',return_value=raw):
+            result=profile.ProcessSampler().report()
+        self.assertEqual(result['outside_process_names'],{'90':'outside'})
+        self.assertEqual(result['phases']['steady']['outside'],[{'pid':90,'name':'outside','cpu_s':12,'cores':.2}])
+        self.assertEqual(result['samples'],[{'outside_cpu_s_delta':{'90':.1}}])
+
+    def test_native_thread_delta_separates_cpu_from_blocked_samples(self):
+        first={'a':{'1':dict(at=0,cpu_s=2,user_cpu_s=1,system_cpu_s=1)}}
+        last={'a':{'1':dict(at=10,name='main',cpu_s=7,user_cpu_s=4,system_cpu_s=3)}}
+        result=profile.thread_deltas(first,last)['a']
+        self.assertEqual(result['main']['cores'],.5)
+        self.assertEqual(result['main']['user_cores'],.3)
+        self.assertEqual(result['main']['system_cores'],.2)
+
+
+if __name__=='__main__':unittest.main()

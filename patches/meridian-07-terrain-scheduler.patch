@@ -1,0 +1,784 @@
+diff --git a/crates/meridian-net/src/io_pool.rs b/crates/meridian-net/src/io_pool.rs
+--- a/crates/meridian-net/src/io_pool.rs
++++ b/crates/meridian-net/src/io_pool.rs
+@@ -20,6 +20,7 @@
+ const TURN_BYTES: usize = 256 * 1024;
+ const WAKE: Token = Token(0);
+ mod tasks;
++mod timers;
+ pub use tasks::{Tasks, Worker};
+ static NEXT_DRIVER: AtomicUsize = AtomicUsize::new(1);
+ thread_local! {
+@@ -64,6 +65,7 @@
+ 
+ struct Shard {
+     identity: usize,
++    timer_slots: Arc<AtomicUsize>,
+     commands: mpsc::SyncSender<Command>,
+     wake: Waker,
+     slots: AtomicUsize,
+@@ -204,6 +206,7 @@
+ }
+ 
+ enum Command {
++    Schedule(timers::Periodic),
+     Install(Box<Entry>),
+     Dirty(Token),
+     Resume(Token),
+@@ -236,6 +239,7 @@
+             let (commands, receive) = mpsc::sync_channel(CONNECTIONS * 3 + 1);
+             let shard = Arc::new(Shard {
+                 identity: NEXT_DRIVER.fetch_add(1, Ordering::Relaxed),
++                timer_slots: Arc::new(AtomicUsize::new(0)),
+                 commands,
+                 wake,
+                 slots: AtomicUsize::new(0),
+@@ -245,6 +249,7 @@
+             });
+             drivers.push(Driver {
+                 identity: shard.identity,
++                timers: timers::Timers::default(),
+                 poll,
+                 receive,
+                 entries: HashMap::new(),
+@@ -305,6 +310,23 @@
+ }
+ 
+ impl Affinity {
++    /// Runs short, nonblocking work on this driver until the callback returns false.
++    /// Blocking IO belongs on the caller-owned bounded workers via `submit`.
++    pub fn schedule(
++        &self,
++        interval: Duration,
++        callback: impl FnMut() -> bool + Send + 'static,
++    ) -> io::Result<()> {
++        if self.0.stopping.load(Ordering::Acquire) {
++            return Err(io::Error::other("IO pool is stopping"));
++        }
++        let timer = timers::Periodic::new(&self.0.timer_slots, interval, callback)?;
++        self.0
++            .commands
++            .try_send(Command::Schedule(timer))
++            .map_err(|_| io::Error::other("IO driver stopped before timer admission"))?;
++        self.0.notify()
++    }
+     pub fn submit(&self, job: impl FnOnce() + Send + 'static) -> bool {
+         self.0.tasks.get().is_some_and(|tasks| tasks.submit(job))
+     }
+@@ -380,6 +402,7 @@
+ /// Application-owned selector loop. No task creates a thread per connection.
+ pub struct Driver {
+     identity: usize,
++    timers: timers::Timers,
+     poll: Poll,
+     receive: mpsc::Receiver<Command>,
+     entries: HashMap<Token, Entry>,
+@@ -415,6 +438,7 @@
+             while let Ok(command) = self.receive.try_recv() {
+                 match command {
+                     Command::Stop => return Ok(()),
++                    Command::Schedule(timer) => self.timers.push(timer),
+                     #[cfg(test)]
+                     Command::AfterDrain(reply) => after_drain.push(reply),
+                     Command::Dirty(token) => {
+@@ -459,6 +483,7 @@
+                     }
+                 }
+             }
++            self.timers.tick();
+             let reading: Vec<_> = self.reading.drain().collect();
+             for token in reading {
+                 let Some(entry) = self.entries.get_mut(&token) else {
+@@ -507,7 +532,11 @@
+             if LOCAL_WORK.replace(false) {
+                 continue;
+             }
+-            let timeout = (!self.reading.is_empty()).then_some(Duration::ZERO);
++            let timeout = if self.reading.is_empty() {
++                self.timers.timeout()
++            } else {
++                Some(Duration::ZERO)
++            };
+             match self.poll.poll(&mut events, timeout) {
+                 Ok(()) => {}
+                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+diff --git a/crates/meridian-net/src/io_pool/tasks.rs b/crates/meridian-net/src/io_pool/tasks.rs
+--- a/crates/meridian-net/src/io_pool/tasks.rs
++++ b/crates/meridian-net/src/io_pool/tasks.rs
+@@ -3,8 +3,12 @@
+ 
+ type Job = Box<dyn FnOnce() + Send>;
+ pub struct Tasks {
++    admission: Mutex<Admission>,
++    workers: usize,
++}
++struct Admission {
+     send: mpsc::SyncSender<Option<Job>>,
+-    workers: usize,
++    stopped: bool,
+ }
+ pub struct Worker {
+     receive: Arc<Mutex<mpsc::Receiver<Option<Job>>>>,
+@@ -15,7 +19,13 @@
+         let (send, receive) = mpsc::sync_channel(capacity);
+         let receive = Arc::new(Mutex::new(receive));
+         (
+-            Arc::new(Self { send, workers }),
++            Arc::new(Self {
++                admission: Mutex::new(Admission {
++                    send,
++                    stopped: false,
++                }),
++                workers,
++            }),
+             (0..workers)
+                 .map(|_| Worker {
+                     receive: Arc::clone(&receive),
+@@ -25,14 +35,26 @@
+     }
+     /// A full queue rejects a command before it runs. The session stays live.
+     pub fn submit(&self, job: impl FnOnce() + Send + 'static) -> bool {
+-        self.send.try_send(Some(Box::new(job))).is_ok()
++        let admission = self.admission.lock().expect("task admission poisoned");
++        !admission.stopped && admission.send.try_send(Some(Box::new(job))).is_ok()
+     }
+     pub fn stop(&self) {
++        // Serialize the admission boundary, not blocking sends. Every accepted
++        // job precedes every stop sentinel; no timer may enqueue behind them.
++        let send = {
++            let mut admission = self.admission.lock().expect("task admission poisoned");
++            if admission.stopped {
++                return;
++            }
++            admission.stopped = true;
++            admission.send.clone()
++        };
+         for _ in 0..self.workers {
+-            let _ = self.send.send(None);
++            let _ = send.send(None);
+         }
+     }
+ }
++
+ impl Worker {
+     pub fn run(self) {
+         loop {
+@@ -48,3 +70,20 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn shutdown_drains_accepted_jobs_and_refuses_late_admission() {
++        let (tasks, mut workers) = Tasks::new(1, 2);
++        let (sent, received) = mpsc::channel();
++        assert!(tasks.submit(move || sent.send(()).unwrap()));
++        tasks.stop(); // Stop fits behind the one accepted job.
++        assert!(!tasks.submit(|| panic!("late work must never run")));
++        workers.pop().unwrap().run();
++        received.try_recv().unwrap();
++        tasks.stop(); // Idempotent after workers have exited.
++    }
++}
+diff --git a/crates/meridian-net/src/io_pool/timers.rs b/crates/meridian-net/src/io_pool/timers.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-net/src/io_pool/timers.rs
+@@ -0,0 +1,123 @@
++//! Bounded periodic callbacks owned and driven by one reactor, without timer threads.
++use std::{
++    io,
++    sync::{
++        Arc,
++        atomic::{AtomicUsize, Ordering},
++    },
++    time::{Duration, Instant},
++};
++
++pub(super) struct Periodic {
++    next: Instant,
++    period: Duration,
++    callback: Box<dyn FnMut() -> bool + Send>,
++    slots: Arc<AtomicUsize>,
++}
++
++impl Periodic {
++    pub(super) fn new(
++        slots: &Arc<AtomicUsize>,
++        period: Duration,
++        callback: impl FnMut() -> bool + Send + 'static,
++    ) -> io::Result<Self> {
++        if period.is_zero() {
++            return Err(io::Error::other(
++                "periodic IO work needs a nonzero interval",
++            ));
++        }
++        slots
++            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |n| {
++                (n < super::CONNECTIONS).then_some(n + 1)
++            })
++            .map_err(|_| io::Error::other("bounded periodic IO work exceeded"))?;
++        Ok(Self {
++            next: Instant::now(),
++            period,
++            callback: Box::new(callback),
++            slots: Arc::clone(slots),
++        })
++    }
++
++    fn tick(&mut self, now: Instant) -> bool {
++        if now < self.next {
++            return true;
++        }
++        self.next = now + self.period;
++        (self.callback)()
++    }
++}
++
++impl Drop for Periodic {
++    fn drop(&mut self) {
++        self.slots.fetch_sub(1, Ordering::AcqRel);
++    }
++}
++
++#[derive(Default)]
++pub(super) struct Timers {
++    entries: Vec<Periodic>,
++    next: Option<Instant>,
++}
++impl Timers {
++    pub(super) fn push(&mut self, periodic: Periodic) {
++        // A new session joins the existing driver's timer turn. Do not create
++        // one selector wake deadline per player.
++        if self.next.is_none() {
++            self.next = Some(Instant::now());
++        }
++        self.entries.push(periodic);
++    }
++    pub(super) fn tick(&mut self) {
++        let now = Instant::now();
++        if self.next.is_none_or(|next| now < next) {
++            return;
++        }
++        self.entries.retain_mut(|periodic| periodic.tick(now));
++        self.next = self.entries.iter().map(|periodic| periodic.next).min();
++    }
++    pub(super) fn timeout(&self) -> Option<Duration> {
++        self.next
++            .map(|next| next.saturating_duration_since(Instant::now()))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn cancelled_timer_releases_admission_and_due_ticks_do_not_catch_up() {
++        let slots = Arc::new(AtomicUsize::new(0));
++        let calls = Arc::new(AtomicUsize::new(0));
++        let count = Arc::clone(&calls);
++        let mut timer = Periodic::new(&slots, Duration::from_millis(20), move || {
++            count.fetch_add(1, Ordering::Relaxed) == 0
++        })
++        .unwrap();
++        let first = timer.next;
++        assert!(timer.tick(first));
++        assert!(timer.tick(first + Duration::from_millis(19)));
++        assert_eq!(calls.load(Ordering::Relaxed), 1);
++        assert!(!timer.tick(first + Duration::from_secs(1)));
++        assert_eq!(timer.next, first + Duration::from_millis(1020));
++        drop(timer);
++        assert_eq!(slots.load(Ordering::Relaxed), 0);
++    }
++
++    #[test]
++    fn admission_and_shutdown_are_bounded() {
++        let slots = Arc::new(AtomicUsize::new(super::super::CONNECTIONS));
++        assert!(Periodic::new(&slots, Duration::from_millis(20), || true).is_err());
++        slots.store(0, Ordering::Relaxed);
++        assert!(Periodic::new(&slots, Duration::ZERO, || true).is_err());
++        let mut timers = Timers::default();
++        timers.push(Periodic::new(&slots, Duration::from_millis(20), || false).unwrap());
++        timers.tick();
++        assert!(timers.timeout().is_none());
++        assert_eq!(slots.load(Ordering::Relaxed), 0);
++        timers.push(Periodic::new(&slots, Duration::from_millis(20), || true).unwrap());
++        drop(timers);
++        assert_eq!(slots.load(Ordering::Relaxed), 0);
++    }
++}
+diff --git a/crates/meridian-proxy/src/session.rs b/crates/meridian-proxy/src/session.rs
+--- a/crates/meridian-proxy/src/session.rs
++++ b/crates/meridian-proxy/src/session.rs
+@@ -756,7 +756,7 @@
+     let profile = session.profile.clone();
+     let virtual_host = session.virtual_host.clone();
+     let io = sessions.io.get().map(|pool| pool.affinity());
+-    let (relay, handle) = match Session::new_with_io(session, link, &backend.name, io) {
++    let (relay, handle) = match Session::new_with_io(session, link, &backend.name, io.clone()) {
+         Ok(session) => session,
+         Err(e) => {
+             warning!("{peer}: {name}: cannot set up the session: {e}");
+@@ -766,7 +766,7 @@
+     if config.tiles.is_some() && crate::wall_approach::stage() >= 3 {
+         handle.enable_lane_inputs();
+     }
+-    if let Err(error) = crate::terrain::start(config, &handle, peer.ip()) {
++    if let Err(error) = crate::terrain::start(config, &handle, peer.ip(), io) {
+         warning!("terrain reader setup refused: {error}");
+         handle.close();
+     }
+diff --git a/crates/meridian-proxy/src/terrain.rs b/crates/meridian-proxy/src/terrain.rs
+--- a/crates/meridian-proxy/src/terrain.rs
++++ b/crates/meridian-proxy/src/terrain.rs
+@@ -2,6 +2,11 @@
+ use meridian_config::Config;
+ use meridian_handoff::{SessionHandle, TargetBackend, TerrainOwners, TerrainReader};
+ use meridian_net::backend::BackendOptions;
++use meridian_net::io_pool::Affinity;
++use std::sync::{
++    Arc, Mutex,
++    atomic::{AtomicBool, Ordering},
++};
+ use std::{
+     net::IpAddr,
+     time::{Duration, Instant},
+@@ -27,6 +32,7 @@
+     config: &Config,
+     handle: &SessionHandle,
+     address: IpAddr,
++    io: Option<Affinity>,
+ ) -> Result<(), String> {
+     if std::env::var_os("GOLIATH_CLUSTER").is_none()
+         || std::env::var_os("E12_TERRAIN_OFF").is_some()
+@@ -49,129 +55,311 @@
+     });
+     let config = config.clone();
+     let handle = handle.clone();
+-    std::thread::Builder::new()
+-        .name("terrain-manager".into())
+-        .spawn(move || {
+-            let run = || -> Result<(), String> {
+-                let options = BackendOptions {
+-                    forwarding_secret: config.forwarding_secret.as_bytes().to_vec(),
+-                    connect_timeout: Duration::from_millis(config.connect_timeout_ms),
+-                    player_address: address,
++    let over = handle.clone();
++    let failed = handle.clone();
++    let options = BackendOptions {
++        forwarding_secret: config.forwarding_secret.as_bytes().to_vec(),
++        connect_timeout: Duration::from_millis(config.connect_timeout_ms),
++        player_address: address,
++    };
++    let timeout = Duration::from_secs(8);
++    let mut readers: Vec<Option<Live>> = (0..map.entries.len()).map(|_| None).collect();
++    let mut retry_after: Vec<Option<Instant>> = vec![None; map.entries.len()];
++    let eager = std::env::var_os("E18_TERRAIN_EAGER").is_some();
++    let mut step = move || -> Result<bool, String> {
++        if handle.is_over() {
++            return Ok(false);
++        }
++        let Some(position) = handle.terrain_position() else {
++            return Ok(true);
++        };
++        let center = (
++            (position[0].floor() as i32) >> 4,
++            (position[2].floor() as i32) >> 4,
++        );
++        let active = handle.backend();
++        let radius = handle.terrain_radius();
++        let reset = handle.terrain_reset_requested();
++        let near_foreign = map.entries.iter().any(|tile| {
++            tile.backend != active && near(position, map.origin, map.edge, tile.index, radius + 2)
++        });
++        handle.terrain_center(position)?;
++        for (index, tile) in map.entries.iter().enumerate() {
++            // The own reader exists only near a wall. It is prepared
++            // before the source lane can be released at a crossing.
++            let margin = radius + if readers[index].is_some() { 4 } else { 2 };
++            let wanted = eager
++                || if tile.backend == active {
++                    near_foreign
++                        || readers[index].is_some()
++                            && map.entries.iter().any(|other| {
++                                other.backend != active
++                                    && near(position, map.origin, map.edge, other.index, radius + 4)
++                            })
++                } else {
++                    near(position, map.origin, map.edge, tile.index, margin)
+                 };
+-                let timeout = Duration::from_secs(8);
+-                let mut readers: Vec<Option<Live>> = (0..map.entries.len()).map(|_| None).collect();
+-                let mut retry_after: Vec<Option<Instant>> = vec![None; map.entries.len()];
+-                let eager = std::env::var_os("E18_TERRAIN_EAGER").is_some();
+-                while !handle.is_over() {
+-                    let Some(position) = handle.terrain_position() else {
+-                        std::thread::sleep(Duration::from_millis(20));
++            if !wanted {
++                if let Some(live) = &readers[index]
++                    && handle.retire_terrain_reader(index, &live._reader)?
++                {
++                    drop(readers[index].take()); // Intentional EOF never closes the real session.
++                }
++                continue;
++            }
++            if readers[index].is_none() {
++                if retry_after[index].is_some_and(|deadline| Instant::now() < deadline) {
++                    continue;
++                }
++                let profile = handle.terrain_profile(index);
++                let id = horizon_protocol::crypto::uuid_string(u128::from_be_bytes(profile.uuid));
++                let reply = endpoints[index]
++                    .ask(
++                        &format!("player-observe {id} {}", serde_json::json!(position)),
++                        timeout,
++                    )
++                    .map_err(|e| e.to_string())?;
++                if reply["ok"] != true {
++                    if reply
++                        .to_string()
++                        .contains("too many players are expected at once")
++                    {
++                        if retry_after[index].is_none() {
++                            crate::log::warning!("terrain admission deferred for {}", tile.backend);
++                        }
++                        retry_after[index] = Some(Instant::now() + Duration::from_secs(1));
+                         continue;
+-                    };
+-                    let center = (
+-                        (position[0].floor() as i32) >> 4,
+-                        (position[2].floor() as i32) >> 4,
++                    }
++                    return Err(format!("observer prepare refused: {reply}"));
++                }
++                let backend = config
++                    .backend(&tile.backend)
++                    .ok_or("missing terrain backend")?;
++                let reader = handle.open_terrain_reader(
++                    TargetBackend {
++                        name: &tile.backend,
++                        address: &backend.address,
++                        options: &options,
++                    },
++                    index,
++                    &profile,
++                )?;
++                readers[index] = Some(Live {
++                    _reader: reader,
++                    uuid: id,
++                    center,
++                    refreshed: Instant::now(),
++                });
++                retry_after[index] = None;
++            }
++            let live = readers[index].as_mut().expect("wanted reader");
++            if reset {
++                let reply = endpoints[index]
++                    .ask(&format!("player-observe-reset {}", live.uuid), timeout)
++                    .map_err(|e| e.to_string())?;
++                if reply["ok"] != true {
++                    return Err(format!("observer reset refused: {reply}"));
++                }
++            }
++            if reset || live.center != center || live.refreshed.elapsed() >= Duration::from_secs(5)
++            {
++                let reply = endpoints[index]
++                    .ask(
++                        &format!(
++                            "player-observe {} {}",
++                            live.uuid,
++                            serde_json::json!(position)
++                        ),
++                        timeout,
++                    )
++                    .map_err(|e| e.to_string())?;
++                if reply["ok"] != true {
++                    return Err(format!("observer recenter refused: {reply}"));
++                }
++                if std::env::var_os("E12_TERRAIN_TRACE").is_some() {
++                    eprintln!(
++                        "E12_TERRAIN {}",
++                        serde_json::json!({"owner":index,"position":position,"ns":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_nanos()})
+                     );
+-                    let active = handle.backend();
+-                    let radius = handle.terrain_radius();
+-                    let reset = handle.terrain_reset_requested();
+-                    let near_foreign = map.entries.iter().any(|tile| tile.backend != active
+-                        && near(position, map.origin, map.edge, tile.index, radius+2));
+-                    handle.terrain_center(position)?;
+-                    for (index, tile) in map.entries.iter().enumerate() {
+-                        // The own reader exists only near a wall. It is prepared
+-                        // before the source lane can be released at a crossing.
+-                        let margin = radius + if readers[index].is_some() { 4 } else { 2 };
+-                        let wanted = eager || if tile.backend == active {
+-                            near_foreign || readers[index].is_some() && map.entries.iter().any(|other|
+-                                other.backend != active && near(position, map.origin, map.edge, other.index, radius+4))
+-                        } else {
+-                            near(position, map.origin, map.edge, tile.index, margin)
+-                        };
+-                        if !wanted {
+-                            if let Some(live) = &readers[index]
+-                                && handle.retire_terrain_reader(index, &live._reader)? {
+-                                drop(readers[index].take()); // Intentional EOF never closes the real session.
+-                            }
+-                            continue;
+-                        }
+-                        if readers[index].is_none() {
+-                            if retry_after[index].is_some_and(|deadline| Instant::now() < deadline) {
+-                                continue;
+-                            }
+-                            let profile = handle.terrain_profile(index);
+-                            let id = horizon_protocol::crypto::uuid_string(u128::from_be_bytes(
+-                                profile.uuid,
+-                            ));
+-                            let reply = endpoints[index]
+-                                .ask(
+-                                    &format!("player-observe {id} {}", serde_json::json!(position)),
+-                                    timeout,
+-                                )
+-                                .map_err(|e| e.to_string())?;
+-                            if reply["ok"] != true {
+-                                if reply.to_string().contains("too many players are expected at once") {
+-                                    if retry_after[index].is_none() {
+-                                        crate::log::warning!("terrain admission deferred for {}", tile.backend);
+-                                    }
+-                                    retry_after[index] = Some(Instant::now()+Duration::from_secs(1));
+-                                    continue;
+-                                }
+-                                return Err(format!("observer prepare refused: {reply}"));
+-                            }
+-                            let backend = config
+-                                .backend(&tile.backend)
+-                                .ok_or("missing terrain backend")?;
+-                            let reader = handle.open_terrain_reader(
+-                                TargetBackend {
+-                                    name: &tile.backend,
+-                                    address: &backend.address,
+-                                    options: &options,
+-                                },
+-                                index,
+-                                &profile,
+-                            )?;
+-                            readers[index] = Some(Live { _reader: reader, uuid: id, center, refreshed: Instant::now() });
+-                            retry_after[index] = None;
+-                        }
+-                        let live = readers[index].as_mut().expect("wanted reader");
+-                        if reset {
+-                            let reply = endpoints[index].ask(&format!("player-observe-reset {}", live.uuid), timeout).map_err(|e| e.to_string())?;
+-                            if reply["ok"] != true { return Err(format!("observer reset refused: {reply}")); }
+-                        }
+-                        if reset || live.center != center || live.refreshed.elapsed() >= Duration::from_secs(5) {
+-                            let reply = endpoints[index]
+-                                .ask(
+-                                    &format!("player-observe {} {}", live.uuid, serde_json::json!(position)),
+-                                    timeout,
+-                                )
+-                                .map_err(|e| e.to_string())?;
+-                            if reply["ok"] != true {
+-                                return Err(format!("observer recenter refused: {reply}"));
+-                            }
+-                            if std::env::var_os("E12_TERRAIN_TRACE").is_some() {
+-                                eprintln!("E12_TERRAIN {}",serde_json::json!({"owner":index,"position":position,"ns":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_nanos()}));
+-                            }
+-                            live.center = center;
+-                            live.refreshed = Instant::now();
+-                        }
+-                    }
++                }
++                live.center = center;
++                live.refreshed = Instant::now();
++            }
++        }
++        Ok(true)
++    };
++    let run = move || match step() {
++        Ok(keep) => keep,
++        Err(error) => {
++            crate::log::warning!("terrain composition stopped: {error}");
++            failed.close();
++            false
++        }
++    };
++    if let Some(io) = io {
++        schedule(io, move || over.is_over(), run)
++    } else {
++        std::thread::Builder::new()
++            .name("terrain-manager".into())
++            .spawn(move || {
++                let mut run = run;
++                while run() {
+                     std::thread::sleep(Duration::from_millis(20));
+                 }
+-                drop(readers);
+-                Ok(())
+-            };
+-            if let Err(error) = run() {
+-                crate::log::warning!("terrain composition stopped: {error}");
+-                handle.close();
+-            }
+-        })
+-        .map_err(|e| e.to_string())?;
+-    Ok(())
++            })
++            .map(drop)
++            .map_err(|e| e.to_string())
++    }
++}
++
++// One timer per session, one in-flight reconciliation, and bounded shared workers.
++// Refused worker admission retries on the next tick without losing reader state.
++fn schedule(
++    io: Affinity,
++    over: impl Fn() -> bool + Send + 'static,
++    run: impl FnMut() -> bool + Send + 'static,
++) -> Result<(), String> {
++    let work = Arc::new(Reconcile {
++        busy: AtomicBool::new(false),
++        done: AtomicBool::new(false),
++        run: Mutex::new(Box::new(run)),
++    });
++    let worker = io.clone();
++    io.schedule(Duration::from_millis(20), move || {
++        if over() || work.done.load(Ordering::Acquire) {
++            return false;
++        }
++        if !work.busy.swap(true, Ordering::AcqRel) {
++            let next = Arc::clone(&work);
++            if !worker.submit(move || {
++                let keep = (next.run.lock().expect("terrain reconciliation poisoned"))();
++                next.done.store(!keep, Ordering::Release);
++                next.busy.store(false, Ordering::Release);
++            }) {
++                work.busy.store(false, Ordering::Release);
++            }
++        }
++        true
++    })
++    .map_err(|e| e.to_string())
++}
++
++struct Reconcile {
++    busy: AtomicBool,
++    done: AtomicBool,
++    run: Mutex<Box<dyn FnMut() -> bool + Send>>,
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::near;
++    use super::{near, schedule};
++    use meridian_net::io_pool::{Pool, Tasks};
++    use std::{
++        sync::{
++            Arc,
++            atomic::{AtomicBool, AtomicUsize, Ordering},
++            mpsc,
++        },
++        thread,
++        time::Duration,
++    };
++
++    struct Dropped(mpsc::Sender<()>);
++    impl Drop for Dropped {
++        fn drop(&mut self) {
++            let _ = self.0.send(());
++        }
++    }
++
++    #[test]
++    fn shared_reconciliation_never_overlaps_and_releases_closed_session_state() {
++        let (pool, mut drivers) = Pool::new(1).unwrap();
++        let (tasks, mut workers) = Tasks::new(1, 4);
++        pool.install_tasks(&tasks);
++        let io = pool.affinity();
++        let over = Arc::new(AtomicBool::new(false));
++        let closed = Arc::clone(&over);
++        let calls = Arc::new(AtomicUsize::new(0));
++        let count = Arc::clone(&calls);
++        let (started, began) = mpsc::channel();
++        let (release, released) = mpsc::channel();
++        let (dropped, ended) = mpsc::channel();
++        let probe = Dropped(dropped);
++        schedule(
++            io.clone(),
++            move || closed.load(Ordering::Acquire),
++            move || {
++                let _keep = &probe;
++                count.fetch_add(1, Ordering::Relaxed);
++                started.send(()).unwrap();
++                released.recv_timeout(Duration::from_secs(2)).unwrap();
++                true
++            },
++        )
++        .unwrap();
++        let worker = thread::spawn(move || workers.pop().unwrap().run());
++        let driver = thread::spawn(move || drivers.pop().unwrap().run().unwrap());
++        began.recv_timeout(Duration::from_secs(2)).unwrap();
++        // Wait for three shared timer turns while the first job is still busy.
++        let (tick, ticks) = mpsc::channel();
++        let mut n = 0;
++        io.schedule(Duration::from_millis(20), move || {
++            n += 1;
++            if n == 3 {
++                tick.send(()).unwrap();
++            }
++            n < 3
++        })
++        .unwrap();
++        ticks.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert_eq!(calls.load(Ordering::Relaxed), 1);
++        over.store(true, Ordering::Release);
++        release.send(()).unwrap();
++        ended.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert_eq!(calls.load(Ordering::Relaxed), 1);
++        pool.stop();
++        driver.join().unwrap();
++        tasks.stop();
++        worker.join().unwrap();
++    }
++
++    #[test]
++    fn full_shared_worker_queue_defers_and_retries_without_discarding_state() {
++        let (pool, mut drivers) = Pool::new(1).unwrap();
++        let (tasks, mut workers) = Tasks::new(1, 1);
++        pool.install_tasks(&tasks);
++        assert!(tasks.submit(|| {})); // No worker yet, so the bounded queue is full.
++        let io = pool.affinity();
++        let (ran, done) = mpsc::channel();
++        schedule(
++            io.clone(),
++            || false,
++            move || {
++                ran.send(()).unwrap();
++                false
++            },
++        )
++        .unwrap();
++        let (tick, ticks) = mpsc::channel();
++        let mut n = 0;
++        io.schedule(Duration::from_millis(20), move || {
++            n += 1;
++            if n == 3 {
++                tick.send(()).unwrap();
++            }
++            n < 3
++        })
++        .unwrap();
++        let driver = thread::spawn(move || drivers.pop().unwrap().run().unwrap());
++        ticks.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert!(done.try_recv().is_err());
++        let worker = thread::spawn(move || workers.pop().unwrap().run());
++        done.recv_timeout(Duration::from_secs(2)).unwrap();
++        pool.stop();
++        driver.join().unwrap();
++        tasks.stop();
++        worker.join().unwrap();
++    }
+ 
+     #[test]
+     fn an_interior_needs_no_foreign_reader() {

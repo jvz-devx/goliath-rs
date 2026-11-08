@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Versioned matched-step baseline analysis; v1 trials and the .95 line stay intact."""
+import argparse
+import copy
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import math
+from pathlib import Path
+import e11_support as support
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E20'
+
+def load(name,path):
+    loader=importlib.machinery.SourceFileLoader(name,str(path));spec=importlib.util.spec_from_loader(name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module);return module
+
+checker=load('e20_v2_v1_checker',ROOT/'scripts/e14-build10-check')
+v1=checker.analysis
+
+class Unresolved(ValueError):pass
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def leg_frames(run,leg):
+    rows=[row for row in run['frames'] if leg['began_ns']<=row['ns']<=leg['ended_ns']]
+    if not rows:raise Unresolved('leg has no retained client frames')
+    if any(b['tick']<a['tick'] or b['ns']<=a['ns'] for a,b in zip(rows,rows[1:])):
+        raise Unresolved('client tick or timestamp order is not monotonic')
+    return rows
+
+def cross_frame(rows,leg):
+    halfway=math.hypot(leg['goal'][0]-leg['start'][0],leg['goal'][2]-leg['start'][2])/2
+    row=next((row for row in rows if v1.projected(row,leg)>=halfway),None)
+    if row is None:raise Unresolved('leg never reaches its midpoint')
+    return row
+
+def buckets(rows):
+    result={}
+    for row in rows:result.setdefault(row['tick'],[]).append(row)
+    return result
+
+def descriptor(rows,at,anchor_tick):
+    pair=next(((a,b) for a,b in zip(rows,rows[1:]) if a['ns']<=at<=b['ns']),None)
+    if pair is None:raise Unresolved('unchanged trial endpoint is not fully sampled')
+    a,b=pair;fraction=(at-a['ns'])/(b['ns']-a['ns'])
+    coordinate=a['tick']+fraction*(b['tick']-a['tick'])
+    result=dict(trial_at_ns=at,trial_tick_coordinate=coordinate,tick_offset=coordinate-anchor_tick,
+        trial_pair=dict(before_frame=a['frame'],after_frame=b['frame'],before_tick=a['tick'],after_tick=b['tick'],fraction=fraction))
+    if math.isclose(coordinate,round(coordinate),rel_tol=0,abs_tol=1e-10):
+        tick=round(coordinate);support_rows=buckets(rows).get(tick)
+        if not support_rows:raise Unresolved('trial endpoint physics step has no observation')
+        first,last=support_rows[0],support_rows[-1]
+        phase=(at-first['ns'])/(last['ns']-first['ns']) if last['ns']>first['ns'] else 0.
+        if not -1e-8<=phase<=1+1e-8:raise Unresolved('trial plateau endpoint lies outside observed support')
+        result.update(kind='plateau',tick_offset=tick-anchor_tick,plateau_phase=min(1.,max(0.,phase)))
+    else:result['kind']='transition'
+    return result
+
+def mapped_endpoint(rows,anchor_tick,description):
+    indexed=buckets(rows);coordinate=anchor_tick+description['tick_offset']
+    if description['kind']=='plateau':
+        tick=round(coordinate);observed=indexed.get(tick)
+        if not observed:raise Unresolved(f'baseline endpoint physics step {tick} is not observed')
+        a,b=observed[0],observed[-1];fraction=description['plateau_phase']
+    else:
+        low=math.floor(coordinate);high=low+1
+        if low not in indexed or high not in indexed:raise Unresolved(f'baseline transition {low}->{high} has no corresponding observed steps')
+        a,b=indexed[low][-1],indexed[high][0];fraction=coordinate-low
+        if b['ns']<=a['ns']:raise Unresolved('baseline transition observation order is invalid')
+    at=a['ns']+fraction*(b['ns']-a['ns'])
+    position=[x+fraction*(y-x) for x,y in zip(a['pos'],b['pos'])]
+    return dict(tick_coordinate=coordinate,at_ns=at,position=position,before_frame=a['frame'],after_frame=b['frame'],fraction=fraction,kind=description['kind'])
+
+def coverage(run,rows,start,end):
+    within=[row for row in rows if start<=row['ns']<=end]
+    gaps=sum(max(0,b['frame']-a['frame']-1) for a,b in zip(within,within[1:]))
+    intervals=[(b['ns']-a['ns'])/1e6 for a,b in zip(rows,rows[1:]) if a['ns']<=end and b['ns']>=start]
+    if not intervals:raise Unresolved('matched baseline interval has no frame coverage')
+    servers={}
+    for tile,samples in run.get('servers',{}).items():
+        ticks=sorted({row['tick'] for row in samples if start<=row['ns']<=end})
+        servers[tile]=sum(max(0,b-a-1) for a,b in zip(ticks,ticks[1:]))
+    return dict(missing_window_frames=gaps,missing_window_server_ticks=servers,max_window_frame_interval_ms=max(intervals))
+
+def match_baseline(run,leg,baseline,trial):
+    if 'speed_1s_bps' not in trial or 'crossed_ns' not in trial:raise Unresolved('unchanged v1 trial window is unavailable')
+    actual=leg_frames(run,leg);reference=leg_frames(run,baseline)
+    a_cross=cross_frame(actual,leg);b_cross=cross_frame(reference,baseline)
+    # Match v1's floating-point endpoint arithmetic exactly. Only the baseline changes.
+    start=trial['crossed_ns']-1_000_000_000/2;end=trial['crossed_ns']+1_000_000_000/2
+    descriptions=[descriptor(actual,at,a_cross['tick']) for at in [start,end]]
+    endpoints=[mapped_endpoint(reference,b_cross['tick'],description) for description in descriptions]
+    elapsed=(endpoints[1]['at_ns']-endpoints[0]['at_ns'])/1e9
+    if elapsed<=0:raise Unresolved('matched baseline elapsed time is not positive')
+    distance=math.hypot(endpoints[1]['position'][0]-endpoints[0]['position'][0],endpoints[1]['position'][2]-endpoints[0]['position'][2])
+    if distance<=0:raise Unresolved('matched no-wall baseline displacement is not positive')
+    return dict(trial_window_ns=[start,end],trial_anchor_tick=a_cross['tick'],baseline_anchor_tick=b_cross['tick'],
+        endpoint_descriptions=descriptions,endpoints=endpoints,
+        matched_step_span=descriptions[1]['tick_offset']-descriptions[0]['tick_offset'],elapsed_s=elapsed,
+        horizontal_blocks=distance,speed_bps=distance/elapsed,
+        **coverage(run,reference,endpoints[0]['at_ns'],endpoints[1]['at_ns']))
+
+def is_resolved(metrics,reference):
+    return bool('speed_ratio' in metrics and not metrics.get('timing_unresolved') and not metrics.get('missing_window_frames')
+        and not any(metrics.get('missing_window_server_ticks',{}).values()) and not reference.get('missing_window_frames')
+        and not any(reference.get('missing_window_server_ticks',{}).values()))
+
+def analyse_run(run):
+    original=v1.analyse(run);rows=[]
+    for index,leg in enumerate(run['trials']):
+        old=original['trials'][index]
+        baseline=next(row for row in run['baselines'] if row['mode']==leg['mode'] and row['direction']==leg['direction'])
+        old_reference=next(row for row in original['baselines'] if row['mode']==leg['mode'] and row['direction']==leg['direction'])
+        old_resolved=is_resolved(old,old_reference)
+        try:budget=checker.corrections(run,leg)
+        except (ValueError,KeyError) as error:budget=dict(resolved=False,error=str(error))
+        correction_failed=not budget['resolved'] or budget.get('maximum_backward_blocks',0)>.1
+        new={key:copy.deepcopy(value) for key,value in old.items() if key not in
+            ['baseline_speed_1s_bps','baseline_stall_ms','extra_stall_ms','excess_forward_tick_step_blocks','error','pass']}
+        try:
+            matched=match_baseline(run,leg,baseline,old)
+            new.update(baseline_speed_bps=matched['speed_bps'],speed_ratio=old['speed_1s_bps']/matched['speed_bps'],matched_baseline=matched,
+                timing_unresolved=max(old['max_window_frame_interval_ms'],matched['max_window_frame_interval_ms'])>100)
+            new.pop('baseline_speed_1s_bps',None)
+            new_resolved=is_resolved(new,matched)
+            new['pass']=bool(new_resolved and new.get('reached') and new.get('owner_matches') and new.get('handoffs',0)>=1
+                and new['speed_ratio']>=.95 and new.get('backward_correction_lower_bound_blocks',math.inf)<=.1)
+            reasons=[]
+            if new['timing_unresolved']:reasons.append('trial or matched baseline has a frame interval over100ms')
+            if old.get('missing_window_frames') or any(old.get('missing_window_server_ticks',{}).values()):reasons.append('unchanged trial has missing frames or server ticks')
+            if matched['missing_window_frames'] or any(matched['missing_window_server_ticks'].values()):reasons.append('matched baseline has missing frames or server ticks')
+        except (Unresolved,KeyError,ValueError) as error:
+            new.pop('speed_ratio',None);new_resolved=False;new['pass']=False;reasons=[str(error)]
+        old_failed=correction_failed or old_resolved and (old['speed_ratio']<.95 or old['backward_correction_lower_bound_blocks']>.1)
+        new_failed=correction_failed or new_resolved and (new['speed_ratio']<.95 or new['backward_correction_lower_bound_blocks']>.1)
+        rows.append(dict(index=index,mode=leg['mode'],source=leg['source'],target=leg['target'],v1=old,v2=new,
+            v1_resolved=old_resolved,v2_resolved=new_resolved,v1_failed=bool(old_failed),v2_failed=bool(new_failed),
+            v2_unresolved_reasons=reasons,correction_budget=budget))
+    return dict(rows=rows,v1_resolved=sum(row['v1_resolved'] for row in rows),v2_resolved=sum(row['v2_resolved'] for row in rows),
+        lost_resolution=[dict(index=row['index'],mode=row['mode'],source=row['source'],target=row['target'],reasons=row['v2_unresolved_reasons']) for row in rows if row['v1_resolved'] and not row['v2_resolved']],
+        v1_failures=[row['index'] for row in rows if row['v1_failed']],v2_failures=[row['index'] for row in rows if row['v2_failed']],
+        hidden_v1_failures=[row['index'] for row in rows if row['v1_failed'] and not row['v2_resolved']])
+
+def discover():
+    directories=[ROOT/'docs/experiments/data/E14',ROOT/'docs/experiments/data/E18/physics',ROOT/'docs/experiments/data/E20/physics',ROOT/'docs/experiments/data/E21/physics']
+    paths=[]
+    for directory in directories:
+        if directory.exists():paths.extend(directory.rglob('*.json.gz'));paths.extend(directory.glob('*.json'))
+    return sorted(set(paths))
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--name',required=True);args=parser.parse_args()
+    target=DATA/'analysis-v2'/args.name;target.mkdir(parents=True,exist_ok=False)
+    manifest=dict(version=2,pass_line=.95,method='trial unchanged; baseline matches trial physics-step offsets and observed endpoint placement; baseline displacement divided by its own matched elapsed timestamps; no offset search',
+        plateau_rule='same fractional position within observed support of the corresponding tick; a single observed sample is its unique support point',
+        source_sha256=sha(Path(__file__)),v1_analysis_sha256=sha(ROOT/'scripts/e14-analyse'),v1_checker_sha256=sha(ROOT/'scripts/e14-build10-check'),runs=[],not_raw=[])
+    for path in discover():
+        raw=path.read_bytes();run=json.loads(gzip.decompress(raw) if path.name.endswith('.gz') else raw)
+        if not isinstance(run,dict) or not all(key in run for key in ['frames','baselines','trials']):
+            manifest['not_raw'].append(str(path.relative_to(ROOT)));continue
+        identity=f'run-{len(manifest["runs"])+1:03d}'
+        entry=dict(id=identity,path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(raw).hexdigest(),status=run.get('status'),trials=len(run['trials']),binaries=run.get('binaries',{}))
+        try:
+            derived=analyse_run(run)
+            native_complete=bool(run.get('collection_complete') and not run.get('errors') and run['trials'] and all(leg.get('reached') and leg.get('owner_after')==leg.get('target') for leg in run['trials']))
+            old_pass=native_complete and not derived['v1_failures']
+            new_pass=native_complete and not derived['v2_failures'] and not derived['hidden_v1_failures']
+            hashes=run.get('binaries',{})
+            known_reference=(all(hashes.get(k)==v for k,v in checker.EXPECTED.items()) or
+                hashes.get('cluster-proxy')=='29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b' and hashes.get('cluster-engine')=='b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d')
+            reference_guard=not (known_reference and old_pass and derived['v2_resolved']<derived['v1_resolved'])
+            entry.update(v1_pass=old_pass,v2_pass=new_pass,v1_pass_v2_fail=old_pass and not new_pass,accepted_reference=known_reference and old_pass,
+                reference_coverage_pass=reference_guard,**{key:value for key,value in derived.items() if key!='rows'})
+            support.save(target/(identity+'.json'),dict(input=entry,**derived))
+        except (KeyError,ValueError,StopIteration,TypeError) as error:
+            entry['analysis_error']=repr(error)
+        manifest['runs'].append(entry)
+    manifest['v1_pass_v2_fail']=[row['id'] for row in manifest['runs'] if row.get('v1_pass_v2_fail')]
+    manifest['reference_coverage_failures']=[row['id'] for row in manifest['runs'] if row.get('reference_coverage_pass') is False]
+    support.save(target/'manifest.json',manifest)
+    print(json.dumps({key:manifest[key] for key in ['v1_pass_v2_fail','reference_coverage_failures']},indent=2))
+    print(json.dumps([{key:row.get(key) for key in ['id','path','trials','v1_resolved','v2_resolved','v1_failures','v2_failures','lost_resolution','analysis_error']} for row in manifest['runs']],indent=2))
+
+if __name__=='__main__':main()

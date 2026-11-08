@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""E20 measurement contract tests without spawning a game fixture."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+loader=importlib.machinery.SourceFileLoader('e20_frontier',str(Path(__file__).with_name('e20-frontier')))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+frontier=importlib.util.module_from_spec(spec)
+loader.exec_module(frontier)
+
+class Contract(unittest.TestCase):
+    def test_mixed_band_is_kept_and_higher_double_failure_closes_bracket(self):
+        results=frontier.load('e20_test_results',frontier.ROOT/'scripts/e20-results')
+        row=lambda passed:dict(valid=True,passed=passed)
+        result=results.endpoints({650:[row(True),row(True)],675:[row(True),row(False)],700:[row(False),row(False)]})
+        self.assertEqual((result['frontier'],result['ratio_to_325'],result['bracket_fail'],result['unstable_counts']),(650,2.0,700,[675]))
+
+    def test_mixed_step_gets_no_extra_repeat(self):
+        staircase=frontier.load('e20_test_staircase',frontier.ROOT/'scripts/e20-staircase')
+        row=lambda passed:dict(passed=passed)
+        levels={650:[row(True)],675:[row(True),row(False)],700:[row(False)]}
+        self.assertEqual(staircase.next_count(levels),650)
+        levels[650].append(row(True))
+        self.assertEqual(staircase.next_count(levels),700)
+        levels[650]=[row(True),row(False)]
+        self.assertEqual(staircase.next_count(levels),625)
+
+    def test_combined_staircase_can_start_at650(self):
+        staircase=frontier.load('e20_test_start',frontier.ROOT/'scripts/e20-staircase')
+        self.assertEqual(staircase.next_count({},650),650)
+
+    def test_regression_window_recognizes_only_its_descendants(self):
+        window=frontier.load('e20_test_window',frontier.ROOT/'scripts/e20-window')
+        sampler=window.FixtureSampler(observer=True)
+        root=next(iter(sampler.roles.values()))
+        row={'processes':{102:{'parent':101},101:{'parent':root},103:{'parent':1}}}
+        with patch.object(window.OriginalProcessSampler,'capture',return_value=row):sampler.capture()
+        self.assertEqual(set(sampler.roles.values()),{root,101,102})
+
+    def test_server_cap_contains_proxy_store_sidecars_and_tiles(self):
+        roles=['tile-a','tile-b','tile-c','tile-d','proxy','store','sidecar-0','sidecar-1','sidecar-2','sidecar-3']
+        pids=list(range(10,20))
+        self.assertEqual(frontier.server_cap(pids,roles,14,False),(pids,roles))
+
+    def test_layout_scales_floor_ten_percent_crossers_and_fixed_pigs(self):
+        baseline=frontier.load('e20_test_capacity',frontier.ROOT/'scripts/capacity-bench')
+        for n in [500,600,700,725,750,775,800]:
+            layout=frontier.plan(n,baseline.route_anchor)
+            self.assertEqual(sum(g['count'] for g in layout['groups']),n)
+            self.assertEqual(layout['crossing_players'],n//10)
+            self.assertEqual(layout['pigs_per_tile'],64)
+            self.assertEqual(layout['total_pigs'],256)
+            self.assertEqual(layout['edge'],2048)
+
+    def test_outside_process_redaction_preserves_cpu_and_pid(self):
+        raw={'outside_process_names':{'90':'private-app'},'phases':{
+            'steady':{'outside':[{'pid':90,'name':'private-app','cpu_s':12,'cores':.2}]},'warmup':None},
+            'samples':[{'outside_cpu_s_delta':{'90':.1}}]}
+        with patch.object(frontier.OriginalProcessSampler,'report',return_value=raw):
+            result=frontier.ProcessSampler().report()
+        self.assertEqual(result['outside_process_names'],{'90':'outside'})
+        self.assertEqual(result['phases']['steady']['outside'],[{'pid':90,'name':'outside','cpu_s':12,'cores':.2}])
+        self.assertEqual(result['samples'],[{'outside_cpu_s_delta':{'90':.1}}])
+
+if __name__=='__main__':unittest.main()

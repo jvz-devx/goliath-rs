@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Owns E19's diagnostic budget and publication regressions, without game load."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import unittest
+from unittest.mock import patch
+
+
+loader=importlib.machinery.SourceFileLoader('e19_slope',str(Path(__file__).with_name('e19-production-slope')))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+slope=importlib.util.module_from_spec(spec)
+loader.exec_module(slope)
+
+
+class DiagnosticContract(unittest.TestCase):
+    def setUp(self):
+        self.roles=['tile-a','tile-b','tile-c','tile-d','proxy','store','sidecar-0','sidecar-1','sidecar-2','sidecar-3']
+        self.pids=list(range(10,20))
+
+    def test_normal_cap_includes_every_server(self):
+        self.assertEqual(slope.server_cap(self.pids,self.roles,14,False),(self.pids,self.roles))
+
+    def test_diagnostic_excludes_only_proxy(self):
+        pids,roles=slope.server_cap(self.pids,self.roles,14,True)
+        self.assertEqual(pids,[10,11,12,13,15,16,17,18,19])
+        self.assertEqual(roles,[role for role in self.roles if role!='proxy'])
+
+    def test_bad_role_mapping_refused(self):
+        with self.assertRaises(ValueError):slope.server_cap(self.pids,self.roles,13,True)
+        with self.assertRaises(ValueError):slope.server_cap(self.pids,self.roles[:-1],14,True)
+
+    def test_published_outside_names_redacted_without_losing_counters(self):
+        raw={'outside_process_names':{'90':'private-app'},'phases':{
+            'steady':{'outside':[{'pid':90,'name':'private-app','cpu_s':12,'cores':.2}]},'warmup':None},
+            'samples':[{'outside_cpu_s_delta':{'90':.1}}]}
+        with patch.object(slope.OriginalProcessSampler,'report',return_value=raw):
+            result=slope.ProcessSampler().report()
+        self.assertEqual(result['outside_process_names'],{'90':'outside'})
+        self.assertEqual(result['phases']['steady']['outside'],[{'pid':90,'name':'outside','cpu_s':12,'cores':.2}])
+        self.assertEqual(result['samples'],[{'outside_cpu_s_delta':{'90':.1}}])
+
+
+if __name__=='__main__':unittest.main()

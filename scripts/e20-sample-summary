@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Group proxy sample stack occupancy by thread role, not CPU percentage."""
+import argparse
+from collections import Counter
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import e11_support as support
+
+PARSER=Path(__file__).with_name('e21-sample-summary')
+loader=importlib.machinery.SourceFileLoader('e20_sample_parser',str(PARSER))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+base=importlib.util.module_from_spec(spec);loader.exec_module(base)
+
+def role(name):
+    for marker,label in [('proxy-io-','IO drivers'),('proxy-control-','command workers'),
+        ('terrain-manager','terrain managers'),('wall-','wall workers'),('player ','player supervisors')]:
+        if marker in name:return label
+    return 'other fixture threads'
+
+def category(name):
+    if 'kevent' in name:return 'selector syscall occupancy'
+    if any(s in name for s in ['__recvfrom','readv','__read_nocancel']):return 'socket read syscall occupancy'
+    if any(s in name for s in ['__sendto','sendmsg','writev','__write_nocancel']):return 'socket write syscall occupancy'
+    if any(s in name for s in ['ulock','psynch','semaphore','cond_wait','__semwait']):return 'lock or wait occupancy'
+    if any(s in name for s in ['malloc','alloc','free','memcpy','memmove']):return 'allocation or copy occupancy'
+    return 'other user or kernel occupancy'
+
+def summarize(root):
+    categories=Counter();leaves=Counter()
+    def visit(node):
+        own=node['count']-sum(child['count'] for child in node['children'])
+        if own:
+            categories[category(node['name'])]+=own
+            leaves[node['name'].split('  (in ')[0]]+=own
+        for child in node['children']:visit(child)
+    visit(root)
+    return dict(thread=root['name'],role=role(root['name']),samples=root['count'],exclusive_occupancy=dict(categories),top_leaves=leaves.most_common(20))
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('sample',type=Path);parser.add_argument('output',type=Path);args=parser.parse_args()
+    threads=[summarize(root) for root in base.parse(args.sample.read_text())]
+    roles={}
+    for thread in threads:
+        counts=roles.setdefault(thread['role'],Counter());counts.update(thread['exclusive_occupancy'])
+    result=dict(method='exclusive stack occupancy grouped by proxy thread role; blocked and runnable samples are mixed',
+        warning='not CPU shares, syscall counts or read-result attribution; use independent native user/system counters',
+        sample_sha256=hashlib.sha256(args.sample.read_bytes()).hexdigest(),parser_sha256=hashlib.sha256(PARSER.read_bytes()).hexdigest(),
+        roles={role:dict(counts) for role,counts in roles.items()},threads=threads)
+    support.save(args.output,result)
+    print(json.dumps(result['roles'],indent=2))
+
+if __name__=='__main__':main()

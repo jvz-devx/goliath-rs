@@ -1,0 +1,143 @@
+{
+  "kind": "E20-fixed-combined-replication",
+  "status": "complete",
+  "count_per_group": 3,
+  "particles": false,
+  "full_suite_modes": [
+    "walk",
+    "sprint",
+    "sprint-jump",
+    "fly"
+  ],
+  "no_early_stop_for_ratios": true,
+  "plan": [
+    {
+      "group": "combined",
+      "round": 1,
+      "name": "physics-combined-replication1-combined-r1-off"
+    },
+    {
+      "group": "combined",
+      "round": 2,
+      "name": "physics-combined-replication1-combined-r2-off"
+    },
+    {
+      "group": "combined",
+      "round": 3,
+      "name": "physics-combined-replication1-combined-r3-off"
+    }
+  ],
+  "snapshots": {
+    "combined": {
+      "path": ".local/bin/meridian-e20/combined-1",
+      "candidate_sha256": "fe6db2d21f9d0043258d460951750c333396e83d8c18c63b6d826bdf83888edf",
+      "binaries": {
+        "horizon-client": "ea4537868c90771e0d030ccfff1dbe36dace215a2c70d652dd86b38b84434090",
+        "meridian": "8716c34f6e799e2ddce31aff153b86cf9c78408bfcd64b4c78551851d2b399ad",
+        "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+        "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+        "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af"
+      }
+    }
+  },
+  "harness_sha256": {
+    "e20-physics-isolation": "2b16087e1786446ab67a75c3a60e0e77ab0e05ac85687da3f044cb6256f3cfb9",
+    "e20-physics": "b186b6570167d9616e435f380877d44d46b975d84a8125b5e6d090c1f20fe5f2",
+    "e20-window": "11602bdfc33729897057d2d75a50f554adac3d42ce7cc5a146bec915863b8c2a",
+    "e14-physics": "ebd963824f5d986e4d17b48f41a0f045ed942410396b1fa983d6a47f3b9a578e",
+    "e14-analyse": "1fede9ca000943725500f1f0fcc661788fd65d421e1b4fa80010b34d1793cb99",
+    "e14-build10-check": "45c4d415ca24a80f06022518fbd601ba8806b9733df36f7e697f4d0a6cc691f7",
+    "e14_support.py": "def6911ee2b3479bb92924456035d514fbd19afbee2f294544d76ae877f5bd93",
+    "e14_snapshot_support.py": "b829d5b2f891c6fbd50f3b1dc4f102fb06207863c2c56dd520d16017b0fee85e",
+    "e18_process.py": "c296d05cb9ad7048ffd05512cbb0a5fe198254c765a71eddc34dc4cdd3868a40",
+    "goliath-cluster": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5",
+    "e20-combined-replication": "d8fcaccb0cfb7e8f7a1e81f75085c105ed3812b0353a0c16be15680e12f1b38c"
+  },
+  "runs": [
+    {
+      "group": "combined",
+      "round": 1,
+      "name": "physics-combined-replication1-combined-r1-off",
+      "exit": 0,
+      "seconds": 306.49756529097795,
+      "log": "docs/experiments/data/E20/physics-combined-replication1-combined-r1-off-command.log.gz",
+      "log_sha256": "244465f9c13f20abd5ba8109804803134ce3970bd56321539cfdbd89ce50f538",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-combined-replication1-combined-r1-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/meridian-e20/combined-1",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-combined-replication1-combined-r1-off"
+      ]
+    },
+    {
+      "group": "combined",
+      "round": 2,
+      "name": "physics-combined-replication1-combined-r2-off",
+      "exit": 0,
+      "seconds": 306.49981224999647,
+      "log": "docs/experiments/data/E20/physics-combined-replication1-combined-r2-off-command.log.gz",
+      "log_sha256": "93199624fce4d8fd6dea28149d8da9e32552d55454cb992bbb962ed8f8b87696",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-combined-replication1-combined-r2-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/meridian-e20/combined-1",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-combined-replication1-combined-r2-off"
+      ]
+    },
+    {
+      "group": "combined",
+      "round": 3,
+      "name": "physics-combined-replication1-combined-r3-off",
+      "exit": 0,
+      "seconds": 306.61477479099995,
+      "log": "docs/experiments/data/E20/physics-combined-replication1-combined-r3-off-command.log.gz",
+      "log_sha256": "5d0bd16d23390540b9faf19f93a771940e3a827d2a5fed71af241a6ce41aa3df",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-combined-replication1-combined-r3-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/meridian-e20/combined-1",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-combined-replication1-combined-r3-off"
+      ]
+    }
+  ],
+  "replication_adapter_sha256": "d8fcaccb0cfb7e8f7a1e81f75085c105ed3812b0353a0c16be15680e12f1b38c"
+}

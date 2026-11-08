@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Print E21 tile CPU, population and validity from retained raw counters."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import e11_support as support
+
+
+def summarize(path):
+    data=json.loads(path.read_text())
+    rows=[]
+    for count,cell in data.get('cells',{}).items():
+        if cell.get('status')!='complete':continue
+        steady=cell['processes']['phases']['steady']
+        for tile,threads in cell['tile_thread_cpu'].items():
+            native=threads['threads']
+            groups={group:sum(row['cores'] for row in native if predicate(row['name'])) for group,predicate in [
+                ('network',lambda name:name.startswith('horizon-net-')),
+                ('cut_writer',lambda name:name=='e6-cut-writer'),
+                ('lease',lambda name:name=='goliath-lease'),
+                ('terrain_workers',lambda name:name.startswith('horizon-worker-'))]}
+            population=cell['before'][tile]
+            rows.append(dict(tile=tile,players=int(count),cores=steady['fixture']['tile-'+tile]['cores'],
+                main_cores=threads['main']['cores'] if threads['main'] else None,
+                matched_thread_cores=threads['matching_thread_cores'],thread_groups=groups,
+                population={key:population[key] for key in ['real','placed','held','readers','chunks','population']},
+                tps=cell['game_time_tps'][tile],tick_p99_ms=cell['tick_summary'][tile]['p99_ms'],
+                noise_valid=cell['noise_valid'],load_start=cell['load_start'],activations=len(cell['activations_in_window']),
+                outside_max_cores=steady['outside_max_process_cores']))
+    return dict(raw=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        acceptance=False,binaries=data.get('binaries'),rows=rows)
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('raw',type=Path)
+    parser.add_argument('--output',type=Path)
+    args=parser.parse_args()
+    result=summarize(args.raw)
+    if args.output:
+        if args.output.exists():raise RuntimeError('summary already exists')
+        support.save(args.output,result)
+    else:print(json.dumps(result,indent=2))
+
+
+if __name__=='__main__':main()

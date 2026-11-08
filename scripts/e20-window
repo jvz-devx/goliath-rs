@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Bound and acknowledge one E20 regression or profiling measurement window."""
+import argparse
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import time
+from e18_process import ProcessSampler as OriginalProcessSampler
+import e11_support as support
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E20'
+
+class FixtureSampler(OriginalProcessSampler):
+    """Recognize only the measured command's descendants, retaining exited PIDs."""
+    def capture(self,mark=None):
+        row=super().capture(mark)
+        known=set(self.roles.values())
+        while True:
+            found={pid for pid,process in row['processes'].items() if process['parent'] in known}
+            fresh=found-known
+            if not fresh:break
+            for pid in fresh:self.register('fixture-'+str(pid),pid)
+            known.update(fresh)
+        return row
+
+    def report(self):
+        result=super().report()
+        result['outside_process_names']={pid:'outside' for pid in result['outside_process_names']}
+        for phase in result['phases'].values():
+            if phase:
+                for row in phase['outside']:row['name']='outside'
+        return result
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--no-other-agents',action='store_true',help='explicit reviewer waiver while E21 is finished and idle')
+    parser.add_argument('command',nargs=argparse.REMAINDER)
+    args=parser.parse_args();command=args.command
+    if command and command[0]=='--':command=command[1:]
+    if not command:parser.error('supply a command after --')
+    DATA.mkdir(parents=True,exist_ok=True)
+    path=DATA/(args.name+'-quiet.json')
+    if path.exists():raise RuntimeError('quiet record exists; use a fresh name')
+    request=ROOT/'.local/quiet-request';ack=ROOT/'.local/quiet-ack-E21'
+    if request.exists():raise RuntimeError('another quiet window exists')
+    identity=json.dumps(dict(owner='E20',name=args.name,pid=os.getpid(),time=datetime.now(timezone.utc).isoformat()))+'\n'
+    began=time.monotonic();deadline=began+1500;child=None;monitor=None
+    metadata=dict(request=json.loads(identity),command=command,status='waiting')
+    with request.open('x') as stream:stream.write(identity)
+    try:
+        while (not args.no_other_agents and not ack.exists()) or os.getloadavg()[0]>4:
+            if not request.exists() or request.read_text()!=identity:raise RuntimeError('quiet identity changed')
+            if time.monotonic()>deadline-60:raise TimeoutError('quiet acquisition timeout')
+            time.sleep(1)
+        metadata.update(status='running',ack='waived: reviewer confirmed E21 finished and idle' if args.no_other_agents else ack.read_text(),load_start=os.getloadavg())
+        env=dict(os.environ,E20_QUIET_IDENTITY=identity)
+        monitor=FixtureSampler(observer=True).start()
+        monitor.capture('steady-first')
+        child=subprocess.Popen(command,cwd=ROOT,env=env,start_new_session=True)
+        try:metadata['exit']=child.wait(timeout=max(1,deadline-time.monotonic()-30))
+        except BaseException:
+            os.killpg(child.pid,signal.SIGCONT);os.killpg(child.pid,signal.SIGTERM)
+            try:child.wait(20)
+            except subprocess.TimeoutExpired:os.killpg(child.pid,signal.SIGKILL);child.wait()
+            raise
+        metadata['status']='complete' if metadata['exit']==0 else 'failed'
+    finally:
+        try:
+            if monitor:
+                try:monitor.capture('steady-last')
+                finally:monitor.stop()
+                report=monitor.report();whole=report['phases']['whole_cell']
+                metadata['processes']=report
+                metadata['noise_valid']=bool(whole and whole['no_outside_process_above_half_core'] and not report['error'])
+                metadata['counter_scope']='outside-noise eligibility only; short-lived fixture process totals are not capacity CPU'
+                if not metadata['noise_valid']:
+                    metadata.update(status='invalid-outside-noise',exit=1)
+        finally:
+            if request.exists() and request.read_text()==identity:request.unlink()
+            metadata.update(seconds=time.monotonic()-began,load_end=os.getloadavg())
+            support.save(path,metadata)
+    raise SystemExit(metadata['exit'])
+
+if __name__=='__main__':main()

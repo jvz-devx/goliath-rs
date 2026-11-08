@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Summarize stack occupancy, never treating blocked samples as CPU shares."""
+import argparse
+from collections import Counter
+import hashlib
+import json
+from pathlib import Path
+import re
+import e11_support as support
+
+
+def parse(text):
+    roots=[];stack=[]
+    for line in text.splitlines():
+        if line.startswith('Total number in stack'):break
+        match=re.match(r'^([ +!:.|]*)(\d+) (.*)$',line)
+        if not match:continue
+        prefix,count,name=match.groups()
+        if 'Thread_' not in name and not stack:continue
+        depth=len(prefix)
+        while stack and stack[-1]['depth']>=depth:stack.pop()
+        node=dict(depth=depth,count=int(count),name=name,children=[])
+        if stack:stack[-1]['children'].append(node)
+        else:roots.append(node)
+        stack.append(node)
+    return roots
+
+
+def summarize(root):
+    totals=Counter();leaves=Counter()
+    def visit(node,ancestors):
+        path=ancestors+[node['name']]
+        own=node['count']-sum(child['count'] for child in node['children'])
+        if own:
+            joined=' '.join(path)
+            blocked=any(word in node['name'] for word in ['__semwait_signal','__ulock_wait','__psynch','kevent','__recvfrom','poll ','mach_msg','semaphore_wait'])
+            if blocked:category='blocked_or_waiting'
+            elif 'poll_server_control' in joined:category='control_including_inlined_generation_warming'
+            elif 'track_entities' in joined or 'tracking' in joined:category='entity_tracking'
+            elif 'tick_guests' in joined:category='player_tick'
+            elif 'tile_cut' in joined:category='cut_writer_or_capture'
+            elif 'lease' in joined or 'authority' in joined:category='lease_authority'
+            elif 'update_chunks' in joined or 'next_batch' in joined or 'lan6chunks' in joined:category='chunk_sending'
+            elif 'tick_world' in joined:category='world_tick_other'
+            else:category='other'
+            totals[category]+=own
+            if not blocked:leaves[node['name'].split('  (in ')[0]]+=own
+        for child in node['children']:visit(child,path)
+    visit(root,[])
+    return dict(thread=root['name'],samples=root['count'],occupancy=dict(totals),
+        top_nonwaiting_leaves=leaves.most_common(12))
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('sample',type=Path)
+    parser.add_argument('output',type=Path)
+    args=parser.parse_args()
+    result=dict(method='exclusive stack occupancy from sample call tree; not running-state CPU attribution',
+        warning='sample includes blocked threads; native thread CPU counters are authoritative; inlined warm work remains within control',
+        sample_sha256=hashlib.sha256(args.sample.read_bytes()).hexdigest(),
+        threads=[summarize(root) for root in parse(args.sample.read_text())])
+    support.save(args.output,result)
+    print(json.dumps([dict(thread=row['thread'],samples=row['samples'],occupancy=row['occupancy']) for row in result['threads'] if 'main-thread' in row['thread'] or 'cut-writer' in row['thread']],indent=2))
+
+
+if __name__=='__main__':main()

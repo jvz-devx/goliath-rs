@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+"""E19 D9 cells, including a proxy-outside-cap feasibility diagnostic.
+
+Derived from E18 without changing its fixture, counters, or frozen evidence.
+"""
+import argparse
+import ctypes
+import gzip
+from datetime import datetime, timezone
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import time
+import tomllib
+
+import e11_support as support
+from e18_d9_layout import plan
+from e18_d9_wire import D9Observer
+from e18_process import ProcessSampler as OriginalProcessSampler
+from e17_flat09_metrics import thread_ids, thread_usage
+from e18_sockets import SocketSampler
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E19'
+BINS=ROOT/'.local/bin/meridian-e18/flat09-tiles'
+
+
+class ProcessSampler(OriginalProcessSampler):
+    """Retain PID/CPU evidence without publishing outside process names."""
+    def report(self):
+        result=super().report()
+        result['outside_process_names']={pid:'outside' for pid in result['outside_process_names']}
+        for phase in result['phases'].values():
+            if phase:
+                for row in phase['outside']:row['name']='outside'
+        return result
+
+
+def load(name, path):
+    loader=importlib.machinery.SourceFileLoader(name,str(path))
+    spec=importlib.util.spec_from_loader(name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module);return module
+
+
+def server_cap(pids,roles,proxy_pid,outside):
+    """Exclude exactly the proxy, only in the labelled feasibility diagnostic."""
+    if len(pids)!=len(roles) or roles.count('proxy')!=1 or pids[roles.index('proxy')]!=proxy_pid:
+        raise ValueError('server role/PID mapping does not identify exactly one proxy')
+    included=[(pid,role) for pid,role in zip(pids,roles) if not (outside and role=='proxy')]
+    return [pid for pid,_ in included],[role for _,role in included]
+
+
+def counters(pid):
+    info=support.TaskInfo()
+    if support.LIBPROC.proc_pidinfo(pid,4,0,ctypes.byref(info),ctypes.sizeof(info))!=ctypes.sizeof(info):
+        raise ProcessLookupError(pid)
+    return dict(at=time.monotonic(),cpu_s=(info.user+info.system)*support.TICK_SECONDS,
+        user_s=info.user*support.TICK_SECONDS,system_s=info.system*support.TICK_SECONDS,
+        threads=info.threads,rss_mb=info.rss/1048576,unix_syscalls=info.syscalls_unix,context_switches=info.csw)
+
+
+def native_threads(pid):
+    """Native IDs and nanosecond thread counters, not PROC_PIDTASKINFO ticks."""
+    result={}
+    for identity in thread_ids(pid):
+        try:result[str(identity)]=thread_usage(pid,identity)
+        except RuntimeError:pass # Short-lived wall workers may finish after the ID list.
+    return result
+
+
+def last_bot(path):
+    rows=[row for row in support.complete_json_lines(path) if 'online' in row]
+    return rows[-1] if rows else {}
+
+
+def population(tile):
+    status=tile.ask('server-status');players=status['players']
+    readers=[p for p in players if p.get('terrain_reader') or p['name'].startswith('E12View')]
+    real=[p for p in players if p not in readers]
+    return dict(chunks=status['chunks'],real=len(real),placed=sum(p.get('placed',False) for p in real),
+        held=sum(p.get('held',False) for p in real),readers=len(readers),players=real,
+        population=status.get('e11_population'))
+
+
+def game_times(instance):
+    result={}
+    for name,tile in instance.tiles.items():
+        sent=time.monotonic();reply=tile.ask('console time query gametime');received=time.monotonic()
+        values=[int(v) for line in reply.get('output',[]) for v in re.findall(r'-?\d+',line)]
+        if not values:raise RuntimeError('missing native game time')
+        result[name]=dict(tick=values[-1],at=(sent+received)/2,rtt_s=received-sent)
+    return result
+
+
+def thread_deltas(before,after):
+    result={}
+    for tile,first in before.items():
+        rows=[]
+        for identity,a in first.items():
+            b=after[tile].get(identity)
+            if b and b['at']>a['at']:rows.append(dict(id=identity,name=b['name'],cores=(b['cpu_s']-a['cpu_s'])/(b['at']-a['at']),
+                user_cores=(b['user_cpu_s']-a['user_cpu_s'])/(b['at']-a['at']),system_cores=(b['system_cpu_s']-a['system_cpu_s'])/(b['at']-a['at'])))
+        rows.sort(key=lambda r:r['cores'],reverse=True);mains=[r for r in rows if r['name']=='main']
+        result[tile]=dict(threads=rows,main=mains[0] if len(mains)==1 else None,matching_thread_cores=sum(r['cores'] for r in rows),
+            missing_end_ids=[identity for identity in first if identity not in after[tile]],new_ids=[identity for identity in after[tile] if identity not in first])
+    return result
+
+
+def failure_evidence(folder,instance,processes,shims):
+    """Capture causal stdout and process state before terminating any child."""
+    records={}
+    roles={**{f'bots-{g["label"]}':p for g,p in processes},**{f'shim-{g["label"]}':p for g,p,_ in shims}}
+    roles.update({f'tile-{name}':tile.server.process for name,tile in instance.tiles.items() if hasattr(tile,'server')})
+    if getattr(instance,'proxy',None):roles['proxy']=instance.proxy.process
+    if hasattr(instance,'store_process'):roles['store']=instance.store_process
+    state={name:dict(pid=process.pid,exit=process.poll()) for name,process in roles.items()}
+    patterns=['warn','error','panic','lease','expired','exited','refused','failed','fatal','memory','capacity','too many','thread']
+    for path in sorted(folder.glob('*.log'))+sorted(folder.glob('*.jsonl')):
+        lines=[]
+        with path.open('rb') as stream:
+            for raw in stream:
+                if not raw.endswith(b'\n'):break
+                line=raw.decode(errors='replace').rstrip('\r\n')
+                if any(word in line.lower() for word in patterns):lines.append(line)
+        if lines:records[path.name]=lines
+    return dict(at=time.monotonic(),time_ns=time.time_ns(),before_any_cleanup=True,processes=state,lines=records)
+
+
+def path_command(instance,reset=False):
+    path=instance.root/'proxy.log';offset=len(path.read_bytes())
+    instance.proxy.send('e18-path'+(' reset' if reset else ''))
+    def reply():
+        raw=path.read_bytes()[offset:]
+        for line in raw[:raw.rfind(b'\n')+1].decode(errors='replace').splitlines():
+            if 'E18_PATH ' in line:return json.loads(line.split('E18_PATH ',1)[1])
+    return support.wait(reply,5,'proxy path histogram timeout')
+
+
+def budget_delta(before,after):
+    keys=['stop_cycles','process_stop_signals','stop_wall_s','sum_process_pause_s','cpu_s']
+    return {key:after[key]-before[key] for key in keys if key in before and key in after}
+
+
+def conservative_p95(latency):
+    rank=math.ceil(latency['front_packets']*.95);total=0
+    if not rank or latency['matched']<rank:return None
+    for micros,count in sorted((int(k),v) for k,v in latency['histogram_us'].items()):
+        total+=count
+        if total>=rank:return micros/1000
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--proxy-outside-cap',action='store_true',help='feasibility only; cap tiles/store/sidecars, record uncapped proxy')
+    parser.add_argument('--bins',type=Path,default=BINS)
+    parser.add_argument('--counts',default='50')
+    parser.add_argument('--allow-200',action='store_true',help='only for an explicitly parent-approved window')
+    parser.add_argument('--capacity-diagnostic',action='store_true',help='parent-approved 975 then conditional 1050, not M4 acceptance')
+    parser.add_argument('--warmup',type=float,default=30)
+    parser.add_argument('--seconds',type=float,default=30)
+    args=parser.parse_args();counts=[int(v) for v in args.counts.split(',')]
+    if args.proxy_outside_cap and not args.capacity_diagnostic:raise SystemExit('proxy exclusion requires diagnostic mode')
+    DATA.mkdir(parents=True,exist_ok=True)
+    bins=args.bins.resolve()
+    if args.capacity_diagnostic:
+        if counts!=[975,1050] or args.warmup!=30 or args.seconds!=60:raise SystemExit('capacity diagnostic is exactly 975 then conditional1050,30warm/60measure')
+    elif any(v not in [50,200] for v in counts):raise SystemExit('only the parent-approved 50/200 window')
+    if 200 in counts and not args.allow_200:raise SystemExit('200-player guard requires explicit approval for this window')
+    target=DATA/(args.name+'.json')
+    if target.exists():raise SystemExit('use a fresh result name')
+    request=ROOT/'.local/quiet-request';ack=ROOT/'.local/quiet-ack-E17'
+    if request.exists() or ack.exists():raise SystemExit('quiet state exists')
+    adapter=load('e18_d9_adapter',ROOT/'scripts/e17-m4')
+    proxy=load('e18_d9_proxy',ROOT/'scripts/e18-proxy')
+    baseline=load('e18_d9_baseline',ROOT/'scripts/capacity-bench')
+    layouts={count:plan(count,baseline.route_anchor) for count in counts}
+    result=dict(kind='E19-proxy-outside-cap-diagnostic' if args.proxy_outside_cap else 'E19-D9-capacity-diagnostic' if args.capacity_diagnostic else 'E19-D9-production-slope',status='preflight',acceptance=False,mode='release coalesced, lazy readers, endpoint pool, cut backoff',
+        server_core_cap=4,bot_core_cap=1,proxy_inside_server_cap=not args.proxy_outside_cap,counts=counts,layouts=layouts,cells={},
+        warmup_seconds=args.warmup,measurement_seconds=args.seconds,
+        binaries={name:hashlib.sha256((bins/name).read_bytes()).hexdigest() for name in ['horizon-client','meridian','meridian-sidecar','goliath-store','horizon-bots']})
+    canonical=json.loads((bins/'canonical.json').read_text())
+    candidate_path=bins/'candidate.json'
+    proxy_candidate=json.loads((candidate_path if candidate_path.exists() else ROOT/'.local/bin/meridian-e18/candidate-1/candidate.json').read_text())
+    for name,digest in result['binaries'].items():
+        expected=canonical['binaries'].get(name,proxy_candidate['binaries'].get(name))
+        if expected!=digest:raise SystemExit('frozen release artifact changed: '+name)
+    result['canonical_sha256']=hashlib.sha256((bins/'canonical.json').read_bytes()).hexdigest()
+    result['proxy_candidate_sha256']=hashlib.sha256((candidate_path if candidate_path.exists() else ROOT/'.local/bin/meridian-e18/candidate-1/candidate.json').read_bytes()).hexdigest()
+    reactor=proxy_candidate['projects']['meridian']['patches'][-1]['path'].endswith('meridian-06-io-pool.patch')
+    result['reactor_candidate']=reactor
+    result['e19_harness_sha256']=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    result['harness_sha256']={name:hashlib.sha256((ROOT/'scripts'/name).read_bytes()).hexdigest() for name in ['e18-production-slope','e18_d9_layout.py','e18_d9_wire.py','e18-front-shim','e18_sockets.py','e18_process.py','e17_flat09_metrics.py','e17-m4','capacity-bench','e11_support.py','goliath-cluster']}
+    support.save(target,result)
+    began=time.monotonic();deadline=began+1500
+    def check():
+        if time.monotonic()>deadline-30:raise TimeoutError('D9 quiet window cleanup reserve')
+        if not request.exists() or request.read_text()!=identity:raise RuntimeError('quiet identity lost')
+    def pause(seconds):
+        until=time.monotonic()+seconds
+        while time.monotonic()<until:check();time.sleep(min(.2,until-time.monotonic()))
+    def settle():
+        while os.getloadavg()[0]>4:check();time.sleep(1)
+    identity=json.dumps(dict(owner='E19',name=args.name,pid=os.getpid(),time=datetime.now(timezone.utc).isoformat()))+'\n'
+    with request.open('x') as stream:stream.write(identity)
+    try:
+        result['quiet_acknowledgements']='not required: parent confirmed no other agent running'
+        for count in counts:
+            if args.capacity_diagnostic and count==1050 and (args.proxy_outside_cap or not result['cells']['975'].get('diagnostic_pass')):
+                result['cells']['1050']=dict(status='not-run',reason='feasibility diagnostic is 975 only' if args.proxy_outside_cap else '975 did not pass the diagnostic gates');break
+            settle();layout=layouts[count]
+            cell=dict(status='starting',load_start=os.getloadavg(),samples=[],bot_commands=[],layout=layout)
+            result['cells'][str(count)]=cell;support.save(target,result)
+            print(f'D9 {count}: starting release fixture',flush=True)
+            with tempfile.TemporaryDirectory(prefix='E19-D9-',dir=support.RUNS) as temporary:
+                folder=Path(temporary);observer=None if args.capacity_diagnostic else D9Observer(layout['witnesses']);monitor=ProcessSampler(observer=True).start()
+                module=adapter.cluster_module(bins);instance=module.Cluster.__new__(module.Cluster)
+                processes=[];streams=[];budgets={};server_roles=[];shims=[];sockets=None
+                original_start=module.Cluster.start_proxy;original_publish=module.Cluster.publish_state
+                def publish(this):
+                    original_publish(this)
+                    config=this.root/'meridian.toml'
+                    if config.exists():
+                        with config.open('a') as stream:
+                            for group in layout['groups']:
+                                stream.write(f'\n[[forced-host]]\nhost = "{group["host"]}"\nbackend = "{group["backend"]}"\n')
+                def start(this):
+                    if observer:
+                        for label,tile in this.tiles.items():tile.port=observer.listen(('127.0.0.1',tile.port),label=label)
+                    original_start(this)
+                module.Cluster.publish_state=publish;module.Cluster.start_proxy=start
+                if args.capacity_diagnostic:
+                    tile_start=module.Tile.start
+                    def interior_start(tile):
+                        previous=tile.cluster.tile_env
+                        center=next(g['center'] for g in layout['groups'][:4] if g['backend']==tile.label)
+                        tile.cluster.tile_env=dict(previous,GOLIATH_SPAWN=json.dumps([center[0],-60,center[1]]))
+                        try:return tile_start(tile)
+                        finally:tile.cluster.tile_env=previous
+                    module.Tile.start=interior_start
+                    cell['per_tile_interior_spawns']={g['label']:[g['center'][0],-60,g['center'][1]] for g in layout['groups'][:4]}
+                    cell['join_batches']=dict(cohorts=5,join_every_seconds=.25,crossing_actors_recentered_after_each_half_second_join_poll=True)
+                for key in ['E18_TERRAIN_EAGER','E18_WRITES_DIRECT','E18_CONTROL_FRESH','E18_BLOCKING_IO']:os.environ.pop(key,None)
+                os.environ['E18_PATH_TIMING']='1'
+                if observer:observer.start()
+                try:
+                    instance.__init__(folder,module.RESOURCES,layout['edge'],tile_env={'HORIZON_E11_MEASURE':'1'},max_players=10000,max_expected=10000)
+                    cell['io_pool_started']=[line for line in (folder/'proxy.log').read_text().rpartition('\n')[0].splitlines() if 'E18 fixed IO pool:' in line]
+                    if reactor and not cell['io_pool_started']:raise RuntimeError('reactor snapshot did not enable fixed IO drivers')
+                    pids=[]
+                    for name,tile in instance.tiles.items():
+                        role='tile-'+name;server_roles.append(role);monitor.register(role,tile.server.process.pid);pids.append(tile.server.process.pid)
+                    for role,pid in [('proxy',instance.proxy.process.pid),('store',instance.store_process.pid)]+[(f'sidecar-{i}',c.process.pid) for i,c in enumerate(instance.sidecars)]:
+                        server_roles.append(role);monitor.register(role,pid);pids.append(pid)
+                    cap_pids,cap_roles=server_cap(pids,server_roles,instance.proxy.process.pid,args.proxy_outside_cap)
+                    cell['server_cap_pids']=cap_pids
+                    cell['server_cap_roles']=cap_roles
+                    cell['proxy_inside_server_cap']=not args.proxy_outside_cap
+                    budgets['servers']=proxy.TrackedBudget(cap_pids,4).start();cell['idle_proxy']=counters(instance.proxy.process.pid)
+                    config=tomllib.loads((folder/'meridian.toml').read_text())
+                    exclusive={int(backend[key].rsplit(':',1)[1]) for backend in config['backends'] for key in ['address','sidecar']}
+                    targets=exclusive|{instance.address[1],instance.port}|{json.loads(tile.endpoint.read_text())['port'] for tile in instance.tiles.values()}
+                    sockets=SocketSampler(instance.proxy.process.pid,instance.port,targets,exclusive).start()
+                    for tile in instance.tiles.values():
+                        for command in ['gamerule spawn_mobs false','gamerule advance_weather false','gamerule advance_time false','gamerule random_tick_speed 3','gamerule respawn_radius 0','time set day','kill @e[type=!minecraft:player]']:
+                            tile.ask('console '+command)
+                    for index,group in enumerate(layout['groups']):
+                        if args.capacity_diagnostic:
+                            shim_path=folder/('shim-'+group['label']+'.jsonl');shim_stream=shim_path.open('w');streams.append(shim_stream)
+                            shim=subprocess.Popen([os.sys.executable,'-B',str(ROOT/'scripts/e18-front-shim'),'--target',str(instance.port),'--host',group['host'],'--index',str(index)],cwd=folder,stdout=shim_stream,stderr=subprocess.STDOUT)
+                            shims.append((group,shim,shim_path));monitor.register('shim-'+group['label'],shim.pid)
+                            def listening():
+                                if shim.poll() is not None:raise RuntimeError('test-only shim exited before listen')
+                                rows=support.complete_json_lines(shim_path)
+                                return rows[-1] if rows else None
+                            port=support.wait(listening,10,'shim listen timeout')['port']
+                        else:port=observer.listen(('127.0.0.1',instance.port),front=True,label='front-'+group['label'],host=group['host'])
+                        sockets.add_target(port)
+                        command=[str(bins/'horizon-bots'),'--event-loop','--server',f'127.0.0.1:{port}','--bots',str(group['count']),
+                            '--behaviour','route','--seconds','900','--join-every','.25' if args.capacity_diagnostic else '.1','--view-distance','3','--seed','12345','--speed','4','--height','2','--name',group['prefix']]
+                        command+=['--spread',','.join(map(str,group['spread']))] if group['kind']=='interior' else ['--path',group['path']]
+                        stream=(folder/(group['label']+'.jsonl')).open('w');streams.append(stream)
+                        process=subprocess.Popen(command,cwd=folder,env=support.private_env(folder/(group['label']+'-home')),stdout=stream,stderr=subprocess.STDOUT)
+                        processes.append((group,process));monitor.register('bots-'+group['label'],process.pid);cell['bot_commands'].append(command)
+                    budgets['bots']=proxy.TrackedBudget([p.pid for _,p in processes],1).start()
+                    crossed=set();last_cross_poll=0.
+                    def healthy(joining=False):
+                        nonlocal last_cross_poll
+                        rows={g['label']:last_bot(folder/(g['label']+'.jsonl')) for g,_ in processes}
+                        if any(p.poll() is not None for _,p in processes) or any(r.get('failed',0) for r in rows.values()):raise RuntimeError('D9 bot exit/drop: '+str(rows))
+                        for _,process,path in shims:
+                            reports=support.complete_json_lines(path)
+                            if process.poll() is not None or reports and reports[-1]['errors']:raise RuntimeError('test-only shim failed')
+                        if args.capacity_diagnostic and joining and time.monotonic()-last_cross_poll>=.5:
+                            last_cross_poll=time.monotonic()
+                            for player in instance.tiles['a'].ask('server-status')['players']:
+                                if player['name'].startswith('E17BotX') and player.get('placed') and player['name'] not in crossed:
+                                    instance.tiles['a'].ask(f'console tp {player["name"]} 12 -58 12');crossed.add(player['name'])
+                        return rows if all(rows[g['label']].get('online')==g['count'] for g,_ in processes) else (False if joining else rows)
+                    support.wait(lambda:healthy(True),300,'D9 join timeout');monitor.capture('joined')
+                    if args.capacity_diagnostic and len(crossed)!=layout['crossing_players']:raise RuntimeError('not every crossing actor was placed on the route')
+                    cell['join_population']={name:population(tile) for name,tile in instance.tiles.items()}
+                    for group in layout['groups'][:4]:
+                        actual=[r for r in support.complete_json_lines(folder/(group['label']+'.jsonl')) if 'routes' in r][0]['routes']
+                        for route in actual:
+                            expected=group['starts'][route['name']]
+                            if any(abs(a-b)>1e-8 for a,b in zip(route['start'],expected)):raise RuntimeError('D9 route preamble mismatch')
+                            owned=[p for p in cell['join_population'][group['backend']]['players'] if p['name']==route['name'] and p.get('placed')]
+                            if not owned:raise RuntimeError('D9 forced-host did not place actor on assigned tile')
+                            instance.tiles[group['backend']].ask(f'console tp {route["name"]} {expected[0]} -58 {expected[1]}')
+                        cx,cz=group['center']
+                        for j in range(64):instance.tiles[group['backend']].ask(f'console summon minecraft:pig {cx+j%8-4} -60 {cz+j//8-4} {{Invulnerable:1b,PersistenceRequired:1b}}')
+                    print(f'D9 {count}: all joined and positioned, warmup {args.warmup}s',flush=True)
+                    pause(args.warmup);healthy();cell['before']={name:population(tile) for name,tile in instance.tiles.items()}
+                    for tile in instance.tiles.values():tile.ask('e11-samples')
+                    cell['game_time_before']=game_times(instance)
+                    cell['timing_reset']=path_command(instance,True)
+                    if observer:observer.reset()
+                    cell['start_ns']=time.time_ns();cell['bot_samples']=[]
+                    cell['budget_before']={name:b.report() for name,b in budgets.items()}
+                    cell['tile_threads_before']={name:native_threads(tile.server.process.pid) for name,tile in instance.tiles.items()}
+                    cell['proxy_threads_before']=native_threads(instance.proxy.process.pid)
+                    monitor.capture('steady-first');first=counters(instance.proxy.process.pid);cell['samples'].append(first)
+                    sockets.capture('steady-first')
+                    until=time.monotonic()+args.seconds
+                    while time.monotonic()<until:
+                        pause(min(1,until-time.monotonic()));cell['bot_last']=healthy()
+                        cell['bot_samples'].append(dict(at=time.monotonic(),groups=cell['bot_last']))
+                        cell['samples'].append(counters(instance.proxy.process.pid))
+                    last=cell['samples'][-1];monitor.capture('steady-last');cell['end_ns']=time.time_ns()
+                    sockets.capture('steady-last')
+                    cell['tile_threads_after']={name:native_threads(tile.server.process.pid) for name,tile in instance.tiles.items()}
+                    cell['proxy_threads_after']=native_threads(instance.proxy.process.pid)
+                    cell['tile_thread_cpu']=thread_deltas(cell['tile_threads_before'],cell['tile_threads_after'])
+                    cell['proxy_thread_cpu']=thread_deltas({'proxy':cell['proxy_threads_before']},{'proxy':cell['proxy_threads_after']})['proxy']
+                    cell['game_time_after']=game_times(instance)
+                    cell['game_time_tps']={name:(cell['game_time_after'][name]['tick']-a['tick'])/(cell['game_time_after'][name]['at']-a['at']) for name,a in cell['game_time_before'].items()}
+                    cell['budget_after']={name:b.report() for name,b in budgets.items()}
+                    cell['histogram']=path_command(instance)
+                    cell['witness_latency']=observer.report() if observer else None
+                    cell['after']={name:population(tile) for name,tile in instance.tiles.items()}
+                    cell['tick_samples']={name:tile.ask('e11-samples') for name,tile in instance.tiles.items()}
+                    cell['tick_summary']={name:dict(count=len(batch['ticks']),dropped=batch['dropped'],p99_ms=sorted(tick['ms'] for tick in batch['ticks'])[math.ceil(.99*len(batch['ticks']))-1]) for name,batch in cell['tick_samples'].items()}
+                    elapsed=last['at']-first['at'];cell['proxy']={key:(last[key]-first[key])/elapsed for key in ['cpu_s','user_s','system_s','unix_syscalls','context_switches']}
+                    cell['proxy'].update(cores=cell['proxy']['cpu_s'],cores_per_player=cell['proxy']['cpu_s']/count,
+                        threads_min=min(r['threads'] for r in cell['samples']),threads_max=max(r['threads'] for r in cell['samples']),
+                        threads_increment_per_player=(max(r['threads'] for r in cell['samples'])-cell['idle_proxy']['threads'])/count,
+                        rss_mb_max=max(r['rss_mb'] for r in cell['samples']))
+                    cell['limiter_window']={name:budget_delta(cell['budget_before'][name],cell['budget_after'][name]) for name in budgets}
+                    cell['latency_includes_sigstop']=any(r.get('stop_wall_s',0)>0 for r in cell['limiter_window'].values())
+                    cell['witness_conservative_p95_ms']=conservative_p95(cell['witness_latency']) if observer else None
+                    events=module.phase_events(folder/'proxy.log');cell['activations_in_window']=[e for e in events if e['phase']=='activation' and cell['start_ns']<=e['ns']<=cell['end_ns']]
+                    uuid_names={p['uuid'].replace('-',''):p['name'] for phase in ['before','after'] for tile in cell[phase].values() for p in tile['players']}
+                    cell['witness_crossings']=[dict(e,name=uuid_names.get(e['uuid'])) for e in cell['activations_in_window'] if uuid_names.get(e['uuid']) in layout['witnesses']]
+                    raw=(folder/'proxy.log').read_bytes();lines=raw[:raw.rfind(b'\n')+1].decode(errors='replace').splitlines()
+                    cell['crossing_routes']=[line for line in lines if 'E17BotX' in line and ' moved from ' in line]
+                    cell['causal_warnings']=[line for line in lines if any(word in line for word in ['WARN','ERROR','replay failed'])]
+                    positions=cell['witness_latency']['witness_positions'] if observer else {};interior_tiles={tuple(math.floor(v/2048) for v in r['position'][::2]) for name,r in positions.items() if not name.startswith('E17BotX')}
+                    cell['witness_geometry']=dict(interior_tiles=[list(v) for v in sorted(interior_tiles)],
+                        crossing_witnesses=[name for name in positions if name.startswith('E17BotX')],
+                        wall_witnesses=[name for name,r in positions.items() if min(min(v%2048,2048-v%2048) for v in r['position'][::2])<=32])
+                    cell['status']='complete'
+                    print(f'D9 {count}: proxy {cell["proxy"]["cores"]:.4f} cores, {cell["proxy"]["threads_max"]} threads, witness P95 {cell["witness_conservative_p95_ms"]}ms',flush=True)
+                except BaseException as error:
+                    cell.update(status='failed',error=repr(error))
+                    monitor.capture('failure-before-cleanup')
+                    evidence=failure_evidence(folder,instance,processes,shims)
+                    evidence_path=DATA/(args.name+'-'+str(count)+'-failure-native.json.gz')
+                    evidence_path.write_bytes(gzip.compress(support.sanitize(json.dumps(evidence,indent=2)).encode(),mtime=0))
+                    cell['failure_evidence']=dict(path=str(evidence_path.relative_to(ROOT)),processes=evidence['processes'],before_any_cleanup=True)
+                    raise
+                finally:
+                    if sockets:
+                        sockets.stop();cell['socket_pressure']=sockets.report()
+                    for budget in budgets.values():
+                        if not budget.done.is_set():budget.stop()
+                    cell['limiter_whole_cell']={name:b.report() for name,b in budgets.items()}
+                    for _,process in processes:
+                        if process.poll() is None:process.terminate();process.wait(10)
+                    cell['shim_reports']={group['label']:(rows[-1] if (rows:=support.complete_json_lines(path)) else dict(errors=['no complete shim report'])) for group,_,path in shims}
+                    for _,process,_ in shims:
+                        if process.poll() is None:process.terminate();process.wait(10)
+                    for stream in streams:stream.close()
+                    if cell['status']=='failed':
+                        cell['bot_tails']={g['label']:support.complete_json_lines(folder/(g['label']+'.jsonl'))[-3:] for g,_ in processes}
+                        if (folder/'proxy.log').exists():
+                            raw=(folder/'proxy.log').read_bytes();cell['failure_log']=[line for line in raw[:raw.rfind(b'\n')+1].decode(errors='replace').splitlines() if any(word in line for word in ['WARN','ERROR','replay failed'])]
+                    instance.stop()
+                    if observer:observer.stop()
+                    monitor.stop()
+                    process_report=monitor.report()
+                    for phase in process_report['phases'].values():
+                        if phase:
+                            phase['server_cores']=sum(row['cores'] for role,row in phase['fixture'].items() if role in server_roles)
+                            phase['capped_server_cores']=sum(row['cores'] for role,row in phase['fixture'].items() if role in cell.get('server_cap_roles',[]))
+                            phase['tile_cores']=sum(row['cores'] for role,row in phase['fixture'].items() if role.startswith('tile-'))
+                    cell['processes']=process_report
+                    steady=process_report['phases']['steady'];whole=process_report['phases']['whole_cell']
+                    cell['noise_valid']=bool(steady and whole and steady['no_outside_process_above_half_core'] and whole['no_outside_process_above_half_core'] and not monitor.error)
+                    cell['observer_and_driver_cores']=steady['fixture']['observer-and-driver']['cores'] if steady else None
+                    cell['cpu_latency_eligible']=bool(observer) and cell['status']=='complete' and cell['noise_valid'] and not cell['witness_latency']['errors'] and bool(cell.get('witness_crossings'))
+                    if args.capacity_diagnostic and cell['status']=='complete':
+                        cell['shim_cores']={name:row['cores'] for name,row in steady['fixture'].items() if name.startswith('shim-')}
+                        cell['shim_production_required']=False;cell['shim_purpose']='native bots canonicalize handshake host to IP; shims select built-in forced-host login backend only; no production forwarding component is added'
+                        cell['bot_cores']=sum(row['cores'] for name,row in steady['fixture'].items() if name.startswith('bots-'))
+                        reasons=[]
+                        if cell['socket_pressure']['error']:reasons.append('socket-pressure sampler failed')
+                        if not cell['noise_valid']:reasons.append('outside-process validity failed')
+                        if any(tps<19.9 for tps in cell['game_time_tps'].values()):reasons.append('tile game-time TPS below19.9')
+                        if any(row['p99_ms']>=50 or row['dropped'] for row in cell['tick_summary'].values()):reasons.append('raw tick P99 over50ms or raw ticks dropped')
+                        if cell['bot_cores']>=.95 or cell['limiter_window']['bots']['stop_cycles'] or any(row['falling_behind'] or row['late_rounds'] or row['failed'] for sample in cell['bot_samples'] for row in sample['groups'].values()):reasons.append('bot core saturation or late/failed bots')
+                        if any(not row['main'] for row in cell['tile_thread_cpu'].values()):reasons.append('native main-thread counters missing')
+                        if any(report['errors'] for report in cell['shim_reports'].values()):reasons.append('shim forwarding error')
+                        cell['diagnostic_failures']=reasons;cell['diagnostic_pass']=not reasons
+                    support.save(target,result)
+        result['status']='complete'
+    except BaseException as error:result.update(status='failed',error=repr(error));raise
+    finally:
+        if request.exists() and request.read_text()==identity:request.unlink()
+        result.update(seconds=time.monotonic()-began,load_end=os.getloadavg());support.save(target,result)
+
+
+if __name__=='__main__':main()

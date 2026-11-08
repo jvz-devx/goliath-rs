@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Run unchanged E14 physics on E20 binaries, keeping captures local."""
+import hashlib
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+ROOT=Path(__file__).resolve().parent.parent
+sys.path.insert(0,str(ROOT/'scripts'))
+
+def main():
+    loader=importlib.machinery.SourceFileLoader('e20_physics_e14',str(ROOT/'scripts/e14-physics'))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module)
+    module.DATA=ROOT/'docs/experiments/data/E20/physics'
+    module.EVIDENCE=ROOT/'.local/evidence/E20/physics'
+    def quiet():
+        request=ROOT/'.local/quiet-request'
+        if not request.exists() or request.read_text()!=os.environ.get('E20_QUIET_IDENTITY'):
+            raise module.Quiet('E20 physics requires an acknowledged e20-window')
+    module.quiet=quiet
+    leg=module.Run.leg;stop=module.Run.stop
+    def recorded_leg(self,*args,**kwargs):
+        row=leg(self,*args,**kwargs)
+        if row.get('screenshot'):row['screenshot']=str((module.EVIDENCE/Path(row['screenshot']).name).relative_to(ROOT))
+        return row
+    def recorded_stop(self):
+        stop(self)
+        self.result['e20_adapter']=dict(physics_harness_sha256=hashlib.sha256((ROOT/'scripts/e14-physics').read_bytes()).hexdigest(),
+            adapter_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),native_physics_unchanged=True)
+    module.Run.leg=recorded_leg;module.Run.stop=recorded_stop
+    return module.main()
+
+if __name__=='__main__':raise SystemExit(main())

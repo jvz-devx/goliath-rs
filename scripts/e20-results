@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Retain a compact, reproducible frontier ledger from immutable E20 raw cells."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E20'
+
+def endpoints(levels):
+    valid_levels={n:[c for c in cells if c['valid']] for n,cells in levels.items()}
+    stable_pass=[n for n,cells in valid_levels.items() if len(cells)>=2 and all(c['passed'] for c in cells)]
+    stable_fail=[n for n,cells in valid_levels.items() if len(cells)>=2 and all(not c['passed'] for c in cells)]
+    unstable=sorted(n for n,cells in valid_levels.items() if any(c['passed'] for c in cells) and any(not c['passed'] for c in cells))
+    frontier=max((n for n in stable_pass if any(failed>n for failed in stable_fail)),default=None)
+    bracket=min((n for n in stable_fail if frontier and n>frontier),default=None)
+    return dict(frontier=frontier,ratio_to_325=frontier/325 if frontier else None,
+        tested_grid_step=25,bracket_fail=bracket,bracket_width=bracket-frontier if bracket else None,
+        unstable_counts=unstable,stable_passing_counts=sorted(stable_pass),stable_failing_counts=sorted(stable_fail))
+
+def ledger(prefix):
+    rows=[];levels={}
+    pattern=re.compile(re.escape(prefix)+r'-(\d+)-r(\d+)\.json$')
+    for path in DATA.glob(prefix+'-*-r*.json'):
+        match=pattern.fullmatch(path.name)
+        if not match:continue
+        count,repeat=map(int,match.groups());data=json.loads(path.read_text())
+        cell=data['cells'][str(count)]
+        row=dict(count=count,repeat=repeat,path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(path.read_bytes()).hexdigest(),status=cell['status'])
+        if cell['status']=='complete':
+            steady=cell['processes']['phases']['steady']
+            cpu={name:value['cores'] for name,value in steady['fixture'].items()}
+            row.update(passed=cell['diagnostic_pass'],valid=cell['noise_valid'] and cell['load_start'][0]<=4,
+                failures=cell['diagnostic_failures'],tile_cores={name:cpu['tile-'+name] for name in cell['before']},
+                proxy_cores=cell['proxy']['cores'],proxy_user_cores=cell['proxy']['user_s'],proxy_system_cores=cell['proxy']['system_s'],
+                store_cores=cpu['store'],sidecar_cores={name:value for name,value in cpu.items() if name.startswith('sidecar-')},
+                server_cores=steady['server_cores'],tile_tps=cell['game_time_tps'],
+                tile_p99_ms={name:value['p99_ms'] for name,value in cell['tick_summary'].items()},
+                tile_population={name:{key:value[key] for key in ['placed','held','readers','chunks','population']} for name,value in cell['before'].items()},
+                limiter=cell['limiter_window'],activations=len(cell['activations_in_window']),
+                load_start=cell['load_start'][0],outside_max_steady=steady['outside_max_process_cores'],
+                outside_max_whole=cell['processes']['phases']['whole_cell']['outside_max_process_cores'],
+                quiet_seconds=data['seconds'],binaries=data['binaries'])
+            levels.setdefault(count,[]).append(row)
+        rows.append(row)
+    rows.sort(key=lambda row:(row['count'],row['repeat']))
+    return dict(kind='E20-frontier-ledger',prefix=prefix,**endpoints(levels),rows=rows,
+        authority='builder evidence; reviewer independently verifies milestone acceptance')
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('prefix');args=parser.parse_args()
+    result=ledger(args.prefix)
+    (DATA/(args.prefix+'-staircase.json')).write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps({key:value for key,value in result.items() if key!='rows'},indent=2))
+    for row in result['rows']:
+        print(json.dumps({key:row.get(key) for key in ['count','repeat','passed','valid','server_cores','proxy_cores','tile_tps','tile_p99_ms','failures']}))
+
+if __name__=='__main__':main()

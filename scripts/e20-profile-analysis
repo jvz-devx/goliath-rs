@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Separate running CPU weights, blocked occupancy and native slow-tick spans."""
+import argparse
+from collections import Counter,defaultdict
+from datetime import datetime
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import re
+import xml.etree.ElementTree as ET
+from zoneinfo import ZoneInfo
+import e11_support as support
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E20'
+
+def role(name):
+    return 'IO drivers' if name.startswith('proxy-io-') else 'control workers' if name.startswith('proxy-control-') else 'wall workers' if name.startswith('wall-') else 'supervisors' if name.startswith('player ') else 'other target threads'
+
+def category(leaf):
+    if any(word in leaf for word in ['recvfrom','readv','read_nocancel']):return 'socket reads'
+    if any(word in leaf for word in ['sendto','sendmsg','writev','write_nocancel']):return 'socket writes'
+    if 'kevent' in leaf:return 'selector calls'
+    if any(word in leaf for word in ['ulock','psynch','semaphore','cond_wait']):return 'locks or wakeups'
+    if any(word in leaf for word in ['alloc','free','memcpy','memmove','realloc']):return 'allocation or copies'
+    return 'other user/kernel work'
+
+def time_profile(path):
+    doc=ET.fromstring(gzip.decompress(path.read_bytes()));definitions={node.get('id'):node for node in doc.iter() if node.get('id')}
+    def resolve(node):
+        if node is None:return None
+        while node.get('ref'):node=definitions[node.get('ref')]
+        return node
+    states=Counter();groups=defaultdict(lambda:dict(total_ns=0,categories=Counter(),leaves=Counter(),inclusive=Counter(),examples={}))
+    total=0;sample_times=[];missing=0
+    for row in doc.findall('.//row'):
+        state=resolve(row.find('thread-state')).text;weight=int(resolve(row.find('weight')).text);states[state]+=weight
+        if state!='Running':continue
+        total+=weight;thread=resolve(row.find('thread')).get('fmt','');group=groups[role(thread)];group['total_ns']+=weight
+        trace=resolve(row.find('tagged-backtrace'));back=resolve(trace.find('backtrace')) if trace is not None else None
+        frames=[resolve(frame).get('name','') for frame in back.findall('frame')] if back is not None else []
+        if not frames:missing+=weight
+        leaf=frames[0] if frames else 'missing unwind';group['leaves'][leaf]+=weight;group['categories'][category(leaf)]+=weight
+        for frame in set(frames):
+            if any(word in frame for word in ['meridian','horizon_protocol','recvfrom','sendmsg','writev','ulock','psynch','kevent']):group['inclusive'][frame]+=weight
+        group['examples'].setdefault(category(leaf),frames[:10])
+        sample_times.append(int(resolve(row.find('sample-time')).text))
+    result={}
+    for name,group in groups.items():
+        as_rows=lambda values:[dict(frame=key,weight_ns=value,percent_of_role=100*value/group['total_ns']) for key,value in values.most_common(18)]
+        result[name]=dict(cpu_seconds=group['total_ns']/1e9,percent_of_target=100*group['total_ns']/total,
+            categories={key:dict(cpu_seconds=value/1e9,percent_of_role=100*value/group['total_ns']) for key,value in group['categories'].most_common()},
+            top_leaves=as_rows(group['leaves']),inclusive_frames=as_rows(group['inclusive']),example_stacks=group['examples'])
+    return dict(method='sum of exported TimeProfiler Running weights; blocked samples are excluded',total_cpu_seconds=total/1e9,
+        states_weight_ns=dict(states),missing_unwind_percent=100*missing/total if total else None,
+        sampled_seconds=(max(sample_times)-min(sample_times))/1e9 if sample_times else None,roles=result,
+        source_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+def spikes(meta):
+    result=[];sample=next(row for row in meta['samples'] if row['role']=='tile-a')
+    date=datetime.fromtimestamp(meta['profile_began_ns']/1e9,ZoneInfo('Europe/Amsterdam')).date()
+    for record in meta.get('tile_a_native_spikes',[]):
+        line=record['line'];match=re.search(r'\[(\d\d:\d\d:\d\d)\].*slow tick ([\d.]+) ms, cpu ([\d.]+) ms.*?: (.*?)(?:; slowest:|$)',line)
+        if not match:continue
+        clock,wall,cpu,text=match.groups();end=datetime.fromisoformat(str(date)+'T'+clock).replace(tzinfo=ZoneInfo('Europe/Amsterdam')).timestamp()*1e9
+        segments=[]
+        for fragment in text.split(', '):
+            parsed=re.fullmatch(r'(.+?) ([\d.]+)(?:/([\d.]+))?',fragment)
+            if parsed:segments.append(dict(name=parsed[1],wall_ms=float(parsed[2]),cpu_ms=float(parsed[3]) if parsed[3] else None))
+        in_sample=(end>=sample['began_ns'] and end+1e9<=sample['ended_ns'])
+        outside_sample=(end+1e9<sample['began_ns'] or end-float(wall)*1e6>sample['ended_ns'])
+        result.append(dict(clock=clock,wall_ms=float(wall),cpu_ms=float(cpu),off_cpu_ms=float(wall)-float(cpu),spans=segments,
+            direct_tile_sample='inside' if in_sample else 'outside' if outside_sample else 'boundary-uncertain',raw=line))
+    result.sort(key=lambda row:row['wall_ms'],reverse=True)
+    return dict(count=len(result),top_all=result[:12],top_outside_direct_tile_sample=[row for row in result if row['direct_tile_sample']=='outside'][:12],
+        limits='native log time has one-second precision; spans are inclusive/nested and may include between-tick work; do not sum them or infer exact old tick sequence')
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--name',required=True);args=parser.parse_args()
+    evidence=ROOT/'.local/evidence/E20'/args.name;meta_path=DATA/(args.name+'-profile.json');meta=json.loads(meta_path.read_text())
+    output=DATA/(args.name+'-analysis.json')
+    if output.exists():raise RuntimeError('analysis exists; keep it and use another versioned name')
+    result=dict(kind='E20-profile-derived-analysis',capacity_acceptance=False,profile_sha256=hashlib.sha256(meta_path.read_bytes()).hexdigest(),
+        running_cpu=time_profile(evidence/'time-profile.xml.gz'),tile_a_spikes=spikes(meta))
+    support.save(output,result)
+    print(json.dumps(dict(total_cpu_seconds=result['running_cpu']['total_cpu_seconds'],roles={name:{key:row[key] for key in ['cpu_seconds','percent_of_target','categories','top_leaves']} for name,row in result['running_cpu']['roles'].items()},spikes=result['tile_a_spikes']),indent=2))
+
+if __name__=='__main__':main()

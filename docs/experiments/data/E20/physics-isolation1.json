@@ -1,0 +1,361 @@
+{
+  "kind": "E20-fixed-physics-isolation",
+  "status": "complete",
+  "count_per_group": 3,
+  "particles": false,
+  "full_suite_modes": [
+    "walk",
+    "sprint",
+    "sprint-jump",
+    "fly"
+  ],
+  "no_early_stop_for_ratios": true,
+  "plan": [
+    {
+      "group": "reference",
+      "round": 1,
+      "name": "physics-isolation1-reference-r1-off"
+    },
+    {
+      "group": "proxy",
+      "round": 1,
+      "name": "physics-isolation1-proxy-r1-off"
+    },
+    {
+      "group": "tiles",
+      "round": 1,
+      "name": "physics-isolation1-tiles-r1-off"
+    },
+    {
+      "group": "proxy",
+      "round": 2,
+      "name": "physics-isolation1-proxy-r2-off"
+    },
+    {
+      "group": "tiles",
+      "round": 2,
+      "name": "physics-isolation1-tiles-r2-off"
+    },
+    {
+      "group": "reference",
+      "round": 2,
+      "name": "physics-isolation1-reference-r2-off"
+    },
+    {
+      "group": "tiles",
+      "round": 3,
+      "name": "physics-isolation1-tiles-r3-off"
+    },
+    {
+      "group": "reference",
+      "round": 3,
+      "name": "physics-isolation1-reference-r3-off"
+    },
+    {
+      "group": "proxy",
+      "round": 3,
+      "name": "physics-isolation1-proxy-r3-off"
+    }
+  ],
+  "snapshots": {
+    "reference": {
+      "path": ".local/bin/meridian-e18/reactor-1",
+      "candidate_sha256": "2bfd2e26c0c9ef61f3549b8a3c33faf96938875fd6063323e359c1910611d7b9",
+      "binaries": {
+        "horizon-client": "b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d",
+        "meridian": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+        "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+        "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+        "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af"
+      }
+    },
+    "proxy": {
+      "path": ".local/bin/meridian-e20/scheduler-2",
+      "candidate_sha256": "efc39e3c45639a2e83eee18961f14e5369c6a0f07185eb315bebf302806a5d2e",
+      "binaries": {
+        "horizon-client": "b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d",
+        "meridian": "8716c34f6e799e2ddce31aff153b86cf9c78408bfcd64b4c78551851d2b399ad",
+        "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+        "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+        "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af"
+      }
+    },
+    "tiles": {
+      "path": ".local/bin/horizon-e21-fc2868b2b/warmtick-2",
+      "candidate_sha256": "4a3328d1a7226782e31e43959e49d2942f7b9705835bb41a11866b11c5e1dce5",
+      "binaries": {
+        "horizon-client": "ea4537868c90771e0d030ccfff1dbe36dace215a2c70d652dd86b38b84434090",
+        "meridian": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+        "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+        "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+        "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af"
+      }
+    }
+  },
+  "harness_sha256": {
+    "e20-physics-isolation": "2b16087e1786446ab67a75c3a60e0e77ab0e05ac85687da3f044cb6256f3cfb9",
+    "e20-physics": "b186b6570167d9616e435f380877d44d46b975d84a8125b5e6d090c1f20fe5f2",
+    "e20-window": "11602bdfc33729897057d2d75a50f554adac3d42ce7cc5a146bec915863b8c2a",
+    "e14-physics": "ebd963824f5d986e4d17b48f41a0f045ed942410396b1fa983d6a47f3b9a578e",
+    "e14-analyse": "1fede9ca000943725500f1f0fcc661788fd65d421e1b4fa80010b34d1793cb99",
+    "e14-build10-check": "45c4d415ca24a80f06022518fbd601ba8806b9733df36f7e697f4d0a6cc691f7",
+    "e14_support.py": "def6911ee2b3479bb92924456035d514fbd19afbee2f294544d76ae877f5bd93",
+    "e14_snapshot_support.py": "b829d5b2f891c6fbd50f3b1dc4f102fb06207863c2c56dd520d16017b0fee85e",
+    "e18_process.py": "c296d05cb9ad7048ffd05512cbb0a5fe198254c765a71eddc34dc4cdd3868a40",
+    "goliath-cluster": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5"
+  },
+  "runs": [
+    {
+      "group": "reference",
+      "round": 1,
+      "name": "physics-isolation1-reference-r1-off",
+      "exit": 0,
+      "seconds": 306.3546559579845,
+      "log": "docs/experiments/data/E20/physics-isolation1-reference-r1-off-command.log.gz",
+      "log_sha256": "543225bc4399c094bb0ef36ce165593732f0323eb87386d0f61a138427cb53fd",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-isolation1-reference-r1-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/meridian-e18/reactor-1",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-isolation1-reference-r1-off"
+      ]
+    },
+    {
+      "group": "proxy",
+      "round": 1,
+      "name": "physics-isolation1-proxy-r1-off",
+      "exit": 0,
+      "seconds": 319.4496605419845,
+      "log": "docs/experiments/data/E20/physics-isolation1-proxy-r1-off-command.log.gz",
+      "log_sha256": "6bc558893f2b8522de95b53205d547be04c0759a5bf122a9b263ec1edb7e407c",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-isolation1-proxy-r1-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/meridian-e20/scheduler-2",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-isolation1-proxy-r1-off"
+      ]
+    },
+    {
+      "group": "tiles",
+      "round": 1,
+      "name": "physics-isolation1-tiles-r1-off",
+      "exit": 0,
+      "seconds": 306.3335807090043,
+      "log": "docs/experiments/data/E20/physics-isolation1-tiles-r1-off-command.log.gz",
+      "log_sha256": "a3782da88a687615aeb39175e68b767fcfc0cf1a566fdb4dca0174b0e8b141e1",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-isolation1-tiles-r1-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/horizon-e21-fc2868b2b/warmtick-2",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-isolation1-tiles-r1-off"
+      ]
+    },
+    {
+      "group": "proxy",
+      "round": 2,
+      "name": "physics-isolation1-proxy-r2-off",
+      "exit": 0,
+      "seconds": 306.26597000000766,
+      "log": "docs/experiments/data/E20/physics-isolation1-proxy-r2-off-command.log.gz",
+      "log_sha256": "de77ca7f44171c7e6581d53bcebeee99259097450dc7cd817dd7c0aa14926e87",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-isolation1-proxy-r2-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/meridian-e20/scheduler-2",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-isolation1-proxy-r2-off"
+      ]
+    },
+    {
+      "group": "tiles",
+      "round": 2,
+      "name": "physics-isolation1-tiles-r2-off",
+      "exit": 0,
+      "seconds": 306.2484490829811,
+      "log": "docs/experiments/data/E20/physics-isolation1-tiles-r2-off-command.log.gz",
+      "log_sha256": "61b7cfffd564c16154f8e2d752e9292ad679ff5ffda6009663c258359af0c548",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-isolation1-tiles-r2-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/horizon-e21-fc2868b2b/warmtick-2",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-isolation1-tiles-r2-off"
+      ]
+    },
+    {
+      "group": "reference",
+      "round": 2,
+      "name": "physics-isolation1-reference-r2-off",
+      "exit": 0,
+      "seconds": 306.4707737909921,
+      "log": "docs/experiments/data/E20/physics-isolation1-reference-r2-off-command.log.gz",
+      "log_sha256": "d7b5c91bc486914c122dddbe77f46f9abea5b89699c1130eaa34570474fa7f32",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-isolation1-reference-r2-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/meridian-e18/reactor-1",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-isolation1-reference-r2-off"
+      ]
+    },
+    {
+      "group": "tiles",
+      "round": 3,
+      "name": "physics-isolation1-tiles-r3-off",
+      "exit": 0,
+      "seconds": 306.3490579169884,
+      "log": "docs/experiments/data/E20/physics-isolation1-tiles-r3-off-command.log.gz",
+      "log_sha256": "249c1c6d0eb7384179fda5c006fa47dc2df93edfa46f3f5f1a54d16f4d737562",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-isolation1-tiles-r3-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/horizon-e21-fc2868b2b/warmtick-2",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-isolation1-tiles-r3-off"
+      ]
+    },
+    {
+      "group": "reference",
+      "round": 3,
+      "name": "physics-isolation1-reference-r3-off",
+      "exit": 0,
+      "seconds": 306.6501309159794,
+      "log": "docs/experiments/data/E20/physics-isolation1-reference-r3-off-command.log.gz",
+      "log_sha256": "cd729571d40a1b876faaba480f05f32a1b430609afc86069eb3745f2e2ced036",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-isolation1-reference-r3-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/meridian-e18/reactor-1",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-isolation1-reference-r3-off"
+      ]
+    },
+    {
+      "group": "proxy",
+      "round": 3,
+      "name": "physics-isolation1-proxy-r3-off",
+      "exit": 0,
+      "seconds": 306.7184131660033,
+      "log": "docs/experiments/data/E20/physics-isolation1-proxy-r3-off-command.log.gz",
+      "log_sha256": "ad838e10a31cc921b7ae8dc3a318938efb681ce354273180c392d0be09e87b76",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-window",
+        "--name",
+        "physics-isolation1-proxy-r3-off",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e20-physics",
+        "--snapshot",
+        "$REPO/.local/bin/meridian-e20/scheduler-2",
+        "--variant",
+        "e12",
+        "--suite",
+        "--name",
+        "physics-isolation1-proxy-r3-off"
+      ]
+    }
+  ]
+}

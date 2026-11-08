@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Owns E19's explicit capped-versus-total diagnostic CPU summary."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+import e11_support as support
+import importlib.machinery
+import importlib.util
+
+
+ROOT=Path(__file__).resolve().parent.parent
+loader=importlib.machinery.SourceFileLoader('e19_e18_summary',str(ROOT/'scripts/e18-capacity-summary'))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+base=importlib.util.module_from_spec(spec)
+loader.exec_module(base)
+
+
+def summarize(data):
+    result=base.summarize(data)
+    result.update(kind='E19-derived-capacity-diagnostic',proxy_inside_server_cap=data['proxy_inside_server_cap'])
+    for count,cell in data['cells'].items():
+        if cell['status']!='complete':continue
+        steady=cell['processes']['phases']['steady']
+        result['cells'][count].update(capped_server_cores=steady['capped_server_cores'],
+            tile_cores=steady['tile_cores'],server_cap_roles=cell['server_cap_roles'],
+            proxy_inside_server_cap=cell['proxy_inside_server_cap'],
+            start_load=cell['load_start'],outside_max_whole=cell['processes']['phases']['whole_cell']['outside_max_process_cores'])
+    return result
+
+
+if __name__=='__main__':
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('raw',type=Path)
+    parser.add_argument('output',type=Path)
+    args=parser.parse_args()
+    result=summarize(json.loads(args.raw.read_text()))
+    result['raw_sha256']=hashlib.sha256(args.raw.read_bytes()).hexdigest()
+    support.save(args.output,result)
+    print(json.dumps({count:{key:cell.get(key) for key in ['status','diagnostic_pass','tile_cores','capped_server_cores','server_cores','failures']}
+        for count,cell in result['cells'].items()},indent=2))

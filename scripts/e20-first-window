@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""Reconstruct the original first walk window without changing E14's metric."""
+import bisect
+from collections import Counter
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import math
+from pathlib import Path
+import statistics
+import e11_support as support
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E20'
+loader=importlib.machinery.SourceFileLoader('e20_window_analysis',str(ROOT/'scripts/e14-analyse'))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+analysis=importlib.util.module_from_spec(spec);loader.exec_module(analysis)
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+def relative(row,at):return dict(row,relative_ms=(row['ns']-at)/1e6)
+
+def context(rows,at):
+    ns=[row['ns'] for row in rows];index=max(0,min(len(rows)-2,bisect.bisect_right(ns,at)-1))
+    a,b=rows[index:index+2]
+    return dict(at_ns=at,position=analysis.interpolate(rows,at),fraction=(at-a['ns'])/(b['ns']-a['ns']),
+        before={key:a[key] for key in ['frame','tick','ns','pos','velocity']},after={key:b[key] for key in ['frame','tick','ns','pos','velocity']})
+
+def trajectory(run,leg,metrics):
+    at=metrics['crossed_ns'];lo=at-500_000_000;hi=at+500_000_000
+    rows=[row for row in run['frames'] if leg['began_ns']<=row['ns']<=leg['ended_ns']]
+    window=[row for row in rows if lo<=row['ns']<=hi]
+    ticks={row['tick']:row for row in rows}
+    tick_rows=[row for row in ticks.values() if abs(row['ns']-at)<=600_000_000]
+    steps=[]
+    for previous,row in zip(tick_rows,tick_rows[1:]):
+        steps.append(dict(relative_ms=(row['ns']-at)/1e6,tick=row['tick'],tick_delta=row['tick']-previous['tick'],
+            frame=row['frame'],dt_ms=(row['ns']-previous['ns'])/1e6,pos=row['pos'],velocity=row['velocity'],
+            forward_blocks=sum((row['pos'][axis]-previous['pos'][axis])*leg['direction'][i] for i,axis in enumerate([0,2]))))
+    columns=set();cursor=0;wire=run['wire'];underfoot=[]
+    for row in window:
+        while cursor<len(wire) and wire[cursor]['ns']<=row['ns']:
+            packet=wire[cursor]
+            if packet['kind']=='chunk':columns.add(tuple(packet['chunk']))
+            elif packet['kind']=='forget_chunk':columns.discard(tuple(packet['chunk']))
+            cursor+=1
+        column=(math.floor(row['pos'][0])//16,math.floor(row['pos'][2])//16)
+        underfoot.append(dict(relative_ms=(row['ns']-at)/1e6,column=column,known_from_wire=column in columns))
+    active_wire=[relative(row,at) for row in wire if lo<=row['ns']<=hi and row['kind']!='sent_position']
+    attributes=[row for row in wire if row['kind']=='attributes' and row['ns']<=hi]
+    motion_attributes=[dict(relative_ms=(row['ns']-at)/1e6,values=[v for v in row['values'] if v['attribute']==26]) for row in attributes]
+    inputs={tile:[relative(row,at) for row in values if lo<=row['ns']<=hi] for tile,values in run['server_inputs'].items()}
+    source=[row for row in run['server_inputs'][leg['source']] if leg['began_ns']<=row['ns']<=leg['ended_ns']]
+    target=[row for row in run['server_inputs'][leg['target']] if leg['began_ns']<=row['ns']<=leg['ended_ns']]
+    first_target=target[0] if target and not leg['baseline'] else None
+    last_source=next((row for row in reversed(source) if first_target and row['ns']<first_target['ns']),None)
+    endpoints=[context(rows,lo),context(rows,hi)]
+    wire_counts=Counter(row['kind'] for row in active_wire)
+    rtts=[(row['ns']-row['sent_ns'])/1e6 for row in window]
+    return dict(metrics=metrics,leg_duration_ms=(leg['ended_ns']-leg['began_ns'])/1e6,
+        crossed_after_begin_ms=(at-leg['began_ns'])/1e6,window_endpoints=endpoints,client_tick_steps=steps,
+        client_frames=[relative(row,at) for row in window],server_tick_samples={tile:[relative(row,at) for row in values if lo<=row['ns']<=hi] for tile,values in run['servers'].items()},
+        server_inputs=inputs,wire_counts=dict(wire_counts),wire_events=active_wire,underfoot=underfoot,
+        underfoot_missing_samples=sum(not row['known_from_wire'] for row in underfoot),
+        pending_chunks_max=max(row['pending_chunks'] for row in window),
+        streaming_max={key:max(row['streaming'][key] for row in window) for key in window[0]['streaming']},
+        frame_query_rtt_ms=dict(minimum=min(rtts),median=statistics.median(rtts),maximum=max(rtts)),
+        input_handover_gap_ms=(first_target['ns']-last_source['ns'])/1e6 if first_target and last_source else None,
+        last_source_input=relative(last_source,at) if last_source else None,first_target_input=relative(first_target,at) if first_target else None,
+        movement_attributes=motion_attributes[-6:])
+
+def inspect(label,path):
+    run=json.loads(gzip.decompress(path.read_bytes()));derived=analysis.analyse(run)
+    leg=run['trials'][0];metrics=derived['trials'][0]
+    baseline=next(row for row in run['baselines'] if row['mode']==leg['mode'] and row['direction']==leg['direction'])
+    ref=next(row for row in derived['baselines'] if row['mode']==leg['mode'] and row['direction']==leg['direction'])
+    activation_index=next(i for i,row in enumerate(run['phases']) if row['phase']=='activation' and leg['began_ns']<=row['ns']<=leg['ended_ns'])
+    phases=run['phases'][max(0,activation_index-2):activation_index+1]
+    at=metrics['crossed_ns']
+    first_sequence=[dict(row,relative_ms=(row['ns']-at)/1e6) if 'ns' in row else row for row in phases]
+    return dict(label=label,path=str(path.relative_to(ROOT)),sha256=sha(path),trial=trajectory(run,leg,metrics),
+        baseline=trajectory(run,baseline,ref),first_transaction=first_sequence,
+        limitations=['cut and CAS have durations but no absolute timestamps','prewarm and reader connect/retire events were not retained',
+            'server samples deduplicate by tick and player-presence, so sub-tick frozen transitions can be absent',
+            'client frame timestamps are control-reply receipt times, not native frame-generation timestamps',
+            'physics fixture has no SIGSTOP CPU limiter; no fixture limiter pause is subtracted'])
+
+def main():
+    files=[('original-combined',DATA/'physics/combined1-physics-off.json.gz')]
+    files +=[(f'reference-r{i}',DATA/'physics'/f'physics-isolation1-reference-r{i}-off.json.gz') for i in range(1,4)]
+    rows=[inspect(label,path) for label,path in files]
+    result=dict(kind='E20-original-first-window-static-analysis',unchanged_analysis_sha256=sha(ROOT/'scripts/e14-analyse'),rows=rows)
+    support.save(DATA/'first-window-analysis.json',result)
+    for row in rows:
+        t=row['trial'];b=row['baseline'];m=t['metrics']
+        print(json.dumps(dict(label=row['label'],ratio=m['speed_ratio'],actual=m['speed_1s_bps'],reference=m['baseline_speed_1s_bps'],
+            actual_duration_ms=t['leg_duration_ms'],baseline_duration_ms=b['leg_duration_ms'],
+            tick_steps=[step['forward_blocks'] for step in t['client_tick_steps']],baseline_tick_steps=[step['forward_blocks'] for step in b['client_tick_steps']],
+            activation=row['first_transaction'],wire=t['wire_counts'],underfoot_missing=t['underfoot_missing_samples'],pending=t['pending_chunks_max'],
+            streaming=t['streaming_max'],rtt=t['frame_query_rtt_ms'],baseline_rtt=b['frame_query_rtt_ms'],input_gap_ms=t['input_handover_gap_ms'])))
+
+if __name__=='__main__':main()

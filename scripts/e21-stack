@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Prove FINAL-09 and patch10 in a private Git index, without another checkout."""
+import argparse
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import e11_support as support
+
+ROOT=support.ROOT
+SOURCE=ROOT/'.local/src/horizon'
+CANONICAL=ROOT/'.local/bin/meridian-e18/flat09-tiles/canonical.json'
+PATCH=ROOT/'patches/horizon-10-warm-tick.patch'
+DATA=ROOT/'docs/experiments/data/E21'
+
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prepare',action='store_true')
+    parser.add_argument('--write',action='store_true')
+    args=parser.parse_args()
+    canonical=json.loads(CANONICAL.read_text())
+    records=canonical['projects']['horizon']['patches']+canonical['measurement_patches']
+    for record in records:
+        if sha(ROOT/record['path'])!=record['sha256']:raise RuntimeError('canonical patch changed')
+    support.RUNS.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='E21-index-',dir=support.RUNS) as temporary:
+        env=dict(os.environ,GIT_INDEX_FILE=str(Path(temporary)/'index'))
+        def git(*words,input=None):
+            return subprocess.check_output(['git',*map(str,words)],cwd=SOURCE,env=env,input=input)
+        git('read-tree',canonical['projects']['horizon']['pin'])
+        if args.prepare:
+            # First prove the existing E12 worktree; never overwrite an unknown edit.
+            for record in records[:7]:git('apply','--cached',ROOT/record['path'])
+            mismatches=[]
+            changed=git('diff','--cached','--name-only').decode().splitlines()
+            actual=git('diff','HEAD','--name-only').decode().splitlines()+git('ls-files','--others','--exclude-standard').decode().splitlines()
+            for path in sorted(set(changed+actual)):
+                if not (path.startswith('crates/') or path=='Cargo.lock'):continue
+                try:expected=git('show',':'+path)
+                except subprocess.CalledProcessError:
+                    mismatches.append(path);continue
+                if not (SOURCE/path).exists() or (SOURCE/path).read_bytes()!=expected:mismatches.append(path)
+            if mismatches:raise RuntimeError('existing source differs from frozen E12: '+str(mismatches))
+            for record in records[7:]:
+                options=record.get('apply_options',[])
+                git('apply','--check',*options,ROOT/record['path'])
+                git('apply',*options,ROOT/record['path'])
+            git('read-tree',canonical['projects']['horizon']['pin'])
+        for record in records:git('apply','--cached',*record.get('apply_options',[]),ROOT/record['path'])
+        baseline=git('write-tree').decode().strip()
+        if args.write:
+            candidates=git('diff','--name-only').decode().splitlines()+git('ls-files','--others','--exclude-standard').decode().splitlines()
+            parts=[];changed=[]
+            for path in sorted(set(candidates)):
+                if not (path.startswith('crates/') or path=='Cargo.lock'):continue
+                old=git('show',':'+path).decode()
+                new=(SOURCE/path).read_text()
+                if old==new:continue
+                changed.append(path)
+                parts.append(f'diff --git a/{path} b/{path}\n')
+                parts.extend(difflib.unified_diff(old.splitlines(keepends=True),new.splitlines(keepends=True),fromfile='a/'+path,tofile='b/'+path))
+            if not parts:raise RuntimeError('no patch10 delta')
+            PATCH.write_text(''.join(parts))
+        if PATCH.exists():git('apply','--cached','--check',PATCH);git('apply','--cached',PATCH)
+        candidates=git('diff','--cached','--name-only').decode().splitlines()+git('diff','HEAD','--name-only').decode().splitlines()+git('ls-files','--others','--exclude-standard').decode().splitlines()
+        files={};mismatches=[]
+        for path in sorted(set(candidates)):
+            if not (path.startswith('crates/') or path=='Cargo.lock'):continue
+            expected=git('show',':'+path)
+            if not (SOURCE/path).exists() or (SOURCE/path).read_bytes()!=expected:mismatches.append(path)
+            else:files[path]=sha(SOURCE/path)
+        proof=dict(pin=canonical['projects']['horizon']['pin'],patches=records,
+            baseline_tree=baseline,source_equality='passed' if not mismatches else 'failed',mismatches=mismatches,
+            files=files,canonical_sha256=sha(CANONICAL),patch10_sha256=sha(PATCH) if PATCH.exists() else None)
+        support.save(DATA/'stack-proof.json',proof)
+        print(json.dumps(dict(source_equality=proof['source_equality'],files=len(files),mismatches=mismatches,patch10_sha256=proof['patch10_sha256'])))
+        if mismatches:raise SystemExit(1)
+
+
+if __name__=='__main__':main()

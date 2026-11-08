@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Sample proxy thread roles in an explicitly perturbed, non-frontier D9 cell."""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT=Path(__file__).resolve().parent.parent
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--bots',type=int,default=650)
+    parser.add_argument('--bins',type=Path,required=True)
+    parser.add_argument('--no-other-agents',action='store_true')
+    args=parser.parse_args()
+    evidence=ROOT/'.local/evidence/E20';evidence.mkdir(parents=True,exist_ok=True)
+    sample=evidence/(args.name+'-sample.txt')
+    if sample.exists():raise RuntimeError('profile already exists')
+    loader=importlib.machinery.SourceFileLoader('e20_profile_frontier',str(ROOT/'scripts/e20-frontier'))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module)
+    counters=module.counters;calls=0;profiler=None;stream=None
+    def sampled(pid):
+        nonlocal calls,profiler,stream
+        calls+=1
+        if calls==2:
+            stream=(evidence/(args.name+'-sample-stderr.txt')).open('w')
+            profiler=subprocess.Popen(['sample',str(pid),'5','-mayDie','-file',str(sample)],stdout=stream,stderr=subprocess.STDOUT)
+        return counters(pid)
+    module.counters=sampled
+    sys.argv=[str(ROOT/'scripts/e20-frontier'),'--name',args.name,'--counts',str(args.bots),'--bins',str(args.bins)]
+    if args.no_other_agents:sys.argv+=['--no-other-agents']
+    try:module.main()
+    finally:
+        code=profiler.wait(10) if profiler else None
+        if stream:stream.close()
+        record=dict(kind='E20-perturbed-profile-not-frontier',capacity_acceptance=False,sample_exit=code,
+            sample_path=str(sample.relative_to(ROOT)),sample_sha256=hashlib.sha256(sample.read_bytes()).hexdigest() if sample.exists() else None,
+            runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            stack_occupancy_is_not_CPU_share=True,thread_CPU_counters_in=args.name+'.json')
+        (module.DATA/(args.name+'-profile.json')).write_text(json.dumps(record,indent=2)+'\n')
+
+if __name__=='__main__':main()

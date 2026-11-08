@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Resume E20's 100-player bracket, 25-player refinement and repeated endpoints."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E20'
+loader=importlib.machinery.SourceFileLoader('e20_staircase_ledger',str(ROOT/'scripts/e20-results'))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+results=importlib.util.module_from_spec(spec);loader.exec_module(results)
+
+def next_count(levels,start=500):
+    mixed=[n for n,cells in levels.items() if any(c['passed'] for c in cells) and any(not c['passed'] for c in cells)]
+    passing=[n for n,cells in levels.items() if all(c['passed'] for c in cells)]
+    lower=max(passing,default=0)
+    upper=min((n for n,cells in levels.items() if n>lower and all(not c['passed'] for c in cells)),default=None)
+    mixed_above=sorted(n for n in mixed if n>lower)
+    if mixed_above:
+        below=mixed_above[0]-25
+        if below>lower:return below
+        if len(levels.get(lower,[]))<2:return lower
+        return upper if upper else max(mixed_above)+25
+    if upper is None:return lower+100 if lower else start
+    if not lower:raise RuntimeError('first step failed; reviewer must authorize lower bracket')
+    if upper-lower>25:return max(lower+25,((lower+upper)//50)*25)
+    return lower if len(levels[lower])<2 else upper
+
+def idle():
+    request=ROOT/'.local/quiet-request';ack=ROOT/'.local/quiet-ack-E20'
+    began=time.monotonic();notice=0
+    while request.exists():
+        state=json.loads(request.read_text())
+        if state['owner']!='E21':raise RuntimeError('another E20 or unknown quiet owner is running')
+        ack.write_text('E20 staircase is between cells, no build or measurement active.\n')
+        if time.monotonic()-began>1800:raise TimeoutError('E21 window exceeds30minutes')
+        if time.monotonic()>notice:
+            print('YIELD '+state.get('name','E21'),flush=True);notice=time.monotonic()+30
+        time.sleep(1)
+    ack.unlink(missing_ok=True)
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prefix',required=True)
+    parser.add_argument('--bins',type=Path,required=True)
+    parser.add_argument('--start',type=int,default=500)
+    parser.add_argument('--no-other-agents',action='store_true')
+    args=parser.parse_args()
+    checkpoint=DATA/(args.prefix+'-campaign.json')
+    while True:
+        ledger=results.ledger(args.prefix);rows=ledger['rows']
+        valid=[r for r in rows if r.get('valid')]
+        levels={n:[r for r in valid if r['count']==n] for n in {r['count'] for r in valid}}
+        if ledger['frontier']:
+            checkpoint.write_text(json.dumps(dict(status='complete',**ledger),indent=2)+'\n')
+            print('FRONTIER '+json.dumps({k:ledger[k] for k in ['frontier','ratio_to_325','stable_passing_counts','stable_failing_counts']}),flush=True)
+            return
+        # A mixed step gets no extra repeats. Select a two-pass lower step and
+        # a two-failure higher bracket, retaining the unstable band in full.
+        count=next_count(levels,args.start)
+        existing=[r for r in rows if r['count']==count]
+        if sum(not r.get('valid',False) for r in existing)>=2:raise RuntimeError('two invalid attempts at '+str(count))
+        repeat=max((r['repeat'] for r in existing),default=0)+1
+        name=f'{args.prefix}-{count}-r{repeat}'
+        checkpoint.write_text(json.dumps(dict(status='running',active_count=count,next_name=name,**ledger),indent=2)+'\n')
+        idle()
+        command=[sys.executable,'-B',str(ROOT/'scripts/e20-frontier'),'--name',name,'--counts',str(count),'--bins',str(args.bins)]
+        if args.no_other_agents:command+=['--no-other-agents']
+        print('CELL '+json.dumps(command),flush=True)
+        completed=subprocess.run(command,cwd=ROOT)
+        if completed.returncode:raise RuntimeError('fixture failed, inspect retained raw cell '+name)
+        subprocess.run([sys.executable,'-B',str(ROOT/'scripts/e20-summary'),str(DATA/(name+'.json')),str(DATA/(name+'-summary.json'))],cwd=ROOT,stdout=subprocess.DEVNULL,check=True)
+        row=json.loads((DATA/(name+'-summary.json')).read_text())['cells'][str(count)]
+        print('RESULT '+json.dumps(dict(count=count,passed=row['diagnostic_pass'],failures=row['failures'],server_cores=row['server_cores'],proxy_cores=row['proxy']['cores'],
+            tile_tps={n:r['tps'] for n,r in row['tiles'].items()},tile_p99_ms={n:r['p99_ms'] for n,r in row['tiles'].items()})),flush=True)
+        time.sleep(2) # Release between steps so E21 can request a window.
+
+if __name__=='__main__':main()

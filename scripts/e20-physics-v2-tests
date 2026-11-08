@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Exact original index-0 regression and matched-window safety properties."""
+import copy
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import unittest
+
+ROOT=Path(__file__).resolve().parent.parent
+loader=importlib.machinery.SourceFileLoader('e20_v2_tested',str(ROOT/'scripts/e20-physics-v2'))
+spec=importlib.util.spec_from_loader(loader.name,loader);v2=importlib.util.module_from_spec(spec);loader.exec_module(v2)
+
+class MatchedWindow(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path=ROOT/'docs/experiments/data/E20/physics/combined1-physics-off.json.gz'
+        raw=path.read_bytes()
+        assert hashlib.sha256(raw).hexdigest()=='8f43195b5b6d0d6f388c4a89fc67a81c251b12f5f06f1204fdb32b527de8547c'
+        cls.original=json.loads(gzip.decompress(raw))
+        cls.original['trials']=cls.original['trials'][:1]
+        cls.original['baselines']=cls.original['baselines'][:1]
+
+    def test_exact_original_index0_case_preserves_trial_and_matches_steps(self):
+        before=copy.deepcopy(self.original)
+        result=v2.analyse_run(self.original);row=result['rows'][0]
+        self.assertAlmostEqual(row['v1']['speed_ratio'],.9401973950468919,places=12)
+        self.assertTrue(row['v1_failed'])
+        self.assertTrue(row['v2_resolved'])
+        self.assertFalse(row['v2_failed'])
+        self.assertEqual(row['v1']['speed_1s_bps'],row['v2']['speed_1s_bps'])
+        matched=row['v2']['matched_baseline']
+        self.assertAlmostEqual(matched['endpoints'][1]['tick_coordinate']-matched['endpoints'][0]['tick_coordinate'],matched['matched_step_span'],places=10)
+        self.assertNotEqual(matched['elapsed_s'],1.)
+        self.assertAlmostEqual(matched['speed_bps'],matched['horizontal_blocks']/matched['elapsed_s'],places=12)
+        self.assertGreaterEqual(row['v2']['speed_ratio'],.95)
+        self.assertEqual(self.original,before)
+
+    def test_missing_corresponding_step_is_unresolved_without_window_search(self):
+        old=v2.v1.analyse(self.original)['trials'][0]
+        baseline=self.original['baselines'][0];leg=self.original['trials'][0]
+        match=v2.match_baseline(self.original,leg,baseline,old)
+        missing=int(match['endpoints'][0]['tick_coordinate'])
+        changed=copy.deepcopy(self.original)
+        changed['frames']=[row for row in changed['frames'] if not (baseline['began_ns']<=row['ns']<=baseline['ended_ns'] and row['tick']==missing)]
+        with self.assertRaises(v2.Unresolved):v2.match_baseline(changed,leg,baseline,old)
+
+    def test_own_elapsed_time_does_not_normalize_away_a_real_tick_slowdown(self):
+        frames=[];number=0
+        for offset,seconds,interval,start,tick_offset in [(0,6,.05,30,0),(10,11,.1,0,200)]:
+            for i in range(int(seconds*40)+1):
+                time=i/40;tick=int((time+1e-9)/interval)
+                frames.append(dict(frame=number,tick=tick_offset+tick,ns=round((offset+time)*1e9),pos=[start+.2*tick,0,0],velocity=[.2,0,0]));number+=1
+        baseline=dict(source='a',target='b',mode='walk',baseline=True,start=[30,0,0],goal=[50,0,0],direction=[1,0],began_ns=0,ended_ns=6_000_000_000,reached=True)
+        leg=dict(source='a',target='b',mode='walk',baseline=False,start=[0,0,0],goal=[20,0,0],direction=[1,0],began_ns=10_000_000_000,ended_ns=21_000_000_000,reached=True,owner_after='b',generation_before=0,generation_after=1)
+        run=dict(status='complete',errors=[],frames=frames,baselines=[baseline],trials=[leg],wire=[],servers={})
+        result=v2.analyse_run(run)['rows'][0]
+        self.assertTrue(result['v2_resolved'])
+        self.assertAlmostEqual(result['v2']['speed_ratio'],.5,places=8)
+        self.assertTrue(result['v2_failed'])
+
+    def test_v1_analysis_and_checker_are_unchanged(self):
+        self.assertEqual(v2.sha(ROOT/'scripts/e14-analyse'),'1fede9ca000943725500f1f0fcc661788fd65d421e1b4fa80010b34d1793cb99')
+        self.assertEqual(v2.sha(ROOT/'scripts/e14-build10-check'),'45c4d415ca24a80f06022518fbd601ba8806b9733df36f7e697f4d0a6cc691f7')
+
+if __name__=='__main__':unittest.main()
