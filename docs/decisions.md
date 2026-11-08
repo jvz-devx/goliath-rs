@@ -69,3 +69,13 @@ P3 is now rejected on safety as well: with crash notices 40 ms late, it duplicat
 
 **Nether and End.** Each runs as one extra process with the whole dimension as a single tile, using the same handover through portals. They aren't split, and they aren't part of the M1 to M4 measurements. DonutSMP reportedly hosts them in one region as well.
 
+
+## D9. Capacity layout and equal CPU
+
+The M4 comparison gives both sides the same budget: 4 cores for the servers, with bots on a separate core. On the cluster side the 4 cores also cover the proxy, the store and the sidecars. Plain Horizon connects without a proxy, but its 325-bot frontier was limited by its single main thread, at about 1.0 core, so the proxy budget doesn't change its number. The baseline is measured on the same engine patch as the tiles (`horizon-09-flat-light`, E18). The old W1 frontier on the unpatched engine is history only.
+
+The baseline keeps W1's workload: one 128-by-128 patrol square and 64 AI pigs. On the cluster, 90% of the players patrol four squares of the same size, one per tile, each centred at least 300 blocks from a wall. The other 10% walk a route that crosses walls all the time, including a corner. Each tile has 64 pigs, a higher pig-per-player ratio than the baseline's, so less gameplay work can't pass as speed. Per-tile player, reader and mob counts are reported in every cell.
+
+Why not the baseline's square at the origin: on the cluster that is the four-tile junction, where every player sees all four tiles and each tile holds a reader for every player. That's the worst case, not how players spread out on a large map. It's measured as a separate stress row and never used as the pass line.
+
+A cell is valid when load is 4 or less at its start and no process outside the fixture averages more than 0.5 core over the cell. Load from the fixture's own threads doesn't void a cell.
