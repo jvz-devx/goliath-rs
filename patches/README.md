@@ -2,6 +2,16 @@
 
 Apply patches from the matching upstream checkout. Nothing here has been sent upstream.
 
+The accepted measurement stack is FINAL-09 tiles, engine SHA-256 beginning
+`b2f1ea65`, with the reactor-1 proxy. It supports the reproduced 650-player
+frontier, not production acceptance or the 3x target. See
+[E20](../docs/experiments/E20-frontier.md) and
+[E23's frozen identities](../docs/experiments/E23-closeout.md#frozen-identities-and-reproduction).
+The root [stack inventory](../README.md#current-experiment-stacks) gives exact
+pins and patch order. Entries below retain earlier checks and failures as history.
+Patches 10 and 11, scheduler proxies and shared views do not replace that stack.
+E22's shared views remain on hold, unqualified.
+
 - `horizon-01-tile-cut.patch`: E6 opt-in tick-boundary persistent-state capture,
   container mutation tracking, a checksummed cut log, grouped full flush and recovery.
   Base is Horizon `fc2868b2b26d56ec76e17414909fe58a3b87bb92` after
@@ -153,7 +163,8 @@ default E10 evidence. Keep the marker when making a leased binary snapshot.
 `python3 -B scripts/e12-patch` applies the pinned stacks in disposable archives
 and checks exact working-source byte equality, including the separate lease
 delta. E12's report and permanent packet checks are in
-`docs/experiments/E12-m2.md`. No E12 patch has been committed or sent upstream.
+`docs/experiments/E12-m2.md`. These are retained local experiment deltas, not
+upstream changes.
 
 - `meridian-05-proxy-cost.patch`: E18 after the immutable E12 Meridian stack,
   ending at `meridian-04-m2.patch`, on
@@ -162,9 +173,10 @@ delta. E12's report and permanent packet checks are in
   queue refusals defer wall crossings with backoff. Adds bounded read-drain
   write coalescing without a timer. `E18_CONTROL_FRESH=1` and
   `E18_WRITES_DIRECT=1` select transport ablations. Store authority and leases
-  are unchanged. `python3 -B scripts/e18-patch` verifies the frozen parent
+  are unchanged. `python3 -B scripts/e18-patch` verifies the frozen prerequisite
   patch hashes, clean application and complete source byte equality. This patch
-  is still under test, not an M2 or M4 acceptance claim. See
+  belongs to the selected reactor-1 stack with patch 06. It is not a standalone
+  M2 or M4 acceptance claim. See
   `docs/experiments/E18-proxy-cost.md`.
 
 - `horizon-09-flat-light.patch`: E18's local patch for an upstream flat-world
@@ -173,8 +185,9 @@ delta. E12's report and permanent packet checks are in
   cloned read-only light view, so normal lighting can finish instead of repeatedly
   receiving `None`. No pacing, condvar, lease or ownership rule changes.
   Apply this exact patch to both the W1-equivalent plain stack and FINAL tile
-  stack before comparing capacity. The old 325-bot baseline and 975-bot target
-  remain provisional until E17 repeats its staircase with this patch.
+  stack before comparing capacity. E17 repeated the staircase with this patch:
+  the matched baseline passes 325 twice and fails 350 twice. E20's selected
+  cluster passes 650 twice; the 975-player target is not met.
   A resource-free unit test covers the 3 by 3 views and COW immutability. The
   `flat_light` streaming regression requires prepared resources through
   `HORIZON_TEST_RESOURCES` or the standard local resource directory; it never
@@ -203,3 +216,111 @@ delta. E12's report and permanent packet checks are in
   release. Full evidence and residual risks are in `docs/experiments/E18-proxy-cost.md`.
   `python3 -B scripts/e18-patch --event-loop` verifies the frozen stack including
   patch 05, clean application and every source byte without rewriting patch 05.
+
+- `horizon-08-m4-measurement.patch`: E17's measurement-only integration on
+  Horizon `fc2868b2b26d56ec76e17414909fe58a3b87bb92`. Apply the E12 FINAL stack
+  through `horizon-07-observer-status.patch`, then `horizon-03-bots.patch`,
+  then `horizon-04-digest.patch` with
+  `--exclude=crates/horizon-client/src/game/dedicated/status.rs`, then this patch.
+  It wires `e11-digest`, `e11-samples` and population status into the leased
+  control endpoint. The digest patch's other files supply their implementations.
+  The release prerequisite export and startup/control smoke passed. This is
+  instrumentation, not a capacity qualification by itself. It remains in
+  FINAL-09 before patch 09. See [E17 release provenance](../docs/experiments/E17-m4.md#release-provenance)
+  and the [ordered manifest](../docs/experiments/data/E17/final-release-prereqs-v2.json).
+
+- `horizon-10-warm-tick.patch`: E21's candidate on Horizon
+  `fc2868b2b26d56ec76e17414909fe58a3b87bb92`, after the complete FINAL-09
+  production and measurement stack, ending at `horizon-09-flat-light.patch`.
+  It admits speculative cut warming at most once per world tick. The real cut
+  still checks freshness. Release gates and same-tick mutation recovery pass.
+  E20's combined scheduler-2/warmtick-2 suite passes checker v2 with three
+  unresolved timing windows retained. The two 650-player capacity pilots are
+  mixed, so this candidate does not replace the accepted frontier stack.
+  See [E21](../docs/experiments/E21-tile-cost.md#patch-10) and
+  [E20 combined validation](../docs/experiments/E20-frontier.md#combined-validation-selected-by-the-reviewer).
+
+- `horizon-11-shared-observer.patch`: E22's shared-reader candidate on Horizon
+  `fc2868b2b26d56ec76e17414909fe58a3b87bb92`, after
+  `horizon-10-warm-tick.patch` and all its prerequisites. It adds bounded sparse
+  observer areas, interest revisions, ordered column refresh and status counters.
+  Release gates and legacy terrain/border checks pass. Both E22 comparison arms
+  use these engine bytes. Shared-4 does not reproduce its CPU-saving rule, and
+  its full M2 suite was not run. Hold, unqualified for promotion. See
+  [E22](../docs/experiments/E22-shared-views.md#horizon-patch-11).
+
+- `meridian-07-terrain-scheduler.patch`: E20's candidate on Meridian
+  `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`, after the reactor-1 stack ending
+  at `meridian-06-io-pool.patch`. It replaces per-session terrain timers with
+  IO-driver timers and bounded shared control workers. Lazy-reader policy and
+  authority ordering stay unchanged. Scheduler-1 passes release gates but has
+  no separate M2 or capacity qualification. Apply the stop-race follow-up next.
+  See [E20](../docs/experiments/E20-frontier.md#shared-scheduler-and-release-verification).
+
+- `meridian-07-scheduler-stop-race.patch`: E20's follow-up on Meridian
+  `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`, immediately after
+  `meridian-07-terrain-scheduler.patch`. It rechecks terminal reconciliation
+  state after claiming a worker slot, so completed work cannot restart.
+  Scheduler-2 passes release gates. Its combined M2 evidence uses warmtick-2
+  and checker v2, with three unresolved timing windows. Mixed capacity pilots
+  do not establish a new frontier. It remains a candidate. See
+  [E20](../docs/experiments/E20-frontier.md#shared-scheduler-and-release-verification).
+
+- `meridian-08-shared-views.patch`: E22's shared-1 candidate on Meridian
+  `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`, after both patch-07 files,
+  ending at `meridian-07-scheduler-stop-race.patch`. It shares each tile's
+  terrain stream through bounded cached snapshots and subscriber interests.
+  Shared-1 has a known return-to-interest terrain defect and cannot qualify.
+  Follow with the three immutable fixes below, in order. See
+  [E22](../docs/experiments/E22-shared-views.md#meridian-patch-08).
+
+- `meridian-08-cache-source-retention.patch`: E22's shared-2 follow-up on
+  Meridian `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`, immediately after
+  `meridian-08-shared-views.patch`. It keeps source-sent snapshots and updates
+  until the source sends an ordered Forget, even without local subscribers.
+  It adds cache bounds and recovery telemetry. Focused tests cover the original
+  defect, but refresh recovery still needs the next patch. No independent
+  promotion or capacity qualification is claimed. See
+  [E22's retained-source fix](../docs/experiments/E22-shared-views.md#cache-lifecycle-regression-and-follow-up).
+
+- `meridian-08-refresh-interest-barrier.patch`: E22's shared-3 follow-up on
+  Meridian `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`, immediately after
+  `meridian-08-cache-source-retention.patch`. It paces refresh retries, clears
+  interest, waits for ordered Forgets and restores the union with deadlines.
+  Release and focused recovery checks pass. Shared-3 still has a client-cache
+  eviction defect, so its earlier M2 results cannot qualify shared-4. See
+  [E22's recovery barrier](../docs/experiments/E22-shared-views.md#final-recovery-barrier-and-telemetry).
+
+- `meridian-08-client-cache-presence.patch`: E22's shared-4 follow-up on
+  Meridian `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`, immediately after
+  `meridian-08-refresh-interest-barrier.patch`. It checks actual client-cache
+  presence before suppressing full columns and restores missing owned columns
+  with ordered updates. Release gates and the native eviction/return/flight
+  probe pass. The two D9 savings are 0.030 and 0.216 core, so the required
+  0.10-core saving does not reproduce. Hold, unqualified; no full shared-4 M2.
+  See [E22](../docs/experiments/E22-shared-views.md).
+
+## Diagnostics in progress
+
+These E24 overlays are diagnostic only, pending E24's report and review. They
+do not replace the accepted measurement stack or qualify an availability fix.
+
+- `horizon-12-lease-diagnostics.patch` and `horizon-12-lease-diagnostics-r2.patch`:
+  E24 renewal and clock-failure telemetry on Horizon
+  `fc2868b2b26d56ec76e17414909fe58a3b87bb92`, after the complete FINAL-09 stack.
+  Select one overlay after patch 09, not after patches 10/11. Revision 2 replaces
+  the first overlay; do not apply both. They record lease calls, deadline slack
+  and stopped-authority causes without changing lease lengths or authority rules.
+  Scheduling effects remain diagnostic. See
+  [E24 diagnostic source](../docs/experiments/E24-lease-availability.md#diagnostic-source-and-ownership).
+
+- `meridian-09-heap-diagnostics.patch`, `meridian-09-heap-diagnostics-r2.patch`,
+  `meridian-09-heap-diagnostics-r3.patch`, `meridian-09-heap-diagnostics-r4.patch`
+  and `meridian-09-heap-diagnostics-r5.patch`: E24 heap instrumentation on
+  Meridian `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`, after the reactor-1 stack
+  ending at `meridian-06-io-pool.patch`. Each revision replaces the preceding
+  overlay against that same base. Do not apply them cumulatively or add patch 08.
+  Revisions 1 through 4 use DHAT; revision 5 uses allocation counters and sampling.
+  Instrumentation can change performance, so these builds are not capacity or
+  latency qualification. See
+  [E24's proxy-memory handoff](../docs/experiments/E24-lease-availability.md#proxy-memory-handoff-to-e25).

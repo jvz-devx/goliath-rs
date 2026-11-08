@@ -4,7 +4,7 @@ Design decisions, newest last. The research behind them is kept local for now. I
 
 ## D1. Purpose
 
-Prove the system first with bots and invited friends. Release it as open source later so others can replicate and refine it. The intent is to reproduce the Goliath system. A public server launch is not a goal yet.
+Prove the system with bots and invited players. The code is public under MIT. The intent is to reproduce the Goliath system. A public server launch is not a goal yet.
 
 ## D0. Roles
 
@@ -22,10 +22,10 @@ Prewarmed crossing with terrain visible. Real terrain past the wall, read-only, 
 
 On 2026-11-07 the project moved from up-front design to learning by building. Open questions are settled by experiment and raised only when the data needs a decision.
 
-- E1 (T0 simulator): which commit and recovery policy keeps item duplication at zero when a tile crashes and rolls back after a player left it.
+- E1 (deterministic crash simulator): which commit and recovery policy keeps item duplication at zero when a tile crashes and rolls back after a player left it.
 - E2 (real Horizon): what a crossing costs today on real servers, for a moving player.
 
-Still undecided: tile size, global state ownership, Nether and End placement, the scaling baseline, the redefined divergence target, naming and licence for the open-source release.
+The later decisions settle the licence, tile size, global state, dimensions and capacity baseline. Naming remains open.
 
 ## Provenance rule
 
@@ -65,7 +65,7 @@ P3 is now rejected on safety as well: with crash notices 40 ms late, it duplicat
 
 **Tile size.** Production tiles default to 2,048 blocks, a multiple of the 512-block region file so each file has one writer. The edge is configurable, and tests use 64 so crossings happen quickly. Crossing load falls with tile size: 50 sprinting players cross about 0.17 times a second at 2,048 blocks, against 1.4 at 256, using the mean rate N * v * 4 / (pi * L). At 256 blocks an E3-style 94 ms stall would take 13% of the tick thread. E3 also showed a cut's cost follows loaded chunks, not tile area, so large tiles cost nothing extra. Tiles can't be too large either, because a tile is the unit of capacity: every player in one tile shares one tick thread.
 
-**Global state.** E8 measured four independent tile clocks drifting up to 72 ticks, 3.6 seconds, with one tile under load. That is a visible sky step at a wall, so tiles can't each own time. The store holds one cluster clock and the weather, and the proxy sends clients the cluster time so the sky doesn't jump at a wall. Chat and the tab list live in the proxy. Scoreboard, statistics and advancements travel in the player's record. Game rules are cluster configuration, set at start.
+**Global state.** E8 measured four independent tile clocks drifting up to 72 ticks, 3.6 seconds, with one tile under load. That is a visible sky step at a wall, so tiles can't each own time. The store holds one cluster clock and the weather, and the proxy sends clients the cluster time so the sky doesn't jump at a wall. Chat and the tab list live in the proxy. Scoreboard, statistics and advancements travel in the player's record. Game rules are cluster configuration, set at start. This is the agreed division of responsibility; each feature needs its own implementation evidence, and E10 lists proxy chat, the cluster tab list and scoreboard transfer as not yet implemented.
 
 **Nether and End.** Each runs as one extra process with the whole dimension as a single tile, using the same handover through portals. They aren't split, and they aren't part of the M1 to M4 measurements. DonutSMP reportedly hosts them in one region as well.
 

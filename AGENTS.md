@@ -20,6 +20,7 @@ Build output is disposable, and it must never pile up.
 ## Rust rules
 
 Follow the `rust-project-architecture` skill.
+`Cargo.toml` and `clippy.toml` hold the enforced lint configuration.
 
 - Our crates are application-internal until a release decides otherwise, so skip the library API rules.
 - Workspace lints come from that skill's `assets/workspace-lints.toml` and `assets/clippy.toml`, and every crate inherits them with `[lints] workspace = true`.
