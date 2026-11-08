@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Build 10 worst speed dips</title>
+<style>
+body { margin: 0; font-family: var(--font-sans); color: var(--foreground); }
+h2 { font-size: 1rem; font-weight: 500; margin: 0 0 10px; }
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: .875rem; margin-bottom: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 14px; height: 8px; display: inline-block; }
+.off { fill: var(--chart-1); background: var(--chart-1); }
+.on { fill: var(--chart-2); background: var(--chart-2); }
+#e14-build10-dips svg { display: block; width: 100%; height: 290px; }
+#e14-build10-dips text { fill: var(--foreground); font-family: var(--font-sans); font-size: 12px; }
+.grid { stroke: var(--border); stroke-width: 1; }
+.limit { stroke: var(--warning); stroke-width: 1; stroke-dasharray: 4 4; }
+p { font-size: .875rem; color: var(--muted-foreground); margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<h2>Build 10: worst one-second speed dip</h2>
+<div class="legend"><span><i class="swatch off"></i>Particle wall off</span><span><i class="swatch on"></i>Particle wall on</span></div>
+<div id="e14-build10-dips" role="img" aria-label="All movement modes pass the five percent speed-dip limit across 112 crossings. The largest dip is walking with particles at 4.955 percent. Sprint is at most 0.057 percent, sprint-jump 0.395 percent, and flight 0.066 percent."></div>
+<p>112 crossings, 112 resolved windows. Each bar is the worst of 14 trials. The dashed line is the 5% limit.</p>
+<script>
+const root = document.getElementById('e14-build10-dips');
+const data = [
+  {label:'Walk', off:0.0561876322, on:4.9553429914},
+  {label:'Sprint', off:0.0396032017, on:0.0568758733},
+  {label:'Sprint-jump', off:0.3946809938, on:0.3633727501},
+  {label:'Flight', off:0.0541633476, on:0.0659554312}
+];
+function draw() {
+  const width=root.clientWidth, left=94, right=62, top=28, bottom=37, height=290;
+  const plot=width-left-right, max=5.2, x=value=>left+plot*value/max;
+  root.innerHTML=`<svg viewBox="0 0 ${width} ${height}" aria-hidden="true">
+    ${[0,1,2,3,4,5].map(value=>`<line class="grid" x1="${x(value)}" x2="${x(value)}" y1="${top}" y2="${height-bottom}"/><text x="${x(value)}" y="${height-bottom+21}" text-anchor="middle">${value}%</text>`).join('')}
+    <line class="limit" x1="${x(5)}" x2="${x(5)}" y1="${top-5}" y2="${height-bottom}"/>
+    <text x="${x(5)}" y="15" text-anchor="end">5% limit</text>
+    ${data.map((row,index)=>{
+      const y=top+index*55+7;
+      return `<text x="${left-9}" y="${y+18}" text-anchor="end">${row.label}</text>`+
+        ['off','on'].map((key,series)=>`<rect class="${key}" x="${left}" y="${y+series*20}" width="${x(row[key])-left}" height="10"/><text x="${x(row[key])+5}" y="${y+series*20+10}">${row[key].toFixed(3)}%</text>`).join('');
+    }).join('')}
+  </svg>`;
+}
+new ResizeObserver(draw).observe(root);
+draw();
+</script>
+</body>
+</html>

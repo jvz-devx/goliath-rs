@@ -17,7 +17,13 @@ def main():
     loader = importlib.machinery.SourceFileLoader('e14_cluster_base', str(ROOT / 'scripts/goliath-cluster'))
     spec = importlib.util.spec_from_loader('e14_cluster_base', loader)
     cluster = importlib.util.module_from_spec(spec)
-    loader.exec_module(cluster)
+    pinned = args.bins / 'cluster-launcher.py'
+    if pinned.exists():
+        # Keep the original __file__ so the unchanged launcher's helper paths
+        # resolve against this repository, not the retained binary directory.
+        exec(compile(pinned.read_bytes(), str(ROOT / 'scripts/goliath-cluster'), 'exec'), cluster.__dict__)
+    else:
+        loader.exec_module(cluster)
     cluster.BINS = args.bins.resolve()
     sys.argv = ['goliath-cluster', 'start', '--edge', '512']
     cluster.main()

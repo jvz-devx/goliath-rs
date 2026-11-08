@@ -329,3 +329,136 @@ management command was made.
 ## Screenshots
 
 The PNG screenshots show rendered game textures, which are Mojang's, so they are kept out of the public repository. They stay local under `.local/evidence/E14/`. The packet counts and frame data above are the evidence; the screenshots only illustrate them.
+
+## Build 10 rerun
+
+2026-11-08. PASS on the exact build-10 snapshot for the requested physics-client
+line. All 112 actual crossings completed, all 112 matched one-second windows
+were resolved, and every window retained at least 95% of its no-wall rate.
+No crossing position correction was received. The earlier failure sections
+remain unchanged as historical evidence.
+
+### Exact binaries and method
+
+The first snapshot captured build 10 before READY advanced to the lease build.
+The run used `.local/bin/horizon-e14-client/cluster-e12-698aa8237118/` throughout.
+Both runs have identical executable and launcher hashes. The snapshot's five
+executables were checked against its original READY manifest again after testing.
+
+| Executable | SHA-256 |
+| --- | --- |
+| Engine | `1c09787bab6a122c6663f9be402563d39036287b7e9efa14f87b609d8bacffac` |
+| Proxy | `94d1dfad6e36146deff9d899340eac69e39fa902b99306b62c6de3514456c0c5` |
+| Store | `299a7204d36b9b4a6f0f8126c9f53e7def036ed3e2dee370a288943449c4fed3` |
+
+The retained plain fc2868b2b client and its controller match the first experiment
+byte for byte, hashes `6afe2161...` and `6cc1188b...`. They were not rebuilt or
+patched. The launcher was copied into the snapshot so a concurrent lease-contract
+edit could not change the second run. Its lease branch was inactive for this
+snapshot and old store. The new lease executables were not tested.
+
+The route, held keys, 30 FPS target, translated no-wall controls, external wire
+observer, frame/server sampling, one-second speed calculation and quality gates
+are the same as before. Each run has 14 legs per movement mode, covering all
+eight directed cardinal borders and all four diagonals. The only fixture change
+is that screenshot files now go directly to the private evidence directory.
+
+### Results
+
+Worst dip is `100 * (1 - minimum speed ratio)`, not an average that can hide a
+slow crossing. Each mode has 14 crossings with particles off and 14 with them on.
+
+| Movement mode | Worst dip, wall off | Worst dip, wall on | Worst across both | Resolved windows |
+| --- | ---: | ---: | ---: | ---: |
+| Walk | 0.0562% | 4.9553% | 4.9553% | 28 / 28 |
+| Sprint | 0.0396% | 0.0569% | 0.0569% | 28 / 28 |
+| Sprint-jump | 0.3947% | 0.3634% | 0.3947% | 28 / 28 |
+| Creative flight | 0.0542% | 0.0660% | 0.0660% | 28 / 28 |
+
+The narrowest pass is particle-on walk trial 6, c to b. Its measured rate is
+4.102836 blocks/s against 4.316745 blocks/s, ratio 95.044657%. That is only
+0.044657 percentage points above the pass line. It remains in the table and raw
+data. Its sampled motion stays near 0.117859 blocks/tick, with W held, and it
+receives no position or motion correction. The current evidence does not assign
+the displacement-rate difference to a particular scheduling or handover step.
+The extracted timeline is `build10-walk-on-trace.json`.
+
+| Observation | Wall off | Wall on |
+| --- | ---: | ---: |
+| Actual crossings, expected owner and generation | 56 / 56 | 56 / 56 |
+| Resolved windows passing the speed line | 56 / 56 | 56 / 56 |
+| Failed or unresolved crossing windows | 0 | 0 |
+| Crossing position correction packets | 0 | 0 |
+| Observed zero-progress physics-tick stall in crossing windows | 0 ms | 0 ms |
+| Missing frame-number samples inside matched windows | 0 | 0 |
+| Missing server ticks inside matched windows | 0 | 0 |
+| Client frame samples over the recorded run | 9,026 | 9,016 |
+| Missing frame-number samples over the recorded run | 0 | 2 |
+| Missing server ticks over the recorded run, all four servers | 0 | 0 |
+
+The on run retains a 1,153.789 ms interval with one frame advanced, after a leg
+has ended and outside every measured crossing and control window. The two lost
+frame-number samples are also outside the matched windows. Whole-session
+rendering is therefore not claimed to be hitch-free. The off run's largest
+observed frame interval is 46.750 ms. None of these samples was deleted or
+replaced, and there was no quiet-window interruption or retry in this rerun.
+
+### Sprint modifier packet check
+
+All 28 sprint legs pass an independent packet check across their recorded target
+activation. The last source movement-speed update contains `minecraft:sprinting`
+with amount 0.30000001192092896 and operation 2. The first target update contains
+the same modifier. Every later movement-speed update before the leg ends also
+retains it. There are no empty sprint lists after activation while the keys are
+held.
+
+For example, off trial 15 has base 0.10000000149011612 on both sides. The source
+update arrives 1,160.023 ms before activation; the target update arrives 79.039 ms
+after it. Both contain the +0.3 sprint modifier. This reverses the old packet
+failure, rather than merely hiding it behind a favorable speed average.
+`build10-final-verification.json` retains the source and target attributes for
+every sprint leg. The checker rejects an empty target list, a missing update and
+a later modifier loss in permanent tests.
+
+### Evidence and restoration
+
+New raw files are `build10-full-off.json.gz` and `build10-full-on.json.gz`.
+Derived results are `build10-analysis.json` and
+`build10-final-verification.json`. Preliminary and extracted checks have separate
+names. No earlier raw or derived result was overwritten. The new screenshots are
+only `.local/evidence/E14/build10-full-off.png` and `build10-full-on.png`.
+
+Before stashing, `build10-preflight.json` proved the four saved patches reproduce
+all 25 changed and untracked source files. The staged and unstaged state was
+preserved, including the two intent-to-add entries. Restoration used the named
+stash with `pop --index`, followed by those intent markers.
+`build10-restoration.json` confirms identical status, HEAD diff, staged diff and
+all 25 file contents. No E14 change remains in the Horizon checkout.
+
+```sh
+python3 -B scripts/e14-checkout --output docs/experiments/data/E14/build10-preflight.json
+python3 -B scripts/e14-snapshot
+python3 -B scripts/e14-physics --name build10-full-off --variant e12 \
+  --snapshot .local/bin/horizon-e14-client/cluster-e12-698aa8237118 --suite
+python3 -B scripts/e14-physics --name build10-full-on --variant e12 \
+  --snapshot .local/bin/horizon-e14-client/cluster-e12-698aa8237118 --suite --particles
+python3 -B scripts/e14-build10-check docs/experiments/data/E14/build10-full-off.json.gz \
+  docs/experiments/data/E14/build10-full-on.json.gz \
+  --output docs/experiments/data/E14/build10-final-verification.json \
+  --restoration docs/experiments/data/E14/build10-restoration.json \
+  --snapshot .local/bin/horizon-e14-client/cluster-e12-698aa8237118
+python3 -B scripts/e14-runner-test
+git diff --check
+scripts/clean-builds
+```
+
+The evidence check and all 15 Python tests pass. New checker tests cover the
+sprint modifier before and after activation and corrections even when a speed
+window cannot be resolved. Runtime worlds, logs and private homes are removed.
+Final plain build cleanup is recorded separately under the build-10 prefix.
+No commit, push, server/client source fix or launcher management command was made.
+
+This accepts the defined M2 real-client speed line on build 10, with the walking
+margin above noted. Stock Java, later lease builds, vehicle transfers and the
+cause of the between-leg frame hitch remain unverified here. Review
+and milestone changes are separate.

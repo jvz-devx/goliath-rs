@@ -14,6 +14,10 @@ loader = importlib.machinery.SourceFileLoader('e14_analysis', str(ROOT / 'script
 spec = importlib.util.spec_from_loader('e14_analysis', loader)
 analysis = importlib.util.module_from_spec(spec)
 loader.exec_module(analysis)
+packet_loader = importlib.machinery.SourceFileLoader('e14_packet_check', str(ROOT / 'scripts/e14-build10-check'))
+packet_spec = importlib.util.spec_from_loader('e14_packet_check', packet_loader)
+packet_check = importlib.util.module_from_spec(packet_spec)
+packet_loader.exec_module(packet_check)
 
 
 def fixture(stall=0):
@@ -38,6 +42,47 @@ def fixture(stall=0):
 
 
 class Measurements(unittest.TestCase):
+    def sprint_fixture(self):
+        run = fixture()
+        leg = run['trials'][0]
+        leg['mode'] = 'sprint'
+        run['phases'] = [{'phase': 'activation', 'ns': 11_700_000_000}]
+        value = {'attribute': 26, 'base': .1,
+                 'modifiers': [{'id': 'minecraft:sprinting', 'amount': .3, 'operation': 2}]}
+        run['wire'] = [{'kind': 'attributes', 'ns': ns, 'values': [copy.deepcopy(value)]}
+                       for ns in (10_300_000_000, 11_750_000_000)]
+        return run, leg
+
+    def test_live_sprint_modifier_survives_activation(self):
+        run, leg = self.sprint_fixture()
+        self.assertTrue(packet_check.sprint_packets(run, leg)['pass'])
+
+    def test_old_empty_sprint_swap_is_rejected(self):
+        run, leg = self.sprint_fixture()
+        run['wire'][1]['values'][0]['modifiers'] = []
+        result = packet_check.sprint_packets(run, leg)
+        self.assertFalse(result['pass'])
+        self.assertEqual(result['post_activation_packets_without_sprint'], 1)
+
+    def test_missing_swap_packet_cannot_prove_sprint_preservation(self):
+        run, leg = self.sprint_fixture()
+        run['wire'].pop()
+        self.assertFalse(packet_check.sprint_packets(run, leg)['pass'])
+
+    def test_later_sprint_modifier_loss_is_rejected(self):
+        run, leg = self.sprint_fixture()
+        run['wire'].append({'kind': 'attributes', 'ns': 12_000_000_000,
+                            'values': [{'attribute': 26, 'base': .1, 'modifiers': []}]})
+        self.assertFalse(packet_check.sprint_packets(run, leg)['pass'])
+
+    def test_correction_budget_does_not_depend_on_a_resolved_speed_window(self):
+        run, leg = self.sprint_fixture()
+        run['wire'] = [{'kind': 'sent_position', 'ns': 11_400_000_000, 'pos': [.4, -60, 6]},
+                       {'kind': 'correction', 'ns': 11_410_000_000, 'pos': [.6, -60, 6], 'relatives': 0}]
+        budget = packet_check.corrections(run, leg)
+        self.assertTrue(budget['resolved'])
+        self.assertAlmostEqual(budget['maximum_backward_blocks'], .2)
+
     def test_attribute_observer_keeps_sprint_modifier(self):
         packet = b'\x07\x01\x05' + struct.pack('>d', .1) + b'\x01\x13minecraft:sprinting' + struct.pack('>d', .3) + b'\x02'
         target, values = attributes(packet)

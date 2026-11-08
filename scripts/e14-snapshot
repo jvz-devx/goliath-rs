@@ -30,6 +30,9 @@ def main():
         raise RuntimeError('READY changed during snapshot; do not run this snapshot')
     (target / 'READY').write_text(ready)
     (target / 'manifest.json').write_text(json.dumps(records, indent=2) + '\n')
+    launcher = target / 'cluster-launcher.py'
+    if not launcher.exists():
+        shutil.copy2(ROOT / 'scripts/goliath-cluster', launcher)
     print(target.relative_to(ROOT))
 
 

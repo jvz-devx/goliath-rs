@@ -2,6 +2,7 @@
 """Prove E14's existing Horizon checkout is reproduced by its saved patches."""
 
 import hashlib
+import argparse
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,11 @@ def digest(raw):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--output', type=Path, default=ROOT / 'docs/experiments/data/E14/preflight.json')
+    args = parser.parse_args()
+    if args.output.exists():
+        parser.error('proof already exists; choose a new --output')
     assert git('rev-parse', 'HEAD').decode().strip() == PIN
     status = git('status', '--porcelain=v1', '-z')
     working_diff = git('diff', 'HEAD', '--binary')
@@ -67,7 +73,7 @@ def main():
               'all_match': all(row['match'] for row in records),
               'baseline': {'status_sha256': digest(status), 'working_diff_sha256': digest(working_diff),
                            'staged_diff_sha256': digest(staged_diff)}}
-    output = ROOT / 'docs/experiments/data/E14/preflight.json'
+    output = args.output
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps({'all_match': result['all_match'], 'files': len(records),

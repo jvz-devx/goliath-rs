@@ -24,6 +24,7 @@ from e14_support import Control, Observer, Sampler, client_state, server_state
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / '.local/runs'
 DATA = ROOT / 'docs/experiments/data/E14'
+EVIDENCE = ROOT / '.local/evidence/E14'
 BINS = ROOT / '.local/bin/horizon-e14-client'
 RESOURCES = Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'
 TILES = {'a': (0, 0), 'b': (-1, 0), 'c': (-1, -1), 'd': (0, -1)}
@@ -99,11 +100,12 @@ def module(name, path):
 
 
 class Run:
-    def __init__(self, folder, particles, backend='a', variant='e10', snapshot=None):
+    def __init__(self, folder, particles, backend='a', variant='e10', snapshot=None, name='pilot'):
         self.folder, self.particles, self.backend = folder, particles, backend
         self.variant = variant
         self.cluster_bins = snapshot.resolve() if snapshot else ROOT / ('.local/bin/goliath-' + variant)
         self.snapshot = snapshot
+        self.name = name
         self.cluster = self.proxy = self.client_pid = None
         self.control = self.observer = self.frames = None
         self.servers, self.samples = {}, {}
@@ -120,7 +122,10 @@ class Run:
             ('cluster-store', self.cluster_bins / 'goliath-store'))}
         if self.variant == 'e12':
             self.result['ready'] = (self.cluster_bins / 'READY').read_text()
-        self.result['launcher_sha256'] = hashlib.sha256((ROOT / 'scripts/goliath-cluster').read_bytes()).hexdigest()
+        launcher = self.cluster_bins / 'cluster-launcher.py'
+        if not launcher.exists():
+            launcher = ROOT / 'scripts/goliath-cluster'
+        self.result['launcher_sha256'] = hashlib.sha256(launcher.read_bytes()).hexdigest()
         self.result['resources_manifest_sha256'] = hashlib.sha256((RESOURCES / 'horizon-resources.json').read_bytes()).hexdigest()
         log = self.folder / 'cluster.log'
         output = log.open('w')
@@ -263,7 +268,7 @@ class Run:
                 if not baseline and time.monotonic() - last_advance > 3:
                     break
                 if capture and screenshot is None and progress >= length / 2 - .5:
-                    screenshot = self.folder / (self.variant + ('-particles-on.png' if self.particles else '-particles-off.png'))
+                    screenshot = EVIDENCE / (self.name + '.png')
                     self.control.ask('screenshot ' + str(screenshot))
                 if progress >= length:
                     reached = True
@@ -281,11 +286,10 @@ class Run:
                'status_end': self.compact_status()}
         self.result['baselines' if baseline else 'trials'].append(row)
         if capture and screenshot is None:
-            screenshot = self.folder / (self.variant + ('-particles-on.png' if self.particles else '-particles-off.png'))
+            screenshot = EVIDENCE / (self.name + '.png')
             self.control.ask('screenshot ' + str(screenshot))
         if screenshot and screenshot.exists():
-            shutil.copy2(screenshot, DATA / screenshot.name)
-            row['screenshot'] = screenshot.name
+            row['screenshot'] = '.local/evidence/E14/' + screenshot.name
         print(json.dumps({'mode': mode, 'baseline': baseline, 'source': source, 'target': target,
                           'reached': reached, 'owner': after_owner, 'seconds': (ended - began) / 1e9}), flush=True)
         return row
@@ -368,19 +372,19 @@ def main():
     parser.add_argument('--render-only', action='store_true')
     args = parser.parse_args()
     DATA.mkdir(parents=True, exist_ok=True)
+    EVIDENCE.mkdir(parents=True, exist_ok=True)
     if (DATA / (args.name + '.json.gz')).exists():
         parser.error('raw result already exists; choose a new --name')
     quiet()
     with tempfile.TemporaryDirectory(prefix='E14-', dir=RUNS) as temporary:
-        run = Run(Path(temporary), args.particles, args.backend, args.variant, args.snapshot)
+        run = Run(Path(temporary), args.particles, args.backend, args.variant, args.snapshot, args.name)
         try:
             run.start()
             if args.render_only:
                 run.reset([2, -60, 6], 90)
                 time.sleep(2)
-                screenshot = run.folder / 'e12-wall-visible.png'
+                screenshot = EVIDENCE / (args.name + '-wall-visible.png')
                 run.control.ask('screenshot ' + str(screenshot))
-                shutil.copy2(screenshot, DATA / screenshot.name)
                 run.result['render_capture'] = {'position': [2, -60, 6], 'yaw': 90,
                     'screenshot': screenshot.name, 'particle_packets': run.observer.particles}
             modes = () if args.render_only else ('walk', 'sprint', 'sprint-jump', 'fly') if args.suite or args.matrix else ('walk',)
