@@ -85,3 +85,9 @@ A cell is valid when load is 4 or less at its start and no process outside the f
 E19 showed that 975 players don't fit in the 4-core budget on this Mac, even with the proxy outside it. Four tiles, the store and the sidecars used 3.96 cores at 975 and still missed 20 TPS (tick P99 84 to 90 ms), and the reviewer reproduced that. Each tile costs about 1 core at about 244 players, where a plain server with that many players needs about 0.7. The difference is the terrain readers and the cluster features.
 
 So M4 reports the cluster's measured frontier inside the D9 budget and layout, as a multiple of the matched baseline (325), with the same pass rules: 20 TPS, raw tick P99 under 50 ms, two passes and two failures per step. 3x stays the target. The budget, the layout and the pass rules don't change; the work goes into making tiles and the proxy cheaper, and the frontier is measured again after each cut.
+
+## D11. Horizon's client stands in for the vanilla client
+
+The real-client checks run Horizon's own client, a reimplementation of the Java Edition 26.3 client, because it can be driven and measured from scripts. On 2026-11-08 the project decided to treat it as equivalent to the vanilla client for crossing behaviour and not to run a separate in-person test with a stock 26.3 client.
+
+What that leaves unproven: vanilla has its own code for chunk loading and unloading, movement prediction and entity tracking, so a difference there could show up only in a stock client. The protocol both clients speak is the same, and every crossing check on the final stack passes with Horizon's client. The M2 item for the stock client stays unticked and says so.
