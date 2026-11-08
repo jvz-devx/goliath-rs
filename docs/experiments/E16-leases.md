@@ -345,8 +345,8 @@ after enabling new operations is unsupported.
 All experiment worlds and store logs created here live under `.local/runs/` and
 are removed after extraction. Only small results remain in `data/E16/`. No result
 contains a home path. The retained E16 store and Rust driver are under
-`.local/bin/goliath-store-e16-7b413bd/`, where `7b413bd` names the starting commit,
-not a committed E16 revision. The store SHA-256 is
+`.local/bin/goliath-store-e16-7b413bd/`, where `7b413bd` is the starting commit's local identity (`f8168b6` in the
+published history), not a committed E16 revision. The store SHA-256 is
 `6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af`.
 The driver SHA-256 is
 `a51e55c0763ee42c416ab835756ab1d2b8c49f1cb0312641fac4dbc1bd6cbe58`.
