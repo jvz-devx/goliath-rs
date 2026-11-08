@@ -28,6 +28,7 @@ The reports retain failed attempts and superseded results. [Progress](../progres
 | [E22. Shared views](E22-shared-views.md) | Can shared terrain readers save CPU without breaking delivery? | Shared-4 is held as unqualified; its saving does not pass both repeats. |
 | [E23. Final-stack closeout](E23-closeout.md) | Which M2/M4 checks pass on the selected bytes? | Vehicles, physics and equal-work checks pass; latency misses, tick cost is unproven, soak fails. |
 | [E24. Lease availability](E24-lease-availability.md) | Why do authority latches and memory growth interrupt the soak? | In progress. A clock-check latch is reproduced; fix qualification and final review remain open. |
+| [E27. Bots on set paths](E27-bots.md) | Do `horizon-bots` follow a set route through backend switches without reconnecting? | 40/40 routes and 435/435 switches confirmed with zero reconnects; reproduced. |
 
 ## Evidence conventions
 

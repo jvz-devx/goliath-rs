@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Check E27 evidence hashes, compression, redaction, identities and resource-free tests."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+
+from e23_support import ROOT, frozen, save
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    args = parser.parse_args()
+    if not args.name.startswith(('e27-', 'repro-')):
+        parser.error('data names start e27- or repro-')
+    folder = ROOT/'docs/experiments/data/E27'
+    target = folder/(args.name+'.json')
+    if target.exists():
+        parser.error('use a fresh integrity name')
+    results = dict(files=[], scripts=[], tests=[], frozen=frozen(), failures=[])
+    for path in sorted(folder.iterdir()):
+        if not path.is_file():
+            continue
+        encoded = path.read_bytes()
+        raw = gzip.decompress(encoded) if path.suffix == '.gz' else encoded
+        value = json.loads(raw)
+        if len(raw) > 1_000_000 and path.suffix != '.gz':
+            results['failures'].append('large uncompressed file: '+path.name)
+        if str(ROOT).encode() in raw or str(Path.home()).encode() in raw or b'/Users/' in raw:
+            results['failures'].append('private absolute path: '+path.name)
+        if not path.name.startswith(('e27-', 'repro-')):
+            results['failures'].append('unowned data name: '+path.name)
+        if 'processes' in value:
+            processes = value['processes']
+            if set(processes['outside_process_names'].values()) != {'outside'}:
+                results['failures'].append('outside process-name map: '+path.name)
+            for phase in processes['phases'].values():
+                if phase and any(row['name'] != 'outside' for row in phase['outside']):
+                    results['failures'].append('outside phase process name: '+path.name)
+            if not value['frozen_unchanged'] or value['frozen']['binaries'] != results['frozen']['binaries']:
+                results['failures'].append('frozen identity: '+path.name)
+        results['files'].append(dict(path=str(path.relative_to(ROOT)), bytes=len(raw),
+            stored_bytes=len(encoded), sha256=hashlib.sha256(raw).hexdigest()))
+    for path in sorted((ROOT/'scripts').glob('e27*')):
+        if path.is_file():
+            results['scripts'].append(dict(path=str(path.relative_to(ROOT)),
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+    for name in ['e27-tests','e18-tools-test','e23-tests']:
+        command = ['python3','-B','scripts/'+name]
+        run = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+        results['tests'].append(dict(command=command, exit=run.returncode,
+            stdout=run.stdout, stderr=run.stderr))
+        if run.returncode:
+            results['failures'].append('resource-free test: '+name)
+    run = subprocess.run(['git','diff','--check'], cwd=ROOT, capture_output=True, text=True)
+    results['diff_check'] = dict(exit=run.returncode, stdout=run.stdout, stderr=run.stderr)
+    if run.returncode:
+        results['failures'].append('git diff --check')
+    results['passed'] = not results['failures']
+    save(target, results)
+    print(json.dumps(dict(passed=results['passed'], files=len(results['files']),
+        failures=results['failures'], path=str(target.relative_to(ROOT)))))
+    raise SystemExit(0 if results['passed'] else 1)

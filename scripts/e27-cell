@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Audit forty frozen horizon-bots through four D9 tiles, with one killed control."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+import traceback
+
+import e11_support as support
+from e18_d9_layout import CROSS_PATH, TILES
+from e23_support import BINS, ROOT, frozen, load, pack, save, sha
+from e27_wire import AuditTap
+
+DATA = ROOT / 'docs/experiments/data/E27'
+
+
+def run(name):
+    owner = ROOT / '.local/host/quiet/owner'
+    if not owner.exists() or owner.read_text().splitlines()[0] != 'E27':
+        raise RuntimeError('E27 must hold host-window')
+    target = DATA / (name+'.json')
+    if target.exists() or target.with_suffix('.json.gz').exists():
+        raise RuntimeError('use a fresh name')
+    before = frozen()
+    tile_binary = ROOT / '.local/bin/meridian-e18/flat09-tiles/horizon-client'
+    if sha(tile_binary) != before['binaries']['horizon-client']:
+        raise RuntimeError('FINAL-09 tile mismatch')
+    adapter = load('e27_adapter', ROOT / 'scripts/e17-m4')
+    kernel = load('e27_kernel', ROOT / 'scripts/e20-frontier')
+    if sha(ROOT/'scripts/goliath-cluster') != sha(BINS/'cluster-launcher.py'):
+        raise RuntimeError('launcher drift')
+    module = adapter.cluster_module(BINS)
+    module.e4.TILES = dict(TILES)
+    server = module.upstream.Server
+    def final_tile_server(command, folder, log):
+        return server([tile_binary, *command[1:]], folder, log)
+    module.upstream.Server = final_tile_server
+    tap = AuditTap()
+    start_proxy, publish, tile_start = module.Cluster.start_proxy, module.Cluster.publish_state, module.Tile.start
+
+    def publishing(instance):
+        publish(instance)
+        config = instance.root/'meridian.toml'
+        if config.exists():
+            with config.open('a') as stream:
+                stream.write('\n[[forced-host]]\nhost = "e27-route.test"\nbackend = "b"\n')
+
+    def starting(instance):
+        for label, tile in instance.tiles.items():
+            tile.port = tap.listen(('127.0.0.1', tile.port), label=label)
+        start_proxy(instance)
+
+    def tile_starting(tile):
+        previous = tile.cluster.tile_env
+        x, z = tile.tile
+        tile.cluster.tile_env = dict(previous, GOLIATH_SPAWN=json.dumps([
+            -12 if x < 0 else 12, -58, -12 if z < 0 else 12]))
+        try:
+            return tile_start(tile)
+        finally:
+            tile.cluster.tile_env = previous
+
+    module.Cluster.publish_state, module.Cluster.start_proxy, module.Tile.start = publishing, starting, tile_starting
+    for key in ['E12_TERRAIN_OFF', 'E18_TERRAIN_EAGER', 'E18_WRITES_DIRECT',
+                'E18_CONTROL_FRESH', 'E18_BLOCKING_IO']:
+        os.environ.pop(key, None)
+    result = dict(kind='E27 per-bot route/session audit', status='starting', frozen=before,
+        route=CROSS_PATH, tiles=TILES, edge=2048, route_bots=40, controls=1,
+        speed=4, height=2, seconds=90, audit_seconds=75, confirmation_tail_seconds=15,
+        join_every=.1, view_distance=3,
+        diagnostic_only=True, capacity_claim=False, load_start=os.getloadavg(),
+        scripts={p:sha(ROOT/'scripts'/p) for p in ['e27-cell','e27_wire.py','e27-audit',
+            'e18_d9_layout.py','e18_d9_wire.py','e17_wire.py','e17-m4','e20-frontier','goliath-cluster']},
+        snapshots=[], bot_output={}, commands=[], before_ns=time.time_ns())
+    monitor = kernel.ProcessSampler(observer=True).start()
+    tap.start()
+    processes, streams = [], []
+    instance = module.Cluster.__new__(module.Cluster)
+    with tempfile.TemporaryDirectory(prefix='e27-', dir=support.RUNS) as temporary:
+        folder = Path(temporary)
+        try:
+            instance.__init__(folder, module.RESOURCES, 2048,
+                tile_env={'HORIZON_E11_MEASURE':'1'}, max_players=128, max_expected=1000)
+            for label, tile in instance.tiles.items():
+                monitor.register('tile-'+label, tile.server.process.pid)
+            monitor.register('proxy', instance.proxy.process.pid)
+            monitor.register('store', instance.store_process.pid)
+            for index, child in enumerate(instance.sidecars):
+                monitor.register('sidecar-'+str(index), child.process.pid)
+            front = tap.listen(('127.0.0.1', instance.port), front=True, label='front', host='e27-route.test')
+            for prefix, count in [('E27BotX', 40), ('E27Control', 1)]:
+                command = [str(BINS/'horizon-bots'), '--event-loop', '--server', f'127.0.0.1:{front}',
+                    '--bots', str(count), '--behaviour', 'route', '--path', CROSS_PATH,
+                    '--seconds', '90', '--join-every', '.1', '--view-distance', '3',
+                    '--seed', '12345', '--speed', '4', '--height', '2', '--name', prefix,
+                    '--report', str(folder/(prefix+'.json'))]
+                stream = (folder/(prefix+'.jsonl')).open('w')
+                streams.append(stream)
+                child = subprocess.Popen(command, cwd=folder, env=support.private_env(folder/(prefix+'-home')),
+                    stdout=stream, stderr=subprocess.STDOUT)
+                processes.append((prefix, child))
+                monitor.register('bots-'+prefix, child.pid)
+                result['commands'].append(command)
+            began, killed = time.monotonic(), False
+            result['route_start_ns'] = time.time_ns()
+            result['audit_end_ns'] = result['route_start_ns']+75_000_000_000
+            while processes[0][1].poll() is None:
+                if time.monotonic()-began > 105:
+                    raise RuntimeError('bounded route cell timeout')
+                if time.monotonic()-began > 12 and not killed:
+                    tap.kill_names.add('E27Control0')
+                    result['control_requested_ns'] = time.time_ns()
+                    killed = True
+                for label, tile in instance.tiles.items():
+                    sent = time.time_ns()
+                    status = tile.ask('server-status')
+                    received = time.time_ns()
+                    if 'error' in status:
+                        raise RuntimeError('tile status refused: '+str(status))
+                    rows = [{key:p.get(key) for key in ['name','uuid','position','placed','held','frozen','released']}
+                        for p in status['players'] if p['name'].startswith('E27') and not p.get('terrain_reader')]
+                    result['snapshots'].append(dict(tile=label, sent_ns=sent, ns=received, players=rows))
+                if tap.errors:
+                    raise RuntimeError('tap failure: '+str(tap.errors))
+                time.sleep(.1)
+            result.update(route_end_ns=time.time_ns(), status='complete')
+        except BaseException as error:
+            result.update(status='failed', error=str(error), traceback=traceback.format_exc())
+        finally:
+            result['shutdown_ns'] = time.time_ns()
+            monitor.capture('steady-last')
+            for prefix, child in processes:
+                if child.poll() is None:
+                    child.terminate()
+                    child.wait(timeout=10)
+                result['bot_output'][prefix] = dict(exit=child.returncode,
+                    rows=support.complete_json_lines(folder/(prefix+'.jsonl')))
+            result['phases'] = module.phase_events(folder/'proxy.log') if (folder/'proxy.log').exists() else []
+            result['proxy_lines'] = [line for line in (folder/'proxy.log').read_text().splitlines()
+                if ' moved from ' in line or 'WARN' in line or 'ERROR' in line] if (folder/'proxy.log').exists() else []
+            try:
+                instance.stop()
+            finally:
+                tap.stop()
+                monitor.stop()
+                result['wire_events'] = tap.events
+                result['sessions'] = tap.sessions
+                result['tap_errors'] = tap.errors
+                result['queue_peak_bytes'] = tap.maximum_pending_bytes
+                result['processes'] = monitor.report()
+                result['after_ns'] = time.time_ns()
+                result['frozen_after'] = frozen()
+                result['frozen_unchanged'] = result['frozen_after'] == before
+                save(target, result)
+                print(json.dumps(dict(path=str(pack(target).relative_to(ROOT)),
+                    status=result['status'], error=result.get('error'), events=len(tap.events))), flush=True)
+            for stream in streams:
+                stream.close()
+    return result['status'] == 'complete'
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    args = parser.parse_args()
+    if not args.name.startswith(('e27-', 'repro-')):
+        parser.error('data names start e27- or repro-')
+    raise SystemExit(0 if run(args.name) else 1)

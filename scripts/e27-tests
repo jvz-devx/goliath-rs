@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Resource-free contracts for E27's route and session audit."""
+from datetime import datetime, timezone
+import struct
+import unittest
+import zlib
+
+from e18_d9_wire import vint
+from e23_support import ROOT, load
+from e27_wire import AuditDecoder
+
+audit = load('e27_audit_tests', ROOT/'scripts/e27-audit')
+
+
+def fixture():
+    base = 1_700_000_000_000_000_000
+    name, uuid = 'E27BotX0', '12345678'
+    events = [dict(kind='move', label='front', name=name, session=0,
+        ns=base+i*2_000_000_000, position=[p[0], -58., p[1]])
+        for i, p in enumerate([*audit.ROUTE, audit.ROUTE[0]])]
+    events += [dict(e, label='a') for e in events[1:]]
+    player = dict(name=name, uuid=uuid, position=[12., -58., 12.],
+        placed=True, held=False, frozen=False, released=False)
+    at = base+1_000_000_000
+    date = datetime.fromtimestamp(at/1e9, timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
+    raw = dict(wire_events=events, sessions=[dict(name=name, label='front', id=0)],
+        route_start_ns=base, route_end_ns=base+18_000_000_000, shutdown_ns=base+18_000_000_000,
+        snapshots=[dict(tile='a', sent_ns=at+1, ns=at+100, players=[player]),
+            dict(tile='a', sent_ns=at+1_000_000_000, ns=at+1_000_000_100,
+                players=[dict(player, position=[12., -58., -12.])]),
+            dict(tile='b', sent_ns=at+1, ns=at+100, players=[])],
+        phases=[dict(phase='cas', uuid=uuid, target=0, generation=1, ns=at-1),
+            dict(phase='activation', uuid=uuid, ns=at)],
+        proxy_lines=[date+' INFO  '+name+' moved from b to a in 1 ms '],
+        bot_output={})
+    return raw
+
+
+class Contracts(unittest.TestCase):
+    def test_complete_route_and_both_sides_pass(self):
+        result = audit.evaluate_bot(fixture(), 'E27BotX0', 0)
+        self.assertEqual(result['failures'], [])
+        self.assertEqual(result['switches_confirmed'], 1)
+        self.assertEqual(result['max_ordered_deviation_blocks'], 0)
+
+    def test_frozen_cas_has_no_timestamp(self):
+        raw = fixture()
+        del raw['phases'][0]['ns']
+        self.assertTrue(audit.evaluate_bot(raw, 'E27BotX0', 0)['passed'])
+
+    def test_relative_evidence_path_has_stable_identity(self):
+        self.assertEqual(audit.identity(ROOT/'scripts/e27-audit'),
+            audit.identity('scripts/e27-audit'))
+
+    def test_reconnect_is_not_hidden_by_successful_route(self):
+        raw = fixture()
+        raw['sessions'].append(dict(name='E27BotX0', label='front', id=2))
+        result = audit.evaluate_bot(raw, 'E27BotX0', 0)
+        self.assertFalse(result['passed'])
+        self.assertEqual(result['reconnects'], 1)
+
+    def test_connection_kill_and_stopped_route_fail(self):
+        raw = fixture()
+        raw['wire_events'] = raw['wire_events'][:2]
+        raw['sessions'][0].update(close_ns=raw['route_start_ns']+3_000_000_000,
+            close_reason='planted_connection_kill')
+        result = audit.evaluate_bot(raw, 'E27BotX0', 0)
+        self.assertFalse(result['passed'])
+        self.assertEqual(result['disconnects'], 1)
+        self.assertIsNone(result['finished_ns'])
+
+    def test_no_target_placement_cannot_confirm_a_switch(self):
+        raw = fixture()
+        raw['snapshots'][0]['players'][0]['held'] = True
+        raw['snapshots'][1]['players'][0]['held'] = True
+        result = audit.evaluate_bot(raw, 'E27BotX0', 0)
+        self.assertFalse(result['passed'])
+        self.assertEqual(result['switches_confirmed'], 0)
+
+    def test_wrong_route_and_stationary_bot_fail(self):
+        raw = fixture()
+        raw['wire_events'][3]['position'][0] += 4
+        result = audit.evaluate_bot(raw, 'E27BotX0', 0)
+        self.assertGreater(result['max_ordered_deviation_blocks'], 0)
+        self.assertFalse(result['passed'])
+        raw = fixture()
+        for event in raw['wire_events']:
+            event['position'] = [-12., -58., 12.]
+        self.assertIsNone(audit.evaluate_bot(raw, 'E27BotX0', 0)['finished_ns'])
+
+    def test_decoder_keeps_fragmented_and_compressed_positions(self):
+        class Tap:
+            events = []
+        tap = Tap()
+        decoder = AuditDecoder(tap, dict(id=0, label='front'))
+        decoder.name, decoder.phase = 'E27BotX0', 'play'
+        body = vint(30)+struct.pack('>dddB', 1.25, -58., 3., 0)
+        frame = vint(len(body))+body
+        for byte in frame:
+            decoder.feed(0, bytes([byte]), 7.)
+        decoder.compressed = True
+        compressed = vint(len(body))+zlib.compress(body)
+        decoder.feed(0, vint(len(compressed))+compressed, 8.)
+        self.assertEqual([e['position'] for e in tap.events], [[1.25,-58.,3.]]*2)
+
+
+if __name__ == '__main__':
+    unittest.main()

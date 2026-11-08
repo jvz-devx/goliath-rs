@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Recompute E27 route, connection and two-sided switch evidence without load."""
+import argparse
+from collections import Counter, defaultdict
+from datetime import datetime
+import gzip
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+
+from e18_d9_layout import CROSS_PATH, TILES
+from e23_support import ROOT, pack, save
+
+DATA = ROOT/'docs/experiments/data/E27'
+ROUTE = [list(map(float, point.split(','))) for point in CROSS_PATH.split(';')]
+
+
+def read(path):
+    raw = Path(path).read_bytes()
+    return json.loads(gzip.decompress(raw) if str(path).endswith('.gz') else raw)
+
+
+def identity(path):
+    path = Path(path).resolve()
+    raw = Path(path).read_bytes()
+    decoded = gzip.decompress(raw) if str(path).endswith('.gz') else raw
+    return dict(path=str(Path(path).relative_to(ROOT)), bytes=len(decoded),
+        sha256=hashlib.sha256(decoded).hexdigest())
+
+
+def distance(point, a, b):
+    dx, dz = b[0]-a[0], b[1]-a[1]
+    length = dx*dx+dz*dz
+    t = max(0, min(1, ((point[0]-a[0])*dx+(point[2]-a[1])*dz)/length)) if length else 0
+    return math.hypot(point[0]-a[0]-t*dx, point[2]-a[1]-t*dz)
+
+
+def route_distance(point):
+    return min(distance(point, ROUTE[i-1], ROUTE[i]) for i in range(len(ROUTE)))
+
+
+def progress(rows, index):
+    target = index % 4
+    origin = [rows[0]['position'][0], rows[0]['position'][2]] if rows else ROUTE[0]
+    hits, deviations, finish = [], [], None
+    for row in rows:
+        point = row['position']
+        deviation = distance(point, origin, ROUTE[target])
+        deviations.append(dict(ns=row['ns'], blocks=deviation, target=target,
+            acquired=bool(hits)))
+        if math.hypot(point[0]-ROUTE[target][0], point[2]-ROUTE[target][1]) < 1e-6:
+            hits.append(dict(ns=row['ns'], waypoint=target))
+            origin = ROUTE[target]
+            target = (target+1) % len(ROUTE)
+            if len(hits) == len(ROUTE)+1:
+                finish = row['ns']
+    return dict(waypoint_hits=hits, finished_ns=finish,
+        max_ordered_deviation_blocks=max((r['blocks'] for r in deviations), default=None),
+        max_d9_deviation_blocks=max((route_distance(r['position']) for r in rows), default=None),
+        deviations=deviations)
+
+
+def evaluate_bot(raw, name, index):
+    events = [e for e in raw['wire_events'] if e['name'] == name]
+    front = [e for e in events if e['label'] == 'front' and e['kind'] == 'move']
+    front_hashes = {e['payload_sha256'] for e in front if 'payload_sha256' in e}
+    walked = progress(front, index)
+    sessions = [s for s in raw['sessions'] if s.get('name') == name and s['label'] == 'front']
+    final = next((row for row in raw['bot_output'].get('E27Control' if name.startswith('E27Control') else 'E27BotX', {}).get('rows', [])
+        if 'per_bot' in row), None)
+    bot_final = next((b for b in final['per_bot'] if b['index'] == index), {}) if final else {}
+    end = raw.get('route_end_ns', raw['shutdown_ns'])
+    audit_end = raw.get('audit_end_ns', end)
+    # A natural, successful driver exit at its fixed deadline is teardown, not a mid-route drop.
+    closes = [s for s in sessions if s.get('close_ns', end+1) < end
+        and not (final and final.get('online') == final.get('bots')
+            and s.get('close_ns', 0) >= raw['route_start_ns']+89_000_000_000)]
+    uuids = {p['uuid'].replace('-', '') for snap in raw['snapshots']
+        for p in snap['players'] if p['name'] == name}
+    phases = [p for p in raw['phases'] if p.get('uuid') in uuids]
+    all_activations = [p for p in phases if p['phase'] == 'activation']
+    activations = [p for p in all_activations if p['ns'] <= audit_end]
+    pending, commits = None, {}
+    # The frozen CAS rows have no timestamp. Preserve the original per-UUID
+    # log order and pair each activation with its preceding CAS, once only.
+    for phase in phases:
+        if phase['phase'] == 'cas':
+            if pending is not None:
+                raise ValueError('two CAS rows before one activation')
+            pending = phase
+        elif phase['phase'] == 'activation':
+            commits[phase['ns']] = pending
+            pending = None
+    moves = []
+    for line in raw['proxy_lines']:
+        match = re.search(r'^(\S+).*? '+re.escape(name)+r' moved from (\w+) to (\w+) ', line)
+        if match:
+            moves.append(dict(ns=int(datetime.fromisoformat(match[1].replace('Z', '+00:00')).timestamp()*1e9),
+                source=match[2], target=match[3]))
+    used, switches = set(), []
+    labels = list(TILES)
+    placed = [(snap['ns'], p) for snap in raw['snapshots'] for p in snap['players']
+        if p['name'] == name and p['placed'] and not p['held'] and not p['released']]
+    for i, activation in enumerate(activations):
+        at = activation['ns']
+        next_at = all_activations[i+1]['ns'] if i+1 < len(all_activations) else end
+        previous_at = activations[i-1]['ns'] if i else raw['route_start_ns']
+        commit = commits.get(at)
+        target = labels[commit['target']] if commit else None
+        options = [(j, m) for j, m in enumerate(moves) if j not in used and m['target'] == target
+            and -2_000_000 <= m['ns']-at < 2_000_000_000]
+        chosen = min(options, key=lambda item:abs(item[1]['ns']-at)) if options else None
+        if chosen:
+            used.add(chosen[0])
+        source = chosen[1]['source'] if chosen else None
+        target_rows, source_rows = [], []
+        for snap in raw['snapshots']:
+            if snap['sent_ns'] <= at or snap['ns'] >= next_at:
+                continue
+            player = next((p for p in snap['players'] if p['name'] == name), None)
+            if snap['tile'] == target and player and player['placed'] and not any(player[k] for k in ['held','frozen','released']):
+                target_rows.append(dict(ns=snap['ns'], **player))
+            if snap['tile'] == source and (player is None or not player['placed'] or player['released']):
+                source_rows.append(dict(ns=snap['ns'], state=player))
+        target_wire = [e for e in events if e['label'] == target and e['kind'] == 'move' and at < e['ns'] < next_at]
+        unmatched = sum(e.get('payload_sha256') not in front_hashes for e in target_wire) if front_hashes else 0
+        advancement = max((math.dist(target_rows[0]['position'], row['position'])
+            for row in target_rows), default=0) if target_rows else 0
+        def maximum(a, b):
+            return max((d['blocks'] for d in walked['deviations'] if a <= d['ns'] < b), default=None)
+        def tile_maximum(a, b):
+            return max((route_distance(p['position']) for ns, p in placed if a <= ns < b), default=None)
+        switches.append(dict(ns=at, source=source, target=target,
+            generation=commit['generation'] if commit else None, proxy_activation=activation,
+            cas_pairing='preceding same-UUID CAS in original proxy record order',
+            proxy_move=chosen[1] if chosen else None,
+            target_placed_samples=len(target_rows), source_released_samples=len(source_rows),
+            target_first=target_rows[0] if target_rows else None,
+            target_last=target_rows[-1] if target_rows else None,
+            source_first=source_rows[0] if source_rows else None,
+            backend_movement_packets=len(target_wire), target_advancement_blocks=advancement,
+            backend_payloads_not_seen_at_front=unmatched,
+            target_max_d9_deviation_blocks=max((route_distance(row['position']) for row in target_rows), default=None),
+            max_before_blocks=maximum(previous_at, at), max_after_blocks=maximum(at, next_at),
+            max_tile_before_blocks=tile_maximum(previous_at, at),
+            max_tile_after_blocks=tile_maximum(at, next_at),
+            confirmed=bool(chosen and commit and target_rows and source_rows and target_wire and not unmatched),
+            continued_route=advancement >= .4))
+    tile_rows = [p for snap in raw['snapshots'] for p in snap['players']
+        if p['name'] == name and p['placed'] and not p['held'] and not p['released']]
+    failures = []
+    if len(sessions) != 1:
+        failures.append('front session count is not one')
+    if closes:
+        failures.append('mid-route disconnect')
+    if not walked['finished_ns'] or walked['finished_ns'] > audit_end:
+        failures.append('ordered full route did not finish')
+    if not switches:
+        failures.append('no proxy activation')
+    if any(not s['confirmed'] for s in switches):
+        failures.append('switch lacks proxy/source/target/wire confirmation')
+    if any(not s['continued_route'] for s in switches):
+        failures.append('no measured route progress on a new tile')
+    if walked['max_ordered_deviation_blocks'] is None or walked['max_ordered_deviation_blocks'] > 1e-6:
+        failures.append('departed from ordered scripted segments')
+    if bot_final.get('error') or bot_final.get('transfers', 0):
+        failures.append('native bot error or transfer reconnect')
+    if any(route_distance(p['position']) > .75 for _, p in placed):
+        failures.append('placed tile position more than 0.75 blocks from D9 path')
+    return dict(name=name, route=ROUTE, initial_target=index % 4,
+        join_leg='first observed spawn to initial target; then the exact cyclic D9 route',
+        front_sessions=len(sessions), reconnects=max(0,len(sessions)-1), disconnects=len(closes),
+        disconnect_records=closes, native_final=bot_final, backend_switches=len(switches),
+        audit_end_ns=audit_end, full_driver_activations=len(all_activations),
+        confirmation_tail_activations=len(all_activations)-len(activations),
+        switches_confirmed=sum(s['confirmed'] for s in switches), switches=switches,
+        max_tile_d9_deviation_blocks=max((route_distance(p['position']) for p in tile_rows), default=None),
+        **{k:v for k,v in walked.items() if k != 'deviations'}, failures=failures, passed=not failures)
+
+
+def audit(path, output):
+    raw = read(path)
+    bots = [evaluate_bot(raw, 'E27BotX'+str(i), i) for i in range(40)]
+    control = evaluate_bot(raw, 'E27Control0', 0)
+    fixture_ok = raw['status'] == 'complete' and raw['frozen_unchanged'] and not raw['tap_errors']
+    result = dict(raw=identity(path), checker=identity(Path(__file__)), fixture_ok=fixture_ok,
+        bots_passed=sum(b['passed'] for b in bots), bot_count=40,
+        switches=sum(b['backend_switches'] for b in bots),
+        switches_confirmed=sum(b['switches_confirmed'] for b in bots),
+        reconnects=sum(b['reconnects'] for b in bots), disconnects=sum(b['disconnects'] for b in bots),
+        max_ordered_deviation_blocks=max(b['max_ordered_deviation_blocks'] for b in bots),
+        max_tile_d9_deviation_blocks=max(b['max_tile_d9_deviation_blocks'] for b in bots),
+        failure_control_caught=not control['passed'] and control['disconnects'] > 0 and not control['finished_ns'],
+        bots=bots, control=control)
+    result['passed'] = fixture_ok and result['bots_passed'] == 40 and result['failure_control_caught']
+    save(output, result)
+    pack(output)
+    print(json.dumps({k:v for k,v in result.items() if k not in ['bots','control']}))
+
+
+def history(output):
+    records = []
+    for experiment in ['E20', 'E23']:
+        for path in sorted((ROOT/'docs/experiments/data'/experiment).glob('*.json*')):
+            if not path.name.endswith(('.json','.json.gz')):
+                continue
+            raw = read(path)
+            if not isinstance(raw, dict):
+                continue
+            for count, cell in raw.get('cells', {}).items():
+                if not isinstance(cell, dict) or 'layout' not in cell:
+                    continue
+                crossing = cell['layout'].get('crossing_players', 0)
+                if not crossing:
+                    continue
+                uuid_names = {p['uuid'].replace('-',''):p['name'] for phase in ['before','after','join_population']
+                    for tile in cell.get(phase, {}).values() for p in tile.get('players', [])}
+                counts = Counter(uuid_names.get(p['uuid'], 'unmapped') for p in cell.get('activations_in_window', []))
+                records.append(dict(**identity(path), players=count, status=cell.get('status'),
+                    binaries=raw.get('binaries'),
+                    crossing_bots=crossing, activations=len(cell.get('activations_in_window', [])),
+                    crossing_bots_with_measured_activation=sum(counts['E17BotX'+str(i)]>0 for i in range(crossing)),
+                    activation_counts={name:n for name,n in counts.items()},
+                    crossing_move_lines=len(cell.get('crossing_routes', [])),
+                    per_bot_final_reports=any('per_bot' in row for row in cell.get('bot_last', {}).values()),
+                    retained_front_session_ledger=False,
+                    witness_names=cell['layout'].get('witnesses'),
+                    snapshot_phases=[k for k in ['join_population','before','after'] if k in cell],
+                    bot_last=cell.get('bot_last')))
+            if 'events' in raw and 'stage' in raw:
+                events = raw['events']
+                names = Counter(e['name'] for e in events)
+                records.append(dict(**identity(path), stage=raw['stage'], event_count=len(events),
+                    names=dict(names), event_drops=raw.get('event_drops'),
+                    front_session_ledger=False))
+    local_files = {}
+    for experiment in ['E20','E23']:
+        folder = ROOT/'.local/evidence'/experiment
+        local_files[experiment] = dict(files=sum(p.is_file() for p in folder.rglob('*')),
+            top_level=sorted(p.name for p in folder.iterdir()) if folder.exists() else [])
+    save(output, dict(records=records, local_evidence_inventory=local_files,
+        conclusion='D9 activations and sampled positions exist. All-bot ordered trajectories, per-front-session continuity and per-switch placed/released confirmation do not.'))
+    print(json.dumps(dict(records=len(records), output=str(output.relative_to(ROOT)))))
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('mode', choices=['history','cell'])
+    parser.add_argument('--raw', type=Path)
+    parser.add_argument('--name', required=True)
+    args = parser.parse_args()
+    if not re.fullmatch(r'(e27|repro)-[a-zA-Z0-9_-]+', args.name):
+        parser.error('use a fresh e27- or repro- name')
+    destination = DATA/(args.name+'.json')
+    if destination.exists():
+        parser.error('output exists')
+    if args.mode == 'history':
+        history(destination)
+    else:
+        audit(args.raw, destination)
