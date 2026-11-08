@@ -27,7 +27,7 @@ import time
 import traceback
 
 ROOT = Path(__file__).resolve().parent.parent
-BINS = ROOT / '.local/bin/goliath-e10'
+BINS = Path(os.environ.get('GOLIATH_BIN_DIR',ROOT / '.local/bin/goliath-e10')).resolve()
 DATA = ROOT / 'docs/experiments/data/E10'
 RUNS = ROOT / '.local/runs'
 RESOURCES = Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'
@@ -149,14 +149,20 @@ class Tile:
         if hasattr(self,'server') and self.server.process.poll() is None:
             raise RuntimeError('refusing to claim a replacement while this tile still runs')
         fresh = not self.cut.joinpath('LOG').exists() and not self.cut.joinpath('BASE').exists()
-        response = store.call(cluster.address, store.request(1, store.u64(self.index)))
-        if response[:2] != b'\1\1':
-            raise RuntimeError(f'claim failed {response!r}')
-        tile, process, epoch = struct.unpack_from('<QQQ', response, 2)
-        self.token = f'{process}:{epoch}'
+        if cluster.leased:
+            # Horizon claims its own original-send lease, not an adopted runner deadline.
+            tile,process,epoch=self.index,time.monotonic_ns(),0
+            self.token='pending-local-lease'
+        else:
+            response = store.call(cluster.address, store.request(1, store.u64(self.index)))
+            if response[:2] != b'\1\1':
+                raise RuntimeError(f'claim failed {response!r}')
+            tile, process, epoch = struct.unpack_from('<QQQ', response, 2)
+            self.token = f'{process}:{epoch}'
         # This is a fresh or stopped local tile. Replace its local append fence
         # only after the shared store has issued the new process fence.
-        self.cut.joinpath('FENCE').write_text(self.token)
+        if not cluster.leased:
+            self.cut.joinpath('FENCE').write_text(self.token)
         # Meridian's backend sockets are static. A replacement must keep the
         # original game port; sidecars read the refreshed control endpoint.
         if hasattr(self, 'server'):
@@ -166,7 +172,7 @@ class Tile:
         spawn = [1 if v == 0 else -2 for v in self.tile]
         settings = dict(upstream.PROPERTIES, **{'server-ip':'127.0.0.1', 'server-port':str(self.port),
             'level-seed':'12345', 'level-name':'world', 'gamemode':'creative', 'force-gamemode':'true',
-            'allow-flight':'true', 'difficulty':'peaceful', 'pause-when-empty-seconds':'-1', 'max-players':'128'})
+            'allow-flight':'true', 'difficulty':'peaceful', 'pause-when-empty-seconds':'-1', 'max-players':str(cluster.max_players)})
         if cluster.normal:
             settings['level-type']='minecraft\\:normal'
         self.folder.joinpath('server.properties').write_text(''.join(f'{k}={v}\n' for k,v in settings.items()))
@@ -178,9 +184,14 @@ class Tile:
             'GOLIATH_STORE':f'{cluster.tile_addresses.get(self.label,cluster.address)[0]}:{cluster.tile_addresses.get(self.label,cluster.address)[1]}', 'GOLIATH_TILE_ID':str(self.index),
             'GOLIATH_SPAWN':json.dumps([spawn[0],300 if cluster.normal else -60,spawn[1]])})
         self.env.update(cluster.tile_env)
+        if cluster.leased:
+            self.env.update(GOLIATH_LEASE_MS='1000',GOLIATH_LEASE_MARGIN_MS='100',GOLIATH_LEASE_TAKEOVER='1')
         with environment(self.env):
+            transfer_settings=dict(part.split('=',1) for part in upstream.TRANSFERS.split(','))
+            transfer_settings['max_expected']=str(cluster.max_expected)
+            transfers=','.join(f'{key}={value}' for key,value in transfer_settings.items())
             self.server = upstream.Server([BINS/'horizon-client', '--resources',cluster.resources,
-                '--control-socket',self.endpoint,'--transfers',upstream.TRANSFERS,'--dedicated','--nogui'],
+                '--control-socket',self.endpoint,'--transfers',transfers,'--dedicated','--nogui'],
                 self.folder, cluster.root/f'server-{self.label}-{process}.log')
         self.server.wait_for(upstream.DONE, 120)
         info = json.loads(self.endpoint.read_text())
@@ -190,6 +201,12 @@ class Tile:
         if json.loads(reader.readline()).get('ok') is not True:
             raise RuntimeError('control authentication failed')
         self.control = sock, reader
+        if cluster.leased:
+            authority=self.ask('cluster-authority')
+            if authority.get('authorized') is not True:
+                raise RuntimeError(f'tile has no local lease: {authority}')
+            tile,process,epoch=(authority[key] for key in ['tile','process','epoch'])
+            self.token=authority['token']
         self.fence = {'tile':tile,'process':process,'epoch':epoch,'endpoint':str(self.endpoint),'token':self.token}
         for command in ('gamerule spawn_mobs false','gamerule advance_weather false','gamerule random_tick_speed 0','gamerule respawn_radius 0'):
             reply = self.ask('console '+command)
@@ -237,8 +254,13 @@ class Tile:
 
 
 class Cluster:
-    def __init__(self, root, resources, edge, normal=False, tile_env=None, store_routes=None, store_binary=None):
+    def __init__(self, root, resources, edge, normal=False, tile_env=None, store_routes=None, store_binary=None, leased=None, max_players=128, max_expected=None):
         self.root, self.resources, self.edge = root, resources, edge
+        self.leased=(BINS/'LEASES').exists() if leased is None else leased
+        self.max_players=max_players
+        self.max_expected=max_expected if max_expected is not None else 4*max_players
+        if self.max_players<1 or self.max_expected<1:
+            raise ValueError('max_players and max_expected must be positive')
         self.normal = normal
         self.tile_env = tile_env or {}
         self.tile_addresses = {}
@@ -287,7 +309,7 @@ class Cluster:
             self.sidecars.append(child)
         self.port = e2.free_port()
         config = self.root/'meridian.toml'
-        config.write_text(f'listen = "127.0.0.1:{self.port}"\nauth-mode = "offline"\nconnections-per-minute = 0\nmax-players = 128\n'
+        config.write_text(f'listen = "127.0.0.1:{self.port}"\nauth-mode = "offline"\nconnections-per-minute = 0\nmax-players = {self.max_players}\n'
             f'forwarding-secret = "{upstream.SECRET.decode()}"\nswitch-carry-position = true\ndefault-backend = "a"\n'
             f'[tiles]\norigin = [0,0]\nedge = {self.edge}\n'
             + ''.join(f'[[tiles.entries]]\nindex = [{x},{z}]\nbackend = "{label}"\n' for label,(x,z) in e4.TILES.items())
@@ -696,6 +718,8 @@ def main():
     parser.add_argument('--resources',type=Path,default=RESOURCES)
     parser.add_argument('--store-binary',type=Path,help='store executable override, default: retained E10 goliath-store')
     parser.add_argument('--edge',type=int)
+    parser.add_argument('--max-players',type=int,default=128)
+    parser.add_argument('--max-expected',type=int,help='pending transfer limit, default: four times max players')
     parser.add_argument('--build',action='store_true')
     parser.add_argument('--fresh',action='store_true')
     parser.add_argument('--crossings',type=int,default=1000)
@@ -722,7 +746,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='E10-cluster-',dir=RUNS) as temporary:
         try:
             cluster=Cluster.__new__(Cluster)
-            cluster.__init__(Path(temporary),args.resources,edge,args.normal,store_binary=args.store_binary.resolve() if args.store_binary else None)
+            cluster.__init__(Path(temporary),args.resources,edge,args.normal,store_binary=args.store_binary.resolve() if args.store_binary else None,max_players=args.max_players,max_expected=args.max_expected)
             print(f'Cluster ready on 127.0.0.1:{cluster.port}; state {cluster.state}',flush=True)
             if args.action=='proof':
                 proof(cluster,args)

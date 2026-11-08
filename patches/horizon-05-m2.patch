@@ -1,0 +1,1221 @@
+diff --git a/crates/horizon-client-render/src/streaming.rs b/crates/horizon-client-render/src/streaming.rs
+--- a/crates/horizon-client-render/src/streaming.rs
++++ b/crates/horizon-client-render/src/streaming.rs
+@@ -435,7 +435,7 @@
+ pub struct Streaming {
+     /// E6 tracks generation state outside resident COW chunks. None when cuts are off.
+     cut_generation: Option<u64>,
+-    cut_protos: std::collections::HashMap<(i32, i32), crate::chunk::SavedProto>,
++    cut_protos: std::collections::HashMap<(i32, i32), Arc<crate::chunk::SavedProto>>,
+     cut_finished: Vec<Arc<Chunk>>,
+     shared: Arc<Shared>,
+     /// Columns generated and saved as they were left behind: new when they
+@@ -1335,7 +1335,7 @@
+             if self.cut_generation.is_some()
+                 && let Some(saved) = self.saves.cut_proto(&proto)
+             {
+-                self.cut_protos.insert(key, saved);
++                self.cut_protos.insert(key, Arc::new(saved));
+             }
+             self.light_views.remove(&key);
+             self.protos.insert(key, Some(proto));
+@@ -1603,10 +1603,17 @@
+     }
+     /// Accepted generation since the last cut, including columns no longer resident.
+     /// Jobs still running are not accepted world state and belong to a later cut.
+-    pub fn take_cut_generation(&mut self) -> (Vec<crate::chunk::SavedProto>, Vec<Arc<Chunk>>) {
++    pub fn take_cut_generation(&mut self) -> (Vec<Arc<crate::chunk::SavedProto>>, Vec<Arc<Chunk>>) {
+         (
+             self.cut_protos.drain().map(|(_, p)| p).collect(),
+             std::mem::take(&mut self.cut_finished),
++        )
++    }
++    /// Immutable accepted generation images, without consuming the next cut's state.
++    pub fn peek_cut_generation(&self) -> (Vec<Arc<crate::chunk::SavedProto>>, Vec<Arc<Chunk>>) {
++        (
++            self.cut_protos.values().cloned().collect(),
++            self.cut_finished.clone(),
+         )
+     }
+     fn cut_generation_changed(&mut self) {
+diff --git a/crates/horizon-client/src/game/dedicated/cluster.rs b/crates/horizon-client/src/game/dedicated/cluster.rs
+--- a/crates/horizon-client/src/game/dedicated/cluster.rs
++++ b/crates/horizon-client/src/game/dedicated/cluster.rs
+@@ -136,6 +136,10 @@
+             let mut tag = Some(named.tag);
+             mark(&mut tag, entry.generation.0)?;
+             let mut tag = tag.ok_or("missing player tag")?;
++            if let Some(position) = body.get("position").filter(|v| !v.is_null()) {
++                let position: [f64; 3] = serde_json::from_value(position.clone())?;
++                horizon_client::lan::import::translate_root_vehicle(&mut tag, position)?;
++            }
+             if let (Some(position), Tag::Compound(fields)) =
+                 (body.get("position").and_then(Value::as_array), &mut tag)
+             {
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -99,6 +99,7 @@
+             };
+             let _ = request.reply.send(reply.to_string());
+         }
++        self.tile_warm_generation(&mut state.tile_cut);
+     }
+ 
+     /// Each level's loaded chunks and entities (players and block entities apart), the level in place
+diff --git a/crates/horizon-client/src/game/dedicated/tile_cut.rs b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+--- a/crates/horizon-client/src/game/dedicated/tile_cut.rs
++++ b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+@@ -18,6 +18,7 @@
+     path::{Path, PathBuf},
+     sync::{
+         Arc, Weak,
++        atomic::{AtomicBool, Ordering},
+         mpsc::{self, Receiver, Sender},
+     },
+     time::Instant,
+@@ -68,9 +69,12 @@
+     pistons: bool,
+ }
+ pub(super) struct Runtime {
+-    send: Sender<Work>,
++    send: Sender<Message>,
++    warming: Arc<AtomicBool>,
+     done: Receiver<std::result::Result<(), String>>,
+     seen: HashMap<Key, Seen>,
++    prepared: HashMap<Key, (Weak<Chunk>, u64, Arc<Chunk>)>,
++    prepared_names: HashMap<String, Vec<((i32, i32, i32), String)>>,
+     names: HashMap<String, Vec<((i32, i32, i32), String)>>,
+     pending: usize,
+     poisoned: bool,
+@@ -79,7 +83,7 @@
+ struct Terrain {
+     prefix: String,
+     chunks: Vec<Arc<Chunk>>,
+-    protos: Vec<save::SavedProto>,
++    protos: Vec<Arc<save::SavedProto>>,
+     metadata: Vec<ChunkMetadata>,
+     entities: Vec<((i32, i32), Vec<Tag>)>,
+     registry: &'static BlockRegistry,
+@@ -94,6 +98,63 @@
+     inhabited: i64,
+     blocks: Vec<horizon_core::ticks::SavedTick>,
+     fluids: Vec<horizon_core::ticks::SavedTick>,
++}
++enum Message {
++    Cut(Box<Work>),
++    Warm(Vec<Terrain>),
++}
++#[derive(Default)]
++struct Encoded {
++    protos: HashMap<Key, (Weak<save::SavedProto>, Vec<u8>)>,
++    chunks: HashMap<Key, (Weak<Chunk>, Vec<u8>)>,
++}
++impl Encoded {
++    fn proto(&mut self, terrain: &Terrain, proto: &Arc<save::SavedProto>) -> Result<Vec<u8>> {
++        let key = (terrain.prefix.clone(), proto.column.x, proto.column.z);
++        if let Some((old, bytes)) = self.protos.get(&key)
++            && old.as_ptr() == Arc::as_ptr(proto)
++        {
++            return Ok(bytes.clone());
++        }
++        let tag = save::encode_proto(
++            proto,
++            terrain.registry,
++            &terrain.biomes,
++            terrain.tables.as_deref(),
++            terrain.shape,
++        );
++        let bytes = Compression::Zlib
++            .encode(&nbt::write_named(&tag, Limits::saved()).map_err(|e| e.to_string())?)?;
++        self.protos
++            .insert(key, (Arc::downgrade(proto), bytes.clone()));
++        Ok(bytes)
++    }
++    fn chunk(&mut self, terrain: &Terrain, chunk: &Arc<Chunk>) -> Result<Vec<u8>> {
++        let key = (terrain.prefix.clone(), chunk.x, chunk.z);
++        if let Some((old, bytes)) = self.chunks.get(&key)
++            && old.as_ptr() == Arc::as_ptr(chunk)
++        {
++            return Ok(bytes.clone());
++        }
++        let tag = save::encode_with(
++            chunk,
++            terrain.registry,
++            &terrain.biomes,
++            terrain.tables.as_deref(),
++            terrain.shape,
++        );
++        let bytes = Compression::Zlib
++            .encode(&nbt::write_named(&tag, Limits::saved()).map_err(|e| e.to_string())?)?;
++        self.chunks
++            .insert(key, (Arc::downgrade(chunk), bytes.clone()));
++        Ok(bytes)
++    }
++    fn prune(&mut self) {
++        self.protos
++            .retain(|_, (image, _)| image.strong_count() != 0);
++        self.chunks
++            .retain(|_, (image, _)| image.strong_count() != 0);
++    }
+ }
+ struct Work {
+     tick: i64,
+@@ -115,13 +176,18 @@
+     fn new(root: PathBuf, token: String) -> Result<Self> {
+         let (send, receive) = mpsc::channel();
+         let (done_tx, done) = mpsc::channel();
++        let warming = Arc::new(AtomicBool::new(false));
++        let worker_warming = Arc::clone(&warming);
+         std::thread::Builder::new()
+             .name("e6-cut-writer".into())
+-            .spawn(move || worker(root, token, receive, done_tx))?;
++            .spawn(move || worker(root, token, receive, done_tx, worker_warming))?;
+         Ok(Self {
+             send,
++            warming,
+             done,
+             seen: HashMap::new(),
++            prepared: HashMap::new(),
++            prepared_names: HashMap::new(),
+             names: HashMap::new(),
+             pending: 0,
+             poisoned: false,
+@@ -165,6 +231,7 @@
+     work: &mut Work,
+     staging: &Path,
+     pois: &mut HashMap<Key, Option<NamedTag>>,
++    encoded: &mut Encoded,
+ ) -> Result<Vec<store::Change>> {
+     let mut changes = Vec::new();
+     if let Some(files) = work.bootstrap.take() {
+@@ -188,33 +255,17 @@
+     }
+     for terrain in &work.terrain {
+         for proto in &terrain.protos {
+-            let tag = save::encode_proto(
+-                proto,
+-                terrain.registry,
+-                &terrain.biomes,
+-                terrain.tables.as_deref(),
+-                terrain.shape,
+-            );
+-            let bytes = nbt::write_named(&tag, Limits::saved()).map_err(|e| e.to_string())?;
+             changes.push(store::Change::chunk(
+                 region(&terrain.prefix, "region", proto.column.x, proto.column.z),
+                 [proto.column.x, proto.column.z],
+-                Compression::Zlib.encode(&bytes)?,
++                encoded.proto(terrain, proto)?,
+             ));
+         }
+         for chunk in &terrain.chunks {
+-            let tag = save::encode_with(
+-                chunk,
+-                terrain.registry,
+-                &terrain.biomes,
+-                terrain.tables.as_deref(),
+-                terrain.shape,
+-            );
+-            let bytes = nbt::write_named(&tag, Limits::saved()).map_err(|e| e.to_string())?;
+             changes.push(store::Change::chunk(
+                 region(&terrain.prefix, "region", chunk.x, chunk.z),
+                 [chunk.x, chunk.z],
+-                Compression::Zlib.encode(&bytes)?,
++                encoded.chunk(terrain, chunk)?,
+             ));
+             if let Some(tables) = &terrain.tables {
+                 let key = (terrain.prefix.clone(), chunk.x, chunk.z);
+@@ -338,8 +389,9 @@
+ fn worker(
+     root: PathBuf,
+     token: String,
+-    receive: Receiver<Work>,
++    receive: Receiver<Message>,
+     done: Sender<std::result::Result<(), String>>,
++    warming: Arc<AtomicBool>,
+ ) {
+     // A revoked process must not influence a new owner's codec input while finishing old work.
+     // PIDs are distinct for concurrent owners of this local, file-locked experiment directory.
+@@ -347,9 +399,27 @@
+     let mut writer = None;
+     let mut pois = HashMap::new();
+     let mut failure = None;
+-    while let Ok(first) = receive.recv() {
++    let mut encoded = Encoded::default();
++    while let Ok(message) = receive.recv() {
++        let first = match message {
++            Message::Warm(terrain) => {
++                encoded.prune();
++                // A failed speculative encoding is retried on the real cut. No acknowledgement
++                // or durable state is produced here, and no live state is changed.
++                for terrain in terrain {
++                    for proto in &terrain.protos {
++                        let _ = encoded.proto(&terrain, proto);
++                    }
++                    for chunk in &terrain.chunks {
++                        let _ = encoded.chunk(&terrain, chunk);
++                    }
++                }
++                warming.store(false, Ordering::Release);
++                continue;
++            }
++            Message::Cut(work) => *work,
++        };
+         let mut batch = vec![first];
+-        batch.extend(receive.try_iter().take(7));
+         let off = Instant::now();
+         let mut encode_ms = 0.;
+         let result = (|| -> Result<_> {
+@@ -361,15 +431,26 @@
+             }
+             let mut cuts = Vec::new();
+             for work in &mut batch {
+-                cuts.push((work.tick, encode(work, &staging, &mut pois)?));
++                cuts.push((work.tick, encode(work, &staging, &mut pois, &mut encoded)?));
+             }
+             // A capture that arrives during encoding joins this same durable barrier.
+             while batch.len() < 8 {
+-                let Ok(mut work) = receive.try_recv() else {
++                // Do not consume a warm message while collecting a durable group.
++                let Ok(message) = receive.try_recv() else {
+                     break;
+                 };
+-                cuts.push((work.tick, encode(&mut work, &staging, &mut pois)?));
+-                batch.push(work);
++                match message {
++                    Message::Cut(mut work) => {
++                        cuts.push((
++                            work.tick,
++                            encode(&mut work, &staging, &mut pois, &mut encoded)?,
++                        ));
++                        batch.push(*work);
++                    }
++                    Message::Warm(_) => {
++                        warming.store(false, Ordering::Release);
++                    }
++                }
+             }
+             encode_ms = off.elapsed().as_secs_f64() * 1000.;
+             let writer = writer.as_mut().ok_or("cut writer missing")?;
+@@ -406,6 +487,95 @@
+ }
+ 
+ impl Game<'_> {
++    /// Prepare only immutable accepted generation images between freezes.
++    pub(super) fn tile_warm_generation(&mut self, runtime: &mut Option<Runtime>) {
++        let Some(state) = runtime else {
++            return;
++        };
++        if !state.initialized || state.poisoned || state.warming.swap(true, Ordering::AcqRel) {
++            return;
++        }
++        let back = self.dim;
++        let mut terrain = Vec::new();
++        for dim in self
++            .levels
++            .parked_dims()
++            .into_iter()
++            .chain(std::iter::once(back))
++        {
++            if self.enter_level(None, dim).is_err() {
++                break;
++            }
++            let (protos, mut chunks) = self.streaming.peek_cut_generation();
++            let Ok(path) = save::dimension_dir(&self.world_root, dim.id())
++                .strip_prefix(&self.world_root)
++                .map(Path::to_owned)
++            else {
++                continue;
++            };
++            let Some(prefix) = path.to_str() else {
++                continue;
++            };
++            let mut names: Vec<_> = self
++                .world
++                .block_names
++                .iter()
++                .map(|(p, n)| (*p, n.clone()))
++                .collect();
++            names.sort();
++            if state.prepared_names.get(prefix) != Some(&names) {
++                state.prepared.retain(|(p, _, _), _| p != prefix);
++                state.prepared_names.insert(prefix.to_owned(), names);
++            }
++            state
++                .prepared
++                .retain(|(p, x, z), _| p != prefix || self.world.chunks.contains_key(&(*x, *z)));
++            if self.block_ticks.moving_pistons.is_empty() {
++                for (&(x, z), live) in self.world.chunks.iter() {
++                    let revision = self.world.block_entities.cut_revision((x, z));
++                    if revision == u64::MAX
++                        || self
++                            .be_anims
++                            .gateway_servers
++                            .keys()
++                            .any(|p| p[0] >> 4 == x && p[2] >> 4 == z)
++                    {
++                        continue;
++                    }
++                    let key = (prefix.to_owned(), x, z);
++                    let entry = state.prepared.get(&key);
++                    if entry.is_none_or(|(old, r, _)| {
++                        old.as_ptr() != Arc::as_ptr(live) || *r != revision
++                    }) && let Some(snapshot) = self.with_entities([live]).pop()
++                    {
++                        state
++                            .prepared
++                            .insert(key.clone(), (Arc::downgrade(live), revision, snapshot));
++                    }
++                    if let Some((_, _, snapshot)) = state.prepared.get(&key) {
++                        chunks.push(Arc::clone(snapshot));
++                    }
++                }
++            }
++            terrain.push(Terrain {
++                prefix: prefix.to_owned(),
++                chunks,
++                protos,
++                metadata: Vec::new(),
++                entities: Vec::new(),
++                registry: self.pack.assets.registry,
++                biomes: world_biomes!(self).clone(),
++                tables: self.save.tables.get().cloned(),
++                shape: self.save.shape,
++                forced: HashSet::new(),
++            });
++        }
++        let _ = self.enter_level(None, back);
++        if state.send.send(Message::Warm(terrain)).is_err() {
++            state.warming.store(false, Ordering::Release);
++            state.poisoned = true;
++        }
++    }
+     /// The cold bootstrap remains E3's full barrier. It must finish before budgeted crossings.
+     fn tile_bootstrap(&mut self) -> Result<store::Files> {
+         let back = self.dim;
+@@ -542,6 +712,9 @@
+                         .map(|(p, n)| (*p, n.clone()))
+                         .collect();
+                     names.sort();
++                    if state.prepared_names.get(&prefix) != Some(&names) {
++                        state.prepared.retain(|(p, _, _), _| p != &prefix);
++                    }
+                     let names_changed = state.names.get(&prefix) != Some(&names);
+                     state.names.insert(prefix.clone(), names);
+                     let mut dirty = Vec::new();
+@@ -619,7 +792,26 @@
+                     }
+                     retired.retain(|key, _| !keys.contains(key));
+                     let mut chunks: Vec<_> = retired.values().map(|(c, _)| c.clone()).collect();
+-                    chunks.extend(self.with_entities(&dirty));
++                    for live in &dirty {
++                        let key = (prefix.clone(), live.x, live.z);
++                        let revision = self.world.block_entities.cut_revision((live.x, live.z));
++                        let prepared = state.prepared.get(&key).filter(|(old, r, _)| {
++                            old.as_ptr() == Arc::as_ptr(live)
++                                && *r == revision
++                                && revision != u64::MAX
++                                && self.block_ticks.moving_pistons.is_empty()
++                                && !self
++                                    .be_anims
++                                    .gateway_servers
++                                    .keys()
++                                    .any(|p| p[0] >> 4 == live.x && p[2] >> 4 == live.z)
++                        });
++                        if let Some((_, _, snapshot)) = prepared {
++                            chunks.push(Arc::clone(snapshot));
++                        } else {
++                            chunks.extend(self.with_entities([live]));
++                        }
++                    }
+                     let mut entities: Vec<_> =
+                         retired.into_iter().map(|(key, (_, e))| (key, e)).collect();
+                     entities.extend(self.entity_chunks(&keys, false));
+@@ -726,7 +918,7 @@
+                 if let Some(state) = runtime {
+                     state.initialized = true;
+                     state.pending += 1;
+-                    if state.send.send(work).is_err() {
++                    if state.send.send(Message::Cut(Box::new(work))).is_err() {
+                         state.poisoned = true;
+                         let _ = reply.send(json!({"error":"cut writer stopped"}).to_string());
+                     }
+diff --git a/crates/horizon-client/src/game/dedicated/transfer.rs b/crates/horizon-client/src/game/dedicated/transfer.rs
+--- a/crates/horizon-client/src/game/dedicated/transfer.rs
++++ b/crates/horizon-client/src/game/dedicated/transfer.rs
+@@ -14,6 +14,7 @@
+ use horizon_protocol::packets::play::{self, Clientbound as C};
+ use serde_json::{Value, json};
+ use std::time::Instant;
++mod live;
+ 
+ impl Game<'_> {
+     /// A proxy's `player-*` request; the reply is one JSON line, `{"ok": true, ...}` or
+@@ -68,6 +69,78 @@
+             return json!({ "error": arrivals::OFF });
+         }
+         match verb {
++            "player-observe-reset" => {
++                let Some(uuid) = arrivals::parse_uuid(args.trim()) else {
++                    return json!({"error":"invalid observer UUID"});
++                };
++                let host = self.lan.as_mut().expect("checked above");
++                if !host.hub.terrain_observers.contains(&uuid) {
++                    return json!({"error":"not a terrain reader"});
++                }
++                let Some(g) = host
++                    .hub
++                    .guests
++                    .iter_mut()
++                    .find(|g| g.uuid == uuid && g.held && !g.placed && !g.imported)
++                else {
++                    return json!({"error":"reader is not held"});
++                };
++                g.sent_chunks.clear();
++                g.center = None;
++                g.held_since = host.hub.ticks;
++                json!({"ok":true})
++            }
++            "player-observe" => {
++                if super::cluster::connection().ok().flatten().is_none() {
++                    return json!({"error":"terrain observers require cluster mode"});
++                }
++                let Some((id, position)) = args.split_once(' ') else {
++                    return json!({"error":"observer needs UUID and position"});
++                };
++                let Some(uuid) = arrivals::parse_uuid(id) else {
++                    return json!({"error":"invalid observer UUID"});
++                };
++                let Ok(position) = serde_json::from_str::<[f64; 3]>(position) else {
++                    return json!({"error":"invalid observer position"});
++                };
++                if position
++                    .iter()
++                    .any(|v| !v.is_finite() || v.abs() > 30_000_000.)
++                {
++                    return json!({"error":"invalid observer position"});
++                }
++                let host = self.lan.as_mut().expect("checked above");
++                if let Some(g) = host.hub.guests.iter_mut().find(|g| g.uuid == uuid) {
++                    if !g.held
++                        || g.placed
++                        || g.imported
++                        || !host.hub.terrain_observers.contains(&uuid)
++                    {
++                        return json!({"error":"observer is not an unimported terrain reader"});
++                    }
++                    g.position = position;
++                    g.previous_position = position;
++                    // An old observer teleport acknowledgement must not undo the new
++                    // authoritative read-only view position. This is never a placed player.
++                    g.awaiting_teleport = None;
++                    g.center = None;
++                    g.held_since = host.hub.ticks;
++                    return json!({"ok":true,"held":true});
++                }
++                let reply =
++                    arrivals::expect_request(&mut host.hub, &format!("{id} 10"), Instant::now());
++                if reply["ok"] == true {
++                    host.hub.terrain_observers.insert(uuid);
++                    host.hub.arrival_positions.insert(
++                        uuid,
++                        (
++                            position,
++                            Instant::now() + std::time::Duration::from_secs(10),
++                        ),
++                    );
++                }
++                reply
++            }
+             "player-expect-at" => {
+                 let mut parts = args.splitn(3, ' ');
+                 let Some(uuid) = parts.next().and_then(arrivals::parse_uuid) else {
+@@ -167,6 +240,44 @@
+             Ok(v) => v,
+             Err(e) => return json!({ "error": format!("the request is not JSON: {e}") }),
+         };
++        let mut initial = Vec::new();
++        if let Some(value) = request.get("initial_inputs") {
++            if std::env::var_os("GOLIATH_STORE").is_none() {
++                return json!({"error":"activation inputs require cluster mode"});
++            }
++            let Ok(packets) = serde_json::from_value::<Vec<(i32, Vec<u8>)>>(value.clone()) else {
++                return json!({"error":"invalid activation inputs"});
++            };
++            if packets.len() > 256 || packets.iter().map(|p| p.1.len()).sum::<usize>() > 1024 * 1024
++            {
++                return json!({"error":"activation input batch too large"});
++            }
++            use horizon_protocol::{ids::play::serverbound as s, packets::play::Serverbound as S};
++            for (id, payload) in packets {
++                if !matches!(
++                    id,
++                    s::MOVE_PLAYER_POS
++                        | s::MOVE_PLAYER_POS_ROT
++                        | s::MOVE_PLAYER_ROT
++                        | s::MOVE_PLAYER_STATUS_ONLY
++                        | s::MOVE_VEHICLE
++                        | s::CLIENT_TICK_END
++                ) {
++                    return json!({"error":"activation batch is not a movement prefix"});
++                }
++                let Ok(packet) = S::decode(id, &payload) else {
++                    return json!({"error":"invalid activation movement"});
++                };
++                initial.push(packet);
++            }
++        }
++        if self
++            .lan
++            .as_ref()
++            .is_some_and(|h| h.hub.terrain_observers.contains(&uuid))
++        {
++            return json!({"error":"a terrain observer cannot be activated"});
++        }
+         let generation = match super::cluster::activation(uuid, &request) {
+             Ok(generation) => generation,
+             Err(e) => return json!({"error":e.to_string()}),
+@@ -196,6 +307,12 @@
+         let reply = match result {
+             Ok(done) => {
+                 self.take_arrival_records(&mut host, uuid, &done);
++                if let Some(state) = request["record"].get("goliath_live")
++                    && let Err(error) = live::apply(self, &mut host, uuid, state)
++                {
++                    self.lan = Some(host);
++                    return json!({"error":error.to_string()});
++                }
+                 if let Some(generation) = generation
+                     && let Some(guest) = host.hub.guests.iter_mut().find(|g| g.uuid == uuid)
+                     && let Err(e) = super::cluster::mark(&mut guest.saved, generation)
+@@ -224,6 +341,9 @@
+             Err(e) => json!({ "error": e }),
+         };
+         self.lan = Some(host);
++        if reply["ok"] == true && reply["placed"] == true {
++            self.arrival_inputs(uuid, initial);
++        }
+         reply
+     }
+ 
+@@ -316,6 +436,7 @@
+         host.hub.guests.insert(i, g);
+         written?;
+         let announced = host.hub.confirm_arrival(uuid, id)?;
++        self.restore_guest_vehicles(host);
+         self.arrival_placed(uuid, &name, announced);
+         Ok(true)
+     }
+@@ -332,7 +453,8 @@
+     }
+ 
+     fn export_from(&mut self, host: &mut LanHost, uuid: u128, freeze: bool) -> Value {
+-        let i = match arrivals::check_exportable(&host.hub, uuid) {
++        let cluster = std::env::var_os("GOLIATH_STORE").is_some();
++        let i = match arrivals::check_exportable_with_vehicle(&host.hub, uuid, cluster) {
+             Ok(i) => i,
+             Err(why) => return json!({ "error": why }),
+         };
+@@ -354,6 +476,13 @@
+         if let Err(e) = self.enter_level(Some(host), level) {
+             return json!({ "error": format!("the player's level could not be opened: {e}") });
+         }
++        if cluster && host.hub.guests[i].motion.is_none() {
++            // Registration can export a newly placed guest before its first normal turn.
++            // Initialize its saved body without advancing physics or consuming input.
++            if self.as_guest(host, conn, |_| ()).is_none() {
++                return json!({"error":"could not initialize the live player body"});
++            }
++        }
+         // Nothing is sent to the client by this: it is for a player who is leaving.
+         self.guest_close_all(host, conn);
+         // The inventory's own 2x2 grid too (`InventoryMenu.removed`): `guest_close_all` empties it
+@@ -375,6 +504,35 @@
+         host.hub.send_inventory(i);
+         // What a mod attached to the player since it joined, as a save writes it.
+         self.guest_attachments_into(&mut host.hub.guests[i]);
++        let previous = (
++            host.hub.guests[i].saved.clone(),
++            host.hub.guests[i].saved_vehicle,
++        );
++        if cluster && let Some(vehicle) = host.hub.guests[i].vehicle {
++            let others = self.ridden_by_others(
++                &host.hub.guests,
++                &host.hub.guests[i].dimension,
++                Some(uuid),
++                true,
++            );
++            let dimension = host.hub.guests[i].dimension.clone();
++            let Some((tag, attach)) =
++                self.parent_vehicle_in(Some(host), &dimension, Some(vehicle), &others, freeze)
++            else {
++                return json!({"error":"vehicle group is unsupported or has another player passenger"});
++            };
++            let guest = &mut host.hub.guests[i];
++            if freeze {
++                guest.vehicle = None;
++            }
++            let saved = guest.saved.get_or_insert_with(|| {
++                horizon_world::nbt::Tag::compound([] as [(&str, horizon_world::nbt::Tag); 0])
++            });
++            if let horizon_world::nbt::Tag::Compound(fields) = saved {
++                fields.insert("RootVehicle".into(), tag);
++            }
++            guest.saved_vehicle = Some(attach);
++        }
+         let advancements = if self.adv.tree.list.is_empty() {
+             Value::Null
+         } else {
+@@ -390,8 +548,27 @@
+             advancements,
+             stats,
+         };
+-        match arrivals::export_record(&mut host.hub, i, freeze, records) {
++        let live = if cluster {
++            match live::capture(&host, i) {
++                Ok(state) => Some(state),
++                Err(error) => return json!({"error":error.to_string()}),
++            }
++        } else {
++            None
++        };
++        let result = arrivals::export_record(&mut host.hub, i, freeze, records);
++        if !freeze {
++            host.hub.guests[i].saved = previous.0;
++            host.hub.guests[i].saved_vehicle = previous.1;
++        }
++        match result {
+             Ok(mut record) => {
++                if let Some(live) = live {
++                    record["goliath_live"] = live;
++                    if let Some(handover) = &mut host.hub.guests[i].handover {
++                        handover.record = record.clone();
++                    }
++                }
+                 if std::env::var_os("GOLIATH_STORE").is_some() {
+                     record["goliath_generation"] =
+                         super::cluster::local_generation(host.hub.guests[i].saved.as_ref()).into();
+diff --git a/crates/horizon-client/src/game/dedicated/transfer/live.rs b/crates/horizon-client/src/game/dedicated/transfer/live.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client/src/game/dedicated/transfer/live.rs
+@@ -0,0 +1,161 @@
++//! Ephemeral player controls, live modifiers and cooldowns in one fenced handover record.
++use crate::game::{Game, lan::LanHost};
++use horizon_client::{
++    Result,
++    lan::{attributes, hub::transfer_flags},
++};
++use horizon_protocol::{
++    buf::Reader,
++    entity_data::{Value as Data, serializer},
++    packets::play::{self, Clientbound as C},
++};
++use serde::{Deserialize, Serialize};
++use serde_json::Value;
++
++#[derive(Serialize, Deserialize)]
++struct State {
++    attributes: Vec<u8>,
++    abilities: Vec<u8>,
++    metadata: Vec<u8>,
++    input: u8,
++    cooldowns: Vec<(String, i32, i32)>,
++    shield_cooldown: u32,
++}
++fn decode(bytes: &[u8]) -> Result<C> {
++    if bytes.len() > 1024 * 1024 {
++        return Err("live player packet is too large".into());
++    }
++    let mut reader = Reader::new(bytes);
++    let id = reader.varint()?;
++    Ok(C::decode(id, reader.rest())?)
++}
++pub(super) fn capture(host: &LanHost, index: usize) -> Result<Value> {
++    let guest = &host.hub.guests[index];
++    let motion = guest
++        .motion
++        .as_ref()
++        .ok_or("live player body is not ready for a cluster export")?;
++    let play = host.play.get(&guest.conn);
++    let state = State {
++        attributes: C::UpdateAttributes(play::UpdateAttributes {
++            id: guest.entity_id,
++            values: attributes::syncable(&motion.attributes),
++        })
++        .encode(),
++        abilities: guest.abilities().encode(),
++        metadata: C::SetEntityData(play::SetEntityData {
++            id: guest.entity_id,
++            values: vec![
++                (0, serializer::BYTE, Data::Byte(transfer_flags(guest))),
++                (6, serializer::POSE, Data::Id(guest.pose().id())),
++            ],
++        })
++        .encode(),
++        input: guest.input,
++        cooldowns: play.map_or_else(Vec::new, |play| play.cooldowns.handover()),
++        shield_cooldown: play.map_or(0, |play| play.shield_cooldown),
++    };
++    Ok(serde_json::to_value(state)?)
++}
++pub(super) fn apply(
++    game: &mut Game<'_>,
++    host: &mut LanHost,
++    uuid: u128,
++    value: &Value,
++) -> Result<()> {
++    if std::env::var_os("GOLIATH_STORE").is_none() {
++        return Err("live state requires a fenced cluster import".into());
++    }
++    let state: State = serde_json::from_value(value.clone())?;
++    let C::UpdateAttributes(mut attrs) = decode(&state.attributes)? else {
++        return Err("live attribute packet has wrong type".into());
++    };
++    let C::PlayerAbilities(abilities) = decode(&state.abilities)? else {
++        return Err("live abilities packet has wrong type".into());
++    };
++    let C::SetEntityData(mut metadata) = decode(&state.metadata)? else {
++        return Err("live metadata packet has wrong type".into());
++    };
++    let flags = metadata
++        .values
++        .iter()
++        .find_map(|(index, _, value)| {
++            if *index == 0 {
++                if let Data::Byte(flags) = value {
++                    Some(*flags)
++                } else {
++                    None
++                }
++            } else {
++                None
++            }
++        })
++        .ok_or("live flags missing")?;
++    let pose = metadata
++        .values
++        .iter()
++        .find_map(|(index, _, value)| {
++            if *index == 6 {
++                if let Data::Id(pose) = value {
++                    Some(*pose)
++                } else {
++                    None
++                }
++            } else {
++                None
++            }
++        })
++        .ok_or("live pose missing")?;
++    if !(0..=5).contains(&pose)
++        || !abilities.flying_speed.is_finite()
++        || !abilities.walking_speed.is_finite()
++    {
++        return Err("invalid live movement state".into());
++    }
++    let cooldowns = horizon_client::cooldowns::Cooldowns::from_handover(&state.cooldowns)
++        .ok_or("invalid live cooldown state")?;
++    let index = host
++        .hub
++        .guests
++        .iter()
++        .position(|g| g.uuid == uuid)
++        .ok_or("live player missing")?;
++    let guest = &mut host.hub.guests[index];
++    let conn = guest.conn;
++    guest.input = state.input;
++    guest.sprinting = flags & 0x08 != 0;
++    guest.sneaking = flags & 0x02 != 0;
++    guest.fall_flying = (flags as u8) & 0x80 != 0;
++    guest.flying = abilities.flags & 2 != 0;
++    guest.allow_flight = abilities.flags & 4 != 0;
++    guest.flying_speed = abilities.flying_speed;
++    game.as_guest(host, conn, |game| -> Result<()> {
++        let player = game
++            .player
++            .as_mut()
++            .ok_or("live player body not initialized")?;
++        attributes::apply(&mut player.attributes, &attrs.values);
++        player.sprinting = flags & 0x08 != 0;
++        player.swimming = flags & 0x10 != 0;
++        player.pose = horizon_client::pose::Pose::from_id(pose);
++        Ok(())
++    })
++    .ok_or("live player turn unavailable")??;
++    let play = host.play.entry(conn).or_default();
++    play.cooldowns = cooldowns;
++    play.shield_cooldown = state.shield_cooldown;
++    let guest = &host.hub.guests[index];
++    attrs.id = guest.entity_id;
++    metadata.id = guest.entity_id;
++    // These follow the held-login defaults on the same lane, before placement and delta.
++    guest.send(&C::UpdateAttributes(attrs));
++    guest.send(&C::PlayerAbilities(abilities));
++    guest.send(&C::SetEntityData(metadata));
++    for (group, elapsed, total) in state.cooldowns {
++        guest.send(&C::Cooldown(play::Cooldown {
++            group,
++            duration: total - elapsed,
++        }));
++    }
++    Ok(())
++}
+diff --git a/crates/horizon-client/src/game/lan.rs b/crates/horizon-client/src/game/lan.rs
+--- a/crates/horizon-client/src/game/lan.rs
++++ b/crates/horizon-client/src/game/lan.rs
+@@ -1598,7 +1598,7 @@
+     /// `ServerPlayer.saveParentVehicle` of a player riding `vehicle` in level
+     /// `dim`, put in place for it if need be; with `remove`, the vehicle tree
+     /// leaves the world with the player (`PlayerList.remove`).
+-    fn parent_vehicle_in(
++    pub(super) fn parent_vehicle_in(
+         &mut self,
+         mut host: Option<&mut LanHost>,
+         dim: &str,
+@@ -1661,7 +1661,7 @@
+     }
+     /// `ServerPlayer.loadAndSpawnParentVehicle`: a guest whose file names the
+     /// vehicle it rode rides it again, once the vehicle is in the world.
+-    fn restore_guest_vehicles(&mut self, host: &mut LanHost) {
++    pub(super) fn restore_guest_vehicles(&mut self, host: &mut LanHost) {
+         let waiting: Vec<(usize, [i32; 4])> = host
+             .hub
+             .guests
+@@ -1675,6 +1675,7 @@
+                     (g.position[2].floor() as i32).div_euclid(16),
+                 );
+                 g.placed
++                    && g.handover.is_none()
+                     && g.vehicle.is_none()
+                     && g.dimension == self.dim.id()
+                     && g.sent_chunks.contains(&chunk)
+@@ -2455,6 +2456,44 @@
+         drop(holding);
+         self.lan = Some(host);
+     }
++    /// Activation's input prefix uses normal movement validation before this tick resumes.
++    pub(super) fn arrival_inputs(
++        &mut self,
++        uuid: u128,
++        packets: Vec<horizon_protocol::packets::play::Serverbound>,
++    ) {
++        if packets.is_empty() {
++            return;
++        }
++        let Some(mut host) = self.lan.take() else {
++            return;
++        };
++        let entities = std::mem::take(&mut host.states);
++        let spawn = self.spawn.map_or([0.5, 80., 0.5], |s| [s.x, s.y, s.z]);
++        let clock_rate = self.network_clock_rate();
++        let mut ctx = TickCtx {
++            world: &mut self.world,
++            entities: entities.as_slice(),
++            next_entity: &mut self.next_entity,
++            spawn,
++            difficulty: i32::from(self.ui.difficulty),
++            difficulty_locked: self.level.difficulty_locked,
++            clock_rate,
++            tick_rate: self.clock.rate(),
++            tick_frozen: self.clock.frozen(),
++            tick_steps: self.clock.step_state(),
++            collision: Some(self.collision),
++            border: &self.border,
++            streaming: Some(&self.streaming),
++        };
++        let events = host.hub.arrival_inputs(uuid, packets, &mut ctx);
++        self.lan = self
++            .lan_process_events(host, events, entities.as_slice(), spawn)
++            .map(|mut host| {
++                host.states = entities;
++                host
++            });
++    }
+ 
+     /// The entity id counter, once the entities Horizon keeps without one
+     /// have theirs, while guests track the level (None otherwise).
+diff --git a/crates/horizon-client/src/lan/arrivals.rs b/crates/horizon-client/src/lan/arrivals.rs
+--- a/crates/horizon-client/src/lan/arrivals.rs
++++ b/crates/horizon-client/src/lan/arrivals.rs
+@@ -293,6 +293,14 @@
+ /// Why the connected player `uuid` cannot be exported now, or the index of its
+ /// guest. A held player is not exportable: it has no state of its own yet.
+ pub fn check_exportable(hub: &Hub, uuid: u128) -> Result<usize, &'static str> {
++    check_exportable_with_vehicle(hub, uuid, false)
++}
++/// The cluster caller must capture and detach the single-player vehicle group itself.
++pub fn check_exportable_with_vehicle(
++    hub: &Hub,
++    uuid: u128,
++    group: bool,
++) -> Result<usize, &'static str> {
+     let Some(i) = hub.guests.iter().position(|g| g.uuid == uuid) else {
+         return Err("that player is not connected to this server");
+     };
+@@ -303,7 +311,7 @@
+         Err("that player has not finished joining")
+     } else if !g.left_reason.is_empty() {
+         Err("that player is leaving")
+-    } else if g.vehicle.is_some() {
++    } else if g.vehicle.is_some() && !group {
+         Err("that player is riding")
+     } else if g.sleeping {
+         Err("that player is asleep")
+diff --git a/crates/horizon-client/src/lan/hub.rs b/crates/horizon-client/src/lan/hub.rs
+--- a/crates/horizon-client/src/lan/hub.rs
++++ b/crates/horizon-client/src/lan/hub.rs
+@@ -306,6 +306,8 @@
+     /// said would arrive (`player-expect`). None while it is off.
+     pub transfers: Option<super::arrivals::Transfers>,
+     pub arrival_positions: HashMap<u128, ([f64; 3], std::time::Instant)>,
++    /// Cluster-only held terrain readers. They can never be imported or placed.
++    pub terrain_observers: std::collections::HashSet<u128>,
+     /// The entities players started and stopped tracking, collected by
+     /// `collect_tracking`, for the game to tell the mods.
+     pub native_tracking: Vec<TrackingBatch>,
+@@ -738,6 +740,7 @@
+             pending_kicks: Vec::new(),
+             transfers: None,
+             arrival_positions: HashMap::new(),
++            terrain_observers: std::collections::HashSet::new(),
+             native_tracking: Vec::new(),
+             attachment_snapshots: Vec::new(),
+             sync_attachments: false,
+@@ -1156,6 +1159,13 @@
+     /// finished, and the freezes no hand-over ended. None may last for ever, and
+     /// a held player goes without a word to anyone, since no one was told of it.
+     fn expire_arrivals(&mut self, events: &mut Vec<HostEvent>) {
++        let now = std::time::Instant::now();
++        self.arrival_positions
++            .retain(|_, (_, deadline)| *deadline > now);
++        self.terrain_observers.retain(|uuid| {
++            self.arrival_positions.contains_key(uuid)
++                || self.guests.iter().any(|g| g.uuid == *uuid && g.held)
++        });
+         // Off: nothing to do (and no player can be frozen).
+         let Some(transfers) = &self.transfers else {
+             return;
+@@ -1416,6 +1426,9 @@
+             let g = &mut self.guests[i];
+             g.held = true;
+             g.held_since = self.ticks;
++            if self.terrain_observers.contains(&uuid) {
++                g.view_distance = (g.view_distance + 1).min(33);
++            }
+             if let Some((position, deadline)) = self.arrival_positions.remove(&uuid)
+                 && deadline > std::time::Instant::now()
+             {
+@@ -2517,6 +2530,7 @@
+ 
+     pub(super) fn remove_guest(&mut self, i: usize, reason: &str) -> Guest {
+         let mut g = self.guests.remove(i);
++        self.terrain_observers.remove(&g.uuid);
+         // A compass target lasts while the player is on, as the world spawn
+         // is sent again when they come back.
+         if !self.guests.iter().any(|o| o.uuid == g.uuid) {
+@@ -2894,7 +2908,8 @@
+                     (-1..=1).all(|dz| {
+                         (-1..=1).all(|dx| {
+                             let (x, z) = (c.x + dx, c.z + dz);
+-                            world.chunks.contains_key(&(x, z))
++                            !horizon_core::tile_ownership::owns_chunk(x, z)
++                                || world.chunks.contains_key(&(x, z))
+                                 || streaming.proto_sections(x, z).is_some()
+                         })
+                     })
+@@ -4273,6 +4288,42 @@
+                 other => events.push(HostEvent::Packet(conn, Box::new(other))),
+             }
+         }
++    }
++    /// A bounded ordered movement prefix, delivered by the owning cluster proxy on activation.
++    /// Uses the same packet handlers as the network. Later queued actions cannot overtake it.
++    pub fn arrival_inputs(
++        &mut self,
++        uuid: u128,
++        packets: Vec<horizon_protocol::packets::play::Serverbound>,
++        ctx: &mut TickCtx,
++    ) -> Vec<HostEvent> {
++        let mut events = Vec::new();
++        let Some(i) = self
++            .guests
++            .iter()
++            .position(|g| g.uuid == uuid && g.placed && !g.held)
++        else {
++            return events;
++        };
++        // The proxy owns both same-world import confirmations on the passive lane.
++        // Answer the latest here before its already-ordered client movement prefix.
++        if let Some((id, at)) = self.guests[i].awaiting_teleport {
++            let g = &self.guests[i];
++            let answer = S::AcceptTeleportation(play::AcceptTeleportation {
++                id,
++                x: at[0],
++                y: at[1],
++                z: at[2],
++                yaw: g.yaw,
++                pitch: g.pitch,
++            });
++            self.guests[i].inbox.push_back((answer, 0));
++        }
++        self.guests[i]
++            .inbox
++            .extend(packets.into_iter().map(|p| (p, 0)));
++        self.process_inbox(i, ctx, &mut events);
++        events
+     }
+ 
+     /// ServerGamePacketListenerImpl.handleMovePlayer.
+@@ -5308,6 +5359,10 @@
+         invisible: g.effects.get("invisibility").is_some() || g.spectator(),
+         glowing: g.effects.get("glowing").is_some(),
+     }
++}
++/// The player's complete live shared-flags byte at a fenced handover.
++pub fn transfer_flags(g: &Guest) -> i8 {
++    shared_flags(g.sneaking, g.sprinting, &guest_body(g))
+ }
+ 
+ /// Entity.DATA_SHARED_FLAGS_ID of a player: on fire 0x01, crouching 0x02,
+diff --git a/crates/horizon-client/src/lan/import.rs b/crates/horizon-client/src/lan/import.rs
+--- a/crates/horizon-client/src/lan/import.rs
++++ b/crates/horizon-client/src/lan/import.rs
+@@ -491,7 +491,7 @@
+         return Err(super::arrivals::STOPPING.into());
+     }
+     let request = read_request(request)?;
+-    let (tag, handover) = read_compound(request.record, uuid)?;
++    let (mut tag, handover) = read_compound(request.record, uuid)?;
+     let Some(i) = hub
+         .guests
+         .iter()
+@@ -514,13 +514,18 @@
+     // A record with a vehicle still to restore (`RootVehicle`) puts the player back on it, at
+     // the vehicle's own saved place: a position named by the request would be undone as soon
+     // as the vehicle is restored, so the two cannot be taken together.
+-    if request.arrival.position.is_some()
++    if let Some(destination) = request.arrival.position
+         && (level.root_vehicle.is_some() || tag.get("RootVehicle").is_some())
+     {
+-        return Err(
++        if std::env::var_os("GOLIATH_STORE").is_some() && request.parts.len() == PARTS.len() {
++            translate_root_vehicle(&mut tag, destination)?;
++            level.read_player(&tag);
++        } else {
++            return Err(
+             "the record has a vehicle to restore (RootVehicle): a position cannot be named with it"
+                 .into(),
+         );
++        }
+     }
+     // What `playerdata::load` gives `apply` too: the whole compound, for the keys Horizon
+     // does not model, the mods' attachments and the body's values.
+@@ -606,6 +611,45 @@
+         recentered,
+     })
+ }
++/// Translate the whole immutable vehicle tree by the same crossing displacement.
++pub fn translate_root_vehicle(tag: &mut Tag, destination: [f64; 3]) -> Result<(), String> {
++    if tag.get("RootVehicle").is_none() {
++        return Ok(());
++    }
++    let mut level = Level::default();
++    level.read_player(tag);
++    let previous = level.position.ok_or("vehicle rider has no position")?;
++    let delta = std::array::from_fn(|axis| destination[axis] - previous[axis]);
++    let entity = tag
++        .get_mut("RootVehicle")
++        .and_then(|root| root.get_mut("Entity"))
++        .ok_or("vehicle record has no root entity")?;
++    translate_vehicle(entity, delta)
++}
++fn translate_vehicle(tag: &mut Tag, delta: [f64; 3]) -> Result<(), String> {
++    let Some(Tag::List(position)) = tag.get_mut("Pos") else {
++        return Err("vehicle has no position".into());
++    };
++    if position.len() != 3 {
++        return Err("vehicle position is not three numbers".into());
++    }
++    for (value, delta) in position.iter_mut().zip(delta) {
++        let Tag::Double(bits) = value else {
++            return Err("vehicle position is not double".into());
++        };
++        let next = f64::from_bits(*bits) + delta;
++        if !next.is_finite() || next.abs() > 30_000_000. {
++            return Err("vehicle translated outside world".into());
++        }
++        *bits = next.to_bits();
++    }
++    if let Some(Tag::List(passengers)) = tag.get_mut("Passengers") {
++        for passenger in passengers {
++            translate_vehicle(passenger, delta)?;
++        }
++    }
++    Ok(())
++}
+ 
+ /// The dimension a record names, the way `playerdata::apply` places it.
+ fn playerdata_dimension(level: &Level) -> String {
+diff --git a/crates/horizon-items/src/cooldowns.rs b/crates/horizon-items/src/cooldowns.rs
+--- a/crates/horizon-items/src/cooldowns.rs
++++ b/crates/horizon-items/src/cooldowns.rs
+@@ -78,6 +78,34 @@
+     entries: HashMap<Arc<str>, (i32, i32)>,
+ }
+ impl Cooldowns {
++    /// Group, elapsed ticks and total ticks at a coherent player handover.
++    pub fn handover(&self) -> Vec<(String, i32, i32)> {
++        let mut entries: Vec<_> = self
++            .entries
++            .iter()
++            .map(|(group, (start, end))| {
++                (
++                    group.to_string(),
++                    self.tick_count.wrapping_sub(*start),
++                    end.wrapping_sub(*start),
++                )
++            })
++            .collect();
++        entries.sort_by(|a, b| a.0.cmp(&b.0));
++        entries
++    }
++    /// Restore the same progress on this manager's local tick counter.
++    pub fn from_handover(entries: &[(String, i32, i32)]) -> Option<Self> {
++        let mut out = Self::default();
++        for (group, elapsed, total) in entries {
++            if *elapsed < 0 || *total <= *elapsed || out.entries.contains_key(group.as_str()) {
++                return None;
++            }
++            out.entries
++                .insert(Arc::from(group.as_str()), (-*elapsed, total - elapsed));
++        }
++        Some(out)
++    }
+     /// `getCooldownPercent`: what is left of the entry, from 1 to 0.
+     pub fn percent(&self, group: &str, partial_tick: f32) -> f32 {
+         let Some((start, end)) = self.entries.get(group) else {
+@@ -123,6 +151,23 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    #[test]
++    fn handover_keeps_elapsed_progress_and_expiry() {
++        let mut source = Cooldowns::default();
++        source.add(Arc::from("minecraft:ender_pearl"), 20);
++        for _ in 0..7 {
++            source.tick();
++        }
++        let mut target = Cooldowns::from_handover(&source.handover()).unwrap();
++        assert_eq!(
++            target.percent("minecraft:ender_pearl", 0.),
++            source.percent("minecraft:ender_pearl", 0.)
++        );
++        for _ in 0..12 {
++            assert!(target.tick().is_empty());
++        }
++        assert_eq!(target.tick(), vec![Arc::from("minecraft:ender_pearl")]);
++    }
+     use serde_json::json;
+ 
+     fn stack(item: &str) -> ItemStack {

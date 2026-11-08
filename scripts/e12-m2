@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""E12's isolated runner, using E10 fixtures without changing E13's runner."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+import shutil
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E12'
+
+
+def quiet_gate():
+    request=ROOT/'.local/quiet-request'
+    ack=ROOT/'.local/quiet-ack-E12'
+    began=time.monotonic()
+    if request.exists():
+        ack.write_text('E12 has no engines, proxies or build running.\n')
+        print('E12 quiet acknowledgement; waiting for request removal or 40 minutes',flush=True)
+        try:
+            while request.exists() and time.monotonic()-began<40*60:
+                time.sleep(1)
+        finally:
+            ack.unlink(missing_ok=True)
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['proof', 'walking', 'items', 'kills', 'breaches', 'build', 'terrain', 'vehicles','teleport','borders','live','radius','queue','admission','start'])
+    parser.add_argument('--baseline', action='store_true')
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--crossings', type=int, default=1000)
+    parser.add_argument('--seconds', type=float, default=70)
+    parser.add_argument('--kills', type=int, default=200)
+    parser.add_argument('--normal', action='store_true')
+    parser.add_argument('--edge',type=int)
+    parser.add_argument('--binaries',type=Path)
+    parser.add_argument('--max-players',type=int,default=128)
+    parser.add_argument('--max-expected',type=int)
+    parser.add_argument('--clients',type=int,default=1)
+    parser.add_argument('--terrain-off', action='store_true')
+    parser.add_argument('--initial-off', action='store_true')
+    parser.add_argument('--trace-terrain',action='store_true')
+    parser.add_argument('--only-meridian',action='store_true')
+    parser.add_argument('--kind',choices=['boat','minecart','horse'],default='boat')
+    args = parser.parse_args()
+    quiet_gate()
+    cluster = load('e12_cluster', ROOT / 'scripts/goliath-cluster')
+    if args.terrain_off:
+        os.environ['E12_TERRAIN_OFF']='1'
+    if args.initial_off:
+        os.environ['E12_INITIAL_INPUT_OFF']='1'
+    if args.trace_terrain:
+        os.environ['E12_TERRAIN_TRACE']='1'
+    cluster.BINS = args.binaries.resolve() if args.binaries else ROOT / ('.local/bin/goliath-e10' if args.baseline else '.local/bin/goliath-e12')
+    cluster.DATA = DATA
+    def stop_child(child):
+        # These E12 children own no subprocesses. Do not signal a recycled process-group id.
+        if child.process.poll() is None:
+            child.process.terminate()
+            try:
+                child.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.process.kill()
+                child.process.wait()
+        child.reader.join(5)
+        child.log.close()
+    cluster.e2.Child.stop=stop_child
+    original = cluster.Tile.ask
+    def ask(tile, command):
+        result = original(tile, command)
+        if command.startswith('tile-cut '):
+            result['load'] = os.getloadavg()
+        return result
+    cluster.Tile.ask = ask
+    args.timeout = 30
+    args.materialize = False
+    DATA.mkdir(parents=True, exist_ok=True)
+    outcome = {'action': args.action, 'baseline': args.baseline, 'terrain_off':args.terrain_off,
+        'initial_off':args.initial_off,'load_start': os.getloadavg(), 'status': 'running'}
+    started = time.monotonic()
+    try:
+        if args.action == 'build':
+            settings = dict(os.environ, CARGO_INCREMENTAL='0', CARGO_PROFILE_FAST_INHERITS='release',
+                CARGO_PROFILE_FAST_LTO='false', CARGO_PROFILE_FAST_CODEGEN_UNITS='16')
+            settings.pop('CI', None)
+            cluster.BINS.mkdir(parents=True, exist_ok=True)
+            results = []
+            commands = [
+                ('horizon', ['cargo','build','--locked','--profile','fast','--no-default-features','-p','horizon-client','--bin','horizon-client'], ['horizon-client']),
+                ('meridian', ['cargo','build','--locked','--profile','fast','-p','meridian-proxy','--bin','meridian','-p','meridian-testkit','--bin','e4-client','-p','meridian-sidecar','--bin','meridian-sidecar'], ['meridian','e4-client','meridian-sidecar']),
+            ]
+            for project, command, names in commands:
+                if project=='meridian' and (ROOT/'.local/bin/goliath-e12/MERIDIAN-HANDOVER').exists():
+                    if args.only_meridian: raise RuntimeError('E18 owns Meridian builds after handover')
+                    continue
+                if args.only_meridian and project!='meridian':
+                    continue
+                quiet_gate()
+                began = time.monotonic()
+                load_before = os.getloadavg()
+                subprocess.run(command, cwd=ROOT/'.local/src'/project, env=settings, check=True)
+                for name in names:
+                    cluster.install(ROOT/'.local/src'/project/'target/fast'/name,name)
+                results.append(dict(project=project,command=command,seconds=time.monotonic()-began,load_start=load_before,load_end=os.getloadavg(),exit=0))
+            # The store owner supplies retained binaries; E12 never builds the root workspace.
+            leased=((ROOT/'.local/src/horizon/crates/horizon-client/src/game/dedicated/cluster/lease.rs').exists() and not args.only_meridian) or (cluster.BINS/'LEASES').exists()
+            store_binary=ROOT/('.local/bin/goliath-store-e16-7b413bd/goliath-store' if leased else '.local/bin/goliath-e10/goliath-store')
+            shutil.copy2(store_binary, cluster.BINS/'goliath-store')
+            if leased:
+                (cluster.BINS/'LEASES').write_text('Horizon owns original-send leases. Cluster must skip legacy Claim and read cluster-authority after startup.\n')
+            cluster.save(args.name+'.json',dict(commands=results,binary_sha256={name:cluster.e8.prereq.sha256(cluster.BINS/name) for name in ['horizon-client','meridian','e4-client','meridian-sidecar','goliath-store']}))
+            ready=['E12 development binaries. Packet validation of this build is pending. Wait for a live-state PASS line before rerunning the E14 sprint matrix.']
+            ready.append('OWNED BORDER FIX PRESENT in source: Hub::next_batch accepts missing foreign light neighbours at the closed ownership boundary. Exact earlier tested hashes and all 16 passing wall probes are in docs/experiments/data/E12/owned-borders-live-build.json. Independent real-client acceptance belongs to E14.')
+            ready.extend(f'.local/bin/goliath-e12/{name} sha256={cluster.e8.prereq.sha256(cluster.BINS/name)}' for name in ['horizon-client','meridian','meridian-sidecar','e4-client','goliath-store'])
+            ready.extend(['Horizon: fc2868b2b + e2-horizon-input-trace + horizon-01-tile-cut + horizon-02-tile-ownership + horizon-03-cluster + horizon-05-m2.',
+                'Meridian: 902dcf1 + e2-meridian-client + meridian-01-wall-trigger + meridian-02-fast-crossing + meridian-03-cluster + meridian-04-m2.',
+                'Start: python3 -B scripts/e12-m2 start --name e14-composition --edge 512',
+                'The adapter redirects goliath-cluster BINS to goliath-e12. Do not use --build or --fresh in the shared E10 runner.',
+                'For an existing imported E14 runner: set its BINS to ROOT / ".local/bin/goliath-e12" before constructing Cluster.',
+                'Keep E12_TERRAIN_OFF unset. The cluster runner sets GOLIATH_CLUSTER and GOLIATH_CLOCK.',
+                'A lost terrain reader closes the session. Real-client distant-teleport acceptance is pending.'])
+            if leased:
+                ready.extend(['LEASED BUILD: Horizon adds horizon-06-leases.patch and uses E16 store 6c54dbeb. Keep the LEASES marker with any binary snapshot, or construct Cluster(..., leased=True). The shared runner skips legacy Claim and reads the actual fence from cluster-authority.',
+                    'The previously validated unleased sprint build is retained under .local/bin/goliath-e12/sprint-1c09787b/ for independent E14 testing. Use that directory as BINS and leased=False.'])
+            (cluster.BINS/'READY').write_text('\n'.join(ready)+'\n')
+        elif args.action=='start':
+            sys.argv=['goliath-cluster','start','--edge',str(args.edge or 2048),'--name',args.name,'--max-players',str(args.max_players)]
+            if args.max_expected is not None: sys.argv.extend(['--max-expected',str(args.max_expected)])
+            cluster.main()
+        elif args.action in ('kills', 'breaches'):
+            from types import SimpleNamespace
+            if args.action == 'kills':
+                module = load('e12_kills', ROOT / 'scripts/e6-cut')
+                module.e3.BINS, module.e3.DATA = cluster.BINS, DATA / args.name
+                module.kills(args.kills)
+            else:
+                module = load('e12_breaches', ROOT / 'scripts/e7-tiles')
+                module.BINS, module.DATA = cluster.BINS, DATA / args.name
+                module.SOURCE = ROOT / '.local/src/horizon'
+                module.DIRECTIONS = {'east': (1, 0)}
+                if not module.breaches(SimpleNamespace(mechanic=None, settle=2)):
+                    raise RuntimeError('east breach regression failed')
+        else:
+            with tempfile.TemporaryDirectory(prefix='E12-', dir=cluster.RUNS) as temporary:
+                instance = cluster.Cluster.__new__(cluster.Cluster)
+                try:
+                    instance.__init__(Path(temporary), cluster.RESOURCES, args.edge or (512 if args.action in ('walking','teleport','borders','radius') else 64), args.normal,max_players=args.max_players,max_expected=args.max_expected,
+                        tile_env={'HORIZON_E3_TEST_PHASES':'1'} if args.action=='queue' else None)
+                    if args.action in ('terrain','vehicles','teleport','borders','live','radius','queue','admission'):
+                        fixtures=load('e12_fixtures',ROOT/'scripts/e12_fixtures.py')
+                        getattr(fixtures,args.action)(cluster,instance,args)
+                    else:
+                        getattr(cluster, args.action)(instance, args)
+                except BaseException:
+                    outcome['crash_reports']=[dict(name=str(p.relative_to(instance.root)),tail=p.read_text(errors='replace').rpartition('\n')[0].splitlines()[-35:])
+                        for p in instance.root.glob('*/crash-reports/*.txt')]
+                    raise
+                finally:
+                    instance.stop()
+        outcome['status'] = 'complete'
+    except BaseException as error:
+        outcome.update(status='failed', error=str(error))
+        if 'instance' in locals() and hasattr(instance,'root') and instance.root.exists():
+            outcome['crash_reports']=[dict(name=str(p.relative_to(instance.root)),tail=p.read_text(errors='replace').splitlines()[-35:])
+                for p in instance.root.glob('*/crash-reports/*.txt')]
+        raise
+    finally:
+        outcome.update(seconds=time.monotonic()-started, load_end=os.getloadavg())
+        cluster.save(args.name+'-outcome.json', outcome)
+
+
+if __name__ == '__main__':
+    main()

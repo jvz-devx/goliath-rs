@@ -1,0 +1,1033 @@
+diff --git a/crates/horizon-client/src/game/dedicated.rs b/crates/horizon-client/src/game/dedicated.rs
+--- a/crates/horizon-client/src/game/dedicated.rs
++++ b/crates/horizon-client/src/game/dedicated.rs
+@@ -905,6 +905,7 @@
+     }
+ 
+     fn run_dedicated_inner(&mut self) -> Result<()> {
++        cluster::initialize()?;
+         // This thread ticks the server (MinecraftServer.spin's priority).
+         horizon_threads::favour_current();
+         self.join_world_rest()?;
+@@ -1295,6 +1296,39 @@
+         // saved below.
+         while !state.lists.lock().unwrap().stop && horizon_threads::stop_requests() == 0 {
+             let tick_start = Instant::now();
++            if !horizon_core::authority::may_act() {
++                if let Some(watchdog) = &watchdog {
++                    watchdog.running.store(false, Ordering::Relaxed);
++                }
++                // Keep diagnostics and explicit shutdown available, but never run another
++                // authoritative world/player tick or resurrect this keeper after healing.
++                self.poll_server_control(&mut state);
++                while let Ok(line) = state.console.try_recv() {
++                    if line.trim() == "stop" {
++                        self.console_line(&mut state, &line);
++                    }
++                }
++                if let Some(host) = &mut self.lan {
++                    let connections: Vec<_> = host
++                        .hub
++                        .guests
++                        .iter()
++                        .filter(|g| g.left_reason.is_empty())
++                        .map(|g| g.conn)
++                        .collect();
++                    for conn in connections {
++                        host.hub.kick(
++                            conn,
++                            horizon_protocol::text::translatable(
++                                "multiplayer.disconnect.server_shutdown",
++                                &[],
++                            ),
++                        );
++                    }
++                }
++                std::thread::sleep(Duration::from_millis(20));
++                continue;
++            }
+             if let Some(watchdog) = &watchdog {
+                 watchdog.tick_due(next, self.clock.tick_duration());
+             }
+@@ -1306,12 +1340,18 @@
+                 }
+                 self.poll_server_control(&mut state);
+                 if let Err(e) = self.cluster_register_players() {
++                    if !horizon_core::authority::may_act() {
++                        return;
++                    }
+                     panic!("cluster authority failed: {e}");
+                 }
+             }));
+             if let Err(payload) = prelude {
+                 crashed = Some(panic_message(payload.as_ref()));
+                 break;
++            }
++            if !horizon_core::authority::may_act() {
++                continue;
+             }
+             let players = self.lan.as_ref().map_or(0, |h| h.hub.guests.len());
+             // Vanilla reads pauseWhenEmptySeconds on every tick, so management changes take effect
+@@ -2374,6 +2414,7 @@
+     /// panic took with it (`self.lan.take()` was in progress) saves no players at all. The
+     /// levels, the scoreboard and the other state are saved as in a normal stop.
+     fn stop_after_crash(&mut self, message: &str) -> Result<()> {
++        cluster::require()?;
+         log("ERROR", &format!("The server thread panicked: {message}"));
+         let acting = self.lan_acting;
+         let hub_lost = self.lan.is_none();
+@@ -2403,6 +2444,7 @@
+     }
+ 
+     fn stop_dedicated(&mut self) -> Result<()> {
++        cluster::require()?;
+         // The close request starts before player and world saves.
+         self.native_lifecycle.begin_close();
+         // MinecraftServer.stopServer's start: everyone is still here.
+diff --git a/crates/horizon-client/src/game/dedicated/cluster.rs b/crates/horizon-client/src/game/dedicated/cluster.rs
+--- a/crates/horizon-client/src/game/dedicated/cluster.rs
++++ b/crates/horizon-client/src/game/dedicated/cluster.rs
+@@ -1,11 +1,11 @@
+ //! Store authority checks and generation-aware player recovery for a cluster tile.
+-use goliath_store::{
+-    Blob, Client, Epoch, Fence, Generation, Operation, PlayerKey, ProcessId, Response, TileId,
+-};
++use goliath_store::{Blob, Client, Fence, Generation, Operation, PlayerKey, Response};
+ use horizon_client::{Result, save};
+ use horizon_world::nbt::{self, Limits, Tag};
+ use serde_json::{Value, json};
+ use std::{path::Path, time::Duration};
++mod lease;
++pub(super) use lease::{authority_status, initialize, require};
+ 
+ pub(super) const GENERATION: &str = "goliath:generation";
+ 
+@@ -13,16 +13,10 @@
+     let Ok(address) = std::env::var("GOLIATH_STORE") else {
+         return Ok(None);
+     };
+-    let tile = std::env::var("GOLIATH_TILE_ID")?.parse()?;
+-    let token = std::env::var("HORIZON_E3_FENCE")?;
+-    let (process, epoch) = token.split_once(':').ok_or("invalid store fence")?;
++    let fence = lease::fence()?;
+     Ok(Some((
+         Client::new(address.parse()?, Duration::from_secs(3), 3)?,
+-        Fence {
+-            tile: TileId(tile),
+-            process: ProcessId(process.parse()?),
+-            epoch: Epoch(epoch.parse()?),
+-        },
++        fence,
+     )))
+ }
+ 
+@@ -45,12 +39,19 @@
+ }
+ 
+ fn current(client: &Client, fence: Fence) -> Result<()> {
+-    match client.execute(Operation::Directory)? {
++    require()?;
++    if !matches!(client.execute(Operation::CheckLease(fence))?, Response::Ok) {
++        return Err("stale or expired cluster lease".into());
++    }
++    require()?;
++    let result: Result<()> = match client.execute(Operation::Directory)? {
+         Response::Directory(entries) if entries.iter().any(|e| e.active && e.fence == fence) => {
+             Ok(())
+         }
+         _ => Err("stale cluster tile fence".into()),
+-    }
++    };
++    result?;
++    require()
+ }
+ 
+ /// Validate the exact committed activation body, not just a caller-supplied generation.
+@@ -73,6 +74,7 @@
+     if record.owner != fence.tile {
+         return Err("activation belongs to another tile".into());
+     }
++    require()?;
+     Ok(Some(record.generation.0))
+ }
+ 
+@@ -91,6 +93,7 @@
+         }
+         after = keys.last().copied();
+         for key in keys {
++            require()?;
+             let Response::Player(Some(entry)) = client.execute(Operation::ReadUuid(key))? else {
+                 return Err("player missing during recovery".into());
+             };
+@@ -199,6 +202,8 @@
+         let Some((client, fence)) = connection()? else {
+             return Ok(());
+         };
++        // Includes returning saved generations. A saved generation never grants authority.
++        require()?;
+         let uuids: Vec<_> = self
+             .lan
+             .as_ref()
+diff --git a/crates/horizon-client/src/game/dedicated/cluster/lease.rs b/crates/horizon-client/src/game/dedicated/cluster/lease.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client/src/game/dedicated/cluster/lease.rs
+@@ -0,0 +1,341 @@
++//! Horizon-owned lease claims, renewal scheduling and suspend-safe local action gates.
++use goliath_store::{
++    Client, Command, Fence, LeaseKeeper, Operation, Response, StoreFault, TileId, request_id,
++};
++use horizon_client::Result;
++use serde_json::{Value, json};
++use std::{
++    sync::{Arc, Mutex, OnceLock},
++    time::{Duration, Instant},
++};
++
++struct Clock {
++    before: Instant,
++    after: Instant,
++    continuous: Duration,
++}
++impl Clock {
++    fn new() -> Option<Self> {
++        let before = Instant::now();
++        let continuous = continuous()?;
++        let after = Instant::now();
++        Some(Self {
++            before,
++            after,
++            continuous,
++        })
++    }
++    fn advance_with(&mut self, next: Self) -> Option<Instant> {
++        // Bracket the continuous-clock read. A scheduling pause between reads widens
++        // the interval, rather than being mistaken for a suspended uptime clock.
++        let maximum = next.after.checked_duration_since(self.before)?;
++        let minimum = next
++            .before
++            .checked_duration_since(self.after)
++            .unwrap_or_default();
++        let elapsed = next.continuous.checked_sub(self.continuous)?;
++        let slack = maximum / 500 + Duration::from_micros(1);
++        if elapsed > maximum.checked_add(slack)? || elapsed.checked_add(slack)? < minimum {
++            return None;
++        }
++        let after = next.after;
++        *self = next;
++        Some(after)
++    }
++    fn advancing(&mut self) -> Option<Instant> {
++        self.advance_with(Self::new()?)
++    }
++}
++#[cfg(target_os = "macos")]
++fn continuous() -> Option<Duration> {
++    // macOS clock_gettime(3): CLOCK_MONOTONIC advances during sleep, unlike uptime.
++    let time = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
++    Some(Duration::new(
++        u64::try_from(time.tv_sec).ok()?,
++        u32::try_from(time.tv_nsec).ok()?,
++    ))
++}
++#[cfg(target_os = "linux")]
++fn continuous() -> Option<Duration> {
++    let time = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
++    Some(Duration::new(
++        u64::try_from(time.tv_sec).ok()?,
++        u32::try_from(time.tv_nsec).ok()?,
++    ))
++}
++#[cfg(not(any(target_os = "macos", target_os = "linux")))]
++fn continuous() -> Option<Duration> {
++    None
++}
++struct State {
++    keeper: LeaseKeeper,
++    clock: Clock,
++}
++struct Authority {
++    state: Mutex<State>,
++    fence: Fence,
++}
++static AUTHORITY: OnceLock<Arc<Authority>> = OnceLock::new();
++
++impl Authority {
++    fn check(&self, budget: Duration) -> bool {
++        let Ok(mut state) = self.state.lock() else {
++            return false;
++        };
++        let Some(now) = state.clock.advancing() else {
++            state.keeper.stop();
++            return false;
++        };
++        state.keeper.may_act(now)
++            && state
++                .keeper
++                .deadline()
++                .and_then(|deadline| deadline.checked_duration_since(now))
++                .is_some_and(|left| left > budget)
++    }
++}
++pub(super) fn fence() -> Result<Fence> {
++    Ok(AUTHORITY
++        .get()
++        .ok_or("cluster lease not initialized")?
++        .fence)
++}
++pub(in crate::game::dedicated) fn require() -> Result<()> {
++    if std::env::var_os("GOLIATH_STORE").is_some() && !horizon_core::authority::may_act() {
++        return Err("cluster lease expired or local clock stopped; queued effects refused".into());
++    }
++    Ok(())
++}
++pub(in crate::game::dedicated) fn authority_status() -> Value {
++    match AUTHORITY.get() {
++        Some(authority) => {
++            json!({"ok":true,"leased":true,"authorized":authority.check(Duration::ZERO),"tile":authority.fence.tile.0,"process":authority.fence.process.0,"epoch":authority.fence.epoch.0,
++            "token":format!("{}:{}",authority.fence.process.0,authority.fence.epoch.0)})
++        }
++        None => json!({"ok":true,"leased":false}),
++    }
++}
++pub(in crate::game::dedicated) fn initialize() -> Result<()> {
++    let Ok(address) = std::env::var("GOLIATH_STORE") else {
++        return Ok(());
++    };
++    let tile = TileId(std::env::var("GOLIATH_TILE_ID")?.parse()?);
++    let lease_ms = std::env::var("GOLIATH_LEASE_MS")
++        .unwrap_or_else(|_| "1000".into())
++        .parse::<u64>()?;
++    let margin = Duration::from_millis(
++        std::env::var("GOLIATH_LEASE_MARGIN_MS")
++            .unwrap_or_else(|_| "100".into())
++            .parse()?,
++    );
++    let address = address.parse()?;
++    if LeaseKeeper::new(tile, lease_ms, margin).is_none()
++        || Duration::from_millis(lease_ms)
++            .checked_sub(margin)
++            .is_none_or(|window| window <= Duration::from_millis(200))
++        || margin.as_millis() * 1001 < u128::from(lease_ms) * 2
++        || Clock::new().is_none()
++    {
++        return Err(
++            "lease configuration cannot provide the clock margin and bounded IO window".into(),
++        );
++    }
++    let client = Client::new(address, Duration::from_millis(200), 1)?;
++    if let Response::Directory(entries) = client.execute(Operation::Directory)?
++        && let Some(old) = entries
++            .iter()
++            .find(|entry| entry.fence.tile == tile && entry.active)
++    {
++        if std::env::var("GOLIATH_LEASE_TAKEOVER").as_deref() != Ok("1") {
++            return Err("active tile holder exists; explicit leased takeover required".into());
++        }
++        match client.execute(Operation::CheckLease(old.fence))? {
++            Response::Fault(StoreFault::LeaseRequired) => {
++                return Err("stop and release every legacy holder before enabling leases".into());
++            }
++            Response::Ok => {
++                let _ = client.execute(Operation::BeginTakeover(old.fence))?;
++            }
++            // Expiry or a newer fence between Directory and CheckLease is not a legacy
++            // upgrade. The fresh claim still has to pass the store's retained wait.
++            _ => {}
++        }
++    }
++    let until = Instant::now() + Duration::from_secs(10);
++    let (keeper, clock) = loop {
++        let mut clock =
++            Clock::new().ok_or("cluster lease needs a suspend-aware monotonic clock")?;
++        match client.claim_lease(tile, lease_ms, margin) {
++            Ok(mut keeper) => {
++                if clock.advancing().is_none() {
++                    keeper.stop();
++                    return Err("clock anomaly during lease claim".into());
++                }
++                break (keeper, clock);
++            }
++            Err(error) => {
++                if Instant::now() >= until {
++                    return Err(error.into());
++                }
++                std::thread::sleep(Duration::from_millis(20));
++            }
++        }
++    };
++    let fence = keeper.fence().ok_or("lease claim returned no fence")?;
++    let authority = Arc::new(Authority {
++        state: Mutex::new(State { keeper, clock }),
++        fence,
++    });
++    AUTHORITY
++        .set(Arc::clone(&authority))
++        .map_err(|_| "cluster lease already initialized")?;
++    let gate = Arc::clone(&authority);
++    horizon_core::authority::install(Arc::new(move |budget| gate.check(budget)))?;
++    // Horizon owns this thread, not the store/model libraries. No keeper lock spans IO.
++    std::thread::Builder::new()
++        .name("goliath-lease".into())
++        .spawn(move || {
++            let period = Duration::from_millis((lease_ms / 4).max(1));
++            loop {
++                std::thread::sleep(period);
++                let ticket = {
++                    let Ok(mut state) = authority.state.lock() else {
++                        break;
++                    };
++                    let Some(now) = state.clock.advancing() else {
++                        state.keeper.stop();
++                        break;
++                    };
++                    let Some(ticket) = state.keeper.request(now) else {
++                        break;
++                    };
++                    ticket
++                };
++                let command = Command {
++                    id: request_id(),
++                    operation: Operation::RenewLease {
++                        fence,
++                        counter: ticket.counter(),
++                    },
++                };
++                let result = client.call(&command);
++                let Ok(mut state) = authority.state.lock() else {
++                    break;
++                };
++                let Some(now) = state.clock.advancing() else {
++                    state.keeper.stop();
++                    break;
++                };
++                match result {
++                    Ok(Response::Leased(grant)) => {
++                        let previous_deadline = state.keeper.deadline();
++                        if !state.keeper.observe(ticket, grant, now) {
++                            state.keeper.stop();
++                            break;
++                        }
++                        // No action reader can see the new grant before this post-check.
++                        let after = state.clock.advancing();
++                        if after.is_none()
++                            || previous_deadline
++                                .is_some_and(|deadline| after.is_some_and(|now| now >= deadline))
++                        {
++                            state.keeper.stop();
++                            break;
++                        }
++                    }
++                    Ok(_) => {
++                        state.keeper.stop();
++                        break;
++                    }
++                    Err(_) => {
++                        if !state.keeper.may_act(now) {
++                            state.keeper.stop();
++                            break;
++                        }
++                    }
++                }
++            }
++        })?;
++    super::super::tile_cut::claim_cluster_fence(&format!("{}:{}", fence.process.0, fence.epoch.0))?;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use goliath_store::{Epoch, LeaseGrant, ProcessId};
++    fn granted(sent: Instant) -> Authority {
++        let fence = Fence {
++            tile: TileId(0),
++            process: ProcessId(1),
++            epoch: Epoch(1),
++        };
++        let mut keeper = LeaseKeeper::new(fence.tile, 1000, Duration::from_millis(100)).unwrap();
++        let ticket = keeper.request(sent).unwrap();
++        assert!(keeper.observe(
++            ticket,
++            LeaseGrant {
++                fence,
++                lease_ms: 1000,
++                counter: 0
++            },
++            sent
++        ));
++        Authority {
++            fence,
++            state: Mutex::new(State {
++                keeper,
++                clock: Clock::new().unwrap(),
++            }),
++        }
++    }
++    #[test]
++    fn expired_action_gate_stays_closed() {
++        let authority = granted(Instant::now() - Duration::from_secs(1));
++        assert!(!authority.check(Duration::ZERO));
++        assert!(
++            !authority
++                .state
++                .lock()
++                .unwrap()
++                .keeper
++                .may_act(Instant::now())
++        );
++    }
++    #[test]
++    fn clock_discontinuity_latches_authority_closed() {
++        let authority = granted(Instant::now());
++        {
++            let mut state = authority.state.lock().unwrap();
++            state.clock.continuous += Duration::from_secs(30);
++        }
++        assert!(!authority.check(Duration::ZERO));
++        {
++            let mut state = authority.state.lock().unwrap();
++            state.clock = Clock::new().unwrap();
++        }
++        assert!(!authority.check(Duration::ZERO));
++    }
++    #[test]
++    fn suspend_is_detected_without_wall_clock_or_real_sleep() {
++        let now = Instant::now();
++        let mut before = Clock {
++            before: now,
++            after: now,
++            continuous: Duration::from_secs(10),
++        };
++        let after = Clock {
++            before: now + Duration::from_millis(1),
++            after: now + Duration::from_millis(1),
++            continuous: Duration::from_secs(40),
++        };
++        assert!(before.advance_with(after).is_none());
++    }
++    #[test]
++    fn critical_budget_cannot_cross_the_deadline() {
++        let authority = granted(Instant::now());
++        assert!(authority.check(Duration::from_millis(100)));
++        assert!(!authority.check(Duration::from_secs(1)));
++        assert!(authority.check(Duration::ZERO));
++    }
++}
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -46,6 +46,18 @@
+         while let Some(request) = self.control.as_ref().and_then(|c| c.try_recv()) {
+             let applied = std::time::Instant::now();
+             let queue_ms = applied.duration_since(request.queued_at).as_secs_f64() * 1000.;
++            if !horizon_core::authority::may_act()
++                && !matches!(
++                    request.line.trim(),
++                    "server-status" | "transfer-status" | "cluster-authority" | "console stop"
++                )
++                && !request.line.starts_with("server-events ")
++            {
++                let _ = request
++                    .reply
++                    .send(json!({"error":"local cluster lease expired"}).to_string());
++                continue;
++            }
+             // A `console stop` just before stops this server for the next request too.
+             self.note_stopping(state.lists.lock().unwrap().stop);
+             let reply = match request.line.trim().split_once(' ') {
+@@ -60,6 +72,9 @@
+                 }
+                 Some(("tile-fence", args)) => super::tile_cut::fence_request(args),
+                 _ if request.line.trim() == "server-status" => self.server_status(state),
++                _ if request.line.trim() == "cluster-authority" => {
++                    super::cluster::authority_status()
++                }
+                 // A proxy reading whether it may send players here (transfer.rs).
+                 _ if request.line.trim() == "transfer-status" => self.transfer_status(),
+                 Some(("server-events", since)) => {
+@@ -99,7 +114,9 @@
+             };
+             let _ = request.reply.send(reply.to_string());
+         }
+-        self.tile_warm_generation(&mut state.tile_cut);
++        if horizon_core::authority::may_act() {
++            self.tile_warm_generation(&mut state.tile_cut);
++        }
+     }
+ 
+     /// Each level's loaded chunks and entities (players and block entities apart), the level in place
+diff --git a/crates/horizon-client/src/game/dedicated/tile_cut.rs b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+--- a/crates/horizon-client/src/game/dedicated/tile_cut.rs
++++ b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+@@ -27,11 +27,23 @@
+ 
+ fn configured() -> Result<(PathBuf, String)> {
+     let root = std::env::var_os("HORIZON_E3_CUT_DIR").ok_or("tile cuts are off")?;
+-    let fence = std::env::var("HORIZON_E3_FENCE")?;
++    let fence = if std::env::var_os("GOLIATH_STORE").is_some() {
++        let (_, fence) = super::cluster::connection()?.ok_or("cluster lease missing")?;
++        format!("{}:{}", fence.process.0, fence.epoch.0)
++    } else {
++        std::env::var("HORIZON_E3_FENCE")?
++    };
+     if fence.is_empty() || fence == "-" || fence.chars().any(char::is_whitespace) {
+         return Err("the process needs a nonempty opaque fence".into());
+     }
+     Ok((PathBuf::from(root), fence))
++}
++pub(super) fn claim_cluster_fence(token: &str) -> Result<()> {
++    let root = PathBuf::from(
++        std::env::var_os("HORIZON_E3_CUT_DIR").ok_or("cluster needs a cut directory")?,
++    );
++    let expected = std::fs::read_to_string(root.join("FENCE")).unwrap_or_else(|_| "-".into());
++    store::claim(&root, &expected, token)
+ }
+ pub(super) fn fence_request(args: &str) -> Value {
+     let result = (|| -> Result<()> {
+@@ -458,6 +470,16 @@
+         })();
+         match result {
+             Ok(receipts) => {
++                if !horizon_core::authority::may_act() {
++                    failure = Some("lease expired before cut acknowledgement".into());
++                    for work in batch {
++                        let _ = work.reply.send(
++                            json!({"error":"lease expired before cut acknowledgement"}).to_string(),
++                        );
++                        let _ = done.send(Err("lease expired".into()));
++                    }
++                    continue;
++                }
+                 let group = receipts.len();
+                 let mut last = None;
+                 for (work, (head, bytes, io_ms)) in batch.into_iter().zip(receipts) {
+@@ -630,6 +652,7 @@
+         let start = Instant::now();
+         let mut capture_started = false;
+         let result = (|| -> Result<_> {
++            super::cluster::require()?;
+             let (root, token) = configured()?;
+             if !horizon_client::mod_api::mods().is_empty() {
+                 return Err("E6 has no snapshot contract for native mod callbacks".into());
+diff --git a/crates/horizon-client/src/game/dedicated/tile_cut/store.rs b/crates/horizon-client/src/game/dedicated/tile_cut/store.rs
+--- a/crates/horizon-client/src/game/dedicated/tile_cut/store.rs
++++ b/crates/horizon-client/src/game/dedicated/tile_cut/store.rs
+@@ -98,14 +98,23 @@
+     Ok(file)
+ }
+ fn sync(file: &File) -> Result<()> {
++    authority(std::time::Duration::from_millis(100))?;
+     file.sync_all()?;
+     #[cfg(target_os = "macos")]
+     rustix::fs::fcntl_fullfsync(file)?;
++    authority(std::time::Duration::ZERO)?;
+     Ok(())
+ }
+ fn fence(root: &Path, token: &str) -> Result<()> {
++    authority(std::time::Duration::ZERO)?;
+     if fs::read_to_string(root.join("FENCE"))? != token {
+         return Err("stale tile fence".into());
++    }
++    Ok(())
++}
++fn authority(budget: std::time::Duration) -> Result<()> {
++    if !horizon_core::authority::can_finish(budget) {
++        return Err("local cluster lease cannot authorize this cut side effect".into());
+     }
+     Ok(())
+ }
+@@ -370,24 +379,29 @@
+         let start = Instant::now();
+         phase(root, "pack-write")?;
+         for (bytes, _, _) in &encoded {
++            authority(std::time::Duration::from_millis(100))?;
+             let mid = bytes.len() / 2;
+             self.file.write_all(&bytes[..mid])?;
+             phase(root, "mid-append")?;
++            authority(std::time::Duration::from_millis(100))?;
+             self.file.write_all(&bytes[mid..])?;
+         }
+         phase(root, "head-write")?;
+         phase(root, "head-rename")?;
+         sync(&self.file)?;
+         phase(root, "head-renamed")?;
++        authority(std::time::Duration::ZERO)?;
+         let elapsed = start.elapsed().as_secs_f64() * 1000.;
+         let mut out = Vec::new();
+         for (bytes, head, changes) in encoded {
++            authority(std::time::Duration::ZERO)?;
+             self.len += bytes.len() as u64;
+             self.sequence = head.sequence;
+             merge(&mut self.image, changes);
+             out.push((head, bytes.len() as u64, elapsed));
+         }
+         phase(root, "installed")?;
++        authority(std::time::Duration::ZERO)?;
+         Ok(out)
+     }
+     /// Called after replies. A crash before log truncation replays the new BASE and skips
+@@ -425,14 +439,20 @@
+         }
+         let mut file = File::create(root.join("BASE.new"))?;
+         phase(root, "base-write")?;
++        authority(std::time::Duration::from_millis(100))?;
+         file.write_all(&bytes)?;
+         phase(root, "base-sync")?;
++        authority(std::time::Duration::from_millis(100))?;
+         file.sync_all()?;
++        authority(std::time::Duration::ZERO)?;
+         phase(root, "base-rename")?;
++        authority(std::time::Duration::from_millis(100))?;
+         fs::rename(root.join("BASE.new"), root.join("BASE"))?;
++        authority(std::time::Duration::ZERO)?;
+         File::open(root)?.sync_all()?;
+         sync(&file)?;
+         phase(root, "log-rotate")?;
++        authority(std::time::Duration::from_millis(100))?;
+         let next = OpenOptions::new()
+             .create(true)
+             .truncate(true)
+@@ -440,7 +460,9 @@
+             .write(true)
+             .open(root.join("LOG.new"))?;
+         next.sync_all()?;
++        authority(std::time::Duration::from_millis(100))?;
+         fs::rename(root.join("LOG.new"), root.join("LOG"))?;
++        authority(std::time::Duration::ZERO)?;
+         File::open(root)?.sync_all()?;
+         sync(&next)?;
+         self.file = OpenOptions::new()
+@@ -478,11 +500,13 @@
+     }
+     fs::create_dir_all(world)?;
+     for (name, _) in capture(world)? {
++        authority(std::time::Duration::from_millis(100))?;
+         if !image.keys().any(|(p, _, _)| p == &name) {
+             fs::remove_file(world.join(name))?;
+         }
+     }
+     for ((name, chunk, overlay), mut bytes) in image {
++        authority(std::time::Duration::from_millis(100))?;
+         let path = world.join(relative(&name)?);
+         fs::create_dir_all(path.parent().ok_or("cut file lacks parent")?)?;
+         if let Some([x, z]) = chunk {
+@@ -535,6 +559,7 @@
+             fs::write(path, bytes)?;
+         }
+     }
++    authority(std::time::Duration::ZERO)?;
+     Ok(Some(head))
+ }
+ 
+diff --git a/crates/horizon-client/src/game/dedicated/transfer.rs b/crates/horizon-client/src/game/dedicated/transfer.rs
+--- a/crates/horizon-client/src/game/dedicated/transfer.rs
++++ b/crates/horizon-client/src/game/dedicated/transfer.rs
+@@ -21,6 +21,9 @@
+     /// `{"error": "..."}`. Each request writes one line to the log with what became of it
+     /// (`arrivals::request_log`): a hand-over that failed leaves a trace.
+     pub(super) fn player_request(&mut self, verb: &str, args: &str) -> Value {
++        if let Err(error) = super::cluster::require() {
++            return json!({"error":error.to_string()});
++        }
+         // The name is read before the request runs: a release or a drop takes the player away.
+         let name = args
+             .split_whitespace()
+@@ -419,6 +422,7 @@
+     /// the player is on disk here. When the file cannot be written the player stays held and
+     /// imported: the proxy can confirm again or drop it.
+     fn place_arrival(&mut self, host: &mut LanHost, uuid: u128, id: u128) -> Result<bool, String> {
++        super::cluster::require().map_err(|e| e.to_string())?;
+         let i = host.hub.imported_arrival(uuid, id)?;
+         let mut g = host.hub.guests.remove(i);
+         self.guest_attachments_into(&mut g);
+@@ -435,6 +439,7 @@
+         let name = g.name.clone();
+         host.hub.guests.insert(i, g);
+         written?;
++        super::cluster::require().map_err(|e| e.to_string())?;
+         let announced = host.hub.confirm_arrival(uuid, id)?;
+         self.restore_guest_vehicles(host);
+         self.arrival_placed(uuid, &name, announced);
+@@ -549,7 +554,7 @@
+             stats,
+         };
+         let live = if cluster {
+-            match live::capture(&host, i) {
++            match live::capture(host, i) {
+                 Ok(state) => Some(state),
+                 Err(error) => return json!({"error":error.to_string()}),
+             }
+diff --git a/crates/horizon-client/src/game/dedicated/transfer/live.rs b/crates/horizon-client/src/game/dedicated/transfer/live.rs
+--- a/crates/horizon-client/src/game/dedicated/transfer/live.rs
++++ b/crates/horizon-client/src/game/dedicated/transfer/live.rs
+@@ -73,6 +73,14 @@
+     let C::PlayerAbilities(abilities) = decode(&state.abilities)? else {
+         return Err("live abilities packet has wrong type".into());
+     };
++    if attrs.values.iter().any(|attribute| {
++        !attribute.base.is_finite()
++            || attribute.modifiers.iter().any(|modifier| {
++                !modifier.amount.is_finite() || !(0..=2).contains(&modifier.operation)
++            })
++    }) {
++        return Err("invalid live attribute snapshot".into());
++    }
+     let C::SetEntityData(mut metadata) = decode(&state.metadata)? else {
+         return Err("live metadata packet has wrong type".into());
+     };
+diff --git a/crates/horizon-client/src/game/lan.rs b/crates/horizon-client/src/game/lan.rs
+--- a/crates/horizon-client/src/game/lan.rs
++++ b/crates/horizon-client/src/game/lan.rs
+@@ -2066,6 +2066,9 @@
+         let mut previous = None;
+         let mut timings = EventTimings::new(horizon_client::spans::NOTE_MS);
+         for event in events {
++            if !horizon_core::authority::may_act() {
++                break;
++            }
+             if timed {
+                 note_event(&host, previous.take(), &mut timings);
+                 let detail = self.event_detail(&host, &event);
+diff --git a/crates/horizon-client/src/game/lan_actions.rs b/crates/horizon-client/src/game/lan_actions.rs
+--- a/crates/horizon-client/src/game/lan_actions.rs
++++ b/crates/horizon-client/src/game/lan_actions.rs
+@@ -2048,6 +2048,9 @@
+ 
+     /// A packet from a guest that the hub does not handle itself.
+     pub(super) fn lan_guest_packet(&mut self, host: &mut LanHost, conn: u32, packet: S) {
++        if !horizon_core::authority::may_act() {
++            return;
++        }
+         let Some(gi) = host.hub.guests.iter().position(|g| g.conn == conn) else {
+             return;
+         };
+diff --git a/crates/horizon-client/src/lan/conn.rs b/crates/horizon-client/src/lan/conn.rs
+--- a/crates/horizon-client/src/lan/conn.rs
++++ b/crates/horizon-client/src/lan/conn.rs
+@@ -913,6 +913,9 @@
+     shared: &Arc<Shared>,
+     counted: Option<super::Counted>,
+ ) -> Result<(), String> {
++    if !horizon_core::authority::may_act() {
++        return Err("local tile lease expired before login".into());
++    }
+     let e = |e: horizon_protocol::Error| e.to_string();
+     let (id, payload) = c.recv().map_err(e)?;
+     let hello = match login::Serverbound::decode(id, &payload).map_err(e)? {
+@@ -1045,6 +1048,9 @@
+     let result = login_and_configure(&mut c, shared, uuid, &name, properties);
+     match result {
+         Ok(Some(parts)) => {
++            if !horizon_core::authority::may_act() {
++                return Err("local tile lease expired during login configuration".into());
++            }
+             play(c, shared, parts, address, counted, expected.is_some());
+             Ok(())
+         }
+@@ -1120,6 +1126,9 @@
+     name: &str,
+     properties: Vec<login::Property>,
+ ) -> Result<Option<Parts>, String> {
++    if !horizon_core::authority::may_act() {
++        return Err("local tile lease expired before login placement".into());
++    }
+     let e = |e: horizon_protocol::Error| e.to_string();
+     // ServerLoginPacketListenerImpl: memory connections are not compressed.
+     let threshold = shared.config.compression_threshold;
+diff --git a/crates/horizon-client/src/lan/hub.rs b/crates/horizon-client/src/lan/hub.rs
+--- a/crates/horizon-client/src/lan/hub.rs
++++ b/crates/horizon-client/src/lan/hub.rs
+@@ -1412,6 +1412,13 @@
+ 
+     /// PlayerList.placeNewPlayer for a guest whose saved state is loaded.
+     pub fn place_new_player(&mut self, conn: u32, ctx: &mut TickCtx) {
++        if !horizon_core::authority::may_act() {
++            self.kick(
++                conn,
++                translatable("multiplayer.disconnect.server_shutdown", &[]),
++            );
++            return;
++        }
+         let Some(i) = self.guests.iter().position(|g| g.conn == conn) else {
+             return;
+         };
+@@ -1644,6 +1651,13 @@
+     /// advancements). Everyone gets its player-list entry, since everyone will be sent its entity
+     /// (a client adds a player's entity only with its list entry); `announce` is the join line.
+     pub fn place_arrival(&mut self, i: usize, announce: bool) {
++        if !horizon_core::authority::may_act() {
++            self.kick(
++                self.guests[i].conn,
++                translatable("multiplayer.disconnect.server_shutdown", &[]),
++            );
++            return;
++        }
+         if !self.guests[i].held || self.guests[i].placed {
+             return;
+         }
+@@ -1723,11 +1737,17 @@
+     /// What the client did since the import was not acted on, so it is put back where the
+     /// server has it: the position to confirm again and the inventory.
+     pub fn confirm_arrival(&mut self, uuid: u128, id: u128) -> Result<bool, &'static str> {
++        if !horizon_core::authority::may_act() {
++            return Err("local tile lease expired before placement");
++        }
+         let i = self.imported_arrival(uuid, id)?;
+         let announce = self.guests[i].arrival_announce;
+         self.resend_teleport(i, None);
+         self.send_inventory(i);
+         self.place_arrival(i, announce);
++        if !self.guests[i].placed || !horizon_core::authority::may_act() {
++            return Err("local tile lease expired during placement");
++        }
+         Ok(announce)
+     }
+ 
+@@ -3940,6 +3960,15 @@
+     }
+ 
+     fn process_inbox(&mut self, i: usize, ctx: &mut TickCtx, events: &mut Vec<HostEvent>) {
++        if !horizon_core::authority::may_act() {
++            let conn = self.guests[i].conn;
++            self.guests[i].inbox.clear();
++            self.kick(
++                conn,
++                translatable("multiplayer.disconnect.server_shutdown", &[]),
++            );
++            return;
++        }
+         // ServerGamePacketListenerImpl.tickPlayer ran between the last
+         // tick's packets and these: resetPosition, and the moves it counted.
+         let g = &mut self.guests[i];
+@@ -3954,6 +3983,15 @@
+         // (the swing starts the attack strength again, #7817).
+         let mut held = false;
+         while budget > 0 {
++            if !horizon_core::authority::may_act() {
++                let conn = self.guests[i].conn;
++                self.guests[i].inbox.clear();
++                self.kick(
++                    conn,
++                    translatable("multiplayer.disconnect.server_shutdown", &[]),
++                );
++                return;
++            }
+             if held && !matches!(self.guests[i].inbox.front(), Some((S::Punch(_), _))) {
+                 break;
+             }
+diff --git a/crates/horizon-client/src/save.rs b/crates/horizon-client/src/save.rs
+--- a/crates/horizon-client/src/save.rs
++++ b/crates/horizon-client/src/save.rs
+@@ -3198,22 +3198,35 @@
+ /// `bytes` written to `path` through `<name>_new` and a rename, synced to the disk as
+ /// [`write_dat_durable`] syncs: never a half-written file in place.
+ pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
++    save_authority()?;
+     if let Some(dir) = path.parent() {
+         fs::create_dir_all(dir)?;
+     }
+     let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("data");
+     let temporary = path.with_file_name(format!("{file}_new"));
+     write_synced(&temporary, bytes)?;
++    save_authority()?;
+     fs::rename(&temporary, path)?;
+     sync_folder(path)?;
+     Ok(())
+ }
+ 
+ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
++    save_authority()?;
+     use std::io::Write;
+     let mut file = fs::File::create(path)?;
+     file.write_all(bytes)?;
+-    file.sync_all()
++    file.sync_all()?;
++    save_authority()
++}
++fn save_authority() -> std::io::Result<()> {
++    if !horizon_core::authority::can_finish(std::time::Duration::from_millis(100)) {
++        return Err(std::io::Error::new(
++            std::io::ErrorKind::PermissionDenied,
++            "local tile lease cannot authorize a save",
++        ));
++    }
++    Ok(())
+ }
+ 
+ /// The folder of `path` synced, so that a rename into it is on the disk (POSIX; Windows has
+@@ -3240,6 +3253,7 @@
+     let Some(tag) = tag else {
+         return Ok(());
+     };
++    save_authority()?;
+     if let Some(dir) = path.parent() {
+         fs::create_dir_all(dir)?;
+     }
+@@ -3263,6 +3277,7 @@
+         fs::write(&temporary, compressed)?;
+     }
+     if path.exists() {
++        save_authority()?;
+         let old = match file.strip_suffix(".dat") {
+             Some(stem) => path.with_file_name(format!("{stem}.dat_old")),
+             None => path.with_file_name(format!("{file}_old")),
+@@ -3270,6 +3285,7 @@
+         // Util.safeReplaceFile: no backup, no replacement.
+         fs::rename(path, old).map_err(|e| format!("{}: {e}", path.display()))?;
+     }
++    save_authority()?;
+     fs::rename(temporary, path)?;
+     if durable {
+         sync_folder(path)?;
+diff --git a/crates/horizon-core/src/authority.rs b/crates/horizon-core/src/authority.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-core/src/authority.rs
+@@ -0,0 +1,22 @@
++//! Caller-owned local authority checks at server side-effect boundaries, without IO here.
++use std::{
++    sync::{Arc, OnceLock},
++    time::Duration,
++};
++
++type Gate = dyn Fn(Duration) -> bool + Send + Sync;
++static GATE: OnceLock<Arc<Gate>> = OnceLock::new();
++
++/// Install before opening a clustered server to players. Standalone worlds need no gate.
++pub fn install(gate: Arc<Gate>) -> Result<(), &'static str> {
++    GATE.set(gate)
++        .map_err(|_| "server authority gate already installed")
++}
++/// No lease lock may be held across IO by the owner of this callback.
++pub fn may_act() -> bool {
++    can_finish(Duration::ZERO)
++}
++/// Reserve a bounded critical section inside the current local authorization window.
++pub fn can_finish(budget: Duration) -> bool {
++    GATE.get().is_none_or(|gate| gate(budget))
++}
+diff --git a/crates/horizon-core/src/lib.rs b/crates/horizon-core/src/lib.rs
+--- a/crates/horizon-core/src/lib.rs
++++ b/crates/horizon-core/src/lib.rs
+@@ -4,6 +4,7 @@
+ //! listed in docs/rust-parity.md; the rest of vanilla remains unimplemented.
+ #![forbid(unsafe_code)]
+ 
++pub mod authority;
+ pub mod biome;
+ pub mod carving;
+ pub mod density;
+diff --git a/crates/horizon-core/src/tile_ownership.rs b/crates/horizon-core/src/tile_ownership.rs
+--- a/crates/horizon-core/src/tile_ownership.rs
++++ b/crates/horizon-core/src/tile_ownership.rs
+@@ -88,6 +88,9 @@
+ 
+ /// Refuse before mutation. Debug builds also fail loudly at the offending writer.
+ pub fn allow_write(x: i32, z: i32) -> bool {
++    if !crate::authority::may_act() {
++        return false;
++    }
+     if owns_chunk(x, z) {
+         return true;
+     }

@@ -1,0 +1,232 @@
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -175,19 +175,30 @@
+                 .guests
+                 .iter()
+                 .map(|g| {
+-                    player_status(
++                    let mut value = player_status(
+                         &g.name,
+                         g.uuid,
+                         &g.address.ip().to_string(),
+                         g.latency.load(Ordering::Relaxed),
+                         &g.dimension,
+                         g.position,
+-                    )
++                    );
++                    value["placed"] = json!(g.placed);
++                    value["held"] = json!(g.held);
++                    value["terrain_reader"] = json!(h.hub.terrain_observers.contains(&g.uuid));
++                    value["frozen"] = json!(g.handover.is_some());
++                    value["released"] = json!(g.released);
++                    value["tracked_chunks"] = json!(g.sent_chunks.len());
++                    value["queued_chunks"] = json!(g.chunk_queue.len());
++                    value["view_distance"] = json!(g.view_distance);
++                    value["wire_bytes"] = json!(g.sender.wire_bytes());
++                    value
+                 })
+                 .collect();
+             (players, h.hub.lan.shared.max_players())
+         });
+         json!({
++            "tick":self.world.game_time,
+             "tps": state.tps(),
+             "target_tps": self.clock.rate(),
+             "mspt": {
+diff --git a/crates/horizon-client/src/game/dedicated/transfer.rs b/crates/horizon-client/src/game/dedicated/transfer.rs
+--- a/crates/horizon-client/src/game/dedicated/transfer.rs
++++ b/crates/horizon-client/src/game/dedicated/transfer.rs
+@@ -15,6 +15,15 @@
+ use serde_json::{Value, json};
+ use std::time::Instant;
+ mod live;
++#[derive(serde::Deserialize)]
++#[serde(untagged)]
++enum ObserverView {
++    Position([f64; 3]),
++    Sized {
++        position: [f64; 3],
++        radius: Option<u8>,
++    },
++}
+ 
+ impl Game<'_> {
+     /// A proxy's `player-*` request; the reply is one JSON line, `{"ok": true, ...}` or
+@@ -103,9 +112,16 @@
+                 let Some(uuid) = arrivals::parse_uuid(id) else {
+                     return json!({"error":"invalid observer UUID"});
+                 };
+-                let Ok(position) = serde_json::from_str::<[f64; 3]>(position) else {
++                let Ok(view) = serde_json::from_str::<ObserverView>(position) else {
+                     return json!({"error":"invalid observer position"});
+                 };
++                let (position, radius) = match view {
++                    ObserverView::Position(position) => (position, None),
++                    ObserverView::Sized { position, radius } => (position, radius),
++                };
++                if radius.is_some_and(|r| !(2..=32).contains(&r)) {
++                    return json!({"error":"observer radius must be 2 through 32"});
++                }
+                 if position
+                     .iter()
+                     .any(|v| !v.is_finite() || v.abs() > 30_000_000.)
+@@ -127,6 +143,15 @@
+                     // authoritative read-only view position. This is never a placed player.
+                     g.awaiting_teleport = None;
+                     g.center = None;
++                    if let Some(radius) = radius {
++                        g.view_distance = i32::from(radius);
++                        host.hub
++                            .terrain_observer_radii
++                            .insert(uuid, i32::from(radius));
++                        g.send(&C::SetChunkCacheRadius(play::Distance {
++                            distance: i32::from(radius),
++                        }));
++                    }
+                     g.held_since = host.hub.ticks;
+                     return json!({"ok":true,"held":true});
+                 }
+@@ -134,6 +159,11 @@
+                     arrivals::expect_request(&mut host.hub, &format!("{id} 10"), Instant::now());
+                 if reply["ok"] == true {
+                     host.hub.terrain_observers.insert(uuid);
++                    if let Some(radius) = radius {
++                        host.hub
++                            .terrain_observer_radii
++                            .insert(uuid, i32::from(radius));
++                    }
+                     host.hub.arrival_positions.insert(
+                         uuid,
+                         (
+diff --git a/crates/horizon-client/src/game/lan.rs b/crates/horizon-client/src/game/lan.rs
+--- a/crates/horizon-client/src/game/lan.rs
++++ b/crates/horizon-client/src/game/lan.rs
+@@ -3349,9 +3349,19 @@
+         // The held players are sent the level, so their chunks are kept as the placed ones'.
+         self.streaming.extra = host
+             .hub
+-            .loading_chunks(|g| super::game_mode::loads_chunks(rule, g.spectator()))
+-            .into_iter()
+-            .map(|chunk| (chunk, radius))
++            .guests
++            .iter()
++            .filter(|g| host.hub.watches(g) && super::game_mode::loads_chunks(rule, g.spectator()))
++            .map(|g| {
++                (
++                    g.chunk(),
++                    if host.hub.terrain_observers.contains(&g.uuid) {
++                        g.view_distance + 1
++                    } else {
++                        radius
++                    },
++                )
++            })
+             .chain(
+                 self.arrival_chunks(self.dim)
+                     .into_iter()
+diff --git a/crates/horizon-client/src/lan/hub.rs b/crates/horizon-client/src/lan/hub.rs
+--- a/crates/horizon-client/src/lan/hub.rs
++++ b/crates/horizon-client/src/lan/hub.rs
+@@ -308,6 +308,8 @@
+     pub arrival_positions: HashMap<u128, ([f64; 3], std::time::Instant)>,
+     /// Cluster-only held terrain readers. They can never be imported or placed.
+     pub terrain_observers: std::collections::HashSet<u128>,
++    /// Explicit read-only tracker radii, independent of real-player view caps.
++    pub terrain_observer_radii: HashMap<u128, i32>,
+     /// The entities players started and stopped tracking, collected by
+     /// `collect_tracking`, for the game to tell the mods.
+     pub native_tracking: Vec<TrackingBatch>,
+@@ -741,6 +743,7 @@
+             transfers: None,
+             arrival_positions: HashMap::new(),
+             terrain_observers: std::collections::HashSet::new(),
++            terrain_observer_radii: HashMap::new(),
+             native_tracking: Vec::new(),
+             attachment_snapshots: Vec::new(),
+             sync_attachments: false,
+@@ -876,6 +879,9 @@
+                 self.config.view_distance,
+                 g.view_limit,
+             );
++            if let Some(radius) = self.terrain_observer_radii.get(&g.uuid) {
++                g.view_distance = *radius;
++            }
+             g.center = None;
+         }
+     }
+@@ -891,6 +897,9 @@
+         let g = &mut self.guests[i];
+         g.view_limit = limit.map(|l| l.clamp(2, 32));
+         g.view_distance = guest_view(g.info.view_distance, server, g.view_limit);
++        if let Some(radius) = self.terrain_observer_radii.get(&g.uuid) {
++            g.view_distance = *radius;
++        }
+         g.center = None;
+         let g = &self.guests[i];
+         if g.placed {
+@@ -901,6 +910,9 @@
+     }
+     /// The radius `g` is told: the server's (`chunk_radius`), under its own limit.
+     fn told_radius(&self, g: &Guest) -> i32 {
++        if self.terrain_observers.contains(&g.uuid) {
++            return g.view_distance;
++        }
+         let radius = self.chunk_radius();
+         g.view_limit.map_or(radius, |l| l.min(radius))
+     }
+@@ -1166,6 +1178,8 @@
+             self.arrival_positions.contains_key(uuid)
+                 || self.guests.iter().any(|g| g.uuid == *uuid && g.held)
+         });
++        self.terrain_observer_radii
++            .retain(|uuid, _| self.terrain_observers.contains(uuid));
+         // Off: nothing to do (and no player can be frozen).
+         let Some(transfers) = &self.transfers else {
+             return;
+@@ -1434,7 +1448,11 @@
+             g.held = true;
+             g.held_since = self.ticks;
+             if self.terrain_observers.contains(&uuid) {
+-                g.view_distance = (g.view_distance + 1).min(33);
++                g.view_distance = self
++                    .terrain_observer_radii
++                    .get(&uuid)
++                    .copied()
++                    .unwrap_or((g.view_distance + 1).min(32));
+             }
+             if let Some((position, deadline)) = self.arrival_positions.remove(&uuid)
+                 && deadline > std::time::Instant::now()
+@@ -1449,7 +1467,7 @@
+             hardcore: self.config.hardcore,
+             levels: Self::level_keys(),
+             max_players: self.config.max_players as i32,
+-            chunk_radius: self.chunk_radius(),
++            chunk_radius: self.told_radius(g),
+             simulation_distance: self.config.simulation_distance,
+             reduced_debug_info: self.reduced_debug_info,
+             show_death_screen: !self.immediate_respawn,
+@@ -2551,6 +2569,7 @@
+     pub(super) fn remove_guest(&mut self, i: usize, reason: &str) -> Guest {
+         let mut g = self.guests.remove(i);
+         self.terrain_observers.remove(&g.uuid);
++        self.terrain_observer_radii.remove(&g.uuid);
+         // A compass target lasts while the player is on, as the world spawn
+         // is sent again when they come back.
+         if !self.guests.iter().any(|o| o.uuid == g.uuid) {
+@@ -4194,8 +4213,13 @@
+                     let old_language = g.info.language.clone();
+                     // PlayerModelPart.HAT (bit 6): the tab list shows the hat layer.
+                     let was_hat = g.info.model_customisation & 0x40 != 0;
+-                    g.view_distance =
+-                        guest_view(info.view_distance, self.config.view_distance, g.view_limit);
++                    g.view_distance = self
++                        .terrain_observer_radii
++                        .get(&g.uuid)
++                        .copied()
++                        .unwrap_or_else(|| {
++                            guest_view(info.view_distance, self.config.view_distance, g.view_limit)
++                        });
+                     g.info = info;
+                     if g.info.main_hand != old_main_hand {
+                         events.push(HostEvent::MainHandChanged(conn, g.info.main_hand == 0));

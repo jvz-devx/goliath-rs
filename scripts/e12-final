@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Publish the verified E12 Horizon and frozen Meridian handover stack for E17."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+from datetime import datetime,timezone
+
+ROOT=Path(__file__).resolve().parent.parent
+BINS=ROOT/'.local/bin/goliath-e12'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--partition',required=True,type=Path)
+    parser.add_argument('--stale-login',required=True,type=Path)
+    parser.add_argument('--campaign',required=True,type=Path)
+    args=parser.parse_args()
+    if (ROOT/'.local/quiet-request').exists():
+        raise RuntimeError('wait for quiet window before export verification')
+    partition=json.loads(args.partition.read_text())
+    stale=json.loads(args.stale_login.read_text())
+    campaign=json.loads(args.campaign.read_text())
+    if any(row['status']!='complete' for row in [partition,stale,campaign]):
+        raise RuntimeError('required fencing evidence did not pass')
+    if campaign['requested']<200 or len(campaign['trials'])!=campaign['requested'] or any(row['status']!='complete' for row in campaign['trials']):
+        raise RuntimeError('fault campaign is incomplete')
+    campaign_hashes=set()
+    for row in campaign['trials']:
+        raw=json.loads((args.campaign.parent/f'{row["evidence_name"]}-{row["seed"]}.json').read_text())
+        if raw['status']!='complete' or not raw['binaries_unchanged']:
+            raise RuntimeError('fault campaign has invalid immutable-binary evidence')
+        campaign_hashes.add(raw['binaries']['horizon-client'])
+    if len(campaign_hashes)!=1:
+        raise RuntimeError('fault campaign mixed engine builds')
+    binary=sha(BINS/'horizon-client')
+    for row in [partition,stale]:
+        if row['binaries']['horizon-client']!=binary or not row['binaries_unchanged']:
+            raise RuntimeError('fencing reproduction is not the retained final engine')
+    subprocess.run(['python3','-B',ROOT/'scripts/e12-patch'],cwd=ROOT,check=True,stdout=subprocess.PIPE)
+    proof=json.loads((ROOT/'docs/experiments/data/E12/patch.json').read_text())
+    projects={}
+    for project in proof:
+        if project['apply_check']!='passed' or project['source_equality']!='passed':
+            raise RuntimeError('source reproduction did not pass')
+        projects[project['project']]=dict(pin=project['pin'],patches=[dict(path='patches/'+name,sha256=sha(ROOT/'patches'/name)) for name in project['order']],
+            clean_checkout_apply='passed',source_reproduction='byte_equal',source_identity='docs/experiments/data/E12/meridian-handover.json' if project['project']=='meridian' else 'working Horizon source at publication')
+    files={str(path.relative_to(ROOT)):sha(path) for path in sorted((ROOT/'crates').rglob('*'))
+        if path.is_file() and (path.suffix=='.rs' or path.name=='Cargo.toml') and 'target' not in path.parts}
+    for name in ['Cargo.toml','Cargo.lock','clippy.toml']:
+        files[name]=sha(ROOT/name)
+    manifest=dict(schema_version=1,created_at=datetime.now(timezone.utc).isoformat(),projects=projects,
+        internal_crates=dict(goliath_rs_commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),identity='working_source_sha256',files=files),
+        binaries={name:dict(path=str((BINS/name).relative_to(ROOT)),sha256=sha(BINS/name)) for name in ['horizon-client','meridian','meridian-sidecar','e4-client','goliath-store']},
+        store_binary_sha256=sha(BINS/'goliath-store'),
+        launcher=dict(path='scripts/goliath-cluster',sha256=sha(ROOT/'scripts/goliath-cluster'),default_max_players=128,
+            max_expected=dict(formula='4 * max_players',default=512),expect_seconds=20,max_expect_seconds=60,max_freeze_seconds=30,max_hold_seconds=60,
+            leases=dict(lease_ms=1000,margin_ms=100,renew_every_ms=250,critical_io_reserve_ms=100),leased_marker='.local/bin/goliath-e12/LEASES'),
+        terrain_readers=dict(lazy=False,implementation='E12 eager four-per-player Meridian handover; E18 owns successor stack',observer_radius_min=2,observer_radius_max=32,
+            status_fields=['placed','held','terrain_reader','frozen','released','tracked_chunks','queued_chunks','view_distance','wire_bytes']),
+        validation=dict(partition=str(args.partition.relative_to(ROOT) if args.partition.is_absolute() else args.partition),
+            stale_login=str(args.stale_login.relative_to(ROOT) if args.stale_login.is_absolute() else args.stale_login),
+            campaign=str(args.campaign.relative_to(ROOT) if args.campaign.is_absolute() else args.campaign),fault_seeds=campaign['requested'],
+            campaign_engine_sha256=next(iter(campaign_hashes)),
+            note='Campaign engine predates observer-radius/status interface only; final engine repeated both exact fencing seeds. No unbounded physical-IO or arbitrary-pause storage-fence claim.'),
+        meridian_handover='.local/bin/goliath-e12/MERIDIAN-HANDOVER')
+    (BINS/'FINAL.json').write_text(json.dumps(manifest,indent=2)+'\n')
+    lines=['E12 final Horizon stack and Meridian handover stack. Canonical manifest: FINAL.json.',
+        'Clean pinned exports applied and reproduced source byte for byte. Meridian identity is frozen at handover, not E18 evolving source.',
+        'Partition and stale-login passed on the final retained engine. The 200-seed fault campaign passed; see exact evidence and hashes in JSON.',
+        'Horizon reader radius 2..32 is independent of real-player cap. Production max_expected is 4*max_players, default 512.',
+        'Meridian at handover still has four eager readers per player. E18 owns lazy/shared changes; apply its successor patches separately.',
+        'Critical IO requires the documented bounded section. This is not physical storage fencing against unbounded pauses or syscalls.']
+    for name,project in projects.items():
+        lines.append(name+' pin '+project['pin'])
+        lines.extend(patch['path']+' sha256='+patch['sha256'] for patch in project['patches'])
+    (BINS/'FINAL').write_text('\n'.join(lines)+'\n')
+    print(json.dumps(dict(manifest='.local/bin/goliath-e12/FINAL.json',engine_sha256=binary,projects=list(projects))))
+
+
+if __name__=='__main__':
+    main()

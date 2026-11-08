@@ -1,0 +1,1361 @@
+diff --git a/crates/meridian-ghost/src/view.rs b/crates/meridian-ghost/src/view.rs
+--- a/crates/meridian-ghost/src/view.rs
++++ b/crates/meridian-ghost/src/view.rs
+@@ -124,6 +124,21 @@
+         (-radius..=radius).all(|dx| {
+             (-radius..=radius).all(|dz| self.chunks.loaded.contains_key(&(x + dx, z + dz)))
+         })
++    }
++    /// One exact column received from this lane.
++    pub fn has_column(&self, x: i32, z: i32) -> bool {
++        self.chunks.loaded.contains_key(&(x, z))
++    }
++    /// A fenced whole-player snapshot supersedes held-login attribute defaults completely.
++    pub fn replace_player_attributes(&mut self, values: Vec<play::AttributeSnapshot>) {
++        self.player.attributes = values
++            .into_iter()
++            .map(|value| (value.attribute, value))
++            .collect();
++    }
++    /// Remaining authoritative cooldowns, not the target's old player-file state.
++    pub fn replace_player_cooldowns(&mut self, values: Vec<(String, i32)>) {
++        self.player.cooldowns = values.into_iter().collect();
+     }
+ 
+     /// Reads one clientbound Play packet. Packets that change nothing the view
+diff --git a/crates/meridian-handoff/src/control.rs b/crates/meridian-handoff/src/control.rs
+--- a/crates/meridian-handoff/src/control.rs
++++ b/crates/meridian-handoff/src/control.rs
+@@ -19,6 +19,10 @@
+ /// The player requests of a switch. Each error is the reason the backend or its
+ /// sidecar gave, as text for the person who asked for the switch.
+ pub trait PlayerControl {
++    fn activation_inputs(&self) -> bool {
++        false
++    }
++    fn set_initial_inputs(&mut self, _inputs: &[(i32, Vec<u8>)]) {}
+     /// Authority may already have moved even if activation's reply was lost.
+     fn authority_uncertain(&self) -> bool {
+         false
+diff --git a/crates/meridian-handoff/src/lane_input.rs b/crates/meridian-handoff/src/lane_input.rs
+--- a/crates/meridian-handoff/src/lane_input.rs
++++ b/crates/meridian-handoff/src/lane_input.rs
+@@ -22,6 +22,30 @@
+ }
+ 
+ impl Inputs {
++    pub fn initial(&self) -> Vec<(i32, Vec<u8>)> {
++        self.packets
++            .iter()
++            .take_while(|p| {
++                matches!(
++                    p.id,
++                    s::MOVE_PLAYER_POS
++                        | s::MOVE_PLAYER_POS_ROT
++                        | s::MOVE_PLAYER_ROT
++                        | s::MOVE_PLAYER_STATUS_ONLY
++                        | s::MOVE_VEHICLE
++                        | s::CLIENT_TICK_END
++                )
++            })
++            .map(|p| (p.id, p.payload.clone()))
++            .collect()
++    }
++    pub fn consumed(&mut self, count: usize) {
++        for _ in 0..count {
++            if let Some(packet) = self.packets.pop_front() {
++                self.bytes -= packet.payload.len();
++            }
++        }
++    }
+     pub fn push(&mut self, packet: Packet) -> Result<(), String> {
+         if self.packets.len() == PACKETS || self.bytes + packet.payload.len() > BYTES {
+             return Err("E8 input queue overflow; session closed without dropping input".into());
+@@ -255,6 +279,30 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    #[test]
++    fn activation_prefix_stops_before_an_action_and_keeps_later_order() {
++        let mut inputs = Inputs::default();
++        for (id, payload) in [
++            (s::MOVE_PLAYER_POS, vec![1]),
++            (s::CLIENT_TICK_END, vec![]),
++            (s::USE_ITEM, vec![2]),
++            (s::MOVE_PLAYER_POS, vec![3]),
++        ] {
++            inputs.push(Packet { id, payload }).unwrap();
++        }
++        assert_eq!(
++            inputs.initial(),
++            vec![(s::MOVE_PLAYER_POS, vec![1]), (s::CLIENT_TICK_END, vec![])]
++        );
++        inputs.consumed(2);
++        assert!(inputs.initial().is_empty());
++        let packets = inputs.into_packets();
++        assert_eq!(
++            packets.iter().map(|p| p.id).collect::<Vec<_>>(),
++            vec![s::USE_ITEM, s::MOVE_PLAYER_POS]
++        );
++        assert_eq!(packets.back().unwrap().payload, vec![3]);
++    }
+     use horizon_protocol::packets::play;
+     use std::sync::Mutex;
+ 
+diff --git a/crates/meridian-handoff/src/lib.rs b/crates/meridian-handoff/src/lib.rs
+--- a/crates/meridian-handoff/src/lib.rs
++++ b/crates/meridian-handoff/src/lib.rs
+@@ -144,6 +144,8 @@
+ mod reason;
+ mod session;
+ mod switch;
++mod terrain;
++pub use terrain::{TerrainOwners, TerrainReader};
+ 
+ pub use configure::{ClientConfiguration, Digest, DigestBuilder, Summary, configure};
+ pub use control::{
+diff --git a/crates/meridian-handoff/src/prepare.rs b/crates/meridian-handoff/src/prepare.rs
+--- a/crates/meridian-handoff/src/prepare.rs
++++ b/crates/meridian-handoff/src/prepare.rs
+@@ -77,6 +77,11 @@
+ }
+ 
+ impl Target {
++    pub(crate) fn terrain_reader(client_id: i32) -> Self {
++        let target = Self::new(client_id);
++        target.lock().view = View::ghost();
++        target
++    }
+     pub fn new(client_id: i32) -> Self {
+         Target {
+             state: Mutex::new(Preparing {
+@@ -255,7 +260,7 @@
+             c::ENTITY_EVENT if self.permission_event(id, payload) => {}
+             c::SET_ENTITY_DATA if self.is_own(payload) => {
+                 let payload = self.swapped(id, payload);
+-                self.extras.push(Packet { id, payload });
++                keep_own_metadata(&mut self.extras, Packet { id, payload });
+             }
+             _ => self.apply(id, payload),
+         }
+@@ -309,6 +314,23 @@
+             note_unreadable(&mut self.unreadable, id, &e);
+         }
+     }
++}
++fn keep_own_metadata(extras: &mut Vec<Packet>, mut packet: Packet) {
++    if let Ok(C::SetEntityData(mut next)) = packet.decode() {
++        for old in extras.iter().filter(|p| p.id == c::SET_ENTITY_DATA) {
++            if let Ok(C::SetEntityData(old)) = old.decode() {
++                for value in old.values {
++                    if !next.values.iter().any(|v| v.0 == value.0) {
++                        next.values.push(value);
++                    }
++                }
++            }
++        }
++        next.values.sort_by_key(|v| v.0);
++        extras.retain(|p| p.id != c::SET_ENTITY_DATA);
++        packet = Packet::of(&C::SetEntityData(next));
++    }
++    extras.push(packet);
+ }
+ 
+ fn send(writer: &Mutex<ConnWriter>, id: i32, payload: &[u8]) {
+@@ -404,3 +426,40 @@
+         (self.at, self.yaw, self.pitch)
+     }
+ }
++#[cfg(test)]
++mod live_metadata_tests {
++    use super::*;
++    use horizon_protocol::entity_data::{Value, serializer};
++    #[test]
++    fn activation_replaces_old_flags_without_losing_other_fields() {
++        let mut extras = Vec::new();
++        keep_own_metadata(
++            &mut extras,
++            Packet::of(&C::SetEntityData(play::SetEntityData {
++                id: 7,
++                values: vec![
++                    (0, serializer::BYTE, Value::Byte(0)),
++                    (6, serializer::POSE, Value::Id(0)),
++                ],
++            })),
++        );
++        keep_own_metadata(
++            &mut extras,
++            Packet::of(&C::SetEntityData(play::SetEntityData {
++                id: 7,
++                values: vec![(0, serializer::BYTE, Value::Byte(8))],
++            })),
++        );
++        assert_eq!(extras.len(), 1);
++        let C::SetEntityData(packet) = extras[0].decode().unwrap() else {
++            panic!()
++        };
++        assert_eq!(
++            packet.values,
++            vec![
++                (0, serializer::BYTE, Value::Byte(8)),
++                (6, serializer::POSE, Value::Id(0))
++            ]
++        );
++    }
++}
+diff --git a/crates/meridian-handoff/src/session.rs b/crates/meridian-handoff/src/session.rs
+--- a/crates/meridian-handoff/src/session.rs
++++ b/crates/meridian-handoff/src/session.rs
+@@ -192,6 +192,7 @@
+ 
+ /// What goes to the client.
+ pub(crate) struct Down {
++    pub terrain: Option<crate::terrain::Terrain>,
+     pub writer: ConnWriter,
+     /// The phase the client reads packets in.
+     pub phase: Phase,
+@@ -231,6 +232,9 @@
+     pub client: ClientConfiguration,
+     /// Where the client last said it stands and how it looks, from its moves.
+     pub client_pose: Option<Pose>,
++    /// The latest actual server placement, until the client acknowledges that teleport.
++    /// Terrain must follow it even when missing chunks prevent client movement packets.
++    pub authoritative_pose: Option<(i32, Pose)>,
+     pub flow: Flow,
+     pub identities: Option<Identities>,
+     pub inputs: Option<Inputs>,
+@@ -290,6 +294,7 @@
+             profile: client.profile,
+             client_counters: Arc::clone(&client_reader.counters),
+             down: Mutex::new(Down {
++                terrain: None,
+                 writer: client_writer,
+                 phase: Phase::Configuration,
+                 ghost: View::ghost(),
+@@ -312,6 +317,7 @@
+                 teleports: Teleports::default(),
+                 client: ClientConfiguration::default(),
+                 client_pose: None,
++                authoritative_pose: None,
+                 flow: Flow::default(),
+                 identities: None,
+                 inputs: None,
+@@ -873,6 +879,17 @@
+ }
+ 
+ impl Shared {
++    pub fn initial_inputs(&self) -> Vec<(i32, Vec<u8>)> {
++        self.up()
++            .inputs
++            .as_ref()
++            .map_or_else(Vec::new, Inputs::initial)
++    }
++    pub fn consumed_initial_inputs(&self, count: usize) {
++        if let Some(inputs) = &mut self.up().inputs {
++            inputs.consumed(count);
++        }
++    }
+     pub fn down(&self) -> MutexGuard<'_, Down> {
+         lock(&self.down)
+     }
+@@ -949,6 +966,23 @@
+             continue;
+         }
+         let mut down = shared.down();
++        if down.phase == Phase::Play
++            && down.active == lane.id
++            && down.terrain.is_some()
++            && id == ids::play::clientbound::CHUNK_BATCH_FINISHED
++        {
++            // The client sees owner readers' terrain, not this lane's batches. Complete
++            // active-lane flow control here, without registering a client acknowledgement.
++            encode(
++                &mut body,
++                ids::play::serverbound::CHUNK_BATCH_RECEIVED,
++                &64.0f32.to_be_bytes(),
++            );
++            if lock(&lane.writer).send(&body).is_err() {
++                return End::Closed;
++            }
++            continue;
++        }
+         // Retired lanes may still owe a block prediction acknowledgement.
+         // Do this before the active-lane filter, but translate only ack packets.
+         let payload = if down.phase == Phase::Play
+@@ -975,6 +1009,24 @@
+         }
+         if down.active != lane.id {
+             continue;
++        }
++        if down.phase == Phase::Play
++            && let Some(terrain) = &mut down.terrain
++        {
++            if id == ids::play::clientbound::PLAYER_POSITION
++                && let Ok(play::Clientbound::PlayerPosition(position)) =
++                    play::Clientbound::decode(id, &payload)
++            {
++                let mut up = shared.up();
++                let mut pose = up.client_pose.unwrap_or_default();
++                pose.placed(&position);
++                up.authoritative_pose = Some((position.teleport, pose));
++            }
++            crate::terrain::initial(terrain, id, &payload);
++            if crate::terrain::packet(id) {
++                // Only the stable owner readers write terrain during cluster crossings.
++                continue;
++            }
+         }
+         // The backend disconnects the player: with the fallback on, the player is moved
+         // instead, and is not shown the disconnect. During a switch too: a server that
+@@ -1128,6 +1180,14 @@
+                     up.client_pose = Some(pose);
+                 }
+                 if id == s::ACCEPT_TELEPORTATION
++                    && let Ok(id) = Reader::new(&payload).varint()
++                    && up
++                        .authoritative_pose
++                        .is_some_and(|(pending, _)| pending == id)
++                {
++                    up.authoritative_pose = None;
++                }
++                if id == s::ACCEPT_TELEPORTATION
+                     && up.identities.is_none()
+                     && let Ok(teleport) = Reader::new(&payload).varint()
+                     && !up.teleports.forward(teleport)
+diff --git a/crates/meridian-handoff/src/switch.rs b/crates/meridian-handoff/src/switch.rs
+--- a/crates/meridian-handoff/src/switch.rs
++++ b/crates/meridian-handoff/src/switch.rs
+@@ -761,6 +761,10 @@
+         "the target did not send the player's world in time",
+         |s| {
+             let settled = s.last_batch.is_some_and(|at| at.elapsed() >= settle);
++            let settled = settled
++                || settings
++                    .predicted_position
++                    .is_some_and(|at| session.composed_arrival_ready(&s.view, target.name, at));
+             (s.swap.is_some() && s.positions > 0 && s.batches > 0 && settled)
+                 .then(|| (s.dimension.clone(), s.secure_chat))
+         },
+@@ -878,6 +882,15 @@
+         }
+     };
+     let record = exported.record;
++    let live = match live_state(&record) {
++        Ok(live) => live,
++        Err(error) => {
++            // The handover id is installed below before abort needs it.
++            run.handover = record_handover(&record);
++            run.abort();
++            return Err(run.fail(Step::Freeze, error));
++        }
++    };
+     // The freeze the server says is left, counted from the moment the export was
+     // sent: the server counted from after it, so the end is never later than this.
+     let mut freeze = Freeze {
+@@ -968,6 +981,12 @@
+     let import_sent = Instant::now();
+     note("hand over: import request sent");
+     let (uuid, parts) = (run.uuid.clone(), run.parts.clone());
++    // Keep the prefix queued until the target confirms it. Abort still replays it on source.
++    let initial_inputs = if settings.continuous_arrival && run.target.activation_inputs() {
++        shared.initial_inputs()
++    } else {
++        Vec::new()
++    };
+     let imported = match run.ask_target(
+         "hand over: the import",
+         "the target may hold the player's record",
+@@ -977,6 +996,7 @@
+             note: &note,
+         },
+         |target| {
++            target.set_initial_inputs(&initial_inputs);
+             target.import(
+                 &uuid,
+                 record.clone(),
+@@ -997,6 +1017,7 @@
+         }
+     };
+     run.imported = true;
++    shared.consumed_initial_inputs(initial_inputs.len());
+     run.placed = settings.continuous_arrival;
+     // The confirm and the release take about as long as the slowest request so far.
+     freeze.slowest = freeze.slowest.max(import_sent.elapsed());
+@@ -1121,7 +1142,14 @@
+         // it waits for the lane to be the target's. Opened right after the lane is changed; the
+         // guard also opens it if the block is left before.
+         let routing = shared.routing.shut();
++        if let Some((attributes, cooldowns)) = &live {
++            s.view.replace_player_attributes(attributes.clone());
++            s.view.replace_player_cooldowns(cooldowns.clone());
++        }
+         let mut packets = delta(&down.ghost, &s.view);
++        if down.terrain.is_some() {
++            packets.retain(|p| !crate::terrain::packet(p.id));
++        }
+         if settings.continuous_arrival {
+             // Both server corrections were acknowledged on the held lane. A
+             // synthetic absolute correction would rewind a client that kept
+@@ -1316,6 +1344,40 @@
+         source_kept,
+     })
+ }
++type LiveSnapshot = (
++    Vec<horizon_protocol::packets::play::AttributeSnapshot>,
++    Vec<(String, i32)>,
++);
++fn live_state(record: &Record) -> Result<Option<LiveSnapshot>, String> {
++    let Some(live) = record.get("goliath_live") else {
++        return Ok(None);
++    };
++    let bytes: Vec<u8> =
++        serde_json::from_value(live["attributes"].clone()).map_err(|e| e.to_string())?;
++    let mut reader = horizon_protocol::buf::Reader::new(&bytes);
++    let id = reader.varint().map_err(|e| e.to_string())?;
++    let horizon_protocol::packets::play::Clientbound::UpdateAttributes(attributes) =
++        horizon_protocol::packets::play::Clientbound::decode(id, reader.rest())
++            .map_err(|e| e.to_string())?
++    else {
++        return Err("live movement attributes have wrong packet type".into());
++    };
++    let cooldowns: Vec<(String, i32, i32)> =
++        serde_json::from_value(live["cooldowns"].clone()).map_err(|e| e.to_string())?;
++    if cooldowns
++        .iter()
++        .any(|(_, elapsed, total)| *elapsed < 0 || *total <= *elapsed)
++    {
++        return Err("invalid live cooldown state".into());
++    }
++    Ok(Some((
++        attributes.values,
++        cooldowns
++            .into_iter()
++            .map(|(group, elapsed, total)| (group, total - elapsed))
++            .collect(),
++    )))
++}
+ 
+ /// The reason of a refusal on the digest, with what the log may say of the two
+ /// configurations: sizes, short hashes and registry names, never their content.
+diff --git a/crates/meridian-handoff/src/terrain.rs b/crates/meridian-handoff/src/terrain.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/terrain.rs
+@@ -0,0 +1,371 @@
++//! Owner-filtered read-only terrain readers, independent of the active player lane.
++use crate::{
++    TargetBackend,
++    configure::configure,
++    prepare::Target,
++    session::{SessionHandle, add, encode},
++};
++use horizon_protocol::{
++    buf::Reader, connection::Closer, ids::play::clientbound as c, packets::play,
++};
++use meridian_ghost::Packet;
++use meridian_net::{Profile, backend};
++use std::{
++    collections::{HashMap, hash_map::DefaultHasher},
++    hash::{Hash, Hasher},
++    sync::Mutex,
++    time::Duration,
++};
++
++/// Static column ownership. All entries use the same coordinate space.
++#[derive(Clone)]
++pub struct TerrainOwners {
++    pub origin: [i32; 2],
++    pub edge: i32,
++    pub entries: Vec<[i32; 2]>,
++    pub backends: Vec<String>,
++}
++pub(crate) struct Terrain {
++    owners: TerrainOwners,
++    loaded: HashMap<(i32, i32), usize>,
++    signatures: HashMap<(i32, i32), u64>,
++    reset: bool,
++    initial: Option<[f64; 3]>,
++    radius: i32,
++    center: Option<(i32, i32)>,
++}
++impl TerrainOwners {
++    fn owner(&self, x: i32, z: i32) -> Option<usize> {
++        let x = (i64::from(x) * 16 - i64::from(self.origin[0])).div_euclid(i64::from(self.edge));
++        let z = (i64::from(z) * 16 - i64::from(self.origin[1])).div_euclid(i64::from(self.edge));
++        self.entries
++            .iter()
++            .position(|p| i64::from(p[0]) == x && i64::from(p[1]) == z)
++    }
++}
++/// The manager owns the connection, closing it on session exit or setup failure.
++pub struct TerrainReader(Closer);
++impl Drop for TerrainReader {
++    fn drop(&mut self) {
++        self.0.close();
++    }
++}
++
++pub(crate) fn packet(id: i32) -> bool {
++    matches!(
++        id,
++        c::LEVEL_CHUNK_WITH_LIGHT
++            | c::FORGET_LEVEL_CHUNK
++            | c::LIGHT_UPDATE
++            | c::BLOCK_UPDATE
++            | c::SECTION_BLOCKS_UPDATE
++            | c::BLOCK_ENTITY_DATA
++            | c::BLOCK_EVENT
++            | c::LEVEL_EVENT
++            | c::SOUND
++            | c::CHUNKS_BIOMES
++            | c::SET_CHUNK_CACHE_CENTER
++            | c::SET_CHUNK_CACHE_RADIUS
++            | c::CHUNK_BATCH_START
++            | c::CHUNK_BATCH_FINISHED
++    )
++}
++fn column(id: i32, payload: &[u8]) -> Option<(i32, i32)> {
++    if id == c::LEVEL_CHUNK_WITH_LIGHT {
++        let mut r = Reader::new(payload);
++        return Some((r.i32().ok()?, r.i32().ok()?));
++    }
++    match play::Clientbound::decode(id, payload).ok()? {
++        play::Clientbound::ForgetLevelChunk(p) => Some((p.pos[0], p.pos[1])),
++        play::Clientbound::LightUpdate(p) => Some((p.x, p.z)),
++        play::Clientbound::BlockUpdate(p) => Some((p.pos[0] >> 4, p.pos[2] >> 4)),
++        play::Clientbound::SectionBlocksUpdate(p) => Some((p.section[0], p.section[2])),
++        play::Clientbound::BlockEntityData(p) => Some((p.pos[0] >> 4, p.pos[2] >> 4)),
++        play::Clientbound::BlockEvent(p) => Some((p.pos[0] >> 4, p.pos[2] >> 4)),
++        play::Clientbound::LevelEvent(p) if !p.global => Some((p.pos[0] >> 4, p.pos[2] >> 4)),
++        play::Clientbound::Sound(p) => Some((p.x.div_euclid(128), p.z.div_euclid(128))),
++        _ => None,
++    }
++}
++impl SessionHandle {
++    pub(crate) fn composed_arrival_ready(
++        &self,
++        view: &meridian_ghost::View,
++        backend: &str,
++        at: [f64; 3],
++    ) -> bool {
++        let down = self.0.down();
++        let Some(terrain) = &down.terrain else {
++            return false;
++        };
++        let Some(owner) = terrain.owners.backends.iter().position(|b| b == backend) else {
++            return false;
++        };
++        let (x, z) = ((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
++        (-1..=1).all(|dx| {
++            (-1..=1).all(|dz| {
++                let key = (x + dx, z + dz);
++                match terrain.owners.owner(key.0, key.1) {
++                    Some(index) if index == owner => view.has_column(key.0, key.1),
++                    Some(index) => terrain.loaded.get(&key) == Some(&index),
++                    None => false,
++                }
++            })
++        })
++    }
++    /// Opt in before relay starts. Ordinary Meridian sessions keep their original path.
++    pub fn compose_terrain(&self, owners: TerrainOwners) {
++        assert!(owners.edge > 0 && owners.edge % 16 == 0);
++        self.0.down().terrain = Some(Terrain {
++            owners,
++            loaded: HashMap::new(),
++            signatures: HashMap::new(),
++            reset: false,
++            initial: None,
++            radius: 3,
++            center: None,
++        });
++    }
++    /// The actual client pose, falling back to the first server placement during login.
++    pub fn terrain_position(&self) -> Option<[f64; 3]> {
++        let down = self.0.down();
++        let up = self.0.up();
++        up.authoritative_pose
++            .map(|(_, pose)| pose)
++            .or(up.client_pose)
++            .map(|p| p.at)
++            .or_else(|| down.terrain.as_ref()?.initial)
++    }
++    pub fn terrain_center(&self, position: [f64; 3]) -> Result<(), String> {
++        let center = (
++            (position[0].floor() as i32) >> 4,
++            (position[2].floor() as i32) >> 4,
++        );
++        let mut down = self.0.down();
++        let Some(terrain) = &mut down.terrain else {
++            return Ok(());
++        };
++        if terrain.center == Some(center) {
++            return Ok(());
++        }
++        terrain.center = Some(center);
++        let packet = Packet::of(&play::Clientbound::SetChunkCacheCenter(
++            play::SetChunkCacheCenter {
++                x: center.0,
++                z: center.1,
++            },
++        ));
++        let mut body = Vec::new();
++        encode(&mut body, packet.id, &packet.payload);
++        down.writer.send(&body).map_err(|e| e.to_string())?;
++        let _ = down.ghost.apply(&packet);
++        Ok(())
++    }
++    pub fn terrain_reset_requested(&self) -> bool {
++        self.0
++            .down()
++            .terrain
++            .as_mut()
++            .is_some_and(|t| std::mem::take(&mut t.reset))
++    }
++    /// Synthetic profile for one private reader. Never use the actual player's identity.
++    pub fn terrain_profile(&self, index: usize) -> Profile {
++        let mut uuid = self.0.profile.uuid;
++        uuid[0] ^= 0xa7;
++        uuid[1] ^= index as u8;
++        Profile {
++            name: format!(
++                "E12View{index}{:08x}",
++                u32::from_be_bytes(uuid[12..].try_into().expect("four bytes"))
++            ),
++            uuid,
++            properties: Vec::new(),
++        }
++    }
++    pub fn open_terrain_reader(
++        &self,
++        target: TargetBackend<'_>,
++        owner: usize,
++        profile: &Profile,
++    ) -> Result<TerrainReader, String> {
++        let (mut client, digest, player_id) = {
++            let down = self.0.down();
++            (
++                self.0.up().client.clone(),
++                down.config_digest.ok_or("client is still configuring")?,
++                down.ghost.player_id().ok_or("client has no player")?,
++            )
++        };
++        if let Some(info) = &mut client.information {
++            // One extra ring keeps next-frame visible columns in the client cache.
++            let mut r = Reader::new(info);
++            let _ = r.string(32767).map_err(|e| e.to_string())?;
++            let at = r.position();
++            if let Some(distance) = info.get_mut(at) {
++                *distance = distance.saturating_add(1).min(32);
++            }
++        }
++        let mut link =
++            backend::connect(target.address, profile, target.options).map_err(|e| e.to_string())?;
++        link.connection
++            .reader
++            .set_read_timeout(Some(Duration::from_secs(8)))
++            .map_err(|e| e.to_string())?;
++        let (observed, _) = configure(&mut link.connection, &client)?;
++        if digest.differs(&observed).is_some() {
++            return Err("observer registry digest differs".into());
++        }
++        link.connection
++            .reader
++            .set_read_timeout(None)
++            .map_err(|e| e.to_string())?;
++        let (mut reader, writer) = link.connection.split();
++        let closer = reader.closer().map_err(|e| e.to_string())?;
++        let handle = TerrainReader(closer);
++        let session = self.clone();
++        std::thread::Builder::new()
++            .name(format!("terrain-{owner}"))
++            .spawn(move || {
++                let writer = Mutex::new(writer);
++                let target = Target::terrain_reader(player_id);
++                let mut body = Vec::new();
++                while !session.is_over() {
++                    let Ok((id, payload)) = reader.recv() else {
++                        break;
++                    };
++                    // This answers lane-local flow control. It never relays an observer entity.
++                    target.take(&writer, id, &payload);
++                    let mut packets = Vec::new();
++                    if id == c::CHUNKS_BIOMES {
++                        if let Ok(play::Clientbound::ChunksBiomes(p)) =
++                            play::Clientbound::decode(id, &payload)
++                        {
++                            packets.extend(p.chunks.into_iter().map(|chunk| {
++                                (
++                                    (chunk.pos[0], chunk.pos[1]),
++                                    Packet::of(&play::Clientbound::ChunksBiomes(
++                                        play::ChunksBiomes {
++                                            chunks: vec![chunk],
++                                        },
++                                    )),
++                                )
++                            }));
++                        }
++                    } else if let Some(at) = column(id, &payload) {
++                        packets.push((at, Packet { id, payload }));
++                    }
++                    if packets.is_empty() {
++                        continue;
++                    }
++                    let mut down = session.0.down();
++                    let position = {
++                        let up = session.0.up();
++                        up.authoritative_pose
++                            .map(|(_, pose)| pose)
++                            .or(up.client_pose)
++                            .map(|p| p.at)
++                            .or_else(|| down.terrain.as_ref()?.initial)
++                    };
++                    let Some(position) = position else {
++                        continue;
++                    };
++                    for (at, packet) in packets {
++                        let Some(terrain) = &mut down.terrain else {
++                            return;
++                        };
++                        if terrain.owners.owner(at.0, at.1) != Some(owner) {
++                            continue;
++                        }
++                        let center = (
++                            (position[0].floor() as i32) >> 4,
++                            (position[2].floor() as i32) >> 4,
++                        );
++                        let visible =
++                            (at.0 - center.0).abs().max((at.1 - center.1).abs()) <= terrain.radius;
++                        if packet.id == c::FORGET_LEVEL_CHUNK {
++                            if visible || terrain.loaded.remove(&at).is_none() {
++                                continue;
++                            }
++                            terrain.signatures.remove(&at);
++                        } else if packet.id == c::LEVEL_CHUNK_WITH_LIGHT {
++                            let mut hash = DefaultHasher::new();
++                            packet.payload.hash(&mut hash);
++                            let hash = hash.finish();
++                            if terrain.signatures.insert(at, hash) == Some(hash) {
++                                continue;
++                            }
++                            terrain.loaded.insert(at, owner);
++                        } else if !terrain.loaded.contains_key(&at) {
++                            continue;
++                        }
++                        encode(&mut body, packet.id, &packet.payload);
++                        if down.writer.send(&body).is_err() {
++                            drop(down);
++                            session.close();
++                            return;
++                        }
++                        add(&mut down.flow, &body);
++                        let _ = down.ghost.apply(&packet);
++                    }
++                }
++                // A lost terrain source cannot silently leave stale foreign columns visible.
++                if !session.is_over() {
++                    session.close();
++                }
++            })
++            .map_err(|e| e.to_string())?;
++        Ok(handle)
++    }
++}
++pub(crate) fn initial(terrain: &mut Terrain, id: i32, payload: &[u8]) {
++    if id == c::RESPAWN {
++        terrain.loaded.clear();
++        terrain.signatures.clear();
++        terrain.initial = None;
++        terrain.center = None;
++        terrain.reset = true;
++    }
++    if id == c::LOGIN {
++        if let Ok(play::Clientbound::Login(p)) = play::Clientbound::decode(id, payload) {
++            terrain.radius = p.chunk_radius;
++        }
++    } else if id == c::PLAYER_POSITION
++        && terrain.initial.is_none()
++        && let Ok(play::Clientbound::PlayerPosition(p)) = play::Clientbound::decode(id, payload)
++    {
++        terrain.initial = Some(p.position);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn negative_columns_use_the_same_half_open_owner() {
++        let owners = TerrainOwners {
++            origin: [0, 0],
++            edge: 64,
++            entries: vec![[0, 0], [-1, 0], [-1, -1], [0, -1]],
++            backends: vec!["a".into(), "b".into(), "c".into(), "d".into()],
++        };
++        assert_eq!(owners.owner(0, 0), Some(0));
++        assert_eq!(owners.owner(-1, 0), Some(1));
++        assert_eq!(owners.owner(-4, -4), Some(2));
++        assert_eq!(owners.owner(0, -1), Some(3));
++        assert_eq!(owners.owner(-5, 0), None);
++    }
++    #[test]
++    fn entity_and_player_state_are_never_terrain() {
++        for id in [
++            c::ADD_ENTITY,
++            c::SET_ENTITY_DATA,
++            c::SET_ENTITY_MOTION,
++            c::SET_PASSENGERS,
++            c::PLAYER_POSITION,
++            c::CONTAINER_SET_CONTENT,
++            c::SOUND_ENTITY,
++        ] {
++            assert!(!packet(id));
++        }
++    }
++}
+diff --git a/crates/meridian-proxy/src/cluster.rs b/crates/meridian-proxy/src/cluster.rs
+--- a/crates/meridian-proxy/src/cluster.rs
++++ b/crates/meridian-proxy/src/cluster.rs
+@@ -18,6 +18,13 @@
+     serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
+         .map(Some)
+         .map_err(|e| e.to_string())
++}
++pub(crate) fn terrain_endpoint(backend: &str) -> Result<Endpoint, String> {
++    let manifest = manifest()?.ok_or("terrain readers require cluster mode")?;
++    let path = manifest["tiles"][backend]["endpoint"]
++        .as_str()
++        .ok_or("missing terrain endpoint")?;
++    Endpoint::read(Path::new(path)).map_err(|e| e.to_string())
+ }
+ 
+ fn client(manifest: &Value) -> Result<Client, String> {
+@@ -76,6 +83,7 @@
+         fence: fence(tile)?,
+         timeout,
+         authority_uncertain: false,
++        initial_inputs: Vec::new(),
+     }))
+ }
+ 
+@@ -86,6 +94,7 @@
+     fence: Fence,
+     timeout: Duration,
+     authority_uncertain: bool,
++    initial_inputs: Vec<(i32, Vec<u8>)>,
+ }
+ 
+ impl Control {
+@@ -107,6 +116,12 @@
+ }
+ 
+ impl PlayerControl for Control {
++    fn activation_inputs(&self) -> bool {
++        std::env::var_os("E12_INITIAL_INPUT_OFF").is_none()
++    }
++    fn set_initial_inputs(&mut self, inputs: &[(i32, Vec<u8>)]) {
++        self.initial_inputs = inputs.to_vec();
++    }
+     fn authority_uncertain(&self) -> bool {
+         self.authority_uncertain
+     }
+@@ -232,10 +247,11 @@
+             json!({"phase":"cas","uuid":uuid,"generation":generation.0+1,"target":self.fence.tile.0,"ms":started.elapsed().as_secs_f64()*1000.})
+         );
+         let started = Instant::now();
++        body["initial_inputs"] = json!(self.initial_inputs);
+         let reply = self.ask(&format!("player-import {uuid} {body}"))?;
+         eprintln!(
+             "E10_PHASE {}",
+-            json!({"phase":"activation","uuid":uuid,"ms":started.elapsed().as_secs_f64()*1000.,"timing":reply["timing"]})
++            json!({"phase":"activation","uuid":uuid,"ms":started.elapsed().as_secs_f64()*1000.,"timing":reply["timing"],"initial_packets":self.initial_inputs.len(),"ns":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_nanos()})
+         );
+         Ok(Imported {
+             recentered: reply["recentered"].as_bool(),
+diff --git a/crates/meridian-proxy/src/main.rs b/crates/meridian-proxy/src/main.rs
+--- a/crates/meridian-proxy/src/main.rs
++++ b/crates/meridian-proxy/src/main.rs
+@@ -28,6 +28,7 @@
+ mod state;
+ mod status;
+ mod switching;
++mod terrain;
+ mod throttle;
+ mod wall_approach;
+ mod wall_particles;
+diff --git a/crates/meridian-proxy/src/session.rs b/crates/meridian-proxy/src/session.rs
+--- a/crates/meridian-proxy/src/session.rs
++++ b/crates/meridian-proxy/src/session.rs
+@@ -761,6 +761,10 @@
+     };
+     if config.tiles.is_some() && crate::wall_approach::stage() >= 3 {
+         handle.enable_lane_inputs();
++    }
++    if let Err(error) = crate::terrain::start(config, &handle, peer.ip()) {
++        warning!("terrain reader setup refused: {error}");
++        handle.close();
+     }
+     let relay = relay.with_commands(commands_hook(config, sessions, &handle, &name, auth, peer));
+     let relay = if config.tiles.is_some() {
+diff --git a/crates/meridian-proxy/src/terrain.rs b/crates/meridian-proxy/src/terrain.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-proxy/src/terrain.rs
+@@ -0,0 +1,132 @@
++//! Lifetimes and recenter requests for private, read-only per-tile terrain readers.
++use meridian_config::Config;
++use meridian_handoff::{SessionHandle, TargetBackend, TerrainOwners};
++use meridian_net::backend::BackendOptions;
++use std::{
++    net::IpAddr,
++    time::{Duration, Instant},
++};
++
++pub(crate) fn start(
++    config: &Config,
++    handle: &SessionHandle,
++    address: IpAddr,
++) -> Result<(), String> {
++    if std::env::var_os("GOLIATH_CLUSTER").is_none()
++        || std::env::var_os("E12_TERRAIN_OFF").is_some()
++    {
++        return Ok(());
++    }
++    let Some(map) = config.tiles.clone() else {
++        return Ok(());
++    };
++    let endpoints = map
++        .entries
++        .iter()
++        .map(|t| crate::cluster::terrain_endpoint(&t.backend))
++        .collect::<Result<Vec<_>, _>>()?;
++    handle.compose_terrain(TerrainOwners {
++        origin: map.origin,
++        edge: map.edge,
++        entries: map.entries.iter().map(|t| t.index).collect(),
++        backends: map.entries.iter().map(|t| t.backend.clone()).collect(),
++    });
++    let config = config.clone();
++    let handle = handle.clone();
++    std::thread::Builder::new()
++        .name("terrain-manager".into())
++        .spawn(move || {
++            let run = || -> Result<(), String> {
++                let options = BackendOptions {
++                    forwarding_secret: config.forwarding_secret.as_bytes().to_vec(),
++                    connect_timeout: Duration::from_millis(config.connect_timeout_ms),
++                    player_address: address,
++                };
++                let timeout = Duration::from_secs(8);
++                let mut readers = Vec::new();
++                let mut profiles = Vec::new();
++                let mut last_center = None;
++                let mut refreshed = Instant::now();
++                while !handle.is_over() {
++                    let Some(position) = handle.terrain_position() else {
++                        std::thread::sleep(Duration::from_millis(20));
++                        continue;
++                    };
++                    let center = (
++                        (position[0].floor() as i32) >> 4,
++                        (position[2].floor() as i32) >> 4,
++                    );
++                    if !readers.is_empty() && handle.terrain_reset_requested() {
++                        for (endpoint, id) in endpoints.iter().zip(&profiles) {
++                            let reply = endpoint
++                                .ask(&format!("player-observe-reset {id}"), timeout)
++                                .map_err(|e| e.to_string())?;
++                            if reply["ok"] != true {
++                                return Err(format!("observer reset refused: {reply}"));
++                            }
++                        }
++                        last_center = None;
++                    }
++                    if readers.is_empty() {
++                        for (index, tile) in map.entries.iter().enumerate() {
++                            let profile = handle.terrain_profile(index);
++                            let id = horizon_protocol::crypto::uuid_string(u128::from_be_bytes(
++                                profile.uuid,
++                            ));
++                            let reply = endpoints[index]
++                                .ask(
++                                    &format!("player-observe {id} {}", serde_json::json!(position)),
++                                    timeout,
++                                )
++                                .map_err(|e| e.to_string())?;
++                            if reply["ok"] != true {
++                                return Err(format!("observer prepare refused: {reply}"));
++                            }
++                            let backend = config
++                                .backend(&tile.backend)
++                                .ok_or("missing terrain backend")?;
++                            readers.push(handle.open_terrain_reader(
++                                TargetBackend {
++                                    name: &tile.backend,
++                                    address: &backend.address,
++                                    options: &options,
++                                },
++                                index,
++                                &profile,
++                            )?);
++                            profiles.push(id);
++                        }
++                    }
++                    if last_center != Some(center) || refreshed.elapsed() >= Duration::from_secs(5)
++                    {
++                        handle.terrain_center(position)?;
++                        for (index,(endpoint, id)) in endpoints.iter().zip(&profiles).enumerate() {
++                            let reply = endpoint
++                                .ask(
++                                    &format!("player-observe {id} {}", serde_json::json!(position)),
++                                    timeout,
++                                )
++                                .map_err(|e| e.to_string())?;
++                            if reply["ok"] != true {
++                                return Err(format!("observer recenter refused: {reply}"));
++                            }
++                            if std::env::var_os("E12_TERRAIN_TRACE").is_some() {
++                                eprintln!("E12_TERRAIN {}",serde_json::json!({"owner":index,"position":position,"ns":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_nanos()}));
++                            }
++                        }
++                        last_center = Some(center);
++                        refreshed = Instant::now();
++                    }
++                    std::thread::sleep(Duration::from_millis(20));
++                }
++                drop(readers);
++                Ok(())
++            };
++            if let Err(error) = run() {
++                crate::log::warning!("terrain composition stopped: {error}");
++                handle.close();
++            }
++        })
++        .map_err(|e| e.to_string())?;
++    Ok(())
++}
+diff --git a/crates/meridian-proxy/src/wall_approach.rs b/crates/meridian-proxy/src/wall_approach.rs
+--- a/crates/meridian-proxy/src/wall_approach.rs
++++ b/crates/meridian-proxy/src/wall_approach.rs
+@@ -191,8 +191,8 @@
+                             }
+                             let mut state = pending.0.lock().expect("wall state poisoned");
+                             state.refused = !retry;
+-                            state.retry_after =
+-                                retry.then(|| Instant::now() + Duration::from_secs(1));
++                            state.retry_after = (retry && !abandoned)
++                                .then(|| Instant::now() + Duration::from_secs(1));
+                             state.running = false;
+                             state.preparing = None;
+                             state.crossing = None;
+diff --git a/crates/meridian-testkit/src/bin/e4-client.rs b/crates/meridian-testkit/src/bin/e4-client.rs
+--- a/crates/meridian-testkit/src/bin/e4-client.rs
++++ b/crates/meridian-testkit/src/bin/e4-client.rs
+@@ -8,7 +8,7 @@
+ use meridian_testkit::{client::FakeClient, trace::Recorder};
+ use serde_json::json;
+ use std::{
+-    collections::HashMap,
++    collections::{HashMap, HashSet},
+     io::{self, BufRead, Write},
+     sync::{atomic::Ordering, mpsc},
+     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+@@ -73,6 +73,26 @@
+     let mut container = 0;
+     let mut container_state = 0;
+     let mut next = Instant::now();
++    let mut columns = HashSet::new();
++    let mut audit = false;
++    let mut missing_frames = 0u64;
++    let mut reloads = 0u64;
++    let mut frames = 0u64;
++    let mut vehicle = false;
++    let mut seat_offset = 0.0;
++    let mut hold_input = false;
++    let mut withheld_teleport = None;
++    let mut own_id = 0;
++    let mut attributes = std::collections::BTreeMap::new();
++    let mut own_flags = 0i8;
++    let mut abilities = None;
++    let missing = |columns: &HashSet<(i32, i32)>, pose: [f64; 3]| {
++        let (x, z) = ((pose[0].floor() as i32) >> 4, (pose[2].floor() as i32) >> 4);
++        (-3..=3)
++            .flat_map(|dx| (-3..=3).map(move |dz| (x + dx, z + dz)))
++            .filter(|p| !columns.contains(p))
++            .collect::<Vec<_>>()
++    };
+     loop {
+         while let Ok(order) = rx.try_recv() {
+             if order == "quit" {
+@@ -81,6 +101,82 @@
+             }
+             let parts: Vec<_> = order.split_whitespace().collect();
+             match parts.as_slice() {
++                ["sprint", mode] => {
++                    let active = *mode == "on";
++                    connection.send(
++                        &play::Serverbound::PlayerInput(play::PlayerInput {
++                            flags: if active { 65 } else { 1 },
++                        })
++                        .encode(),
++                    )?;
++                    connection.send(
++                        &play::Serverbound::PlayerCommand(play::PlayerCommand {
++                            id: own_id,
++                            action: if active { 1 } else { 2 },
++                            data: 0,
++                        })
++                        .encode(),
++                    )?;
++                }
++                ["fly", mode] => {
++                    connection.send(
++                        &play::Serverbound::PlayerAbilities(play::PlayerAbilitiesRequest {
++                            flags: if *mode == "on" { 2 } else { 0 },
++                        })
++                        .encode(),
++                    )?;
++                }
++                ["state", token] => {
++                    let values:Vec<_>=attributes.values().map(|value:&play::AttributeSnapshot|json!({"attribute":value.attribute,"base":value.base,"modifiers":value.modifiers.iter().map(|m|json!({"id":m.id,"amount":m.amount,"operation":m.operation})).collect::<Vec<_>>()})).collect();
++                    emit(
++                        json!({"kind":"live_state","token":token,"attributes":values,"flags":own_flags,"abilities":abilities,"ns":now()}),
++                    );
++                }
++                ["hold", mode] => {
++                    hold_input = *mode == "on";
++                    if !hold_input
++                        && let Some((id, position, yaw, pitch)) = withheld_teleport.take()
++                    {
++                        let [x, y, z] = position;
++                        connection.send(
++                            &play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {
++                                id,
++                                x,
++                                y,
++                                z,
++                                yaw,
++                                pitch,
++                            })
++                            .encode(),
++                        )?;
++                        connection.send(&play::Serverbound::PlayerLoaded(Empty).encode())?;
++                    }
++                    emit(json!({"kind":"hold","active":hold_input,"ns":now()}));
++                }
++                ["vehicle", mode] => {
++                    vehicle = *mode == "on";
++                }
++                ["vehicle", mode, offset] => {
++                    vehicle = *mode == "on";
++                    seat_offset = offset.parse()?;
++                }
++                ["audit-start", token] | ["audit", token] => {
++                    let absent = missing(&columns, pose);
++                    if parts[0] == "audit-start" {
++                        if !absent.is_empty() {
++                            return Err("cannot start terrain audit with missing columns".into());
++                        }
++                        audit = true;
++                        missing_frames = 0;
++                        reloads = 0;
++                        frames = 0;
++                    }
++                    let mut loaded: Vec<_> = columns.iter().copied().collect();
++                    loaded.sort();
++                    emit(
++                        json!({"kind":"terrain_audit","token":token,"ns":now(),"pos":pose,"columns":loaded,"missing":absent,"frames":frames,"missing_frames":missing_frames,"visible_reloads":reloads,"bytes":counters.bytes_in.load(Ordering::Relaxed)}),
++                    );
++                }
+                 ["open", x, y, z] => {
+                     connection.send(
+                         &play::Serverbound::UseItemOn(play::UseItemOn {
+@@ -95,6 +191,28 @@
+                         .encode(),
+                     )?;
+                 }
++                ["break", x, y, z] => {
++                    connection.send(
++                        &play::Serverbound::PlayerAction(play::PlayerAction {
++                            action: 0,
++                            pos: [x.parse()?, y.parse()?, z.parse()?],
++                            direction: 1,
++                            sequence: 41,
++                        })
++                        .encode(),
++                    )?;
++                }
++                ["mount", entity] => {
++                    connection.send(
++                        &play::Serverbound::Interact(play::Interact {
++                            id: entity.parse()?,
++                            hand: 0,
++                            location: [0.; 3],
++                            secondary: false,
++                        })
++                        .encode(),
++                    )?;
++                }
+                 ["click", slot] => {
+                     connection.send(
+                         &play::Serverbound::ContainerClick(play::ContainerClick {
+@@ -160,7 +278,7 @@
+                 _ => return Err("expected walk TOKEN X Z, snapshot TOKEN, or quit".into()),
+             }
+         }
+-        if playing && loaded && Instant::now() >= next {
++        if playing && loaded && !hold_input && Instant::now() >= next {
+             next = Instant::now() + Duration::from_millis(50);
+             if let Some((_, destination)) = &goal {
+                 let dx = destination[0] - pose[0];
+@@ -181,10 +299,27 @@
+                 }
+             }
+             emit(json!({"kind":"move", "ns":now(), "pos":pose}));
++            if audit {
++                frames += 1;
++                if !missing(&columns, pose).is_empty() {
++                    missing_frames += 1;
++                }
++            }
++            if vehicle {
++                connection.send(
++                    &play::Serverbound::MoveVehicle(play::MoveVehicleRequest {
++                        position: pose,
++                        yaw: 0.,
++                        pitch: 0.,
++                        on_ground: true,
++                    })
++                    .encode(),
++                )?;
++            }
+             connection.send(
+                 &play::Serverbound::MovePlayerPos(play::MovePlayerPos {
+                     x: pose[0],
+-                    y: pose[1],
++                    y: pose[1] + if vehicle { seat_offset } else { 0.0 },
+                     z: pose[2],
+                     flags: 1,
+                 })
+@@ -235,6 +370,98 @@
+             continue;
+         }
+         match id {
++            ids::play::clientbound::LOGIN => {
++                if let play::Clientbound::Login(p) = play::Clientbound::decode(id, &payload)? {
++                    own_id = p.player_id;
++                }
++            }
++            ids::play::clientbound::UPDATE_ATTRIBUTES => {
++                if let play::Clientbound::UpdateAttributes(p) =
++                    play::Clientbound::decode(id, &payload)?
++                    && p.id == own_id
++                {
++                    let values:Vec<_>=p.values.iter().map(|v|json!({"attribute":v.attribute,"base":v.base,"modifiers":v.modifiers.iter().map(|m|json!({"id":m.id,"amount":m.amount,"operation":m.operation})).collect::<Vec<_>>()})).collect();
++                    for value in p.values {
++                        attributes.insert(value.attribute, value);
++                    }
++                    emit(json!({"kind":"attributes","values":values,"ns":now()}));
++                }
++            }
++            ids::play::clientbound::SET_ENTITY_DATA => {
++                if let play::Clientbound::SetEntityData(p) =
++                    play::Clientbound::decode(id, &payload)?
++                    && p.id == own_id
++                {
++                    for (index, _, value) in p.values {
++                        if index == 0
++                            && let horizon_protocol::entity_data::Value::Byte(flags) = value
++                        {
++                            own_flags = flags;
++                            emit(json!({"kind":"flags","flags":flags,"ns":now()}));
++                        }
++                    }
++                }
++            }
++            ids::play::clientbound::PLAYER_ABILITIES => {
++                if let play::Clientbound::PlayerAbilities(p) =
++                    play::Clientbound::decode(id, &payload)?
++                {
++                    let value = json!({"flags":p.flags,"flying_speed":p.flying_speed,"walking_speed":p.walking_speed});
++                    abilities = Some(value.clone());
++                    emit(json!({"kind":"abilities","value":value,"ns":now()}));
++                }
++            }
++            ids::play::clientbound::ADD_ENTITY => {
++                if let play::Clientbound::AddEntity(p) = play::Clientbound::decode(id, &payload)? {
++                    emit(
++                        json!({"kind":"entity","entity":p.id,"entity_kind":p.kind,"uuid":format!("{:032x}",p.uuid),"pos":p.position,"ns":now()}),
++                    );
++                }
++            }
++            ids::play::clientbound::LEVEL_CHUNK_WITH_LIGHT => {
++                let mut reader = horizon_protocol::buf::Reader::new(&payload);
++                let at = (reader.i32()?, reader.i32()?);
++                let visible = ((pose[0].floor() as i32 >> 4) - at.0)
++                    .abs()
++                    .max(((pose[2].floor() as i32 >> 4) - at.1).abs())
++                    <= 3;
++                if !columns.insert(at) && audit && visible {
++                    reloads += 1;
++                }
++                emit(json!({"kind":"chunk","column":at,"ns":now()}));
++            }
++            ids::play::clientbound::FORGET_LEVEL_CHUNK => {
++                if let play::Clientbound::ForgetLevelChunk(p) =
++                    play::Clientbound::decode(id, &payload)?
++                {
++                    columns.remove(&(p.pos[0], p.pos[1]));
++                    emit(json!({"kind":"forget","column":p.pos,"ns":now()}));
++                }
++            }
++            ids::play::clientbound::BLOCK_UPDATE => {
++                if let play::Clientbound::BlockUpdate(p) = play::Clientbound::decode(id, &payload)?
++                {
++                    emit(json!({"kind":"block_update","pos":p.pos,"state":p.state,"ns":now()}));
++                }
++            }
++            ids::play::clientbound::SECTION_BLOCKS_UPDATE => {
++                if let play::Clientbound::SectionBlocksUpdate(p) =
++                    play::Clientbound::decode(id, &payload)?
++                {
++                    emit(
++                        json!({"kind":"section_update","section":p.section,"changes":p.changes,"ns":now()}),
++                    );
++                }
++            }
++            ids::play::clientbound::SET_PASSENGERS => {
++                if let play::Clientbound::SetPassengers(p) =
++                    play::Clientbound::decode(id, &payload)?
++                {
++                    emit(
++                        json!({"kind":"passengers","vehicle":p.vehicle,"passengers":p.passengers,"ns":now()}),
++                    );
++                }
++            }
+             ids::play::clientbound::SET_TIME => {
+                 if let play::Clientbound::SetTime(p) = play::Clientbound::decode(id, &payload)? {
+                     emit(
+@@ -323,6 +550,10 @@
+                     emit(
+                         json!({"kind":"teleport", "ns":now(), "before":before, "pos":pose, "delta":p.delta, "flags":p.relatives, "bytes":counters.bytes_in.load(Ordering::Relaxed)}),
+                     );
++                    if hold_input {
++                        withheld_teleport = Some((p.teleport, p.position, p.yaw, p.pitch));
++                        continue;
++                    }
+                     connection.send(
+                         &play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {
+                             id: p.teleport,
+@@ -351,5 +582,11 @@
+             }
+             _ => {}
+         }
++        if audit {
++            frames += 1;
++            if !missing(&columns, pose).is_empty() {
++                missing_frames += 1;
++            }
++        }
+     }
+ }

@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Recompute E12 verdicts from small raw files without starting game processes."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import math
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+
+
+def percentiles(values):
+    ordered=sorted(values)
+    if not ordered or any(not math.isfinite(v) for v in ordered):
+        raise ValueError('empty or nonfinite distribution')
+    return {f'p{p}':ordered[math.ceil(len(ordered)*p/100)-1] for p in [50,95,99]}
+
+
+def analyse(value):
+    if value['status']!='complete':
+        raise ValueError('run is not complete')
+    if 'walls' in value:
+        tiles={'a':(0,0),'b':(-1,0),'c':(-1,-1),'d':(0,-1)}
+        expected_matrix={(t,w) for t in tiles for w in ['west','east','north','south']}
+        if len(value['walls'])!=16 or {(w['tile'],w['wall']) for w in value['walls']}!=expected_matrix:
+            raise ValueError('owned-wall matrix incomplete')
+        for wall in value['walls']:
+            ix,iz=tiles[wall['tile']]
+            edge=value['edge']//16
+            cx,cz=math.floor(wall['position'][0]/16),math.floor(wall['position'][2]/16)
+            radius=value['view_distance']
+            expected={(x,z) for x in range(cx-radius,cx+radius+1) for z in range(cz-radius,cz+radius+1)
+                if ix*edge<=x<(ix+1)*edge and iz*edge<=z<(iz+1)*edge}
+            if set(map(tuple,wall['expected']))!=expected or not expected.issubset(set(map(tuple,wall['received']))) or wall['missing']:
+                raise ValueError('missing owned border column')
+        return dict(walls=16,expected_columns=sum(len(w['expected']) for w in value['walls']),missing_owned_columns=0)
+    if 'known_inventory' in value:
+        loader=importlib.machinery.SourceFileLoader('e12_e10_check',str(ROOT/'scripts/e10-analyse'))
+        spec=importlib.util.spec_from_loader('e12_e10_check',loader)
+        check=importlib.util.module_from_spec(spec)
+        loader.exec_module(check)
+        return check.verify(value,value['requested'])
+    if 'normal_terrain' in value:
+        if value['refused_cuts'] or value['disconnects'] or len(value['samples'])<100:
+            raise ValueError('cut run refused, disconnected or too small')
+        for endpoint in ['before','after']:
+            if sum(not p['name'].startswith('E12View') for p in value[endpoint]['players'])!=25:
+                raise ValueError('actual walking player count differs')
+        if not any(s['lifecycle']['proto_chunks']>0 for s in value['samples']) or not any(s['lifecycle']['unloaded_chunks']>0 for s in value['samples']):
+            raise ValueError('no proto or unload capture')
+        summary={key:percentiles([s[key] for s in value['samples']]) for key in ['rtt_ms','tick_ms','capture_ms','encode_ms','install_io_ms']}
+        if summary!=value['summary']:
+            raise ValueError('cut summary arithmetic differs')
+        return dict(samples=len(value['samples']),summary=summary,freeze_passed=summary['rtt_ms']['p95']<40,
+            load_1m=dict(min=min(s['load'][0] for s in value['samples']),max=max(s['load'][0] for s in value['samples'])))
+    if 'terrain_off' in value:
+        if len(value['trials'])!=value['crossings'] or value['crossings']<100 or value['disconnects']:
+            raise ValueError('terrain route incomplete')
+        if not value['terrain_off']:
+            final=value['final']
+            if value['standing']['missing'] or final['missing_frames'] or final['visible_reloads'] or final['frames']<100:
+                raise ValueError('visible columns missing or reloaded')
+            if value['foreign_entities_seen'] or not value['entity_positive_control'] or not value['foreign_block_update']:
+                raise ValueError('missing foreign terrain/entity positive controls')
+        return dict(crossings=len(value['trials']),terrain_off=value['terrain_off'],cost=value['cost'],
+            missing_frames=value['final']['missing_frames'],visible_reloads=value['final']['visible_reloads'])
+    if 'kind' in value:
+        if len(value['trials'])!=value['requested'] or value['requested']<100:
+            raise ValueError('vehicle route incomplete')
+        identity=value['trials'][0]['vehicle'][0]
+        for index,trial in enumerate(value['trials']):
+            if trial['index']!=index or trial['generation']!=index+1 or trial['vehicle'][0]!=identity:
+                raise ValueError('vehicle identity or generation changed')
+            if trial['live_counts']!={tile:int(tile==trial['target']) for tile in ['a','b','c','d']}:
+                raise ValueError('vehicle live owner differs')
+        if value['saved_root']!=identity or any(value['saved_entity_copies'].values()):
+            raise ValueError('saved vehicle missing or duplicated')
+        return dict(kind=value['kind'],crossings=len(value['trials']),vehicle_uuid=identity,saved_copies=1)
+    raise ValueError('unknown E12 result format')
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('files',nargs='+',type=Path)
+    args=parser.parse_args()
+    for path in args.files:
+        result=analyse(json.loads(path.read_text()))
+        target=path.with_name(path.stem+'-analysis.json')
+        target.write_text(json.dumps(result,indent=2)+'\n')
+        print(path.name,json.dumps(result))
+
+
+if __name__=='__main__':
+    main()

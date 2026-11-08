@@ -102,3 +102,55 @@ No Folia, Paper, other GPL source or `docs/research/05-folia.md` was read for E4
   plus exact source equality. The final check includes the test client's
   corrected 26.3 drop action and the persistence wrapper's proto-snapshot
   forwarding. Both deltas apply and reproduce the working source byte for byte.
+
+- `horizon-05-m2.patch`: E12 after the complete E10 Horizon stack on
+  `fc2868b2b26d56ec76e17414909fe58a3b87bb92`. Sends owned edge columns without
+  waiting for foreign light neighbours. Adds held, non-placeable terrain readers,
+  immutable cut pre-encoding, single-player vehicle groups, activation input and
+  full live player-state transfer. The latter preserves transient attribute
+  modifiers, controls, abilities, shared flags, pose and cooldown progress.
+  It does not change client physics or relax the lit-column guard.
+
+- `meridian-04-m2.patch`: E12 after the complete E10 Meridian stack on
+  `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`. Composes terrain by fixed column
+  owner, filters observer entities, acknowledges suppressed active-lane chunk
+  batches and keeps terrain across a swap. Server placements drive observers
+  even without client movement. The delta takes authoritative live attributes
+  rather than held-login defaults, and own metadata is coalesced by field.
+
+- `horizon-06-leases.patch`: E12's E16 integration after `horizon-05-m2.patch`.
+  Requires the E16 store/model API. Horizon itself claims an original-send lease,
+  owns its renewal thread and exposes the actual fence through `cluster-authority`.
+  Keeper locks never span network IO. A caller-supplied core gate protects login,
+  placement, packet dispatch, append, flush, installation and recovery writes.
+  Expiry latches the process read-only; healing does not revive it. Monotonic
+  clock comparison detects suspension without using wall time for authority.
+  Critical IO reserves 100 ms and checks again after barriers. This is not a
+  physical storage fence against unbounded pauses or IO inside a syscall.
+
+- `horizon-07-observer-status.patch`: after `horizon-06-leases.patch`. Adds
+  exact placed/held/terrain_reader guest status, frozen/released and chunk/wire
+  counters, and an observer-only radius request. `player-observe UUID` accepts
+  either the old position array or `{"position":[x,y,z],"radius":8}`. Explicit
+  radii 2 through 32 control loading and tracking without changing real-player
+  view caps. It also contains the final post-IO recovery authority checks.
+
+The canonical E17 handoff is `.local/bin/goliath-e12/FINAL.json`, with ordered
+patch SHA-256 values, internal-crate source identities, store identity and
+scalable transfer admission settings. Its Meridian entry is frozen at E12's
+handover. E18 owns successor Meridian patches. E12 no longer regenerates that
+source from E18's worktree.
+
+E12 uses `.local/bin/goliath-e12/LEASES` to select leased launcher setup. That
+setup skips legacy `Claim`, starts Horizon with an explicit takeover permission,
+then reads its granted fence instead of inventing a local deadline. Never mix
+leased Horizon with the retained E10 store. The E16 store is retained separately
+and copied by `scripts/e12-m2 build`. Old unleased experiments remain the default
+when their binary directory has no `LEASES` marker. `GOLIATH_BIN_DIR` selects a
+binary directory for the shared runner and E13 fixtures without changing their
+default E10 evidence. Keep the marker when making a leased binary snapshot.
+
+`python3 -B scripts/e12-patch` applies the pinned stacks in disposable archives
+and checks exact working-source byte equality, including the separate lease
+delta. E12's report and permanent packet checks are in
+`docs/experiments/E12-m2.md`. No E12 patch has been committed or sent upstream.

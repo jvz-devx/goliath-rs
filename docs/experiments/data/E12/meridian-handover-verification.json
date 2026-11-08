@@ -1,0 +1,120 @@
+[
+  {
+    "project": "meridian",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--profile",
+      "fast",
+      "-p",
+      "meridian-handoff",
+      "-p",
+      "meridian-proxy",
+      "-p",
+      "meridian-testkit",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "seconds": 2.0986535840056604,
+    "load_start": [
+      22.86962890625,
+      13.8994140625,
+      8.2919921875
+    ],
+    "load_end": [
+      23.1201171875,
+      14.10009765625,
+      8.3955078125
+    ],
+    "summary": [
+      "    Finished `fast` profile [optimized] target(s) in 2.03s"
+    ],
+    "tail": []
+  },
+  {
+    "project": "meridian",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--profile",
+      "fast",
+      "-p",
+      "meridian-config",
+      "-p",
+      "meridian-ghost",
+      "-p",
+      "meridian-handoff",
+      "-p",
+      "meridian-proxy",
+      "--lib",
+      "--bins",
+      "--",
+      "--skip",
+      "serve::tests::the_listener_queues_a_large_burst"
+    ],
+    "exit": 0,
+    "seconds": 17.613148125004955,
+    "load_start": [
+      23.1201171875,
+      14.10009765625,
+      8.3955078125
+    ],
+    "load_end": [
+      19.666015625,
+      13.78271484375,
+      8.38232421875
+    ],
+    "summary": [
+      "    Finished `fast` profile [optimized] target(s) in 7.61s",
+      "test result: ok. 202 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+      "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+      "test result: ok. 89 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.92s",
+      "test result: ok. 559 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.24s"
+    ],
+    "tail": []
+  },
+  {
+    "project": "meridian",
+    "command": [
+      "rustfmt",
+      "--edition",
+      "2024",
+      "--config",
+      "skip_children=true",
+      "--check",
+      "crates/meridian-ghost/src/view.rs",
+      "crates/meridian-handoff/src/control.rs",
+      "crates/meridian-handoff/src/lane_input.rs",
+      "crates/meridian-handoff/src/lib.rs",
+      "crates/meridian-handoff/src/prepare.rs",
+      "crates/meridian-handoff/src/session.rs",
+      "crates/meridian-handoff/src/switch.rs",
+      "crates/meridian-handoff/src/terrain.rs",
+      "crates/meridian-proxy/src/cluster.rs",
+      "crates/meridian-proxy/src/main.rs",
+      "crates/meridian-proxy/src/session.rs",
+      "crates/meridian-proxy/src/terrain.rs",
+      "crates/meridian-proxy/src/wall_approach.rs",
+      "crates/meridian-testkit/src/bin/e4-client.rs"
+    ],
+    "exit": 0,
+    "seconds": 0.0672657499962952,
+    "load_start": [
+      19.666015625,
+      13.78271484375,
+      8.38232421875
+    ],
+    "load_end": [
+      19.666015625,
+      13.78271484375,
+      8.38232421875
+    ],
+    "summary": [],
+    "tail": []
+  }
+]

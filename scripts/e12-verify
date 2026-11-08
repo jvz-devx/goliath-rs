@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Serial scoped gates for the upstream trees E12 owns. E15 owns root gates."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import time
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E12'
+
+
+def main():
+    env=dict(os.environ,CARGO_INCREMENTAL='0',CARGO_PROFILE_FAST_INHERITS='release',CARGO_PROFILE_FAST_LTO='false',
+        CARGO_PROFILE_FAST_CODEGEN_UNITS='16',E3_TEST_ROOT=str(ROOT/'.local/runs'))
+    env.pop('CI',None)
+    commands=[
+        ('horizon',['cargo','clippy','--locked','--profile','fast','--no-default-features','-p','horizon-client','--lib','--bin','horizon-client','--','-D','warnings']),
+        ('horizon',['cargo','test','--locked','--profile','fast','--no-default-features','-p','horizon-client','--lib','game::dedicated::tile_cut::store::tests']),
+        ('horizon',['cargo','test','--locked','--profile','fast','--no-default-features','-p','horizon-client','--lib','game::dedicated::cluster::lease::tests']),
+        ('horizon',['cargo','test','--locked','--profile','fast','--no-default-features','-p','horizon-items','--lib','cooldowns::tests']),
+        ('horizon',['cargo','test','--locked','--profile','fast','--no-default-features','-p','horizon-core','--lib','tile_ownership']),
+        ('horizon',['cargo','test','--locked','--profile','fast','--no-default-features','-p','horizon-client-render','--lib','tile_unknown_reads_are_solid_without_materializing_a_chunk']),
+        ('horizon',['cargo','test','--locked','--profile','fast','--no-default-features','-p','horizon-client-lib','--lib','lan::arrivals::tests']),
+        ('meridian',['cargo','clippy','--locked','--profile','fast','-p','meridian-handoff','-p','meridian-proxy','-p','meridian-testkit','--all-targets','--','-D','warnings']),
+        ('meridian',['cargo','test','--locked','--profile','fast','-p','meridian-config','-p','meridian-ghost','-p','meridian-handoff','-p','meridian-proxy','--lib','--bins','--','--skip','serve::tests::the_listener_queues_a_large_burst']),
+    ]
+    for project in json.loads((DATA/'patch.json').read_text()):
+        commands.append((project['project'],['rustfmt','--edition','2024','--config','skip_children=true','--check',*[p for p in project['changed'] if p.endswith('.rs')]]))
+    results=[]
+    for project,command in commands:
+        if project=='meridian' and (ROOT/'.local/bin/goliath-e12/MERIDIAN-HANDOVER').exists():
+            continue
+        if (ROOT/'.local/quiet-request').exists():
+            raise RuntimeError('quiet request appeared; no next build started, rerun gates after quiet window')
+        started=time.monotonic()
+        load=os.getloadavg()
+        print(project,' '.join(command),flush=True)
+        run=subprocess.run(command,cwd=ROOT/'.local/src'/project,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+        lines=run.stdout.replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME').splitlines()
+        result=dict(project=project,command=command,exit=run.returncode,seconds=time.monotonic()-started,load_start=load,load_end=os.getloadavg(),
+            summary=[line for line in lines if line.startswith(('test result:','error:','error[','    Finished'))],tail=lines[-25:] if run.returncode else [])
+        results.append(result)
+        (DATA/'verification.json').write_text(json.dumps(results,indent=2)+'\n')
+        print(json.dumps(result),flush=True)
+        if run.returncode:
+            raise SystemExit(run.returncode)
+
+
+if __name__=='__main__':
+    main()
