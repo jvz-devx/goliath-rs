@@ -16,6 +16,29 @@ from e11_support import (ROOT,RUNS,DATA,BINS,Control,Engine,CpuBudget,complete_j
     percentile,private_env,sanitize,save,usage,wait)
 
 
+class ClusterControl(Control):
+    """Count placed players, retaining held and reader sessions as explicit work.
+
+    Readers and prepared arrivals are real backend sessions but not additional
+    simulated players. No PID or its CPU is removed by this accounting.
+    """
+    def ask(self, text):
+        value=super().ask(text)
+        if text=='server-status':
+            guests=value['players']
+            if any(not all(key in guest for key in ['placed','held','terrain_reader']) for guest in guests):
+                raise RuntimeError('cluster status lacks explicit session-kind flags')
+            if any(guest['terrain_reader'] and guest['placed'] for guest in guests):
+                raise RuntimeError('terrain reader entered player simulation')
+            value['session_guests']=guests
+            value['session_counts']={'total':len(guests),
+                'real':sum(g['placed'] and not g['terrain_reader'] for g in guests),
+                'held':sum(g['held'] and not g['placed'] and not g['terrain_reader'] for g in guests),
+                'terrain_reader':sum(g['terrain_reader'] for g in guests)}
+            value['players']=[g for g in guests if g['placed'] and not g['terrain_reader']]
+        return value
+
+
 def game_time(engine):
     before=time.monotonic()
     reply=engine.console('time query gametime')
@@ -32,6 +55,15 @@ def latest(path):
     if not rows:
         return {}
     return rows[-1]
+
+
+def drain_ticks(engines, traces):
+    """Keep every raw sample while a long soak stays inside the engine buffer."""
+    for engine,trace in zip(engines,traces):
+        batch=engine.ask('e11-samples')
+        trace['ticks'].extend(batch['ticks'])
+        trace['digests'].extend(batch.get('digests',[]))
+        trace['dropped']+=batch['dropped']
 
 
 def route_anchor(index,count,seed,spread):
@@ -163,6 +195,7 @@ def evaluate(samples, raw, expected, server_cores, bot_cores, max_load, expected
         'work_per_tile':[{'players':[s['tiles'][i]['players'] for s in samples],
             'chunks':[s['tiles'][i]['chunks'] for s in samples],
             'levels':[s['tiles'][i]['levels'] for s in samples],
+            'session_counts':[s['tiles'][i].get('session_counts') for s in samples],
             'mob_count':[s['tiles'][i].get('e11_population') for s in samples]} for i in range(len(raw))]}
 
 
@@ -198,7 +231,8 @@ def cell(config,count,repeat,args):
                 raise RuntimeError('quiet window marker missing at cell start')
             external=config.get('mode')=='external'
             if external:
-                engines=[Control(Path(s['endpoint']).expanduser()) for s in config['servers']]
+                controller=ClusterControl if config.get('session_accounting')=='explicit' else Control
+                engines=[controller(Path(s['endpoint']).expanduser()) for s in config['servers']]
                 pids=[s['pid'] for s in config['servers']]+config.get('proxy_pids',[])+config.get('service_pids',[])
                 targets=config['bot_targets']
             else:
@@ -222,7 +256,7 @@ def cell(config,count,repeat,args):
                 e.console('time set day')
             bot_path=folder/'bots.jsonl'
             bot_log=bot_path.open('w')
-            command=[str(BINS/'horizon-bots'),'--event-loop','--servers',','.join(targets),'--bots',str(count),
+            command=[str(config.get('bot_binary',BINS/'horizon-bots')),'--event-loop','--servers',','.join(targets),'--bots',str(count),
                 '--behaviour','route','--seconds','7200','--join-every',str(args.join_every),
                 '--view-distance',str(config.get('view_distance',3)),'--seed',str(config.get('seed',12345)),
                 '--spread',','.join(map(str,config.get('spread',[-64,-64,64,64]))),'--speed',str(config.get('speed',4)),
@@ -265,12 +299,19 @@ def cell(config,count,repeat,args):
                     e.ask('e11-samples')
             limiter_start=[limit.report() for limit in limits]
             samples=[snapshot(engines,pids,bot.pid,bot_path)]
+            traces=[{'ticks':[],'digests':[],'dropped':0} for _ in engines]
+            next_drain=time.monotonic()+60
             end=time.monotonic()+args.seconds
             while time.monotonic()<end:
                 if quiet_marker and not quiet_marker.exists(): window_lost=True
                 time.sleep(min(args.sample_every,max(0,end-time.monotonic())))
                 samples.append(snapshot(engines,pids,bot.pid,bot_path))
-            raw=[] if args.bot_only else [e.ask('e11-samples') for e in engines]
+                if not args.bot_only and time.monotonic()>=next_drain:
+                    drain_ticks(engines,traces)
+                    next_drain=time.monotonic()+60
+            if not args.bot_only:
+                drain_ticks(engines,traces)
+            raw=[] if args.bot_only else traces
             result=evaluate_bots(samples,count,args.bot_cores,args.max_load) if args.bot_only else evaluate(
                 samples,raw,count,float('inf') if args.uncapped_servers else args.server_cores,args.bot_cores,
                 float('inf') if args.uncapped_servers else args.max_load,config.get('mobs',64),config)
@@ -333,7 +374,7 @@ def main():
     requested_loads=args.loads
     reference_capacity=None
     reference_path=DATA/'plain-staircase.json'
-    if args.quiet_marker and args.servers==4 and not args.bot_only and not args.uncapped_servers and args.loads!='4' and reference_path.exists():
+    if config.get('mode')!='external' and args.quiet_marker and args.servers==4 and not args.bot_only and not args.uncapped_servers and args.loads!='4' and reference_path.exists():
         reference=json.loads(reference_path.read_text())
         reference_capacity=reference.get('capacity_lower_bound')
         if reference_capacity:

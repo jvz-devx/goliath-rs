@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""E17 packet observer framing and latency-accounting controls."""
+import unittest
+import zlib
+import socket
+import time
+import tempfile
+import json
+import sys
+import io
+from contextlib import redirect_stdout
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+from unittest.mock import patch
+from e17_wire import Decoder, PacketObserver, varint
+
+loader=importlib.machinery.SourceFileLoader('e17_bench',str(Path(__file__).with_name('capacity-bench')))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+bench=importlib.util.module_from_spec(spec)
+loader.exec_module(bench)
+
+
+def encode(value):
+    result=bytearray()
+    while value>127:
+        result.append((value&127)|128)
+        value>>=7
+    return bytes(result)+bytes([value])
+
+
+def frame(body, compressed=False):
+    if compressed:
+        body=encode(len(body))+zlib.compress(body)
+    return encode(len(body))+body
+
+
+class ObserverTests(unittest.TestCase):
+    def test_outbound_socket_does_not_use_system_ephemeral_range(self):
+        observer=PacketObserver()
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1',0))
+            listener.listen()
+            connection=observer.connect(listener.getsockname())
+            try:
+                self.assertGreaterEqual(connection.getsockname()[1],20000)
+                self.assertLess(connection.getsockname()[1],40000)
+                accepted,_=listener.accept()
+                accepted.close()
+            finally:
+                connection.close()
+                observer.selector.close()
+
+    def test_repeated_tick_drains_retain_samples_sequences_and_drops(self):
+        class Engine:
+            def __init__(self): self.sequence=0
+            def ask(self,command):
+                self.sequence+=1
+                return {'ticks':[{'sequence':self.sequence,'ms':self.sequence}], 'dropped':1,'digests':[]}
+        engine=Engine()
+        traces=[{'ticks':[],'digests':[],'dropped':0}]
+        bench.drain_ticks([engine],traces)
+        bench.drain_ticks([engine],traces)
+        self.assertEqual([t['sequence'] for t in traces[0]['ticks']],[1,2])
+        self.assertEqual(traces[0]['dropped'],2)
+
+    def test_external_load_is_not_replaced_by_old_e11_reference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder=Path(temporary)
+            (folder/'plain-staircase.json').write_text(json.dumps({'capacity_lower_bound':200}))
+            config=folder/'external.json'
+            config.write_text(json.dumps({'mode':'external','release_verified':True,'build':{'profile':'release'},
+                'servers':[{} for _ in range(4)]}))
+            seen=[]
+            def cell(config,count,repeat,args):
+                seen.append(count)
+                return {'bots':count,'repeat':repeat,'pass':True,'valid':True,'reasons':[],'tps':[20.],'tick_p99_ms':[1.]}
+            arguments=['capacity-bench','--config',str(config),'--loads','900','--repeat','1',
+                '--quiet-marker','unused-test-marker','--out',str(folder/'result.json')]
+            with patch.object(sys,'argv',arguments), \
+                    patch.object(bench,'DATA',folder),patch.object(bench,'cell',cell), \
+                    patch.object(bench.os,'getloadavg',return_value=(0.,0.,0.)), \
+                    patch.object(bench.subprocess,'check_output',return_value='1'),redirect_stdout(io.StringIO()):
+                bench.main()
+            self.assertEqual(seen,[900])
+
+    def test_external_counts_distinguish_simulated_players_from_work_sessions(self):
+        guests=[{'name':'real','placed':True,'held':False,'terrain_reader':False},
+            {'name':'preparation','placed':False,'held':True,'terrain_reader':False},
+            {'name':'reader','placed':False,'held':True,'terrain_reader':True}]
+        controller=bench.ClusterControl.__new__(bench.ClusterControl)
+        with patch.object(bench.Control,'ask',return_value={'players':guests}):
+            status=controller.ask('server-status')
+        self.assertEqual(status['players'],guests[:1])
+        self.assertEqual(status['session_counts'],{'total':3,'real':1,'held':1,'terrain_reader':1})
+        self.assertEqual(status['session_guests'],guests)
+
+    def test_missing_session_flags_refuse_external_acceptance(self):
+        controller=bench.ClusterControl.__new__(bench.ClusterControl)
+        with patch.object(bench.Control,'ask',return_value={'players':[{'name':'unknown'}]}):
+            with self.assertRaisesRegex(RuntimeError,'explicit session-kind flags'):
+                controller.ask('server-status')
+
+    def test_placed_reader_is_rejected_instead_of_hidden(self):
+        controller=bench.ClusterControl.__new__(bench.ClusterControl)
+        with patch.object(bench.Control,'ask',return_value={'players':[
+                {'name':'reader','placed':True,'held':True,'terrain_reader':True}]}):
+            with self.assertRaisesRegex(RuntimeError,'entered player simulation'):
+                controller.ask('server-status')
+
+    def login(self,decoder,compressed=False):
+        decoder.feed(0,frame(b'\0\2'),1)
+        decoder.feed(0,frame(b'\0\7E17Bot0'),1)
+        if compressed: decoder.feed(1,frame(b'\3\0'),1)
+        decoder.feed(0,frame(b'\3',compressed),1)
+        decoder.feed(0,frame(b'\3',compressed),1)
+        self.assertEqual(decoder.phase,'play')
+
+    def test_varints_wait_for_complete_input(self):
+        self.assertIsNone(varint(b'\x80'))
+        self.assertEqual(varint(encode(262144)),(262144,3))
+
+    def test_partial_frames_and_compression_preserve_packet_identity(self):
+        for compressed in (False,True):
+            rows=[]
+            decoder=Decoder(lambda *row:rows.append(row))
+            self.login(decoder,compressed)
+            packet=bytes([30])+bytes(range(25))
+            wire=frame(packet,compressed)
+            decoder.feed(0,wire[:-1],2)
+            self.assertEqual(rows,[])
+            decoder.feed(0,wire[-1:],3)
+            self.assertEqual(rows,[('E17Bot0',packet,3)])
+
+    def test_status_probe_does_not_enter_login_decoder(self):
+        decoder=Decoder(lambda *row:self.fail('status is not movement'))
+        decoder.feed(0,frame(b'\0\1')+frame(b'\0'),1)
+        self.assertEqual(decoder.phase,'status')
+
+    def test_fifo_matching_includes_tail_and_unmatched_packets(self):
+        observer=PacketObserver()
+        try:
+            for timestamp in [1.,2.,3.]: observer.observe(True,'E17Bot0',b'position',timestamp)
+            observer.observe(False,'E17Bot0',b'position',1.001)
+            observer.observe(False,'E17Bot0',b'position',2.1)
+            row=observer.report()
+            self.assertEqual(row['matched'],2)
+            self.assertEqual(row['unmatched_front'],1)
+            self.assertGreaterEqual(row['p95_ms'],100)
+            self.assertLessEqual(row['p50_ms'],1.001)
+            self.assertEqual(sum(row['histogram_us'].values()),2)
+        finally:
+            observer.selector.close()
+
+    def test_real_loopback_observers_forward_and_match(self):
+        observer=PacketObserver()
+        listener=socket.socket()
+        listener.bind(('127.0.0.1',0))
+        listener.listen()
+        listener.settimeout(3)
+        backend=observer.listen(listener.getsockname())
+        front=observer.listen(('127.0.0.1',backend),front=True)
+        with socket.socket() as closed:
+            closed.bind(('127.0.0.1',0))
+            unreachable=closed.getsockname()
+        failed=observer.listen(unreachable,label='failed-test')
+        observer.start()
+        try:
+            with socket.create_connection(('127.0.0.1',failed),timeout=3) as client:
+                self.assertEqual(client.recv(1),b'')
+            self.assertTrue(observer.thread.is_alive())
+            with socket.create_connection(('127.0.0.1',front),timeout=3) as client:
+                packet=b'\x1e'+bytes(range(25))
+                wire=b''.join(frame(body) for body in [b'\0\2',b'\0\7E17Bot0',b'\3',b'\3',packet])
+                client.sendall(wire)
+                connection,_=listener.accept()
+                with connection:
+                    connection.settimeout(3)
+                    received=b''
+                    while len(received)<len(wire): received+=connection.recv(4096)
+                    self.assertEqual(received,wire)
+                    self.assertEqual(observer.report()['matched'],1)
+                    self.assertEqual(observer.report()['unmatched_front'],0)
+        finally:
+            listener.close()
+            observer.stop()
+        self.assertEqual(len(observer.errors),1)
+        self.assertIn('connect failed-test',observer.errors[0])
+
+
+if __name__=='__main__': unittest.main()

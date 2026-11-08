@@ -1,0 +1,692 @@
+{
+  "kind": "E17-proxy-pilot",
+  "acceptance": false,
+  "profile": "fast",
+  "bots": 50,
+  "seconds": 30.0,
+  "settle_seconds": 10,
+  "load_start": [
+    4.375,
+    3.83837890625,
+    4.6630859375
+  ],
+  "binaries": {
+    "horizon-client": "16f0cdce2d37d8abf8736d4a28d87c3387fa766ebd698c78e6307a929ee8aa77",
+    "meridian": "94d1dfad6e36146deff9d899340eac69e39fa902b99306b62c6de3514456c0c5",
+    "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af"
+  },
+  "bot_binary_sha256": "76db11c864bcf01bfbcdfa533923c78f7fb833970c9debcc4863551ecc8469a4",
+  "samples": [],
+  "join_samples": [
+    {
+      "at": 110528.311040875,
+      "proxy": {
+        "cpu_s": 0.005296916666666666,
+        "rss_mb": 7.640625,
+        "threads": 9
+      },
+      "bots": {},
+      "load": [
+        4.375,
+        3.83837890625,
+        4.6630859375
+      ]
+    }
+  ],
+  "idle_proxy": {
+    "cpu_s": 0.0051922083333333325,
+    "rss_mb": 7.578125,
+    "threads": 10
+  },
+  "status": "failed",
+  "error": "bot join failed: {'bytes_in': 386031, 'bytes_out': 5106, 'chunks': 798, 'corrections': 0, 'distance': 14.4, 'elapsed': 1.000236292, 'errors': ['8: socket closed'], 'event_loop': True, 'failed': 1, 'falling_behind': False, 'joined': 10, 'late_rounds': 0, 'max_lateness_ms': 0.0, 'online': 9, 'rounds': 21, 'switches': 0, 'threads': 1, 'transfers': 0, 'waited_ticks': 27}",
+  "traceback": "Traceback (most recent call last):\n  File \"$REPO/scripts/e17-m4\", line 325, in pilot\n    wait(joined,120,'cluster bot join timeout')\n    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"$REPO/scripts/e11_support.py\", line 52, in wait\n    value = predicate()\n  File \"$REPO/scripts/e17-m4\", line 323, in joined\n    raise RuntimeError(f'bot join failed: {state}')\nRuntimeError: bot join failed: {'bytes_in': 386031, 'bytes_out': 5106, 'chunks': 798, 'corrections': 0, 'distance': 14.4, 'elapsed': 1.000236292, 'errors': ['8: socket closed'], 'event_loop': True, 'failed': 1, 'falling_behind': False, 'joined': 10, 'late_rounds': 0, 'max_lateness_ms': 0.0, 'online': 9, 'rounds': 21, 'switches': 0, 'threads': 1, 'transfers': 0, 'waited_ticks': 27}\n",
+  "proxy_at_failure": {
+    "cpu_s": 0.11657720833333332,
+    "rss_mb": 23.65625,
+    "threads": 87
+  },
+  "packet_latency": {
+    "scope": "serverbound position packets, observer front-read to backend-read",
+    "includes": "observer queues, proxy queues and TCP scheduling",
+    "front_packets": 99,
+    "backend_packets": 99,
+    "matched": 99,
+    "unmatched_front": 0,
+    "p50_ms": 0.2,
+    "p95_ms": 0.861,
+    "p99_ms": 0.973,
+    "maximum_ms": 0.973,
+    "matched_fraction": 1.0,
+    "histogram_us": {
+      "253": 1,
+      "126": 1,
+      "197": 2,
+      "206": 1,
+      "107": 1,
+      "121": 1,
+      "235": 1,
+      "163": 2,
+      "164": 1,
+      "129": 1,
+      "135": 3,
+      "144": 1,
+      "261": 2,
+      "268": 1,
+      "269": 1,
+      "132": 2,
+      "131": 1,
+      "247": 2,
+      "246": 2,
+      "255": 1,
+      "258": 1,
+      "156": 1,
+      "140": 2,
+      "147": 1,
+      "195": 2,
+      "180": 1,
+      "192": 1,
+      "185": 3,
+      "190": 2,
+      "187": 2,
+      "177": 2,
+      "183": 1,
+      "181": 2,
+      "173": 1,
+      "332": 1,
+      "189": 1,
+      "176": 2,
+      "179": 1,
+      "240": 1,
+      "245": 3,
+      "239": 1,
+      "233": 1,
+      "236": 2,
+      "793": 1,
+      "709": 1,
+      "817": 1,
+      "861": 1,
+      "939": 1,
+      "949": 1,
+      "947": 1,
+      "973": 1,
+      "188": 1,
+      "182": 1,
+      "200": 1,
+      "219": 1,
+      "222": 1,
+      "395": 1,
+      "397": 1,
+      "392": 1,
+      "390": 1,
+      "299": 1,
+      "248": 1,
+      "250": 1,
+      "251": 1,
+      "191": 1,
+      "169": 1,
+      "165": 1,
+      "167": 1,
+      "168": 1,
+      "166": 1,
+      "452": 1,
+      "445": 1,
+      "447": 1,
+      "430": 2,
+      "426": 1,
+      "433": 1,
+      "442": 1,
+      "446": 1
+    },
+    "errors": []
+  },
+  "packet_network": {
+    "a:real_or_held": {
+      "from_backend_packets": 1389,
+      "from_backend_wire_bytes": 98337,
+      "to_backend_packets": 336,
+      "to_backend_wire_bytes": 4204
+    },
+    "front:real_or_held": {
+      "from_backend_packets": 1896,
+      "from_backend_wire_bytes": 174531,
+      "to_backend_packets": 329,
+      "to_backend_wire_bytes": 4206
+    },
+    "a:reader": {
+      "from_backend_packets": 1027,
+      "from_backend_wire_bytes": 72090,
+      "to_backend_packets": 33,
+      "to_backend_wire_bytes": 460
+    },
+    "b:reader": {
+      "from_backend_packets": 469,
+      "from_backend_wire_bytes": 48212,
+      "to_backend_packets": 33,
+      "to_backend_wire_bytes": 431
+    },
+    "c:reader": {
+      "from_backend_packets": 420,
+      "from_backend_wire_bytes": 46260,
+      "to_backend_packets": 32,
+      "to_backend_wire_bytes": 424
+    },
+    "d:reader": {
+      "from_backend_packets": 421,
+      "from_backend_wire_bytes": 46261,
+      "to_backend_packets": 32,
+      "to_backend_wire_bytes": 424
+    },
+    "b:real_or_held": {
+      "from_backend_packets": 131,
+      "from_backend_wire_bytes": 12743,
+      "to_backend_packets": 19,
+      "to_backend_wire_bytes": 292
+    },
+    "d:real_or_held": {
+      "from_backend_packets": 51,
+      "from_backend_wire_bytes": 5762,
+      "to_backend_packets": 4,
+      "to_backend_wire_bytes": 53
+    },
+    "c:real_or_held": {
+      "from_backend_packets": 73,
+      "from_backend_wire_bytes": 8376,
+      "to_backend_packets": 5,
+      "to_backend_wire_bytes": 89
+    }
+  },
+  "bot_tail": [
+    {
+      "routes": [
+        {
+          "name": "E17Bot0",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot1",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot2",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot3",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot4",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot5",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot6",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot7",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot8",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot9",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot10",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot11",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot12",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot13",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot14",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot15",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot16",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot17",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot18",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot19",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot20",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot21",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot22",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot23",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot24",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot25",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot26",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot27",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot28",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot29",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot30",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot31",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot32",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot33",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot34",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot35",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot36",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot37",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot38",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot39",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot40",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot41",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot42",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot43",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot44",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot45",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot46",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot47",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot48",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        },
+        {
+          "name": "E17Bot49",
+          "server": 0,
+          "start": [
+            -12.0,
+            12.0
+          ]
+        }
+      ]
+    },
+    {
+      "bytes_in": 386031,
+      "bytes_out": 5106,
+      "chunks": 798,
+      "corrections": 0,
+      "distance": 14.4,
+      "elapsed": 1.000236292,
+      "errors": [
+        "8: socket closed"
+      ],
+      "event_loop": true,
+      "failed": 1,
+      "falling_behind": false,
+      "joined": 10,
+      "late_rounds": 0,
+      "max_lateness_ms": 0.0,
+      "online": 9,
+      "rounds": 21,
+      "switches": 0,
+      "threads": 1,
+      "transfers": 0,
+      "waited_ticks": 27
+    }
+  ],
+  "phases": [
+    {
+      "capture_ms": 0.14875000000000002,
+      "encode_ms": 1.463708,
+      "install_io_ms": 3.2195,
+      "ms": 10.868915999999999,
+      "phase": "cut",
+      "sequence": 2,
+      "tick_ms": 4.573416,
+      "uuid": "169c6c90fe973d14b3d9b7f094525515"
+    },
+    {
+      "generation": 1,
+      "ms": 3.613292,
+      "phase": "cas",
+      "target": 1,
+      "uuid": "169c6c90fe973d14b3d9b7f094525515"
+    },
+    {
+      "initial_packets": 0,
+      "ms": 1.7265,
+      "ns": 1794101475608844000,
+      "phase": "activation",
+      "timing": {
+        "apply_ms": 1.033125,
+        "queue_ms": 0.396958,
+        "tick": 61
+      },
+      "uuid": "169c6c90fe973d14b3d9b7f094525515"
+    }
+  ],
+  "proxy_tail": [
+    "E8_EVENT {\"elapsed_ms\":586.950833,\"ns\":1794101475613029000,\"step\":\"commit: replayed 0 ordered inputs\",\"target\":\"b\"}",
+    "2026-11-08T01:31:15.613Z INFO  E17Bot0 moved from a to b in 587 ms (prepare 566 ms, freeze 11 ms, hand over 6 ms, commit 3 ms): 15 packets, 4445 bytes (25 chunks, 0 entities)",
+    "2026-11-08T01:31:15.625Z INFO  E17Bot4: switch to b: prepare: the target's world is here (9 chunks, 1 entities) (+154 ms)",
+    "E8_EVENT {\"elapsed_ms\":154.592875,\"ns\":1794101475625631000,\"step\":\"prepare: the target's world is here (9 chunks, 1 entities)\",\"target\":\"b\"}",
+    "2026-11-08T01:31:15.645Z INFO  E17Bot7: switch from a to c: starting",
+    "2026-11-08T01:31:15.647Z INFO  E17Bot7: switch to c: prepare: the target expects the player (+0 ms)",
+    "E8_EVENT {\"elapsed_ms\":0.458417,\"ns\":1794101475647508000,\"step\":\"prepare: the target expects the player\",\"target\":\"c\"}",
+    "2026-11-08T01:31:15.651Z INFO  E17Bot6: switch from a to d: starting",
+    "2026-11-08T01:31:15.653Z WARN  wall refusal (retry false): E17Bot6 could not move from a to d: prepare: d would not expect the player: {\"error\":\"too many players are expected at once\",\"timing\":{\"apply_ms\":0.036917,\"queue_ms\":1.0427920000000002,\"tick\":32}} (the player stays where they were)",
+    "2026-11-08T01:31:15.655Z INFO  127.0.0.1:59188: E17Bot9 (167ba274-859d-398f-a5eb-4ddeee9a05e4) joined backend \"a\"",
+    "2026-11-08T01:31:15.663Z INFO  E17Bot7: switch to c: prepare: the player is logged in on the target (+16 ms)",
+    "E8_EVENT {\"elapsed_ms\":16.505667000000003,\"ns\":1794101475663564000,\"step\":\"prepare: the player is logged in on the target\",\"target\":\"c\"}",
+    "2026-11-08T01:31:15.665Z INFO  E17Bot7: switch to c: prepare: the target configures clients as the first server did (digest) (+18 ms)",
+    "E8_EVENT {\"elapsed_ms\":18.050167,\"ns\":1794101475665110000,\"step\":\"prepare: the target configures clients as the first server did (digest)\",\"target\":\"c\"}",
+    "2026-11-08T01:31:15.665Z WARN  terrain composition stopped: observer prepare refused: {\"error\":\"too many players are expected at once\",\"timing\":{\"apply_ms\":0.034165999999999995,\"queue_ms\":0.054417,\"tick\":32}}",
+    "2026-11-08T01:31:15.665Z INFO  127.0.0.1:59155: E17Bot8 (9b9790ed-2216-3e4b-aca9-5dd438baa5d0) left backend \"a\" after 0.1 s: 80 packets, 74876 bytes to the player; 7 packets, 68 bytes to the backend",
+    "2026-11-08T01:31:15.758Z INFO  127.0.0.1:59102: E17Bot7 (2eeeb4a8-8dd7-3852-977b-e86e92c566ba) left backend \"a\" after 0.3 s: 244 packets, 804083 bytes to the player; 17 packets, 203 bytes to the backend",
+    "2026-11-08T01:31:15.758Z INFO  127.0.0.1:59188: E17Bot9 (167ba274-859d-398f-a5eb-4ddeee9a05e4) left backend \"a\" after 0.1 s: 76 packets, 74506 bytes to the player; 7 packets, 68 bytes to the backend",
+    "2026-11-08T01:31:15.758Z INFO  127.0.0.1:59070: E17Bot6 (6310f143-03fb-302d-811c-e7ef3d4607f5) left backend \"a\" after 0.4 s: 255 packets, 804549 bytes to the player; 19 packets, 230 bytes to the backend",
+    "2026-11-08T01:31:15.758Z INFO  127.0.0.1:59017: E17Bot4 (7eea5bc0-db77-3ba5-801a-1abbc6463551) left backend \"a\" after 0.6 s: 272 packets, 798115 bytes to the player; 27 packets, 338 bytes to the backend",
+    "2026-11-08T01:31:15.758Z INFO  127.0.0.1:59040: E17Bot5 (b2debf8d-e190-3f66-b351-17bf92589443) left backend \"a\" after 0.5 s: 266 packets, 797729 bytes to the player; 23 packets, 284 bytes to the backend",
+    "2026-11-08T01:31:15.758Z INFO  127.0.0.1:58941: E17Bot1 (ee1384d8-c817-39f6-82c0-c01d3075bc03) left backend \"a\" after 0.9 s: 293 packets, 806285 bytes to the player; 39 packets, 500 bytes to the backend",
+    "2026-11-08T01:31:15.758Z INFO  127.0.0.1:58992: E17Bot3 (e298eb4d-7ffd-362f-80ca-0f92625c6a4d) left backend \"a\" after 0.7 s: 281 packets, 805703 bytes to the player; 31 packets, 392 bytes to the backend",
+    "2026-11-08T01:31:15.758Z INFO  127.0.0.1:58964: E17Bot2 (f84afa6b-8f58-3b7e-8824-22e036a6b405) left backend \"a\" after 0.8 s: 289 packets, 806031 bytes to the player; 35 packets, 446 bytes to the backend",
+    "2026-11-08T01:31:15.758Z INFO  127.0.0.1:58928: E17Bot0 (169c6c90-fe97-3d14-b3d9-b7f094525515) left backend \"a\" after 1.0 s: 283 packets, 809711 bytes to the player; 43 packets, 554 bytes to the backend"
+  ],
+  "elapsed_s": 6.86352483301016,
+  "load_end": [
+    7.4677734375,
+    4.48828125,
+    4.8876953125
+  ]
+}

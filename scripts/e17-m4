@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+"""E17 real-cluster adapter, early proxy pilots and release-build provenance."""
+import argparse
+import contextlib
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+import io
+import tarfile
+import base64
+import threading
+import copy
+from datetime import datetime, timezone
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from e11_support import ROOT, RUNS, BINS as BOT_BINS, usage, save, private_env, complete_json_lines, wait
+from e17_wire import PacketObserver
+
+DATA = ROOT / 'docs/experiments/data/E17'
+RELEASE = ROOT / '.local/bin/goliath-e17-release'
+
+
+@contextlib.contextmanager
+def quiet_window(name):
+    request=ROOT/'.local/quiet-request'
+    acknowledgements=[ROOT/f'.local/quiet-ack-{agent}' for agent in ['E12','E18']]
+    if request.exists() or any(path.exists() for path in acknowledgements):
+        raise RuntimeError('another request or stale acknowledgement exists; not overwriting')
+    identity=json.dumps({'owner':'E17','name':name,'time':datetime.now(timezone.utc).isoformat(),'pid':os.getpid()})+'\n'
+    request.write_text(identity)
+    metadata={'request':json.loads(identity),'load_request':os.getloadavg(),'status':'waiting'}
+    began=time.monotonic()
+    try:
+        next_notice=0.
+        while not all(path.exists() for path in acknowledgements) or os.getloadavg()[0]>4:
+            now=time.monotonic()
+            if now-began>=1800: raise TimeoutError('quiet acks and load <=4 not obtained within 30 minutes')
+            if not request.exists() or request.read_text()!=identity: raise RuntimeError('quiet request changed')
+            if now>=next_notice:
+                print('quiet wait '+json.dumps({'acks':{p.name:p.exists() for p in acknowledgements},'load':os.getloadavg()}),flush=True)
+                next_notice=now+30
+            time.sleep(1)
+        metadata.update(status='running',load_start=os.getloadavg(),wait_seconds=time.monotonic()-began,
+            acknowledgements={path.name:path.read_text() for path in acknowledgements})
+        save(DATA/(name+'-quiet.json'),metadata)
+        # Forty minutes from marker creation, including its wait, stays under 45.
+        yield request,max(0,2400-(time.monotonic()-began))
+        metadata['status']='complete'
+    except BaseException as error:
+        metadata.update(status='failed',error=str(error))
+        raise
+    finally:
+        if request.exists() and request.read_text()==identity:
+            request.unlink()
+            for path in acknowledgements: path.unlink(missing_ok=True)
+            (ROOT/'.local/quiet-ack-E13').unlink(missing_ok=True)
+        metadata.update(total_seconds=time.monotonic()-began,load_end=os.getloadavg())
+        save(DATA/(name+'-quiet.json'),metadata)
+
+
+def baseline(args):
+    with quiet_window(args.name) as (request,remaining):
+        command=[sys.executable,'-B',str(ROOT/'scripts/capacity-bench'),
+            '--loads','200,225,250,275,300,325,350,375,400','--repeat','2','--refine-step','0',
+            '--quiet-marker',str(request),'--out',str(DATA/(args.name+'.json'))]
+        print('baseline command '+json.dumps(command),flush=True)
+        process=subprocess.Popen(command,cwd=ROOT,start_new_session=True)
+        try:
+            process.wait(timeout=remaining)
+            if process.returncode: raise subprocess.CalledProcessError(process.returncode,command)
+        finally:
+            if process.poll() is None:
+                import signal
+                os.killpg(process.pid,signal.SIGINT)
+                try: process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid,signal.SIGCONT)
+                    os.killpg(process.pid,signal.SIGTERM)
+                    process.wait(timeout=10)
+    return True
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def snapshot(args):
+    source=Path(args.bins)
+    target=ROOT/'.local/bin/goliath-e17-pilot'
+    target.mkdir(parents=True,exist_ok=True)
+    names=['horizon-client','meridian','meridian-sidecar','goliath-store']
+    before={name:sha(source/name) for name in names}
+    for name in names:
+        staged=target/(name+'.new')
+        shutil.copy2(source/name,staged)
+        if sha(staged)!=before[name]: raise RuntimeError('pilot source changed during snapshot')
+        staged.replace(target/name)
+    if (source/'LEASES').exists(): shutil.copy2(source/'LEASES',target/'LEASES')
+    if (source/'READY').exists(): shutil.copy2(source/'READY',target/'READY')
+    save(DATA/(args.name+'.json'),{'kind':'E17-pilot-binary-snapshot','profile':'fast',
+        'source':str(source),'target':str(target),'binaries':before,'load':os.getloadavg(),
+        'kernel_thread_settings':{key:int(subprocess.check_output(['sysctl','-n',key],text=True))
+            for key in ['kern.num_taskthreads','kern.num_threads','kern.maxprocperuid']}})
+    return True
+
+
+def build(args):
+    marker=ROOT/'.local/bin/goliath-e12/FINAL'
+    manifest=marker.with_suffix('.json')
+    if not marker.exists() or not manifest.exists():
+        raise RuntimeError('wait for E12 FINAL and FINAL.json before a release export')
+    if not args.proxy_manifest:
+        raise RuntimeError('wait for the parent-selected E18 Meridian stack; pass --proxy-manifest')
+    proxy_manifest=Path(args.proxy_manifest)
+    proxy_final=json.loads(proxy_manifest.read_text())
+    if (ROOT/'.local/quiet-request').exists():
+        raise RuntimeError('do not build during a quiet window')
+    final=json.loads(manifest.read_text())
+    output={'kind':'E17-fresh-release-build','final':final,'final_sha256':sha(manifest),
+        'proxy_final':proxy_final,'proxy_final_sha256':sha(proxy_manifest),
+        'profile':'release','incremental':False,'lto':'thin','codegen_units':1,'commands':[]}
+    settings={key:value for key,value in os.environ.items() if key not in ['CI','CARGO_TARGET_DIR']}
+    settings.update(CARGO_INCREMENTAL='0',CARGO_PROFILE_RELEASE_LTO='thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',CARGO_BUILD_JOBS='6')
+    RUNS.mkdir(parents=True,exist_ok=True)
+    RELEASE.mkdir(parents=True,exist_ok=True)
+    began=time.monotonic()
+    try:
+        with tempfile.TemporaryDirectory(prefix='E17-build-',dir=RUNS) as temporary:
+            root=Path(temporary)
+            for name in ['Cargo.toml','Cargo.lock','clippy.toml']:
+                shutil.copy2(ROOT/name,root/name)
+            shutil.copytree(ROOT/'crates',root/'crates')
+            projects=copy.deepcopy(final['projects'])
+            if isinstance(projects,list): projects={p['project']:p for p in projects}
+            if 'projects' in proxy_final:
+                proxy_projects=proxy_final['projects']
+                if isinstance(proxy_projects,list): proxy_projects={p['project']:p for p in proxy_projects}
+                projects['meridian']=proxy_projects['meridian']
+            else:
+                projects['meridian']=proxy_final
+            output['effective_projects']=projects
+            output['measurement_patches']=[]
+            for project in ['horizon','meridian']:
+                spec=projects[project]
+                destination=root/'.local/src'/project
+                destination.mkdir(parents=True)
+                archive=subprocess.check_output(['git','-C',ROOT/'.local/src'/project,'archive',spec['pin']])
+                with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
+                    bundle.extractall(destination,filter='data')
+                subprocess.run(['git','init','--quiet',destination],check=True)
+                for record in spec['patches']:
+                    patch=ROOT/record['path']
+                    if sha(patch)!=record['sha256']: raise RuntimeError(f'FINAL patch changed: {record["path"]}')
+                    content=patch.read_bytes()
+                    if hashlib.sha256(content).hexdigest()!=record['sha256']: raise RuntimeError('patch changed while reading')
+                    subprocess.run(['git','apply','--check','-'],cwd=destination,input=content,check=True)
+                    subprocess.run(['git','apply','-'],cwd=destination,input=content,check=True)
+                if project=='horizon':
+                    for name in ['horizon-03-bots.patch','horizon-04-digest.patch']:
+                        patch=ROOT/'patches'/name
+                        subprocess.run(['git','apply','--check',patch],cwd=destination,check=True)
+                        subprocess.run(['git','apply',patch],cwd=destination,check=True)
+                        output['measurement_patches'].append({'path':'patches/'+name,'sha256':sha(patch)})
+            jobs=[(root,['cargo','build','--locked','--release','-p','goliath-store','--bin','goliath-store'],['goliath-store']),
+                (root/'.local/src/horizon',['cargo','build','--locked','--release','--no-default-features',
+                    '-p','horizon-client','--bin','horizon-client','-p','horizon-bots','--bin','horizon-bots'],['horizon-client','horizon-bots']),
+                (root/'.local/src/meridian',['cargo','build','--locked','--release','-p','meridian-proxy','--bin','meridian',
+                    '-p','meridian-sidecar','--bin','meridian-sidecar'],['meridian','meridian-sidecar'])]
+            for cwd,command,names in jobs:
+                started=time.monotonic()
+                print('release build '+str(cwd.relative_to(root))+' '+json.dumps(command),flush=True)
+                subprocess.run(command,cwd=cwd,env=settings,check=True)
+                output['commands'].append({'workspace':str(cwd.relative_to(root)),'command':command,'exit':0,'seconds':time.monotonic()-started})
+                for name in names:
+                    staged=RELEASE/(name+'.new')
+                    shutil.copy2(cwd/'target/release'/name,staged)
+                    staged.replace(RELEASE/name)
+            shutil.copy2(marker,RELEASE/'LEASES')
+            output['binaries']={name:sha(RELEASE/name) for name in ['goliath-store','horizon-client','horizon-bots','meridian','meridian-sidecar']}
+            output['status']='complete'
+    except BaseException as error:
+        output.update(status='failed',error=str(error))
+        raise
+    finally:
+        output['seconds']=time.monotonic()-began
+        save(DATA/(args.name+'.json'),output)
+    save(RELEASE/'build.json',output)
+    return True
+
+
+def upstream(args):
+    command=['gh','pr','view','8666','--repo','horizon-rust/horizon','--json',
+        'number,state,mergedAt,headRefName,headRefOid,baseRefName,title,url']
+    pr=json.loads(subprocess.check_output(command,text=True))
+    head=subprocess.check_output(['gh','api','repos/horizon-rust/horizon/commits/main','--jq','.sha'],text=True).strip()
+    document=json.loads(subprocess.check_output(['gh','api',f'repos/horizon-rust/horizon/contents/docs/server-next.md?ref={head}'],text=True))
+    content=base64.b64decode(document['content']).decode()
+    lines=content.splitlines()
+    paragraphs=[paragraph for paragraph in content.split('\n\n') if any(word in paragraph.lower() for word in ['parallel','region-owned','bounded worker'])]
+    output={'kind':'E17-upstream-status','checked_at':datetime.now(timezone.utc).isoformat(),
+        'pr_command':command,'pr':pr,'main_head':head,'document_path':'docs/server-next.md',
+        'document_blob_sha':document['sha'],'document_sha256':hashlib.sha256(content.encode()).hexdigest(),
+        'document_lines':len(lines),'parallel_excerpts':paragraphs,'parallel_pr_landed':pr['mergedAt'] is not None}
+    save(DATA/(args.name+'.json'),output)
+    print(json.dumps(output,indent=2))
+    return True
+
+
+def summary(args):
+    source=DATA/(args.name+'.json')
+    data=json.loads(source.read_text())
+    rows=data['runs']
+    groups={count:[row for row in rows if row['bots']==count] for count in sorted({row['bots'] for row in rows})}
+    accepted=[]
+    rejected=[]
+    for count,group in groups.items():
+        final=[]
+        for repeat in sorted({row['repeat'] for row in group}):
+            final.append(max((row for row in group if row['repeat']==repeat),key=lambda row:row.get('attempt',0)))
+        if len(final)==2 and all(row.get('pass') for row in final): accepted.append(count)
+        for row in group:
+            if not row.get('pass'): rejected.append({key:row.get(key) for key in ['bots','repeat','attempt','valid','reasons']})
+    lower=max(accepted,default=None)
+    upper=min((row['bots'] for row in rows if row.get('valid') and not row.get('pass') and (lower is None or row['bots']>lower)),default=None)
+    output={'kind':'E17-baseline-summary','source':str(source.relative_to(ROOT)),
+        'complete':'capacity_lower_bound' in data,'lower_bound':lower,'upper_bound_exclusive':upper,
+        'three_times_lower_bound':3*lower if lower else None,
+        'unaccepted_cells':rejected,'runs':[{key:row.get(key) for key in ['bots','repeat','attempt','pass','valid','reasons',
+            'tps','tick_p99_ms','server_cpu_cores','bot_cpu_cores','bot_cpu_peak_interval_cores','bot_movement_fraction','load_1m_range']} for row in rows]}
+    save(DATA/(args.name+'-summary.json'),output)
+    print(json.dumps(output,indent=2))
+    return True
+
+
+def cluster_module(bins):
+    module = load('e17_cluster', ROOT / 'scripts/goliath-cluster')
+    module.BINS = Path(bins).resolve()
+    module.DATA = DATA
+    # E10's eight-arrival fixture ceiling is not a capacity-test player limit.
+    module.upstream.TRANSFERS=module.upstream.TRANSFERS.replace('max_expected=8','max_expected=10000')
+    original = module.upstream.Server
+
+    def server(command, folder, log):
+        # Only this adapter's private worlds. Match E11's plain workload.
+        properties = folder / 'server.properties'
+        values = dict(line.split('=', 1) for line in properties.read_text().splitlines())
+        values.update({'max-players':'10000', 'difficulty':'peaceful', 'max-tick-time':'0',
+            'generator-settings':json.dumps({'layers':[{'block':'minecraft:bedrock','height':1},
+                {'block':'minecraft:dirt','height':2},{'block':'minecraft:grass_block','height':1}],
+                'biome':'minecraft:plains','features':False,'lakes':False,'structure_overrides':[]})})
+        properties.write_text(''.join(f'{key}={value}\n' for key,value in values.items()))
+        return original(command, folder, log)
+
+    module.upstream.Server = server
+    publish=module.Cluster.publish_state
+    def publish_state(instance):
+        publish(instance)
+        config=instance.root/'meridian.toml'
+        if config.exists():
+            config.write_text(config.read_text().replace('max-players = 128\n','max-players = 10000\n'))
+    module.Cluster.publish_state=publish_state
+    def stop_child(child):
+        if child.process.poll() is None:
+            child.process.terminate()
+            try:
+                child.process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                child.process.kill()
+                child.process.wait()
+        child.reader.join(5)
+        child.log.close()
+    module.e2.Child.stop = stop_child
+    return module
+
+
+def pilot(args):
+    module = cluster_module(args.bins)
+    output = {'kind':'E17-proxy-pilot', 'acceptance':False, 'profile':'fast',
+        'bots':args.bots, 'seconds':args.seconds, 'settle_seconds':args.settle,'load_start':os.getloadavg(),
+        'binaries':{name:sha(Path(args.bins)/name) for name in ['horizon-client','meridian','goliath-store']},
+        'bot_binary_sha256':sha(BOT_BINS/'horizon-bots'), 'samples':[], 'join_samples':[]}
+    output['transfers']=module.upstream.TRANSFERS
+    began = time.monotonic()
+    observer=PacketObserver() if args.observe else None
+    if observer:
+        start_proxy=module.Cluster.start_proxy
+        def observed_start(instance):
+            for label,tile in instance.tiles.items():
+                tile.port=observer.listen(('127.0.0.1',tile.port),label=label)
+            start_proxy(instance)
+        module.Cluster.start_proxy=observed_start
+    RUNS.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='E17-pilot-', dir=RUNS) as temporary:
+        folder = Path(temporary)
+        instance = module.Cluster.__new__(module.Cluster)
+        bot = None
+        stream = None
+        try:
+            instance.__init__(folder, module.RESOURCES, 512)
+            output['proxy_pid']=instance.proxy.process.pid
+            output['run_folder']=str(folder)
+            print('E17_PROXY '+json.dumps({'pid':instance.proxy.process.pid,'run':args.name,'bots':args.bots}),flush=True)
+            port=instance.port
+            if observer:
+                port=observer.listen(('127.0.0.1',port),front=True)
+                observer.start()
+            output['idle_proxy'] = usage(instance.proxy.process.pid)
+            bot_path = folder/'bots.jsonl'
+            report = folder/'bot-report.json'
+            stream = bot_path.open('w')
+            command = [str(BOT_BINS/'horizon-bots'),'--event-loop','--server',f'127.0.0.1:{port}',
+                '--bots',str(args.bots),'--behaviour','route','--path','-12,12;12,12;12,-12;-12,-12',
+                '--speed','4','--height','2','--seconds',str(args.seconds+180),
+                '--join-every','.1','--view-distance','3','--name','E17Bot','--report',str(report)]
+            bot = subprocess.Popen(command,cwd=folder,env=private_env(folder/'bot-home'),stdout=stream,stderr=subprocess.STDOUT)
+            def latest():
+                rows=[row for row in complete_json_lines(bot_path) if 'online' in row]
+                return rows[-1] if rows else {}
+            def joined():
+                state=latest()
+                if not output['join_samples'] or time.monotonic()-output['join_samples'][-1]['at']>=2:
+                    output['join_samples'].append({'at':time.monotonic(),'proxy':usage(instance.proxy.process.pid),
+                        'bots':state,'load':os.getloadavg()})
+                if state.get('failed') or bot.poll() is not None:
+                    raise RuntimeError(f'bot join failed: {state}')
+                return state.get('online')==args.bots
+            wait(joined,120,'cluster bot join timeout')
+            print('E17_JOINED '+json.dumps({'pid':instance.proxy.process.pid,'run':args.name,'bots':args.bots}),flush=True)
+            time.sleep(args.settle)
+            if observer:
+                observer.reset()
+                output['latency_phase']='fixed load after join and settle'
+            end=time.monotonic()+args.seconds
+            while time.monotonic()<end:
+                statuses={label:tile.ask('server-status') for label,tile in instance.tiles.items()}
+                output['samples'].append({'at':time.monotonic(), 'load':os.getloadavg(),
+                    'proxy':usage(instance.proxy.process.pid),'bots':latest(),'bot_cpu':usage(bot.pid),
+                    'observer_process':usage(os.getpid()),
+                    'tiles':{label:{'players':len(value['players']),'chunks':value['chunks'],
+                        'session_kinds':session_kinds(value['players']),
+                        'sample_players':value['players'][:8]} for label,value in statuses.items()}})
+                save(DATA/(args.name+'.json'),output)
+                time.sleep(min(2,max(0,end-time.monotonic())))
+            output['status']='complete'
+            output['clients_survived']=all(row['bots'].get('online')==args.bots and row['bots'].get('failed')==0 for row in output['samples'])
+            if not output['clients_survived']:
+                output.update(status='failed',error='clients dropped during the pilot')
+        except BaseException as error:
+            output.update(status='failed',error=str(error),traceback=traceback.format_exc())
+            if getattr(instance,'proxy',None) and instance.proxy.process.poll() is None:
+                output['proxy_at_failure']=usage(instance.proxy.process.pid)
+        finally:
+            if (folder/'proxy.log').exists():
+                lines=(folder/'proxy.log').read_text(errors='replace').rpartition('\n')[0].splitlines()
+                output['proxy_warnings']=[line for line in lines if any(word in line for word in [' WARN ',' ERROR ','panicked','E8 replay failed'])]
+            if observer:
+                output['packet_latency']=observer.report()
+                output['packet_network']=observer.network_report()
+            if bot and bot.poll() is None:
+                bot.terminate()
+                try: bot.wait(10)
+                except subprocess.TimeoutExpired: bot.kill(); bot.wait()
+            if stream: stream.close()
+            if 'bot_path' in locals():
+                output['bot_tail']=complete_json_lines(bot_path)[-3:]
+            output['phases']=module.phase_events(folder/'proxy.log') if (folder/'proxy.log').exists() else []
+            if (folder/'proxy.log').exists():
+                output['proxy_tail']=(folder/'proxy.log').read_text(errors='replace').rpartition('\n')[0].splitlines()[-25:]
+            if 'report' in locals() and report.exists(): output['bot_final']=json.loads(report.read_text())
+            if observer:
+                if observer.thread.ident is not None: observer.stop()
+            instance.stop()
+            output.update(elapsed_s=time.monotonic()-began,load_end=os.getloadavg())
+            if len(output['samples'])>1:
+                a,b=output['samples'][0],output['samples'][-1]
+                output['proxy_cpu_cores']=(b['proxy']['cpu_s']-a['proxy']['cpu_s'])/(b['at']-a['at'])
+                output['proxy_threads_max']=max(row['proxy']['threads'] for row in output['samples'])
+                output['proxy_threads_min']=min(row['proxy']['threads'] for row in output['samples'])
+                output['proxy_cpu_cores_per_player']=output['proxy_cpu_cores']/args.bots
+                output['proxy_threads_increment_per_player']=(output['proxy_threads_max']-output['idle_proxy']['threads'])/args.bots
+                healthy=[(a,b) for a,b in zip(output['samples'],output['samples'][1:])
+                    if all(row['bots'].get('online')==args.bots and row['bots'].get('failed')==0 for row in [a,b])]
+                output['healthy_seconds']=sum(b['at']-a['at'] for a,b in healthy)
+                output['healthy_proxy_cpu_cores']=sum(b['proxy']['cpu_s']-a['proxy']['cpu_s'] for a,b in healthy)/output['healthy_seconds'] if healthy else None
+                if observer:
+                    traffic=output['packet_network'].get('front:real_or_held',{})
+                    packets=sum(value for key,value in traffic.items() if key.endswith('_packets'))
+                    output['client_packets_observed']=packets
+                    output['proxy_cpu_us_per_client_packet']=(b['proxy']['cpu_s']-a['proxy']['cpu_s'])*1e6/packets if packets else None
+                    output['observer_cpu_cores']=(b['observer_process']['cpu_s']-a['observer_process']['cpu_s'])/(b['at']-a['at'])
+            save(DATA/(args.name+'.json'),output)
+    print(json.dumps({key:output.get(key) for key in ['status','error','proxy_cpu_cores','proxy_threads_max','load_start','load_end']},indent=2))
+    return output.get('status')=='complete'
+
+
+def session_kinds(players):
+    result={'total':len(players),'placed':0,'held':0,'terrain_reader':0,'unknown_real_or_held':0,'other':0}
+    for player in players:
+        if player.get('terrain_reader') or player['name'].startswith('E12View'):
+            result['terrain_reader']+=1
+        elif player.get('placed'):
+            result['placed']+=1
+        elif player.get('held'):
+            result['held']+=1
+        elif player['name'].startswith(('E17Bot','E11Bot')):
+            result['unknown_real_or_held']+=1
+        else:
+            result['other']+=1
+    return result
+
+
+def cell(args):
+    """Run exactly one external-cluster cell with fresh worlds and complete PIDs."""
+    provenance=RELEASE/'build.json'
+    if not provenance.exists(): raise RuntimeError('build the final fresh release export first')
+    build_record=json.loads(provenance.read_text())
+    if build_record.get('status')!='complete': raise RuntimeError('release build did not complete')
+    if sha(ROOT/'.local/bin/goliath-e12/FINAL.json')!=build_record['final_sha256']:
+        raise RuntimeError('FINAL changed after the retained release build')
+    for name,digest in build_record['binaries'].items():
+        if sha(RELEASE/name)!=digest: raise RuntimeError(f'release binary changed: {name}')
+    module=cluster_module(RELEASE)
+    original_env=module.env
+    def measured_env(directory,extra=None):
+        result=original_env(directory,extra)
+        result.pop('E2_TRACE_INPUTS',None)
+        return result
+    module.env=measured_env
+    RUNS.mkdir(parents=True,exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='E17-cell-',dir=RUNS) as temporary:
+        folder=Path(temporary)
+        instance=module.Cluster.__new__(module.Cluster)
+        done=threading.Event()
+        failures=[]
+        worker=None
+        try:
+            instance.__init__(folder,module.RESOURCES,512,tile_env={'HORIZON_E11_MEASURE':'1'})
+            def checkpoint():
+                while not done.wait(5):
+                    try: instance.checkpoint_tiles()
+                    except BaseException as error:
+                        failures.append(str(error))
+                        break
+            worker=threading.Thread(target=checkpoint,daemon=True)
+            worker.start()
+            config={'mode':'external','release_verified':True,'build':build_record,
+                'seed':12345,'view_distance':3,'speed':4,'mobs':64,'spread':[-64,-64,64,64],
+                'skip_spread_teleport':True,'session_accounting':'explicit',
+                'bot_binary':str(RELEASE/'horizon-bots'),'bot_targets':[f'127.0.0.1:{instance.port}'],
+                'servers':[{'pid':tile.server.process.pid,'endpoint':str(tile.endpoint)} for tile in instance.tiles.values()],
+                'proxy_pids':[instance.proxy.process.pid],
+                'service_pids':[child.process.pid for child in instance.sidecars]+[instance.store_process.pid,os.getpid()],
+                'mob_origins':[[16 if coordinate==0 else -16 for coordinate in tile.tile] for tile in instance.tiles.values()]}
+            if args.path: config['path']=args.path
+            config_path=folder/'capacity.json'
+            # Runtime configuration needs real paths, unlike retained sanitized evidence.
+            config_path.write_text(json.dumps(config))
+            command=[sys.executable,'-B',str(ROOT/'scripts/capacity-bench'),'--config',str(config_path),
+                '--loads',str(args.bots),'--repeat','1','--warmup',str(args.warmup),'--seconds',str(args.seconds),
+                '--refine-step','0','--out',str(DATA/(args.name+'.json'))]
+            if args.quiet_marker: command+=['--quiet-marker',args.quiet_marker]
+            subprocess.run(command,cwd=ROOT,check=True)
+            if failures: raise RuntimeError('background checkpoint failed: '+str(failures))
+        finally:
+            done.set()
+            if worker: worker.join(15)
+            if worker and worker.is_alive(): raise RuntimeError('checkpoint thread did not stop')
+            instance.stop()
+    return True
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action',choices=['pilot','baseline','build','upstream','cell','summary','snapshot'])
+    parser.add_argument('--bins',type=Path,default=ROOT/'.local/bin/goliath-e12')
+    parser.add_argument('--bots',type=int,default=4)
+    parser.add_argument('--seconds',type=float,default=30)
+    parser.add_argument('--name',default='proxy-pilot-4')
+    parser.add_argument('--observe',action='store_true')
+    parser.add_argument('--settle',type=float,default=10)
+    parser.add_argument('--warmup',type=float,default=90)
+    parser.add_argument('--path')
+    parser.add_argument('--quiet-marker')
+    parser.add_argument('--proxy-manifest',type=Path)
+    args=parser.parse_args()
+    if not globals()[args.action](args): raise SystemExit(1)
+
+
+if __name__=='__main__': main()
