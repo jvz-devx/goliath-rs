@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""Run E23's fixed final-stack cells using the retained E20 measurement kernel."""
+import argparse
+import ast
+from collections import defaultdict, deque
+import gzip
+import json
+import math
+import os
+from pathlib import Path
+import sys
+import subprocess
+import time
+
+import e11_support as support
+from e18_d9_layout import TILES
+from e23_support import (BINS, DATA, ROOT, availability, finish_availability,
+    frozen, instrument_cluster, load, pack, quiet, save, sha)
+from e23_observe import Profile, Soak
+
+
+def identical_layout(active, anchor):
+    """Replicate one exact tile's workload, not a scaled crossing workload."""
+    groups = []
+    for label, tile in list(TILES.items())[:active]:
+        center = [v * 2048 + 1024 for v in tile]
+        spread = [center[0]-64, center[1]-64, center[0]+64, center[1]+64]
+        prefix = 'E17Bot' + label.upper()
+        groups.append(dict(label=label, backend=label, count=162, prefix=prefix,
+            center=center, spread=spread, seed=12345, kind='interior',
+            patrol_radius=min(128 / math.ceil(math.sqrt(162)) * .2, 8),
+            starts={prefix+str(i):anchor(i,162,12345,spread) for i in range(162)},
+            host='d9-'+label+'.test'))
+    return dict(layout='E23-identical-per-tile-interior', edge=2048, world_seed=12345,
+        players=162*active, interior_players=162*active, crossing_players=0,
+        pigs_per_tile=64, total_pigs=64*active, witnesses=[], groups=groups,
+        readers_enabled=True, through_final_proxy=True)
+
+
+class Adapt(ast.NodeTransformer):
+    """Remove nested quiet ownership only; preserve E20's counters and pass gates."""
+    def __init__(self,profile=False):
+        self.profile = profile
+
+    def visit_Call(self,node):
+        if self.profile and isinstance(node.func,ast.Name) and node.func.id=='pause' and len(node.args)==1 and isinstance(node.args[0],ast.Attribute) and node.args[0].attr=='warmup':
+            return ast.copy_location(ast.Call(ast.Name('e23_warmup',ast.Load()),[ast.Name('instance',ast.Load()),node.args[0]],[]),node)
+        return self.generic_visit(node)
+
+    def visit_If(self, node):
+        # The outer E23 window owns acquisition and release.
+        if any(isinstance(item, ast.Constant) and item.value == 'another quiet request exists' for item in ast.walk(node)):
+            return ast.copy_location(ast.Pass(), node)
+        if any(isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute)
+               and isinstance(item.func.value, ast.Name) and item.func.value.id == 'request'
+               and item.func.attr == 'unlink' for item in ast.walk(node)):
+            return ast.copy_location(ast.Pass(), node)
+        if isinstance(node.test, ast.BoolOp) and any(isinstance(item, ast.Attribute)
+               and isinstance(item.value, ast.Name) and item.value.id == 'args'
+               and item.attr == 'seconds' for item in ast.walk(node.test)):
+            # One fixed row per invocation. Duration is selected by the E23 plan.
+            node.test = ast.parse('len(counts) != 1 or counts[0] < 100 or args.warmup != 30').body[0].value
+        return self.generic_visit(node)
+
+    def visit_With(self, node):
+        for item in node.items:
+            call = item.context_expr
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name) and call.func.value.id == 'request' and call.func.attr == 'open':
+                return ast.copy_location(ast.Pass(), node)
+        return self.generic_visit(node)
+
+    def visit_Assign(self, node):
+        if any(isinstance(target, ast.Name) and target.id == 'identity' for target in node.targets):
+            node.value = ast.parse('os.environ["E23_QUIET_IDENTITY"]').body[0].value
+        if any(isinstance(target, ast.Name) and target.id == 'deadline' for target in node.targets):
+            node.value = ast.parse('began + E23_WINDOW_SECONDS').body[0].value
+        return self.generic_visit(node)
+
+    def visit_Constant(self, node):
+        if node.value == '900':
+            return ast.copy_location(ast.Constant('2400'), node)
+        if isinstance(node.value, str):
+            return ast.copy_location(ast.Constant(node.value.replace('E20-D9-', 'E23-D9-')), node)
+        return node
+
+
+def namespace(name,profile=False):
+    base = ROOT / 'scripts/e20-frontier'
+    tree = ast.fix_missing_locations(Adapt(profile).visit(ast.parse(base.read_text())))
+    source = ast.unparse(tree) + '\n'
+    path = DATA / 'harnesses' / (name + '-cell.py')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise RuntimeError('executed fixture already exists; use a fresh attempt')
+    path.write_text(source)
+    result = dict(__name__='e23_cell_base', __file__=str(base), E23_WINDOW_SECONDS=1500)
+    exec(compile(tree, str(base), 'exec'), result)
+    result['DATA'] = DATA
+    return result, path
+
+
+class Partitions:
+    """Own nine independent tap processes, never one shared forwarding loop."""
+    def __init__(self, name, witnesses, monitor):
+        self.name, self.witnesses, self.monitor = name, witnesses, monitor
+        self.backends, self.files, self.paths = [], [], []
+
+    def command(self, command, stage, index, label):
+        path = DATA / (self.name + '-tap-' + label + '.json.gz')
+        if path.exists():
+            raise RuntimeError('tap evidence exists')
+        self.paths.append(path)
+        return [sys.executable,'-B',str(ROOT/'scripts/e23-tap'),*map(str,command),
+            '--stage',stage,'--index',str(index),'--witnesses',json.dumps(self.witnesses),'--events',str(path)]
+
+    def cluster(self, module):
+        start, stop = module.Cluster.start_proxy, module.Cluster.stop
+        taps = self
+
+        def start_proxy(instance):
+            for index,(label,tile) in enumerate(instance.tiles.items()):
+                path = instance.root / ('tap-backend-'+label+'.jsonl')
+                stream = path.open('w')
+                taps.files.append(stream)
+                child = subprocess.Popen(taps.command(['--target',tile.port],'backend',5+index,'backend-'+label),
+                    cwd=instance.root,stdout=stream,stderr=subprocess.STDOUT)
+                taps.backends.append(child)
+                taps.monitor.register('tap-backend-'+label,child.pid)
+
+                def ready():
+                    if child.poll() is not None:
+                        raise RuntimeError('backend witness tap exited before listen')
+                    rows = support.complete_json_lines(path)
+                    return rows[-1] if rows else None
+
+                tile.port = support.wait(ready,10,'backend witness tap startup')['port']
+            return start(instance)
+
+        def cluster_stop(instance):
+            try:
+                return stop(instance)
+            finally:
+                taps.stop()
+
+        module.Cluster.start_proxy, module.Cluster.stop = start_proxy, cluster_stop
+        return module
+
+    def stop(self):
+        for child in self.backends:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=15)
+        for stream in self.files:
+            if not stream.closed:
+                stream.close()
+
+    def analyse(self, cell):
+        fronts, backs, reports = [], [], []
+        for path in self.paths:
+            if not path.exists():
+                raise RuntimeError('missing partition evidence: '+path.name)
+            raw = json.loads(gzip.decompress(path.read_bytes()))
+            if raw['event_drops'] or raw['report']['errors']:
+                raise RuntimeError('witness tap dropped events or reported errors')
+            (fronts if raw['stage']=='front' else backs).extend(raw['events'])
+            reports.append(dict(path=str(path.relative_to(ROOT)),sha256=sha(path),
+                maximum_pending_bytes=raw['report']['maximum_pending_bytes']))
+        queues = defaultdict(deque)
+        for row in sorted(backs,key=lambda row:row['at']):
+            queues[row['name'],row['payload_sha256']].append(row['at'])
+        latency, unmatched = [], []
+        window = [row for row in sorted(fronts,key=lambda row:row['at']) if cell['start_ns']<=row['wall_ns']<=cell['end_ns']]
+        for row in window:
+            queue = queues[row['name'],row['payload_sha256']]
+            while queue and queue[0]<row['at']:
+                queue.popleft()
+            if queue:
+                latency.append((queue.popleft()-row['at'])*1000)
+            else:
+                unmatched.append(row)
+        rank = math.ceil(.95*len(window))
+        p95 = sorted(latency)[rank-1] if rank and len(latency)>=rank else None
+        positions = {}
+        for row in window:
+            if row.get('position') and row['name'] not in positions:
+                positions[row['name']] = row['position']
+        interior = {tuple(math.floor(point[axis]/2048) for axis in [0,2]) for name,point in positions.items() if not name.startswith('E17BotX')}
+        near_wall = [name for name,point in positions.items() if min(min(point[axis]%2048,2048-point[axis]%2048) for axis in [0,2])<=32]
+        phase = cell['processes']['phases']['steady']
+        cores = {name:row['cores'] for name,row in phase['fixture'].items() if name.startswith(('tap-','shim-'))}
+        return dict(scope='unchanged seeded witness movement, front socket-read to backend socket-read; TCP/tap queues included',
+            witnesses=self.witnesses,front_packets=len(window),matched=len(latency),unmatched=len(unmatched),
+            conservative_p95_ms=p95,latencies_ms=latency,unmatched_rows=unmatched,partitions=reports,
+            partition_cores=cores,partition_headroom_pass=len(cores)==9 and all(value<.7 for value in cores.values()),
+            witness_positions=positions,interior_tiles=sorted(interior),near_wall_witnesses=near_wall,
+            geometry_pass=len(interior)==4 and len(near_wall)>=2 and len(positions)==8,
+            queue_peak_bytes=max(row['maximum_pending_bytes'] for row in reports),
+            latency_under_5ms=p95 is not None and p95<5)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('mode', choices=['identical','control','latency','profile','soak'])
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--tiles', type=int, choices=[1,2,4], default=4)
+    args = parser.parse_args()
+    quiet()
+    before = frozen()
+    target = DATA / (args.name + '.json')
+    if target.exists() or target.with_suffix('.json.gz').exists():
+        raise RuntimeError('use a fresh cell name')
+    active = list(TILES.items())[:args.tiles] if args.mode == 'identical' else list(TILES.items())
+    ns, executed = namespace(args.name,args.mode=='profile')
+    ns['e23_native_counter'] = ns['counters']
+    if args.mode=='soak':
+        ns['E23_WINDOW_SECONDS'] = 2400
+    trace = availability(args.name)
+    original_load = ns['load']
+    holder = {}
+    partitions = None
+    profiling = Profile(args.name,ns,holder) if args.mode=='profile' else None
+    soak = Soak(args.name,ns,holder) if args.mode=='soak' else None
+    if args.mode == 'latency':
+        layout = ns['plan'](650,load('e23_latency_anchor',ROOT/'scripts/capacity-bench').route_anchor)
+        partitions = Partitions(args.name,layout['witnesses'],None)
+
+    def loaded(name, path):
+        module = original_load(name, path)
+        if Path(path).name == 'e17-m4':
+            factory = instrument_cluster(trace, module.cluster_module, active)
+            def cluster(bins):
+                result = factory(bins)
+                if partitions:
+                    partitions.monitor = holder['monitor']
+                    result = partitions.cluster(result)
+                if soak:
+                    result = soak.cluster(result)
+                return result
+            module.cluster_module = cluster
+        if Path(path).name == 'e18-proxy':
+            module.os = trace.os_proxy
+            module.TrackedBudget = trace.budget(module.TrackedBudget)
+        return module
+
+    ns['load'] = loaded
+    sampler_base = trace.sampler(ns['ProcessSampler'])
+    class Sampler(sampler_base):
+        def __init__(self,*a,**kw):
+            super().__init__(*a,**kw)
+            holder['monitor'] = self
+    ns['ProcessSampler'] = Sampler
+    counter_calls = 0
+    def counters(pid):
+        nonlocal counter_calls
+        counter_calls += 1
+        value = ns['e23_native_counter'](pid)
+        if counter_calls>=2:
+            if profiling:
+                profiling.begin()
+            if soak:
+                soak.sample(value)
+        return value
+    ns['counters'] = counters
+    if profiling:
+        ns['e23_warmup'] = profiling.warmup
+    if soak:
+        times = ns['game_times']
+        ns['game_times'] = lambda instance:soak.times(instance,times)
+    if partitions:
+        class Subprocess:
+            def __getattr__(self,name):
+                return getattr(subprocess,name)
+            def Popen(self,command,*a,**kw):
+                if isinstance(command,(list,tuple)) and any(str(value).endswith('/e18-front-shim') for value in command):
+                    index = int(command[command.index('--index')+1])
+                    arguments = list(command[command.index('--target'):])
+                    # The partition command owns index itself.
+                    at = arguments.index('--index')
+                    del arguments[at:at+2]
+                    command = partitions.command(arguments,'front',index,'front-'+str(index))
+                return subprocess.Popen(command,*a,**kw)
+        ns['subprocess'] = Subprocess()
+    if args.mode == 'identical':
+        ns['plan'] = lambda count, anchor: identical_layout(args.tiles, anchor)
+    original_save = support.save
+
+    def recorded_save(path, value):
+        if Path(path) == target:
+            value.update(e23_mode=args.mode, frozen=before, readers_enabled=True,
+                quiet_owner='E23', adapter_sha256=sha(Path(__file__)),
+                executed_fixture=dict(path=str(executed.relative_to(ROOT)), sha256=sha(executed)),
+                base_fixture_sha256=sha(ROOT / 'scripts/e20-frontier'))
+            for cell in value.get('cells',{}).values():
+                if 'join_batches' in cell:
+                    cell['join_batches']['cohorts'] = len(cell['layout']['groups'])
+        return original_save(path, value)
+
+    class Support:
+        def __getattr__(self, name):
+            return recorded_save if name == 'save' else getattr(support, name)
+
+    ns['support'] = Support()
+    sys.argv = ['e20-frontier','--name',args.name,'--counts',str(162*args.tiles if args.mode == 'identical' else 650),
+        '--bins',str(BINS),'--no-other-agents','--warmup','30','--seconds','1800' if soak else '60']
+    for key in ['E12_TERRAIN_OFF','E18_TERRAIN_EAGER','E18_WRITES_DIRECT','E18_CONTROL_FRESH','E18_BLOCKING_IO']:
+        os.environ.pop(key, None)
+    try:
+        ns['main']()
+    finally:
+        if profiling:
+            profiling.finish()
+        if soak:
+            soak.finish()
+        if partitions:
+            partitions.stop()
+            if target.exists():
+                raw = json.loads(target.read_text())
+                cell = raw.get('cells',{}).get('650',{})
+                if cell.get('status') == 'complete':
+                    cell['external_witness'] = partitions.analyse(cell)
+                    save(target,raw)
+        captured = finish_availability(trace, target, [label for label,_ in active])
+        if frozen() != before:
+            raise RuntimeError('frozen binary changed during cell')
+        pack(target)
+        if captured['lease_expiry_observed'] or not captured['complete']:
+            raise RuntimeError('availability failure; stop this plan')
+
+
+if __name__ == '__main__':
+    main()
+

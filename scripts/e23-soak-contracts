@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Resource-free checks of E23 long-run tick draining and memory sampling."""
+from types import SimpleNamespace as NS
+import unittest
+
+from e23_observe import Soak
+
+
+class LongRunContracts(unittest.TestCase):
+    def test_periodic_and_final_drains_keep_every_tick_and_drop(self):
+        class Tile:
+            def __init__(self,label,pid):
+                self.label,self.cursor = label,0
+                self.server = NS(process=NS(pid=pid))
+            def ask(self,command):
+                self.assert_command = command
+                index = self.cursor
+                self.cursor += 1
+                return dict(ticks=[dict(tick=index,ms=1)],digests=[],dropped=int(index==1))
+        class Cluster:
+            def stop(self):
+                pass
+        module = NS(Tile=Tile,Cluster=Cluster)
+        counter = lambda pid:dict(at=0,rss_mb=10,pid=pid)
+        subject = Soak('static',{'e23_native_counter':counter},dict(monitor=NS(roles={'observer-and-driver':99})))
+        subject.cluster(module)
+        subject.audit = lambda *_:None
+        subject.instance = NS(tiles={label:Tile(label,i+1) for i,label in enumerate('abcd')},
+            proxy=NS(process=NS(pid=10)),store_process=NS(pid=11),sidecars=[NS(process=NS(pid=12))])
+        for moment in [0,60,120]:
+            subject.sample(dict(at=moment))
+        for tile in subject.instance.tiles.values():
+            batch = tile.ask('e11-samples')
+            self.assertEqual([row['tick'] for row in batch['ticks']],[0,1,2])
+            self.assertEqual(batch['dropped'],1)
+        self.assertEqual(subject.batches,{})
+        self.assertEqual(len(subject.memory),3)
+        self.assertEqual(set(subject.memory[-1]['processes']),{'proxy','store','tile-a','tile-b','tile-c','tile-d','sidecar-0'})
+        self.assertIn('observer-and-driver',subject.memory[-1]['helper_processes'])
+
+    def test_fixed_cargo_names_have_no_substring_alias(self):
+        names = [f'E23Cargo-{index:04d}' for index in range(65)]
+        self.assertTrue(all(a not in b for a in names for b in names if a!=b))
+
+    def test_refused_recovery_still_runs_owned_process_cleanup(self):
+        stopped = []
+        class Tile:
+            def ask(self,_):
+                return {}
+            def stop(self):
+                raise RuntimeError('local cluster lease expired')
+        class Cluster:
+            def stop_proxy(self):
+                stopped.append('proxy')
+            def stop(self):
+                stopped.append('all-owned-processes')
+        module = NS(Tile=Tile,Cluster=Cluster)
+        subject = Soak('static',{}, {})
+        subject.cluster(module)
+        subject.origin = 0
+        instance = Cluster()
+        instance.tiles = {'a':Tile()}
+        with self.assertRaisesRegex(RuntimeError,'lease expired'):
+            instance.stop()
+        self.assertEqual(stopped,['proxy','all-owned-processes'])
+
+
+if __name__=='__main__':
+    unittest.main()

@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Summarize the retained E23 availability event without attributing a cause."""
+from collections import Counter
+from datetime import datetime
+import gzip
+import json
+from pathlib import Path
+import re
+
+from e23_support import DATA, ROOT, load, save, sha
+
+
+def main():
+    shared = load('e23_event_read',ROOT/'scripts/e23-results')
+    capture = shared.read(DATA/'soak-final-r1-availability.json')
+    raw = shared.read(DATA/'soak-final-r1.json')
+    quiet = shared.read(DATA/'soak-final-r1-quiet.json')
+    failure_path = ROOT/raw['cells']['650']['failure_evidence']['path']
+    failure = shared.read(failure_path)
+    signals_path = ROOT/capture['limiter_signals']['path']
+    signals = shared.read(signals_path)
+    open_stops = {}
+    intervals = {}
+    for row in signals['events']:
+        if row['error'] is not None:
+            continue
+        if row['signal']=='STOP':
+            open_stops[row['pid']] = row
+        elif row['pid'] in open_stops:
+            first = open_stops.pop(row['pid'])
+            ms = (row['monotonic_after_ns']-first['monotonic_before_ns'])/1e6
+            intervals.setdefault(row['role'],[]).append(ms)
+    warnings = []
+    for line in failure['lines'].get('proxy.log',[]):
+        match = re.match(r'(\d{4}-\d\d-\d\dT[\d:.]+Z)',line)
+        if match and 'E17Bot' in line and 'session ended' in line:
+            at = int(datetime.fromisoformat(match[1].replace('Z','+00:00')).timestamp()*1e9)
+            warnings.append(dict(at_ns=at,line=line))
+    first = min(warnings,key=lambda row:row['at_ns']) if warnings else None
+    samples = quiet['processes']['samples']
+    spacing = [b['at']-a['at'] for a,b in zip(samples,samples[1:])]
+    releases = Counter()
+    for label,lines in failure['lines'].items():
+        if label.startswith('server-'):
+            handovers = set()
+            for line in lines:
+                match = re.search(r'player-release (E17BotX\d+).*?: ok, moved,.*hand-over ([0-9a-f]+)',line)
+                if match:
+                    handovers.add(match[2])
+            releases[label] = len(handovers)
+    result = dict(kind='E23-retained-availability-event',cause='unproven',
+        failure_capture_ns=failure['time_ns'],measurement_start_ns=raw['cells']['650']['start_ns'],
+        first_session_ended_warning=first,
+        first_warning_measurement_seconds=(first['at_ns']-raw['cells']['650']['start_ns'])/1e9 if first else None,
+        explicit_local_expiry_observations=capture['expiry_events'],
+        affected_tile_scope='tile a explicitly observed; expiry of every other tile is not independently established',
+        bot_failures={role:state['exit'] for role,state in failure['processes'].items() if role.startswith('bots-')},
+        maximum_signal_call_pause_ms={role:max(values) for role,values in intervals.items()},
+        signal_pause_scope='STOP-call begin to CONT-call end brackets; not proof of exact OS scheduling',
+        open_stop_count=len(open_stops),signals_dropped=capture['events_dropped'],
+        outside_noise_valid=quiet['noise_valid'],maximum_outside_process_core=quiet['processes']['phases']['whole_cell']['outside_max_process_cores'],
+        maximum_sampler_spacing_seconds=max(spacing) if spacing else None,
+        store_batch_rows=capture['store_batches']['rows'],store_batch_maxima_ms=capture['store_batches']['maxima_ms'],
+        origin_bracket=capture['origin_bracket'],
+        caveats=['Store background durations may overlap successful commits and do not alone prove a blocked store.',
+            'No per-renewal tile trace exists in the frozen engine.',
+            'Sampler cadence and limiter brackets cannot rule out every host or thread stall.'],
+        logged_completed_source_releases=releases,
+        logged_release_scope='deduplicated handover IDs in retained native server logs, including join/warmup; not a full measured activation ledger',
+        store_trace=capture['store_batches']['path'],limiter_signals=capture['limiter_signals']['path'],
+        failure_evidence=dict(path=str(failure_path.relative_to(ROOT)),stored_sha256=sha(failure_path)),
+        cleanup=dict(residual_owned_pids=[36855,36941,36955,37007],signal='SIGTERM',
+            validated='exact frozen executable paths and unique E23 run directory in argv',all_owned_fixture_pids_gone=True),
+        evidence_gaps=['Failed recovery teardown prevented the endpoint cargo/recovery audit.',
+            'The original failure path did not serialize accumulated raw tick drains; that retention gap is not repaired retroactively.'])
+    target = DATA/'soak-availability-event-v1.json'
+    if target.exists():
+        raise RuntimeError('event summary exists; preserve it')
+    save(target,result)
+    print(json.dumps({key:result[key] for key in ['first_warning_measurement_seconds','maximum_signal_call_pause_ms',
+        'maximum_sampler_spacing_seconds','maximum_outside_process_core','logged_completed_source_releases','cause']},indent=2))
+
+
+if __name__=='__main__':
+    main()

@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""Static E23 fixture contracts. Never launch a cluster, game, build or load."""
+import ast
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from e23_support import ROOT, FROZEN, frozen, load, Ownership, pack
+from e23_observe import Soak, running
+
+cell = load('e23_cell_test', ROOT / 'scripts/e23-cell')
+baseline = load('e23_anchor_test', ROOT / 'scripts/capacity-bench')
+results = load('e23_results_test', ROOT / 'scripts/e23-results')
+
+
+class StaticContracts(unittest.TestCase):
+    def test_frozen_selected_bytes(self):
+        self.assertEqual(frozen()['binaries'], FROZEN)
+
+    def test_seven_registered_plans(self):
+        plan = json.loads((ROOT / 'docs/experiments/data/E23/preregister-v1.json').read_text())
+        self.assertEqual(len(plan['plans']), 7)
+        self.assertEqual(plan['capacity_multiple'], 2)
+        self.assertFalse(plan['target_three_times_met'])
+
+    def test_identical_population_and_mobs(self):
+        for n in [1,2,4]:
+            plan = cell.identical_layout(n, baseline.route_anchor)
+            self.assertEqual(plan['players'], n*162)
+            self.assertEqual(plan['total_pigs'], n*64)
+            self.assertEqual(plan['crossing_players'], 0)
+            self.assertTrue(plan['through_final_proxy'])
+            self.assertTrue(plan['readers_enabled'])
+
+    def test_each_tile_has_identical_relative_routes(self):
+        groups = cell.identical_layout(4, baseline.route_anchor)['groups']
+        routes = []
+        for group in groups:
+            routes.append([[p[0]-group['center'][0],p[1]-group['center'][1]] for p in group['starts'].values()])
+        for other in routes[1:]:
+            for a,b in zip(routes[0],other):
+                for x,y in zip(a,b):
+                    self.assertAlmostEqual(x,y,places=10)
+
+    def test_active_tile_prefix_only(self):
+        for n in [1,2,4]:
+            groups = cell.identical_layout(n, baseline.route_anchor)['groups']
+            self.assertEqual([g['label'] for g in groups], list('abcd')[:n])
+
+    def test_approach_geometry_stays_interior(self):
+        for group in cell.identical_layout(4, baseline.route_anchor)['groups']:
+            for point in group['starts'].values():
+                self.assertTrue(all(abs(a-b) < 64 for a,b in zip(point,group['center'])))
+
+    def test_nested_window_removes_no_metrics(self):
+        original = ast.parse((ROOT / 'scripts/e20-frontier').read_text())
+        expected = {node.name:ast.unparse(node) for node in original.body if isinstance(node,ast.FunctionDef) and node.name!='main'}
+        transformed = ast.fix_missing_locations(cell.Adapt().visit(original))
+        actual = {node.name:ast.unparse(node) for node in transformed.body if isinstance(node,ast.FunctionDef) and node.name!='main'}
+        self.assertEqual(expected,actual)
+        source = ast.unparse(transformed)
+        self.assertNotIn("request.open('x')",source)
+        self.assertNotIn('request.unlink()',source)
+        self.assertNotIn('another quiet request exists',source)
+        self.assertIn("os.environ['E23_QUIET_IDENTITY']",source)
+        compile(transformed,'e23-static-cell','exec')
+
+    def test_profile_selects_last_warmup_span(self):
+        tree = ast.fix_missing_locations(cell.Adapt(True).visit(ast.parse((ROOT/'scripts/e20-frontier').read_text())))
+        self.assertIn('e23_warmup(instance, args.warmup)',ast.unparse(tree))
+        compile(tree,'e23-static-profile','exec')
+
+    def test_availability_source_only_changes_result_ownership(self):
+        source = (ROOT / 'scripts/e22_availability.py').read_text()
+        tree = ast.fix_missing_locations(Ownership().visit(ast.parse(source)))
+        modified = ast.unparse(tree)
+        self.assertIn('.local/evidence/E23/availability',modified)
+        self.assertIn('docs/experiments/data/E23',modified)
+        self.assertNotIn('.local/evidence/E22',modified)
+        compile(tree,'e23-static-availability','exec')
+
+    def test_gzip_roundtrip(self):
+        import gzip
+        with tempfile.TemporaryDirectory(prefix='E23-static-') as folder:
+            path = Path(folder)/'raw.json'
+            raw = json.dumps({'data':'x'*1_000_001}).encode()
+            path.write_bytes(raw)
+            result = pack(path)
+            self.assertEqual(gzip.decompress(result.read_bytes()),raw)
+            self.assertFalse(path.exists())
+
+    def test_partition_p95_keeps_unmatched_in_denominator(self):
+        import gzip
+        with tempfile.TemporaryDirectory(prefix='E23-static-') as folder:
+            paths = []
+            for stage in ['front','backend']:
+                events = [dict(name='E17BotA0',payload_sha256=str(i),at=i+(0 if stage=='front' else .001),wall_ns=i,stage=stage)
+                    for i in range(100 if stage=='front' else 94)]
+                path = Path(folder)/(stage+'.json.gz')
+                path.write_bytes(gzip.compress(json.dumps(dict(stage=stage,events=events,event_drops=0,report=dict(errors=[],maximum_pending_bytes=10))).encode()))
+                paths.append(path)
+            observer = cell.Partitions('test',['E17BotA0'],None)
+            observer.paths = paths
+            with patch.object(cell,'ROOT',Path(folder)):
+                result = observer.analyse(dict(start_ns=0,end_ns=100,processes=dict(phases=dict(steady=dict(fixture={})))))
+            self.assertEqual(result['matched'],94)
+            self.assertEqual(result['unmatched'],6)
+            self.assertIsNone(result['conservative_p95_ms'])
+            self.assertFalse(result['latency_under_5ms'])
+
+    def test_soak_driver_retains_long_lived_bots_and_full_ticks(self):
+        source = ast.unparse(ast.fix_missing_locations(cell.Adapt().visit(ast.parse((ROOT/'scripts/e20-frontier').read_text()))))
+        self.assertIn("'--seconds', '2400'",source)
+        self.assertIn("tick['ms'] for tick in batch['ticks']",source)
+
+    def test_approach_requires_observed_target_before_wall(self):
+        raw = dict(trials=[dict(began_ns=0,ended_ns=1000,source='a',target='b',mode='walk')],
+            wire=[dict(kind='sent_position',ns=400,pos=[1,-60,1]),dict(kind='sent_position',ns=600,pos=[-1,-60,1])],
+            approach_presence=dict(b=[dict(ns=300,actors=[dict(held=True,placed=False)])]))
+        row = results.approach(raw)[0]
+        self.assertEqual(row['wall_ns'],500)
+        self.assertTrue(row['approach_proven'])
+        raw['approach_presence']['b'][0]['ns'] = 700
+        self.assertFalse(results.approach(raw)[0]['approach_proven'])
+
+    def test_no_approach_observation_stays_unproven(self):
+        raw = dict(trials=[dict(began_ns=0,ended_ns=1000,source='a',target='b',mode='walk')],wire=[],approach_presence={})
+        row = results.approach(raw)[0]
+        self.assertFalse(row['approach_proven'])
+        self.assertIsNone(row['lead_lower_bound_ms'])
+
+    def test_owner_audit_catches_two_acting_copies(self):
+        from types import SimpleNamespace
+        actor = dict(name='E17BotX0',placed=True,held=False,frozen=False,released=False,terrain_reader=False)
+        class Tile:
+            def __init__(self,actors):
+                self.actors=actors
+            def ask(self,_):
+                return dict(players=self.actors)
+        instance = SimpleNamespace(tiles=dict(a=Tile([actor]),b=Tile([actor])),
+            player=lambda _:dict(generation=0,owner=0))
+        soak = Soak('static',{}, {})
+        soak.seeded = {'E17BotX0':dict(uuid='synthetic')}
+        with self.assertRaisesRegex(RuntimeError,'owner violation'):
+            soak.audit(instance,60)
+        self.assertEqual(len(soak.audits[0]['violations']),1)
+
+    def test_running_profile_excludes_blocked_weight(self):
+        import gzip
+        raw = b'''<table>
+        <row><thread-state>Running</thread-state><weight>100000000</weight><thread fmt="main"/><tagged-backtrace><backtrace><frame name="tile_work"/></backtrace></tagged-backtrace></row>
+        <row><thread-state>Blocked</thread-state><weight>900000000</weight><thread fmt="main"/></row>
+        </table>'''
+        with tempfile.TemporaryDirectory(prefix='E23-static-') as folder:
+            path=Path(folder)/'trace.xml.gz'
+            path.write_bytes(gzip.compress(raw))
+            result=running(path)
+        self.assertEqual(result['total_cpu_seconds'],.1)
+        self.assertEqual(result['main_cpu_seconds'],.1)
+        self.assertEqual(result['states_weight_ns']['Blocked'],900_000_000)
+
+    def test_all_new_scripts_parse(self):
+        for path in (ROOT/'scripts').glob('e23*'):
+            if path.is_file():
+                compile(path.read_text(),str(path),'exec')
+
+
+if __name__ == '__main__':
+    unittest.main()

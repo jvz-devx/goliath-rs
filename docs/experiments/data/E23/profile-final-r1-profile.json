@@ -1,0 +1,569 @@
+{
+  "kind": "E23-busiest-tile-profile",
+  "profiling_perturbs_timing": true,
+  "maximum_additions_tick_fraction": 0.05,
+  "errors": [],
+  "selection": {
+    "method": "native process CPU during last five warmup seconds",
+    "cores": {
+      "a": 0.6376307188738628,
+      "b": 0.52621524375893,
+      "c": 0.5325269683848797,
+      "d": 0.6416383031954684
+    },
+    "before": {
+      "a": {
+        "at": 164179.741225708,
+        "cpu_s": 29.827373666666663,
+        "user_s": 18.99986620833333,
+        "system_s": 10.827507458333333,
+        "threads": 46,
+        "rss_mb": 430.765625,
+        "unix_syscalls": 7304705,
+        "context_switches": 725810
+      },
+      "b": {
+        "at": 164179.741269125,
+        "cpu_s": 28.56473845833333,
+        "user_s": 18.420015916666664,
+        "system_s": 10.144722541666665,
+        "threads": 45,
+        "rss_mb": 422.875,
+        "unix_syscalls": 7255862,
+        "context_switches": 713678
+      },
+      "c": {
+        "at": 164179.741311625,
+        "cpu_s": 27.72816370833333,
+        "user_s": 18.279745875,
+        "system_s": 9.448417833333332,
+        "threads": 47,
+        "rss_mb": 421.484375,
+        "unix_syscalls": 7399466,
+        "context_switches": 757781
+      },
+      "d": {
+        "at": 164179.741324958,
+        "cpu_s": 28.32400420833333,
+        "user_s": 18.001426041666665,
+        "system_s": 10.322578166666666,
+        "threads": 46,
+        "rss_mb": 440.140625,
+        "unix_syscalls": 7191233,
+        "context_switches": 691208
+      }
+    },
+    "after": {
+      "a": {
+        "at": 164184.74535125,
+        "cpu_s": 33.01815783333333,
+        "user_s": 20.89893945833333,
+        "system_s": 12.119218374999999,
+        "threads": 46,
+        "rss_mb": 432.046875,
+        "unix_syscalls": 8089254,
+        "context_switches": 794620
+      },
+      "b": {
+        "at": 164184.745364625,
+        "cpu_s": 31.197969791666665,
+        "user_s": 20.081435166666665,
+        "system_s": 11.116534624999998,
+        "threads": 45,
+        "rss_mb": 422.953125,
+        "unix_syscalls": 7981353,
+        "context_switches": 777196
+      },
+      "c": {
+        "at": 164184.745373375,
+        "cpu_s": 30.392961541666665,
+        "user_s": 19.988172916666663,
+        "system_s": 10.404788624999998,
+        "threads": 47,
+        "rss_mb": 421.546875,
+        "unix_syscalls": 8165118,
+        "context_switches": 829618
+      },
+      "d": {
+        "at": 164184.745381541,
+        "cpu_s": 31.53479858333333,
+        "user_s": 20.05080208333333,
+        "system_s": 11.483996499999998,
+        "threads": 46,
+        "rss_mb": 441.234375,
+        "unix_syscalls": 7982575,
+        "context_switches": 760536
+      }
+    },
+    "tile": "d",
+    "pid": 27735
+  },
+  "collection": {
+    "command": [
+      "xcrun",
+      "xctrace",
+      "record",
+      "--template",
+      "Time Profiler",
+      "--attach",
+      "27735",
+      "--time-limit",
+      "10s",
+      "--no-prompt",
+      "--output",
+      "$REPO/.local/evidence/E23/profile-final-r1/tile.trace"
+    ],
+    "exit": 0,
+    "began_ns": 1794155131619965000,
+    "ended_ns": 1794155146121703000
+  },
+  "schemas": [
+    "tick",
+    "life-cycle-period",
+    "tick",
+    "device-thermal-state-intervals",
+    "os-log",
+    "os-log",
+    "os-signpost",
+    "os-signpost",
+    "hang-risks",
+    "potential-hangs",
+    "global-poi-layout",
+    "time-profile",
+    "kdebug-signpost",
+    "kdebug-strings",
+    "dyld-library-load",
+    "kdebug-strings",
+    "process-info",
+    "os-log-arg",
+    "kdebug",
+    "region-of-interest",
+    "kdebug",
+    "kdebug",
+    "kdebug",
+    "kdebug",
+    "kdebug",
+    "kdebug",
+    "kdebug",
+    "kdebug",
+    "kdebug",
+    "kdebug",
+    "global-roi-layout",
+    "kdebug",
+    "kdebug",
+    "kdebug",
+    "gcd-perf-event",
+    "thread-info",
+    "runloop-events",
+    "roi-metadata",
+    "time-sample",
+    "os-signpost-arg"
+  ],
+  "running": {
+    "method": "Time Profiler Running weights; no blocked occupancy in CPU denominator",
+    "source_sha256": "0e4036edd49a2c89e3aa0268ee0a70ec83a912cdd0fdbf6768f6fdda1ab6e778",
+    "total_cpu_seconds": 5.688,
+    "main_cpu_seconds": 3.343,
+    "states_weight_ns": {
+      "Running": 5688000000
+    },
+    "thread_cpu_seconds": {
+      "horizon-net-1 (0x12fe448) (horizon-client, pid: 27735)": 0.205,
+      "Main Thread (0x12fe332) (horizon-client, pid: 27735)": 3.343,
+      "horizon-net-2 (0x12fe449) (horizon-client, pid: 27735)": 0.186,
+      "horizon-net-5 (0x12fe44c) (horizon-client, pid: 27735)": 0.21,
+      "horizon-net-7 (0x12fe44e) (horizon-client, pid: 27735)": 0.166,
+      "horizon-net-0 (0x12fe447) (horizon-client, pid: 27735)": 0.229,
+      "horizon-net-8 (0x12fe44f) (horizon-client, pid: 27735)": 0.187,
+      "e6-cut-writer (0x12fe382) (horizon-client, pid: 27735)": 0.51,
+      "horizon-net-4 (0x12fe44b) (horizon-client, pid: 27735)": 0.188,
+      "horizon-net-6 (0x12fe44d) (horizon-client, pid: 27735)": 0.205,
+      "horizon-net-3 (0x12fe44a) (horizon-client, pid: 27735)": 0.201,
+      "Log writer (0x12fe334) (horizon-client, pid: 27735)": 0.004,
+      "horizon-lan-conn (0x13031e1) (horizon-client, pid: 27735)": 0.001,
+      "horizon-lan-conn (0x130325b) (horizon-client, pid: 27735)": 0.001,
+      "horizon-control-client (0x12feb99) (horizon-client, pid: 27735)": 0.002,
+      "horizon-control-client (0x13017a4) (horizon-client, pid: 27735)": 0.005,
+      "horizon-lan-conn (0x13032f2) (horizon-client, pid: 27735)": 0.001,
+      "horizon-chunk-encode-0 (0x12fe498) (horizon-client, pid: 27735)": 0.003,
+      "horizon-lan-conn (0x13033a3) (horizon-client, pid: 27735)": 0.001,
+      "horizon-lan-accept (0x12fe37f) (horizon-client, pid: 27735)": 0.005,
+      "horizon-lan-conn (0x13034d4) (horizon-client, pid: 27735)": 0.001,
+      "horizon-chunk-encode-8 (0x12fe4a0) (horizon-client, pid: 27735)": 0.002,
+      "horizon-chunk-encode-15 (0x12fe4a7) (horizon-client, pid: 27735)": 0.002,
+      "horizon-chunk-encode-13 (0x12fe4a5) (horizon-client, pid: 27735)": 0.002,
+      "horizon-chunk-encode-11 (0x12fe4a3) (horizon-client, pid: 27735)": 0.002,
+      "horizon-chunk-encode-5 (0x12fe49d) (horizon-client, pid: 27735)": 0.002,
+      "horizon-lan-conn (0x13035ed) (horizon-client, pid: 27735)": 0.001,
+      "horizon-chunk-encode-16 (0x12fe4a8) (horizon-client, pid: 27735)": 0.002,
+      "horizon-chunk-encode-12 (0x12fe4a4) (horizon-client, pid: 27735)": 0.002,
+      "horizon-chunk-encode-4 (0x12fe49c) (horizon-client, pid: 27735)": 0.001,
+      "horizon-chunk-encode-3 (0x12fe49b) (horizon-client, pid: 27735)": 0.001,
+      "horizon-lan-conn (0x13036e6) (horizon-client, pid: 27735)": 0.001,
+      "horizon-chunk-encode-7 (0x12fe49f) (horizon-client, pid: 27735)": 0.003,
+      "horizon-chunk-encode-10 (0x12fe4a2) (horizon-client, pid: 27735)": 0.001,
+      "horizon-chunk-encode-9 (0x12fe4a1) (horizon-client, pid: 27735)": 0.002,
+      "horizon-chunk-encode-2 (0x12fe49a) (horizon-client, pid: 27735)": 0.001,
+      "horizon-chunk-encode-14 (0x12fe4a6) (horizon-client, pid: 27735)": 0.002,
+      "horizon-control-client (0x12fe508) (horizon-client, pid: 27735)": 0.001,
+      "horizon-lan-conn (0x1303879) (horizon-client, pid: 27735)": 0.001,
+      "horizon-lan-conn (0x13038d8) (horizon-client, pid: 27735)": 0.003,
+      "horizon-control-client (0x13022f4) (horizon-client, pid: 27735)": 0.001,
+      "horizon-lan-conn (0x130397e) (horizon-client, pid: 27735)": 0.001
+    },
+    "main_categories": {
+      "unattributed main work": {
+        "cpu_seconds": 2.962,
+        "percent_main": 88.60305115166018
+      },
+      "between-tick pacing and control, includes inlined warming": {
+        "cpu_seconds": 0.253,
+        "percent_main": 7.568052647322764
+      },
+      "entity tracking, mixed readers and real players": {
+        "cpu_seconds": 0.1,
+        "percent_main": 2.991325157044571
+      },
+      "lease checks on main": {
+        "cpu_seconds": 0.028,
+        "percent_main": 0.8375710439724798
+      }
+    },
+    "top_leaves": [
+      {
+        "frame": "_RNvMs1_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan9waypointsNtB5_9Waypoints16update_or_create",
+        "cpu_seconds": 0.768,
+        "percent_target": 13.50210970464135
+      },
+      {
+        "frame": "__sendto",
+        "cpu_seconds": 0.704,
+        "percent_target": 12.376933895921237
+      },
+      {
+        "frame": "write",
+        "cpu_seconds": 0.6,
+        "percent_target": 10.548523206751055
+      },
+      {
+        "frame": "_platform_memmove",
+        "cpu_seconds": 0.388,
+        "percent_target": 6.8213783403656825
+      },
+      {
+        "frame": "kevent",
+        "cpu_seconds": 0.351,
+        "percent_target": 6.170886075949367
+      },
+      {
+        "frame": "__recvfrom",
+        "cpu_seconds": 0.316,
+        "percent_target": 5.555555555555555
+      },
+      {
+        "frame": "mi_free",
+        "cpu_seconds": 0.16,
+        "percent_target": 2.8129395218002813
+      },
+      {
+        "frame": "_RNvXs3_NtNtCs8Mbv00yxnRz_4core4hash3sipINtB5_6HasherNtB5_11Sip13RoundsENtB7_6Hasher5writeCs1uiLCjNxXHo_14horizon_client",
+        "cpu_seconds": 0.116,
+        "percent_target": 2.0393811533052038
+      },
+      {
+        "frame": "mach_absolute_time",
+        "cpu_seconds": 0.067,
+        "percent_target": 1.1779184247538679
+      },
+      {
+        "frame": "__bzero",
+        "cpu_seconds": 0.063,
+        "percent_target": 1.1075949367088607
+      },
+      {
+        "frame": "_platform_memcmp",
+        "cpu_seconds": 0.06,
+        "percent_target": 1.0548523206751055
+      },
+      {
+        "frame": "_RNvMNtNtCs1uiLCjNxXHo_14horizon_client4game16building_playersNtB2_15BuildingPlayers8for_turn",
+        "cpu_seconds": 0.059,
+        "percent_target": 1.0372714486638537
+      },
+      {
+        "frame": "madvise",
+        "cpu_seconds": 0.058,
+        "percent_target": 1.0196905766526019
+      },
+      {
+        "frame": "_RNvMs_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan5guestNtB4_5Guest6bounds",
+        "cpu_seconds": 0.055,
+        "percent_target": 0.9669479606188467
+      },
+      {
+        "frame": "_RNvMs6_NtNtCs1uiLCjNxXHo_14horizon_client4game16natural_spawningNtB7_4Game15spawning_chunks",
+        "cpu_seconds": 0.052,
+        "percent_target": 0.9142053445850914
+      },
+      {
+        "frame": "_RNvMs0_NtNtCs1uiLCjNxXHo_14horizon_client4game11lan_actionsNtB7_4Game11enter_guest",
+        "cpu_seconds": 0.051,
+        "percent_target": 0.8966244725738397
+      },
+      {
+        "frame": "_RNvMs1_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan3hubNtB5_3Hub14track_entities",
+        "cpu_seconds": 0.05,
+        "percent_target": 0.8790436005625879
+      },
+      {
+        "frame": "_RNvMsa_NtCsdSvliMZVe8v_7zlib_rs7deflateNtB5_4Heap10pqdownheap",
+        "cpu_seconds": 0.048,
+        "percent_target": 0.8438818565400844
+      },
+      {
+        "frame": "_RNvNtNtCs1uiLCjNxXHo_14horizon_client4game11lan_actions16building_players",
+        "cpu_seconds": 0.048,
+        "percent_target": 0.8438818565400844
+      },
+      {
+        "frame": "_RINvNtCs8Mbv00yxnRz_4core3ptr9drop_glueINtNtCshxvaOLs88l5_5alloc3vec3VecINtNtBG_4sync3ArcNtNtCsbc64hCwV2WJ_21horizon_client_render5chunk5ChunkEEECs1uiLCjNxXHo_14horizon_client",
+        "cpu_seconds": 0.047,
+        "percent_target": 0.8263009845288326
+      },
+      {
+        "frame": "mi_page_thread_collect_to_local",
+        "cpu_seconds": 0.042,
+        "percent_target": 0.7383966244725738
+      },
+      {
+        "frame": "_RNvMs_NtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated6statusNtB8_4Game19poll_server_control",
+        "cpu_seconds": 0.038,
+        "percent_target": 0.6680731364275668
+      },
+      {
+        "frame": "_RNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game3lanNtB7_4Game8tick_lan",
+        "cpu_seconds": 0.034,
+        "percent_target": 0.5977496483825597
+      },
+      {
+        "frame": "_RNvNtNtNtCsdSvliMZVe8v_7zlib_rs7deflate9algorithm6medium14deflate_medium",
+        "cpu_seconds": 0.033,
+        "percent_target": 0.580168776371308
+      },
+      {
+        "frame": "_RNvMNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cutNtB2_7Encoded5chunk",
+        "cpu_seconds": 0.032,
+        "percent_target": 0.5625879043600562
+      },
+      {
+        "frame": "_RNvMs1_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan3hubNtB5_3Hub4poll",
+        "cpu_seconds": 0.029,
+        "percent_target": 0.5098452883263009
+      },
+      {
+        "frame": "_RNvMs2_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan7io_poolNtB5_4Conn5frame",
+        "cpu_seconds": 0.028,
+        "percent_target": 0.49226441631504925
+      },
+      {
+        "frame": "_RNvNtCsk15EsyUm19k_16horizon_protocol5frame8contents",
+        "cpu_seconds": 0.028,
+        "percent_target": 0.49226441631504925
+      },
+      {
+        "frame": "_RINvYNtNtNtCs82bWklYMk3w_3std4hash6random11RandomStateNtNtCs8Mbv00yxnRz_4core4hash11BuildHasher8hash_oneRTNtNtCshxvaOLs88l5_5alloc6string6StringllEECs1uiLCjNxXHo_14horizon_client",
+        "cpu_seconds": 0.028,
+        "percent_target": 0.49226441631504925
+      },
+      {
+        "frame": "_RNvMs_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan5guestNtB4_5Guest10dimensions",
+        "cpu_seconds": 0.028,
+        "percent_target": 0.49226441631504925
+      }
+    ],
+    "addition_inclusive_frames": [
+      {
+        "frame": "_RINvNtNtCs82bWklYMk3w_3std3sys9backtrace28___rust_begin_short_backtraceNCNvMs_NtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cutNtB1e_7Runtime3new0uEB1k_",
+        "cpu_seconds": 0.51
+      },
+      {
+        "frame": "_RNSNvYNCINvNtNtCs82bWklYMk3w_3std6thread9lifecycle15spawn_uncheckedNCNvMs_NtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cutNtB1a_7Runtime3new0uEs_0INtNtNtCs8Mbv00yxnRz_4core3ops8function6FnOnceuE9call_once6vtableB1g_",
+        "cpu_seconds": 0.51
+      },
+      {
+        "frame": "_RNvNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut6worker",
+        "cpu_seconds": 0.501
+      },
+      {
+        "frame": "_RNvMs0_NtNtCs1uiLCjNxXHo_14horizon_client4game6levelsNtB7_4Game30wait_for_next_server_tick_with",
+        "cpu_seconds": 0.253
+      },
+      {
+        "frame": "_RNvMs_NtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated6statusNtB8_4Game19poll_server_control",
+        "cpu_seconds": 0.231
+      },
+      {
+        "frame": "_RNvNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut6encode",
+        "cpu_seconds": 0.189
+      },
+      {
+        "frame": "_RNvMNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cutNtB2_7Encoded5chunk",
+        "cpu_seconds": 0.139
+      },
+      {
+        "frame": "_RNvMs1_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan3hubNtB5_3Hub14track_entities",
+        "cpu_seconds": 0.1
+      },
+      {
+        "frame": "_RNvNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut4gzip",
+        "cpu_seconds": 0.094
+      },
+      {
+        "frame": "_RINvNtCs8Mbv00yxnRz_4core3ptr9drop_glueNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut7TerrainEBJ_",
+        "cpu_seconds": 0.05
+      },
+      {
+        "frame": "_RNvNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut5store5merge",
+        "cpu_seconds": 0.033
+      },
+      {
+        "frame": "_RNvMs_NtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated7cluster5leaseNtB4_9Authority5check",
+        "cpu_seconds": 0.028
+      },
+      {
+        "frame": "_RNvMNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated7cluster5leaseNtB2_5Clock9advancing",
+        "cpu_seconds": 0.027
+      },
+      {
+        "frame": "_RNvMNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated7cluster5leaseNtB2_5Clock3new",
+        "cpu_seconds": 0.026
+      },
+      {
+        "frame": "_RNCNCNvMs0_NtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cutNtBd_4Game16tile_cut_request00Bf_",
+        "cpu_seconds": 0.009
+      },
+      {
+        "frame": "_RINvNtCs1eLD2zUJtbl_18horizon_client_lib4save8cut_tagsuNCNCNvMs0_NtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cutNtB15_4Game16tile_cut_request00EB17_",
+        "cpu_seconds": 0.009
+      },
+      {
+        "frame": "_RNvNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut5store6encode",
+        "cpu_seconds": 0.006
+      },
+      {
+        "frame": "_RNvMs1_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan3hubNtB5_3Hub13release_moved",
+        "cpu_seconds": 0.005
+      },
+      {
+        "frame": "_RNvNtNtCs1eLD2zUJtbl_18horizon_client_lib3lan8arrivals15release_request",
+        "cpu_seconds": 0.005
+      },
+      {
+        "frame": "_RNvMs2_NtNtCs82bWklYMk3w_3std4sync4mpmcINtB5_6SenderNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut7MessageE4sendBW_",
+        "cpu_seconds": 0.004
+      },
+      {
+        "frame": "_RINvNtCs8Mbv00yxnRz_4core3ptr9drop_glueNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut4WorkEBJ_",
+        "cpu_seconds": 0.003
+      },
+      {
+        "frame": "_RNvMs7_NtNtCs1uiLCjNxXHo_14horizon_client4game6entityNtB7_4Game18hold_tile_entities",
+        "cpu_seconds": 0.003
+      },
+      {
+        "frame": "_RNvNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut5store4lock",
+        "cpu_seconds": 0.002
+      },
+      {
+        "frame": "_RNCNvNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated7cluster5lease10initializes3_0Bb_",
+        "cpu_seconds": 0.002
+      },
+      {
+        "frame": "_RNvMs0_NtNtCs1uiLCjNxXHo_14horizon_client4game12lan_entitiesNtB7_4Game21lan_projectile_states",
+        "cpu_seconds": 0.001
+      },
+      {
+        "frame": "_RNvNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut5store5fence",
+        "cpu_seconds": 0.001
+      },
+      {
+        "frame": "_RNvNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut5store4sync",
+        "cpu_seconds": 0.001
+      },
+      {
+        "frame": "_RNvMs1_NtNtNtCs82bWklYMk3w_3std4sync4mpmc4listINtB5_7ChannelNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated8tile_cut7MessageE4readB14_",
+        "cpu_seconds": 0.001
+      }
+    ],
+    "example_stacks": {
+      "unattributed main work": [
+        "kevent",
+        "_RNvMs_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan7io_poolNtB4_6Worker4wake",
+        "_RNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game3lanNtB7_4Game8tick_lan",
+        "_RNvMsa_NtCs1uiLCjNxXHo_14horizon_client4gameNtB5_4Game10tick_world",
+        "_RNvMsa_NtCs1uiLCjNxXHo_14horizon_client4gameNtB5_4Game4tick",
+        "_RNvMs0_NtNtCs1uiLCjNxXHo_14horizon_client4game6levelsNtB7_4Game11tick_server",
+        "_RNvMs0_NtNtCs1uiLCjNxXHo_14horizon_client4game6levelsNtB7_4Game17tick_server_timed",
+        "_RINvNvNtCs82bWklYMk3w_3std9panicking12catch_unwind7do_callINtNtNtCs8Mbv00yxnRz_4core5panic11unwind_safe16AssertUnwindSafeNCNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game9dedicatedNtB25_4Game19run_dedicated_innerse_0EINtNtB11_6result6ResultuINtNtCshxvaOLs88l5_5alloc5boxed3BoxDNtNtB11_5error5ErrorEL_EEEB27_",
+        "_RNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game9dedicatedNtB7_4Game19run_dedicated_inner",
+        "_RNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game9dedicatedNtB7_4Game13run_dedicated",
+        "_RNvNtCs1uiLCjNxXHo_14horizon_client4game10start_game",
+        "_RNvNtCs1uiLCjNxXHo_14horizon_client4game8run_with",
+        "_RNvNtCs1uiLCjNxXHo_14horizon_client5entry9main_with",
+        "_RNvCs9tdZhp4pTQx_14horizon_client4main"
+      ],
+      "between-tick pacing and control, includes inlined warming": [
+        "_RNvXs3_NtNtCs8Mbv00yxnRz_4core4hash3sipINtB5_6HasherNtB5_11Sip13RoundsENtB7_6Hasher5writeCs1uiLCjNxXHo_14horizon_client",
+        "_RINvYNtNtNtCs82bWklYMk3w_3std4hash6random11RandomStateNtNtCs8Mbv00yxnRz_4core4hash11BuildHasher8hash_oneRTNtNtCshxvaOLs88l5_5alloc6string6StringllEECs1uiLCjNxXHo_14horizon_client",
+        "_RNvMs_NtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated6statusNtB8_4Game19poll_server_control",
+        "_RNvMs0_NtNtCs1uiLCjNxXHo_14horizon_client4game6levelsNtB7_4Game30wait_for_next_server_tick_with",
+        "_RNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game9dedicatedNtB7_4Game19run_dedicated_inner",
+        "_RNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game9dedicatedNtB7_4Game13run_dedicated",
+        "_RNvNtCs1uiLCjNxXHo_14horizon_client4game10start_game",
+        "_RNvNtCs1uiLCjNxXHo_14horizon_client4game8run_with",
+        "_RNvNtCs1uiLCjNxXHo_14horizon_client5entry9main_with",
+        "_RNvCs9tdZhp4pTQx_14horizon_client4main",
+        "_RINvNtNtCs82bWklYMk3w_3std3sys9backtrace28___rust_begin_short_backtraceFEuuECs9tdZhp4pTQx_14horizon_client",
+        "_RNCINvNtCs82bWklYMk3w_3std2rt10lang_startuE0Cs9tdZhp4pTQx_14horizon_client",
+        "_RNvNtCs82bWklYMk3w_3std2rt19lang_start_internal",
+        "main"
+      ],
+      "entity tracking, mixed readers and real players": [
+        "_RNvMs1_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan3hubNtB5_3Hub14track_entities",
+        "_RNvMs1_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan3hubNtB5_3Hub14track_entities",
+        "_RNvMs1_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan3hubNtB5_3Hub10tick_level",
+        "_RNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game3lanNtB7_4Game8tick_lan",
+        "_RNvMsa_NtCs1uiLCjNxXHo_14horizon_client4gameNtB5_4Game10tick_world",
+        "_RNvMsa_NtCs1uiLCjNxXHo_14horizon_client4gameNtB5_4Game4tick",
+        "_RNvMs0_NtNtCs1uiLCjNxXHo_14horizon_client4game6levelsNtB7_4Game11tick_server",
+        "_RNvMs0_NtNtCs1uiLCjNxXHo_14horizon_client4game6levelsNtB7_4Game17tick_server_timed",
+        "_RINvNvNtCs82bWklYMk3w_3std9panicking12catch_unwind7do_callINtNtNtCs8Mbv00yxnRz_4core5panic11unwind_safe16AssertUnwindSafeNCNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game9dedicatedNtB25_4Game19run_dedicated_innerse_0EINtNtB11_6result6ResultuINtNtCshxvaOLs88l5_5alloc5boxed3BoxDNtNtB11_5error5ErrorEL_EEEB27_",
+        "_RNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game9dedicatedNtB7_4Game19run_dedicated_inner",
+        "_RNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game9dedicatedNtB7_4Game13run_dedicated",
+        "_RNvNtCs1uiLCjNxXHo_14horizon_client4game10start_game",
+        "_RNvNtCs1uiLCjNxXHo_14horizon_client4game8run_with",
+        "_RNvNtCs1uiLCjNxXHo_14horizon_client5entry9main_with"
+      ],
+      "lease checks on main": [
+        "mach_absolute_time",
+        "clock_gettime_nsec_np",
+        "clock_gettime",
+        "_RNvMNtNtNtNtCs82bWklYMk3w_3std3sys3pal4unix4timeNtB2_8Timespec3now",
+        "_RNvMNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated7cluster5leaseNtB2_5Clock3new",
+        "_RNvMNtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated7cluster5leaseNtB2_5Clock9advancing",
+        "_RNvMs_NtNtNtNtCs1uiLCjNxXHo_14horizon_client4game9dedicated7cluster5leaseNtB4_9Authority5check",
+        "_RNvMs1_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan3hubNtB5_3Hub13process_inbox",
+        "_RNvMs1_NtNtCs1eLD2zUJtbl_18horizon_client_lib3lan3hubNtB5_3Hub13drain_packets",
+        "_RNvMs1_NtNtCs1uiLCjNxXHo_14horizon_client4game3lanNtB7_4Game16tick_lan_packets",
+        "_RNvMsa_NtCs1uiLCjNxXHo_14horizon_client4gameNtB5_4Game10tick_world",
+        "_RNvMsa_NtCs1uiLCjNxXHo_14horizon_client4gameNtB5_4Game4tick",
+        "_RNvMs0_NtNtCs1uiLCjNxXHo_14horizon_client4game6levelsNtB7_4Game11tick_server",
+        "_RNvMs0_NtNtCs1uiLCjNxXHo_14horizon_client4game6levelsNtB7_4Game17tick_server_timed"
+      ]
+    },
+    "reader_attribution": "not separable from real-player tracking in optimized symbols",
+    "ownership_attribution": "may be inlined; missing named symbols are not zero cost"
+  },
+  "verdict": "unproven",
+  "reason": "sampled symbols cannot bound inlined ownership and reader work below 5% of tick execution; off-tick CPU is reported separately"
+}

@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""E23 bounded quiet ownership, explicit host-release gate and noise evidence."""
+import argparse
+import json
+import os
+import signal
+import subprocess
+import time
+
+from e23_support import DATA, ROOT, frozen, load, name_check, pack, save, timestamp
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--host-released', action='store_true', required=True,
+        help='reviewer explicitly confirmed E22 has finished')
+    parser.add_argument('--soak', action='store_true')
+    parser.add_argument('command', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    name_check(args.name)
+    command = args.command[1:] if args.command[:1] == ['--'] else args.command
+    if not command:
+        parser.error('supply the fixture command after --')
+    DATA.mkdir(parents=True, exist_ok=True)
+    target = DATA / (args.name + '-quiet.json')
+    if target.exists() or target.with_suffix('.json.gz').exists():
+        raise RuntimeError('quiet result exists; use a fresh attempt name')
+    identity = json.dumps(dict(owner='E23', name=args.name, pid=os.getpid(), time=timestamp())) + '\n'
+    request = ROOT / '.local/quiet-request'
+    before = frozen()
+    began = time.monotonic()
+    deadline = began + (2400 if args.soak else 1500)
+    child = monitor = None
+    result = dict(status='waiting', request=json.loads(identity), command=command,
+        explicit_host_release=True, binaries_before=before, exit=1,
+        maximum_seconds=2400 if args.soak else 1500)
+    with request.open('x') as stream:
+        stream.write(identity)
+    try:
+        while os.getloadavg()[0] > 4:
+            if request.read_text() != identity:
+                raise RuntimeError('quiet identity changed')
+            if time.monotonic() > deadline - (2100 if args.soak else 120):
+                raise TimeoutError('quiet acquisition deadline')
+            time.sleep(1)
+        result.update(status='running', load_start=os.getloadavg())
+        noise = load('e23_noise', ROOT / 'scripts/e20-window')
+        monitor = noise.FixtureSampler(observer=True).start()
+        monitor.capture('steady-first')
+        child = subprocess.Popen(command, cwd=ROOT,
+            env=dict(os.environ, E23_QUIET_IDENTITY=identity,
+                E23_QUIET_WAIVER='reviewer confirmed E22 finished; E23 is the only active builder'),
+            start_new_session=True)
+        monitor.register('regression-driver', child.pid)
+        try:
+            result['exit'] = child.wait(timeout=max(1, deadline - time.monotonic() - 50))
+        except BaseException:
+            child.send_signal(signal.SIGINT)
+            try:
+                child.wait(timeout=35)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGCONT)
+                os.killpg(child.pid, signal.SIGTERM)
+                child.wait(timeout=10)
+            raise
+        result['status'] = 'complete' if result['exit'] == 0 else 'failed'
+    except BaseException as error:
+        result.update(status='failed', error=str(error))
+        raise
+    finally:
+        try:
+            if monitor:
+                monitor.capture('steady-last')
+                monitor.stop()
+                report = monitor.report()
+                whole = report['phases']['whole_cell']
+                result['processes'] = report
+                result['noise_valid'] = bool(whole and whole['no_outside_process_above_half_core'] and not report['error'])
+                if not result['noise_valid']:
+                    result.update(status='invalid-outside-noise', exit=1)
+            result['binaries_after'] = frozen()
+            if result['binaries_after'] != before:
+                raise RuntimeError('frozen identity changed inside window')
+        finally:
+            if request.exists() and request.read_text() == identity:
+                request.unlink()
+            result.update(seconds=time.monotonic() - began, load_end=os.getloadavg())
+            save(target, result)
+            pack(target)
+    raise SystemExit(result['exit'])
+
+
+if __name__ == '__main__':
+    main()

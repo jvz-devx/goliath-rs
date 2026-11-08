@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Collect the unchanged native physics suite with E23-owned lease evidence."""
+import importlib.machinery
+import json
+from pathlib import Path
+
+from e23_support import ROOT, availability, frozen, owned_fixture, quiet
+
+
+def add_approach_observations(module):
+    """Observe real held target sessions; leave movement and checker unchanged."""
+    start, stop = module.Run.start, module.Run.stop
+
+    def started(run):
+        result = start(run)
+        run.e23_presence = {}
+        def extract(raw):
+            actors = [{key:actor.get(key) for key in ['held','placed','frozen','released','position']}
+                for actor in raw.get('players',[]) if actor.get('name') == module.NAME
+                and not actor.get('terrain_reader')]
+            return dict(_key=json.dumps(actors,sort_keys=True), actors=actors)
+        for label,tile in run.state['tiles'].items():
+            endpoint = json.loads(Path(tile['endpoint']).read_text())
+            run.e23_presence[label] = module.Sampler(endpoint,'server-status',extract,.02)
+        return result
+
+    def stopped(run):
+        presence = getattr(run,'e23_presence',{})
+        for sampler in presence.values():
+            sampler.stop()
+        result = stop(run)
+        run.result['approach_presence'] = {label:sampler.rows for label,sampler in presence.items()}
+        run.result['errors'] += [error for sampler in presence.values() for error in sampler.errors]
+        run.result['approach_observation_scope'] = '20ms target real-session status, held/unplaced before wall; no engine or movement changes'
+        return result
+
+    module.Run.start, module.Run.stop = started, stopped
+
+
+def main():
+    quiet()
+    before = frozen()
+    module = owned_fixture(ROOT / 'scripts/e22-physics', 'physics-adapter-v1')
+    module.Availability = availability
+    original = importlib.machinery.SourceFileLoader
+    class Loader(original):
+        def exec_module(self, loaded):
+            super().exec_module(loaded)
+            if Path(self.path).name == 'e14-physics':
+                add_approach_observations(loaded)
+    class Machinery:
+        SourceFileLoader = Loader
+    class Importlib:
+        machinery = Machinery()
+        util = __import__('importlib.util',fromlist=['util'])
+    module.importlib = Importlib()
+    try:
+        return module.main()
+    finally:
+        if frozen() != before:
+            raise RuntimeError('frozen binary identity changed during physics collection')
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

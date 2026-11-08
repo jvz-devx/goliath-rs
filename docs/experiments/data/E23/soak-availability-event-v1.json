@@ -1,0 +1,90 @@
+{
+  "kind": "E23-retained-availability-event",
+  "cause": "unproven",
+  "failure_capture_ns": 1794156774878561000,
+  "measurement_start_ns": 1794155372999363000,
+  "first_session_ended_warning": {
+    "at_ns": 1794156740828000000,
+    "line": "2026-11-08T16:52:20.828Z WARN  wall refusal (retry true): E17BotX16 could not move from c to d: prepare: E8 preparation abandoned: session ended (the player stays where they were)"
+  },
+  "first_warning_measurement_seconds": 1367.828637,
+  "explicit_local_expiry_observations": [
+    {
+      "role": "tile-a",
+      "scope": "control",
+      "wall_ns": 1794156775615788000
+    }
+  ],
+  "affected_tile_scope": "tile a explicitly observed; expiry of every other tile is not independently established",
+  "bot_failures": {
+    "bots-a": 1,
+    "bots-b": 1,
+    "bots-c": 1,
+    "bots-d": 1,
+    "bots-cross": 1
+  },
+  "maximum_signal_call_pause_ms": {
+    "tile-a": 252.719042,
+    "tile-b": 252.778167,
+    "tile-c": 252.803042,
+    "tile-d": 252.842791,
+    "store": 254.357333
+  },
+  "signal_pause_scope": "STOP-call begin to CONT-call end brackets; not proof of exact OS scheduling",
+  "open_stop_count": 0,
+  "signals_dropped": 0,
+  "outside_noise_valid": true,
+  "maximum_outside_process_core": 0.0644688420619957,
+  "maximum_sampler_spacing_seconds": 1.0979474379855674,
+  "store_batch_rows": 94547,
+  "store_batch_maxima_ms": {
+    "admission_max_ms": 17.7505,
+    "queue_max_ms": 65.502333,
+    "execute_ms": 44.759208,
+    "barrier_ms": 32.035334,
+    "maintain_ms": 47.034,
+    "background_ms": 952.290833
+  },
+  "origin_bracket": {
+    "store_pid": 36855,
+    "spawn_before_monotonic_ns": 164353672830416,
+    "spawn_before_wall_ns": 1794155300365308000,
+    "popen_return_monotonic_ns": 164353674176583,
+    "listen_observed_monotonic_ns": 164353697034500,
+    "listen_observed_wall_ns": 1794155300389512000,
+    "origin_bracket_width_ms": 24.204084
+  },
+  "caveats": [
+    "Store background durations may overlap successful commits and do not alone prove a blocked store.",
+    "No per-renewal tile trace exists in the frozen engine.",
+    "Sampler cadence and limiter brackets cannot rule out every host or thread stall."
+  ],
+  "logged_completed_source_releases": {
+    "server-a-164353704714666.log": 3526,
+    "server-b-164354348910208.log": 3461,
+    "server-c-164354971584916.log": 3496,
+    "server-d-164355589913000.log": 3456
+  },
+  "logged_release_scope": "deduplicated handover IDs in retained native server logs, including join/warmup; not a full measured activation ledger",
+  "store_trace": "docs/experiments/data/E23/soak-final-r1-store-batches.csv.gz",
+  "limiter_signals": "docs/experiments/data/E23/soak-final-r1-limiter-signals.json.gz",
+  "failure_evidence": {
+    "path": "docs/experiments/data/E23/soak-final-r1-650-failure-native.json.gz",
+    "stored_sha256": "b3328aad81c0b135504dff379ba34e933e82b24f790ec23d409844b16e7526dd"
+  },
+  "cleanup": {
+    "residual_owned_pids": [
+      36855,
+      36941,
+      36955,
+      37007
+    ],
+    "signal": "SIGTERM",
+    "validated": "exact frozen executable paths and unique E23 run directory in argv",
+    "all_owned_fixture_pids_gone": true
+  },
+  "evidence_gaps": [
+    "Failed recovery teardown prevented the endpoint cargo/recovery audit.",
+    "The original failure path did not serialize accumulated raw tick drains; that retention gap is not repaired retroactively."
+  ]
+}

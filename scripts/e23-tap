@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""One partition of E23's external witness, with opaque nonwitness forwarding."""
+import argparse
+import json
+import hashlib
+import os
+import signal
+import struct
+import threading
+import time
+
+from e18_d9_wire import D9Observer
+from e17_wire import varint
+from e23_support import save
+
+
+class Recorder(D9Observer):
+    def __init__(self, witnesses, stage):
+        super().__init__(witnesses)
+        self.stage = stage
+        self.events = []
+        self.event_drops = 0
+
+    def observe(self, front, name, body, at):
+        if name in self.witnesses:
+            with self.lock:
+                if len(self.events) < 200_000:
+                    _,offset = varint(body)
+                    self.events.append(dict(name=name, payload_sha256=hashlib.sha256(body).hexdigest(),
+                        at=at, wall_ns=time.time_ns(), stage=self.stage,
+                        position=list(struct.unpack_from('>ddd',body,offset))))
+                else:
+                    self.event_drops += 1
+        super().observe(front,name,body,at)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--target',type=int,required=True)
+    parser.add_argument('--host')
+    parser.add_argument('--index',type=int,required=True)
+    parser.add_argument('--witnesses',required=True)
+    parser.add_argument('--events',required=True)
+    parser.add_argument('--stage',choices=['front','backend'],required=True)
+    args = parser.parse_args()
+    observer = Recorder(json.loads(args.witnesses),args.stage)
+    # Nine independent partitions. All ranges stay outside Darwin's ephemeral pool.
+    observer.source_ports = (20000 + 2200*args.index, 22200 + 2200*args.index)
+    observer.next_source_port = observer.source_ports[0]
+    port = observer.listen(('127.0.0.1',args.target),front=args.stage=='front',host=args.host)
+    done = threading.Event()
+    for action in [signal.SIGINT,signal.SIGTERM]:
+        signal.signal(action,lambda *_:done.set())
+    observer.start()
+
+    def report():
+        value = observer.report()
+        print(json.dumps(dict(port=port,pid=os.getpid(),errors=value['errors'],
+            forwarded_bytes=value['forwarded_bytes'],maximum_pending_bytes=value['maximum_pending_bytes'],
+            outbound_connections=value['outbound_connections'],event_count=len(observer.events),
+            event_drops=observer.event_drops)),flush=True)
+
+    try:
+        report()
+        while not done.wait(1):
+            report()
+    finally:
+        observer.stop()
+        save(args.events,dict(stage=args.stage,pid=os.getpid(),report=observer.report(),
+            events=observer.events,event_drops=observer.event_drops,
+            clock='shared-host time.monotonic seconds at socket recv; wall timestamp selects window only'))
+        report()
+
+
+if __name__ == '__main__':
+    main()

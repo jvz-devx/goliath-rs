@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Freeze E23's seven plans and audit retained release provenance without load."""
+import argparse
+import json
+from pathlib import Path
+
+from e23_support import BINS, DATA, FROZEN, ROOT, frozen, save, sha, timestamp
+
+
+def build_proof(path, names, commands_key='commands'):
+    record = json.loads(path.read_text())
+    commands = record[commands_key]
+    rows = [row for row in commands if 'build' in row['command']]
+    if not rows or any(row['exit'] != 0 or '--release' not in row['command'] or '--profile' in row['command'] for row in rows):
+        raise RuntimeError('no successful release build in ' + str(path))
+    for name in names:
+        if record['binaries'][name] != FROZEN[name]:
+            raise RuntimeError('build output differs for ' + name)
+        if not any(name in row['command'] for row in rows):
+            raise RuntimeError('binary not selected by retained build command: ' + name)
+    return dict(path=str(path.relative_to(ROOT)), sha256=sha(path),
+        profile=record.get('profile'), incremental=record.get('incremental'), binaries={name:FROZEN[name] for name in names},
+        commands=rows)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', default='preregister-v1')
+    args = parser.parse_args()
+    target = DATA / (args.name + '.json')
+    if target.exists():
+        raise RuntimeError('plan already exists; use a new explicit version')
+    identity = frozen()
+    proofs = [build_proof(ROOT / 'docs/experiments/data/E17/final-release-prereqs-v2.json', ['goliath-store','horizon-bots']),
+        build_proof(ROOT / 'docs/experiments/data/E18/flat09-tiles-build-1.json', ['horizon-client'])]
+    candidate = json.loads((BINS / 'candidate.json').read_text())
+    commands = candidate['gates']['commands']
+    builds = [row for row in commands if row['command'][:2] == ['cargo','build']]
+    names = ['meridian','meridian-sidecar','e4-client']
+    if not builds or any(row['exit'] or '--release' not in row['command'] for row in builds):
+        raise RuntimeError('proxy release gate lacks a successful release build')
+    if any(candidate['binaries'][name] != FROZEN[name] or not any(name in row['command'] for row in builds) for name in names):
+        raise RuntimeError('proxy build outputs do not match selected final stack')
+    proofs.append(dict(path=str((BINS / 'candidate.json').relative_to(ROOT)), sha256=sha(BINS / 'candidate.json'),
+        profile=candidate['profile'], binaries={name:FROZEN[name] for name in names}, commands=builds))
+    plans = {
+        'vehicles': dict(rows=[dict(kind=kind,crossings=100) for kind in ['boat','minecart','horse']],
+            pass_line='stable UUID, generation +1, one live owner, saved-file/store consistency, mounted recovery'),
+        'physics': dict(rows=[dict(particles=particles,crossings=56) for particles in [False,True]],
+            checker='scripts/e20-build10-check-v2', maximum_backward_blocks=.1, minimum_speed_ratio=.95,
+            approach='prepare must precede interpolated client wall crossing; report every signed lead'),
+        'identical': dict(rows=[dict(tiles=n,repeat=r,players_per_tile=162,pigs_per_tile=64) for n in [1,2,4] for r in [1,2]],
+            warmup_seconds=30,seconds=60,readers_enabled=True,through_proxy=True,server_cores=4,bot_cores=1),
+        'latency': dict(rows=[dict(players=650,taps=kind) for kind in ['none','partitioned']],
+            warmup_seconds=30,seconds=60,maximum_p95_ms=5,server_cores=4,bot_cores=1,
+            intrusion='each tap below .7 core; no errors; intact D9 throughput, online population and bot deadlines'),
+        'profile': dict(rows=[dict(players=650,seconds=60)],
+            selection='largest native tile process CPU delta after warmup',maximum_additions_tick_fraction=.05,
+            unresolved_attribution_is_not_pass=True),
+        'soak': dict(rows=[dict(players=650,seconds=1800,maximum_window_seconds=2400)],
+            memory_from_seconds=300,memory_to_seconds=1800,maximum_growth_fraction=.10,
+            maximum_duplicates=0,maximum_owner_violations=0,server_cores=4,bot_cores=1),
+        'release': dict(rows=[dict(binary=name,sha256=digest) for name,digest in FROZEN.items()],
+            pass_line='successful retained cargo build --release record matches exact executable hash'),
+    }
+    result = dict(kind='E23-preregistered-plans',created=timestamp(),status='pre-registered',
+        host_release_required=True,rows_retained=True,capacity_players=650,matched_plain_players=325,
+        capacity_multiple=2.0,target_three_times_met=False,frozen=identity,plans=plans,
+        production_release_provenance=proofs,release_verdict='production executables verified; native physics client provenance is separate',
+        scripts={path.name:sha(path) for path in sorted((ROOT / 'scripts').glob('e23*')) if path.is_file()},
+        report_sha256_at_registration=sha(ROOT / 'docs/experiments/E23-closeout.md'))
+    save(target,result)
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)),production_release='passed',plans=len(plans),this_command_starts_load=False),indent=2))
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Independently recompute E23 soak growth, ownership and recovery from raw evidence."""
+import argparse
+import gzip
+import json
+from pathlib import Path
+
+from e23_support import DATA, ROOT, frozen, load, save, sha
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--run',required=True)
+    parser.add_argument('--name',required=True)
+    args = parser.parse_args()
+    target = DATA/(args.name+'.json')
+    if target.exists():
+        raise RuntimeError('derived result exists; use a fresh name')
+    shared = load('e23_soak_read',ROOT/'scripts/e23-results')
+    path = DATA/(args.run+'-soak.json.gz')
+    raw = shared.read(path)
+    measurement = shared.read(DATA/(args.run+'.json'))
+    cell = measurement.get('cells',{}).get('650',{})
+    available = shared.read(DATA/(args.run+'-availability.json'))
+    memory = raw['memory']
+    rows = []
+    coverage = False
+    if memory:
+        first = min(memory,key=lambda row:abs(row['elapsed_seconds']-300))
+        last = min(memory,key=lambda row:abs(row['elapsed_seconds']-1800))
+        coverage = abs(first['elapsed_seconds']-300)<2 and abs(last['elapsed_seconds']-1800)<2
+        for role,left in first['processes'].items():
+            right = last['processes'][role]
+            growth = right['rss_mb']/left['rss_mb']-1
+            retained = raw['minute5_to30'][role]
+            assert abs(growth-retained['growth_fraction'])<1e-12
+            rows.append(dict(role=role,pid=cell.get('processes',{}).get('roles',{}).get(role),minute5_mb=left['rss_mb'],later_observed_mb=right['rss_mb'],
+                from_seconds=first['elapsed_seconds'],to_seconds=last['elapsed_seconds'],
+                later_point_is_minute30=coverage,growth_fraction=growth,under_10_percent=growth<.10))
+    previous = {}
+    regressions = []
+    violations = []
+    for audit in raw['ownership_audits']:
+        violations += audit['violations']
+        for name,row in audit['generations'].items():
+            if row['before']<previous.get(name,0) or row['after']<row['before']:
+                regressions.append(dict(name=name,elapsed=audit['elapsed_seconds'],previous=previous.get(name),observed=row))
+            previous[name] = row['after']
+    recovery = raw.get('recovery') or {}
+    totals = recovery.get('totals',{})
+    cargo = len(totals)==65 and all(count==1 for count in totals.values()) and not recovery.get('duplicates') and not recovery.get('missing') and not recovery.get('stale_files')
+    ticks = cell.get('tick_summary',{})
+    no_drops = len(ticks)==4 and all(row['dropped']==0 and row['count']>=35900 for row in ticks.values())
+    activations = sorted(row['ns'] for row in cell.get('activations_in_window',[]))
+    minute_counts = [0]*30
+    if cell.get('start_ns') is not None:
+        for stamp in activations:
+            minute_counts[min(29,max(0,int((stamp-cell['start_ns'])/60_000_000_000)))] += 1
+    continuous = all(minute_counts)
+    endpoints = [cell.get('start_ns',0),*activations,cell.get('end_ns',0)]
+    gaps = [(right-left)/1e9 for left,right in zip(endpoints,endpoints[1:])]
+    eligible = shared.eligible(args.run)
+    passed = bool(coverage and len(rows)==10 and all(row['under_10_percent'] for row in rows)
+        and cargo and not violations and not regressions and len(raw['ownership_audits'])>=29
+        and no_drops and continuous and eligible and cell.get('diagnostic_pass'))
+    result = dict(kind='E23-soak-recomputed-summary',run=args.run,raw_stored_sha256=sha(path),
+        verdict='passed' if passed else 'availability-event' if available['lease_expiry_observed'] else 'failed',
+        eligible=eligible,lease_expiry_observed=available['lease_expiry_observed'],memory_endpoint_coverage=coverage,
+        memory=rows,ownership_audits=len(raw['ownership_audits']),owner_violations=violations,
+        generation_regressions=regressions,cargo_items=totals,cargo_conserved=cargo if recovery else None,
+        cargo_audit_status='not-run' if not recovery else 'passed' if cargo else 'failed',
+        recovery=recovery,no_tick_drop=no_drops if ticks else None,tick_summary=ticks,game_time_tps=cell.get('game_time_tps'),
+        activations=len(activations),activations_per_minute=minute_counts,crossings_in_every_minute=bool(continuous),
+        maximum_activation_gap_seconds=max(gaps) if gaps else None,capacity_diagnostic_pass=cell.get('diagnostic_pass'),
+        capacity_diagnostic_failures=cell.get('diagnostic_failures'),frozen=frozen(),
+        memory_unit='MiB; growth is the exact ratio of native per-process RSS snapshots',
+        evidence_scope='minute-spaced stable-generation acting-session audits plus all-tile checkpoint/recovery cargo audit; not per-action tracing')
+    save(target,result)
+    print(json.dumps(dict(verdict=result['verdict'],memory_endpoint_coverage=coverage,
+        cargo_conserved=result['cargo_conserved'],ownership_audits=result['ownership_audits'],
+        owner_violations=len(violations),generation_regressions=len(regressions)),indent=2))
+
+
+if __name__=='__main__':
+    main()

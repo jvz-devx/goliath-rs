@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Audit E23 evidence ownership, hash stability, outside redaction and compression."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import re
+
+from e23_support import DATA, FROZEN, ROOT, frozen, pack, save, sha, timestamp
+
+
+def read(path):
+    raw = path.read_bytes()
+    return json.loads(gzip.decompress(raw) if path.suffix=='.gz' else raw)
+
+
+def inspect(value,path,errors,counts):
+    if isinstance(value,dict):
+        for key,item in value.items():
+            if key=='outside_process_names':
+                counts['outside_name_entries'] += len(item)
+                if any(name!='outside' for name in item.values()):
+                    errors.append(str(path.relative_to(ROOT))+': unredacted outside PID map')
+            elif key=='outside' and isinstance(item,list):
+                counts['outside_phase_rows'] += len(item)
+                if any(row.get('name')!='outside' for row in item):
+                    errors.append(str(path.relative_to(ROOT))+': unredacted outside phase')
+            inspect(item,path,errors,counts)
+    elif isinstance(value,list):
+        for item in value:
+            inspect(item,path,errors,counts)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--compress',action='store_true',help='losslessly pack any E23 JSON over one million bytes')
+    args = parser.parse_args()
+    target = DATA/(args.name+'.json')
+    if target.exists():
+        raise RuntimeError('audit exists; use a new name')
+    errors = []
+    counts = dict(json_inputs=0,outside_name_entries=0,outside_phase_rows=0)
+    hashes,compression,windows,plans = [],[],[],[]
+    if args.compress:
+        for path in sorted(DATA.rglob('*.json')):
+            if path.stat().st_size>1_000_000:
+                raw = path.read_bytes()
+                stored = pack(path)
+                compression.append(dict(original=str(path.relative_to(ROOT)),stored=str(stored.relative_to(ROOT)),
+                    uncompressed_bytes=len(raw),uncompressed_sha256=hashlib.sha256(raw).hexdigest(),
+                    stored_bytes=stored.stat().st_size,stored_sha256=sha(stored),lossless_round_trip=True))
+    for path in sorted(DATA.rglob('*')):
+        if not path.is_file():
+            continue
+        hashes.append(dict(path=str(path.relative_to(ROOT)),bytes=path.stat().st_size,stored_sha256=sha(path)))
+        if not path.name.endswith(('.json','.json.gz')):
+            continue
+        raw = gzip.decompress(path.read_bytes()) if path.suffix=='.gz' else path.read_bytes()
+        if b'/Users/' in raw or b'/home/' in raw:
+            errors.append(str(path.relative_to(ROOT))+': actual home path')
+        if path.suffix=='.json' and len(raw)>1_000_000:
+            errors.append(str(path.relative_to(ROOT))+': large JSON not compressed')
+        value = json.loads(raw)
+        counts['json_inputs'] += 1
+        inspect(value,path,errors,counts)
+        if '-quiet.json' in path.name:
+            valid_identity = value.get('binaries_before')==value.get('binaries_after') and value.get('binaries_before',{}).get('binaries')==FROZEN
+            if not valid_identity:
+                errors.append(str(path.relative_to(ROOT))+': frozen identity mismatch')
+            windows.append(dict(path=str(path.relative_to(ROOT)),status=value['status'],seconds=value['seconds'],
+                noise_valid=value.get('noise_valid'),frozen_identity=valid_identity,exit=value.get('exit')))
+        if path.name.endswith('-plan.json'):
+            plans.append(dict(path=str(path.relative_to(ROOT)),status=value['status'],rows=value['rows']))
+            if value['status'] in ['running','registered'] or any(row['status']=='running' for row in value['rows']):
+                errors.append(str(path.relative_to(ROOT))+': plan remains active')
+        if isinstance(value,dict) and value.get('executed_fixture'):
+            source = value['executed_fixture']
+            if sha(ROOT/source['path'])!=source['sha256']:
+                errors.append(str(path.relative_to(ROOT))+': executed source changed')
+    report = ROOT/'docs/experiments/E23-closeout.md'
+    if re.search(r'\b(parent|opus|sol)\b|the maintainer.s request',report.read_text(),re.I):
+        errors.append('report violates writing rule')
+    correctness = {}
+    for name,expected in {'horizon-client':'6afe2161283d7a4741f390c9aa7b7b4becb9b91f960c37208a50325a8a43eb75',
+        'horizon-ctl':'6cc1188b8ff48bfe2a0f826e930a07c5b49c167bfcb2b8840cdf1fa8e5b05dbe'}.items():
+        actual = sha(ROOT/'.local/bin/horizon-e14-client'/name)
+        correctness[name] = dict(sha256=actual,profile='fast',scope='native correctness ratios only; excluded from capacity and latency')
+        if actual!=expected:
+            errors.append('pinned correctness binary changed: '+name)
+    for path in [report,*sorted((ROOT/'scripts').glob('e23*'))]:
+        if path.is_file() and any(line.endswith((b' ',b'\t')) for line in path.read_bytes().splitlines()):
+            errors.append(str(path.relative_to(ROOT))+': trailing whitespace')
+    result = dict(kind='E23-final-integrity-audit',created=timestamp(),status='passed' if not errors else 'failed',
+        errors=errors,counts=counts,frozen=frozen(),windows=windows,plans=plans,compression=compression,
+        hashes=hashes,hash_scope='stored bytes; compression entries separately identify original uncompressed bytes',
+        scripts={path.name:sha(path) for path in sorted((ROOT/'scripts').glob('e23*')) if path.is_file()},
+        report_sha256=sha(report),correctness_fixtures=correctness)
+    save(target,result)
+    print(json.dumps(dict(status=result['status'],counts=counts,errors=errors),indent=2))
+    raise SystemExit(0 if not errors else 1)
+
+
+if __name__=='__main__':
+    main()

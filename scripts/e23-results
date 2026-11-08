@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Recompute E23 verdicts from retained raw rows without replacing any evidence."""
+import argparse
+import gzip
+import json
+import math
+from pathlib import Path
+import subprocess
+import sys
+
+from e23_support import BINS, DATA, ROOT, frozen, load, save, sha
+
+
+def read(path):
+    path = Path(path)
+    if not path.exists() and path.suffix == '.json':
+        path = path.with_suffix('.json.gz')
+    raw = path.read_bytes()
+    return json.loads(gzip.decompress(raw) if path.suffix=='.gz' else raw)
+
+
+def eligible(name):
+    quiet = read(DATA/(name+'-quiet.json'))
+    available = read(DATA/(name+'-availability.json'))
+    return quiet.get('noise_valid') and quiet.get('exit')==0 and quiet['binaries_before']==quiet['binaries_after'] and available['complete'] and not available['lease_expiry_observed']
+
+
+def vehicles(prefix='vehicles'):
+    rows = []
+    for kind in ['boat','minecart','horse']:
+        name = prefix+'-'+kind+'-r1'
+        raw = read(DATA/(name+'.json'))
+        trials = raw['trials']
+        identities = {tuple(row['vehicle'][0]) for row in trials}
+        correct = len(trials)==100 and all(row['generation']==i+1 and row['index']==i
+            and row['live_counts']=={tile:int(tile==row['target']) for tile in 'abcd'} for i,row in enumerate(trials))
+        saved = raw.get('saved_after_reconcile')==dict(a=True,b=False,c=False,d=False)
+        no_extra = not any(raw.get('saved_entity_copies',{}).values())
+        owners = {label:sum('E12_GROUP' in line for line in reply.get('output',[])) for label,reply in raw.get('recovered_counts',{}).items()}
+        mounted = owners==dict(a=1,b=0,c=0,d=0)
+        root = tuple(raw.get('saved_root',[])) in identities
+        passed = raw['status']=='complete' and correct and len(identities)==1 and saved and no_extra and mounted and root and eligible(name)
+        rows.append(dict(kind=kind,crossings=len(trials),stable_identity=len(identities)==1,
+            generations_and_live_counts=correct,current_owner_file_only=saved,no_entity_file_copy=no_extra,
+            mounted_recovery=mounted,saved_root_identity=root,eligible=eligible(name),passed=passed))
+    return dict(kind='E23-vehicles-summary',rows=rows,verdict='passed' if all(row['passed'] for row in rows) else 'failed')
+
+
+def matrix(prefix):
+    ledger = read(DATA/(prefix+'-plan.json'))
+    rows = []
+    for attempt in ledger['rows']:
+        name = attempt['name']
+        if attempt['status']!='complete':
+            rows.append(dict(name=name,status=attempt['status'],passed=False))
+            continue
+        raw = read(DATA/(name+'.json'))
+        count,cell = next(iter(raw['cells'].items()))
+        native = []
+        for label,batch in cell['tick_samples'].items():
+            values = sorted(row['ms'] for row in batch['ticks'])
+            p99 = values[math.ceil(.99*len(values))-1]
+            assert p99==cell['tick_summary'][label]['p99_ms']
+            first,last = cell['before'][label],cell['after'][label]
+            mobs = [sum(p['mobs_by_kind'].get('minecraft:pig',0) for p in phase['population']) for phase in [first,last]]
+            native.append(dict(tile=label,cores=cell['processes']['phases']['steady']['fixture']['tile-'+label]['cores'],
+                tps=cell['game_time_tps'][label],tick_p99_ms=p99,tick_count=len(values),ticks_dropped=batch['dropped'],
+                placed=[first['placed'],last['placed']],held=[first['held'],last['held']],
+                readers=[first['readers'],last['readers']],chunks=[first['chunks'],last['chunks']],pigs=mobs))
+        equal = all(row['placed']==[162,162] and row['held']==[0,0] and row['pigs']==[64,64] for row in native)
+        rows.append(dict(name=name,active_tiles=len(native),players=int(count),proxy_cores=cell['proxy']['cores'],
+            proxy_threads=cell['proxy']['threads_max'],tiles=native,identical_work=equal,
+            eligible=eligible(name),capacity_checks=cell.get('diagnostic_pass'),
+            passed=bool(equal and eligible(name) and cell.get('diagnostic_pass'))))
+    return dict(kind='E23-identical-load-summary',rows=rows,verdict='passed' if len(rows)==6 and all(row['passed'] for row in rows) else 'failed')
+
+
+def approach(run):
+    import math
+    tiles = dict(a=(0,0),b=(-1,0),c=(-1,-1),d=(0,-1))
+    result = []
+    for index,leg in enumerate(run['trials']):
+        packets = [row for row in run['wire'] if row['kind']=='sent_position' and leg['began_ns']<=row['ns']<=leg['ended_ns']]
+        wall = None
+        for left,right in zip(packets,packets[1:]):
+            point = tuple(math.floor(right['pos'][axis]/512) for axis in [0,2])
+            if point != tiles[leg['target']]:
+                continue
+            fractions = []
+            for i,axis in enumerate([0,2]):
+                if tiles[leg['source']][i] != tiles[leg['target']][i] and right['pos'][axis] != left['pos'][axis]:
+                    fractions.append(-left['pos'][axis]/(right['pos'][axis]-left['pos'][axis]))
+            fraction = max(fractions) if fractions else 1
+            if not 0<=fraction<=1:
+                fraction = 1
+            wall = left['ns']+fraction*(right['ns']-left['ns'])
+            break
+        observations = [row for row in run.get('approach_presence',{}).get(leg['target'],[])
+            if leg['began_ns']<=row['ns']<=leg['ended_ns'] and any(actor.get('held') and not actor.get('placed') for actor in row['actors'])]
+        prepared = min((row['ns'] for row in observations),default=None)
+        lead = (wall-prepared)/1e6 if wall is not None and prepared is not None else None
+        result.append(dict(index=index,mode=leg['mode'],source=leg['source'],target=leg['target'],
+            wall_ns=wall,target_held_observed_ns=prepared,lead_lower_bound_ms=lead,
+            approach_proven=lead is not None and lead>0))
+    return result
+
+
+def physics(prefix):
+    files = [DATA/'physics'/(prefix+'-'+setting+'-r1.json.gz') for setting in ['off','on']]
+    output = DATA/(prefix+'-checker-v2.json')
+    coverage = ROOT/'docs/experiments/data/E20/analysis-v2/physics-v2-audit-1/manifest.json'
+    command = [sys.executable,'-B','scripts/e20-build10-check-v2',*map(str,files),'--snapshot',str(BINS),
+        '--coverage-report',str(coverage),'--output',str(output)]
+    subprocess.run(command,cwd=ROOT,check=True)
+    checked = read(output)
+    rows = [dict(file=str(path.relative_to(ROOT)),sha256=sha(path),rows=approach(read(path)),eligible=eligible(path.name.removesuffix('.json.gz'))) for path in files]
+    proven = sum(row['approach_proven'] for run in rows for row in run['rows'])
+    return dict(kind='E23-physics-summary',checker_command=command,checker_sha256=sha(ROOT/'scripts/e20-build10-check-v2'),
+        checker_result=dict(status=checked['status'],crossings=checked['actual_crossings'],resolved=checked['resolved_windows'],
+            unresolved=checked['unresolved'],failures=checked['failures'],sprint_packet_passes=checked['sprint_packet_passes'],
+            maximum_backward_blocks=max(row['maximum_backward_blocks'] for row in checked['corrections'])),
+        approach_runs=rows,approach_proven=proven,
+        verdict='passed' if proven==112 and checked['status']=='passed' and all(run['eligible'] for run in rows) else 'unproven')
+
+
+def latency(prefix):
+    cells = {}
+    rows = []
+    for mode in ['control','latency']:
+        name = prefix+'-'+mode+'-r1'
+        raw = read(DATA/(name+'.json'))
+        cell = raw['cells']['650']
+        cells[mode] = cell
+        paths = cell['histogram']['paths']
+        histograms = {}
+        for path,record in paths.items():
+            rank = math.ceil(record['count']*.95)
+            total = 0
+            p95 = None
+            for lower,count in sorted((int(key),count) for key,count in record['bins_us'].items()):
+                total += count
+                if total>=rank:
+                    p95 = (lower+cell['histogram']['bin_width_us'])/1000
+                    break
+            expected = record['p95_us_upper']/1000 if record['p95_us_upper'] is not None else None
+            assert p95==expected
+            histograms[path] = dict(count=record['count'],p95_ms_upper=p95,unstamped_writes=record['unstamped_writes'])
+        rows.append(dict(mode=mode,name=name,eligible=eligible(name),diagnostic_pass=cell.get('diagnostic_pass'),
+            proxy_cores=cell['proxy']['cores'],proxy_threads=cell['proxy']['threads_max'],
+            tile_tps=cell['game_time_tps'],tile_tick_p99_ms={name:row['p99_ms'] for name,row in cell['tick_summary'].items()},
+            activations=len(cell['activations_in_window']),histograms=histograms,
+            limiter=cell['limiter_window'],external_witness=cell.get('external_witness')))
+    a,b = cells['control'],cells['latency']
+    counts = {mode:cell['histogram']['paths']['serverbound']['count'] for mode,cell in cells.items()}
+    throughput_ratio = counts['latency']/counts['control']
+    witness = b['external_witness']
+    intrusion = bool(witness['partition_headroom_pass'] and witness['geometry_pass']
+        and throughput_ratio>=.95 and b.get('diagnostic_pass') and len(b['witness_crossings'])>0)
+    internal = all(row['histograms'][path]['p95_ms_upper'] is not None and row['histograms'][path]['p95_ms_upper']<5
+        for row in rows for path in ['serverbound','clientbound','reader-replies'])
+    passed = all(row['eligible'] and row['diagnostic_pass'] for row in rows) and intrusion and witness['latency_under_5ms'] and internal
+    return dict(kind='E23-latency-summary',rows=rows,throughput_counts=counts,throughput_ratio=throughput_ratio,
+        intrusion_checks_pass=intrusion,ordinary_internal_paths_under_5ms=internal,
+        external_scope=witness['scope'],all_protocol_wire_packet_types_measured=False,
+        verdict='passed' if passed else 'failed' if intrusion else 'unproven')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('mode',choices=['vehicles','identical','physics','latency'])
+    parser.add_argument('--prefix')
+    parser.add_argument('--name',required=True)
+    args = parser.parse_args()
+    path = DATA/(args.name+'.json')
+    if path.exists():
+        raise RuntimeError('derived result exists; use a new name')
+    result = vehicles(args.prefix or 'vehicles') if args.mode=='vehicles' else matrix(args.prefix) if args.mode=='identical' else physics(args.prefix) if args.mode=='physics' else latency(args.prefix)
+    result['frozen_readback'] = frozen()
+    save(path,result)
+    print(json.dumps(dict(verdict=result['verdict'],path=str(path.relative_to(ROOT))),indent=2))
+
+
+if __name__=='__main__':
+    main()

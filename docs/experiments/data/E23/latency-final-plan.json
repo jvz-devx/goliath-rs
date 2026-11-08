@@ -1,0 +1,96 @@
+{
+  "kind": "E23-fixed-plan",
+  "plan": "latency",
+  "status": "complete",
+  "created": "2026-11-08T16:16:12.261780+00:00",
+  "frozen": {
+    "binaries": {
+      "horizon-client": "b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d",
+      "meridian": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+      "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+      "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+      "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+      "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025"
+    },
+    "manifests": {
+      "manifest.json": "704736938e54ac6732c881f7597676d38e25a6d6d4625799b3a04fc0faac1657",
+      "candidate.json": "2bfd2e26c0c9ef61f3549b8a3c33faf96938875fd6063323e359c1910611d7b9",
+      "canonical.json": "33a2322d27331f0b6f6310d06a8be5e4cff9adda9e98dbf1a13baf219d5c9cf9",
+      "FINAL.json": "b0840ee4635d572971e23c6f6af2c9bc9f2282a82ff19d22befaaae5b76a3546",
+      "LEASES": "14e155e414ecf409b1691473aa56c568c8f25634152ab0467a0fed739dd9d65f",
+      "cluster-launcher.py": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5"
+    }
+  },
+  "rows": [
+    {
+      "name": "latency-final-control-r1",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "scripts/e23-window",
+        "--name",
+        "latency-final-control-r1",
+        "--host-released",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "scripts/e23-cell",
+        "control",
+        "--name",
+        "latency-final-control-r1"
+      ],
+      "status": "complete",
+      "started": "2026-11-08T16:16:12.324642+00:00",
+      "exit": 0,
+      "seconds": 196.59459920899826,
+      "availability": {
+        "path": "docs/experiments/data/E23/latency-final-control-r1-availability.json",
+        "complete": true,
+        "lease_expiry_observed": false
+      }
+    },
+    {
+      "name": "latency-final-latency-r1",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "scripts/e23-window",
+        "--name",
+        "latency-final-latency-r1",
+        "--host-released",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "scripts/e23-cell",
+        "latency",
+        "--name",
+        "latency-final-latency-r1"
+      ],
+      "status": "complete",
+      "started": "2026-11-08T16:19:28.919997+00:00",
+      "exit": 0,
+      "seconds": 210.86319241698948,
+      "availability": {
+        "path": "docs/experiments/data/E23/latency-final-latency-r1-availability.json",
+        "complete": true,
+        "lease_expiry_observed": false
+      }
+    }
+  ],
+  "all_attempts_retained": true,
+  "harnesses": {
+    "e23-audit": "b7c09783a5eef5e0495f7e059b996dd611e206f19085c0edec7f419fe8c9a371",
+    "e23-campaign": "7832997aba8ebf24b040a0233b0cb3d6e9a33b31bbbc522ce8af1b38e29382f2",
+    "e23-cell": "d622bf0172a6243bf6ee60b446791cb6a77dca4616ad97855a67b6e34c58620f",
+    "e23-physics": "97a349d7f427e66d1dfe9c161f672f5f3d9b7e711503803ed69238e70b8ab9ad",
+    "e23-prepare": "d9cf714ce159b83ceef60c0d94f5d21dc1f84f7913f4f8bd4cd0bfa1ea5edfc6",
+    "e23-results": "db583677fc19a6bcc5f02a980f1f20a3f324613a47474a6e1c5d347a59345b5b",
+    "e23-tap": "6a3ba469272356eb53fb454be6143172c50729adbd3b1ac0f69b50c277193434",
+    "e23-tests": "0847e09cfad4db17acde341ed5ae38e6c4639b9609db3d0bd5a136cb98b15203",
+    "e23-vehicles": "8288b36f72ed2068b704cb527c40611dc65509142ff648f41c790e8da11b1477",
+    "e23-window": "10bf1b39931170768b90cf5f51c072a5a5593742646703f92db99cda43c9098a",
+    "e23_observe.py": "905338f15099e91def369b4b5f017cc1cf0f3d6344ca9b5b96e43920e2850b0b",
+    "e23_support.py": "a8a5ed7e3e3bf54b32a7c2a56a99c29af963323d3b2c841f52ee4a4c86b06029"
+  },
+  "finished": "2026-11-08T16:22:59.785225+00:00"
+}
