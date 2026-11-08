@@ -79,3 +79,9 @@ Both sides run the same world workload. On the cluster, 90% of the players patro
 Why not the baseline's square at the origin: on the cluster that is the four-tile junction, where every player sees all four tiles and each tile holds a reader for every player. That's the worst case, not how players spread out on a large map. It's measured as a separate stress row and never used as the pass line.
 
 A cell is valid when load is 4 or less at its start and no process outside the fixture averages more than 0.5 core over the cell. Load from the fixture's own threads doesn't void a cell.
+
+## D10. Capacity result: report the frontier, keep 3x as the aim
+
+E19 showed that 975 players don't fit in the 4-core budget on this Mac, even with the proxy outside it. Four tiles, the store and the sidecars used 3.96 cores at 975 and still missed 20 TPS (tick P99 84 to 90 ms), and the reviewer reproduced that. Each tile costs about 1 core at about 244 players, where a plain server with that many players needs about 0.7. The difference is the terrain readers and the cluster features.
+
+So M4 reports the cluster's measured frontier inside the D9 budget and layout, as a multiple of the matched baseline (325), with the same pass rules: 20 TPS, raw tick P99 under 50 ms, two passes and two failures per step. 3x stays the target. The budget, the layout and the pass rules don't change; the work goes into making tiles and the proxy cheaper, and the frontier is measured again after each cut.
