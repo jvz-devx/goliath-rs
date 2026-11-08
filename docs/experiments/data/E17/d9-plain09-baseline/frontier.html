@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D9 matched plain baseline</title>
+<style>
+html,body{background:transparent}body{margin:0;font-family:var(--font-sans);color:var(--foreground)}
+#e17-d9-chart h3{font-size:16px;font-weight:500;margin:0 0 12px}#e17-d9-chart figure{margin:0 0 16px}
+#e17-d9-chart figcaption{font-size:12px;margin:0 0 6px;color:var(--muted-foreground)}
+#e17-d9-chart svg{display:block;width:100%;height:220px;overflow:visible}
+#e17-d9-chart svg text{font-size:12px;fill:var(--foreground);font-family:var(--font-sans)}
+#e17-d9-chart .grid{stroke:var(--border);stroke-width:1;opacity:.6}#e17-d9-chart .axis{stroke:var(--border);stroke-width:1}
+#e17-d9-chart .limit{stroke:var(--foreground);stroke-width:1;stroke-dasharray:4 4;opacity:.65}
+#e17-d9-chart .series{fill:none;stroke-width:2}#e17-d9-chart .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px}
+#e17-d9-chart .legend span{white-space:nowrap}#e17-d9-chart .note{font-size:12px;color:var(--muted-foreground);margin-top:6px}
+#e17-d9-chart .legend b{font-weight:400}
+</style>
+</head>
+<body>
+<section id="e17-d9-chart">
+<h3>Matched D9 plain-09 baseline</h3>
+<figure><figcaption>Tick P99. Both repeats shown; labels show the worse repeat.</figcaption><svg id="e17-p99" role="img" aria-label="325 bots pass twice below 50 milliseconds; 350 bots fail twice above 50 milliseconds."></svg></figure>
+<figure><figcaption>CPU used. Four-core engine allowance; five bot processes share one core.</figcaption><svg id="e17-cpu" role="img" aria-label="The main thread reaches about 0.98 cores at 350 bots. The engine uses about 1.23 cores; bots use about 0.13 cores."></svg>
+<div class="legend"><span><b style="color:var(--chart-1)">●</b> Engine</span><span><b style="color:var(--chart-2)">◆</b> Main thread</span><span><b style="color:var(--chart-3)">■</b> All bots</span></div></figure>
+<div class="note">Four squares at ±1024 · 90% interior / 10% crossing · 256 pigs · 30 s warmup / 60 s measure · Zero STOPs</div>
+</section>
+<script>
+(()=>{
+const root=document.getElementById('e17-d9-chart');
+const rows=[
+{n:300,r:0,p99:39.364458,engine:.9069492454,main:.6918652457,bots:.1054252285},
+{n:300,r:1,p99:41.410166,engine:.9278153155,main:.7100933118,bots:.1103127248},
+{n:325,r:0,p99:46.915291,engine:1.0606603680,main:.8277162818,bots:.1129923280},
+{n:325,r:1,p99:47.167625,engine:1.0534554472,main:.8226156854,bots:.1153665635},
+{n:350,r:0,p99:56.363000,engine:1.2297038731,main:.9783157704,bots:.1289331244},
+{n:350,r:1,p99:57.455625,engine:1.2286006930,main:.9796648781,bots:.1287284403}];
+const counts=[...new Set(rows.map(d=>d.n))];const ns='http://www.w3.org/2000/svg';
+function el(svg,name,attrs={},text){const node=document.createElementNS(ns,name);for(const [k,v]of Object.entries(attrs))node.setAttribute(k,v);if(text!==undefined)node.textContent=text;svg.appendChild(node);return node}
+function plot(id,fields,limit,unit,ticks){
+ const svg=root.querySelector('#'+id),w=Math.max(280,svg.getBoundingClientRect().width),h=220;
+ svg.replaceChildren();svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
+ el(svg,'title',{},id==='e17-p99'?'Tick P99 by offered bot count':'CPU used by offered bot count');
+ const l=64,r=w-18,t=28,b=h-42;
+ const minimum=Math.min(...counts),maximum=Math.max(...counts),pad=(maximum-minimum)*.12;
+ const ymax=id==='e17-p99'?Math.ceil(Math.max(limit,...rows.map(d=>d.p99))*1.15/10)*10:Math.ceil(Math.max(limit,...rows.flatMap(d=>fields.map(f=>d[f.key])))*1.15*2)/2;
+ const x=n=>l+(n-minimum+pad)/(maximum-minimum+pad*2)*(r-l),y=v=>b-v/ymax*(b-t);
+ el(svg,'rect',{x:l,y:t,width:r-l,height:b-t,fill:'none',class:'axis','data-chart-frame':''});
+ for(const value of ticks.filter(v=>v<=ymax)){el(svg,'line',{x1:l,x2:r,y1:y(value),y2:y(value),class:'grid'});el(svg,'text',{x:l-10,y:y(value)+4,'text-anchor':'end'},String(value))}
+ for(const count of counts){el(svg,'text',{x:x(count),y:b+20,'text-anchor':'middle'},String(count))}
+ el(svg,'text',{x:(l+r)/2,y:h-5,'text-anchor':'middle',class:'axis-title','data-axis':'x'},'Bots');
+ el(svg,'text',{x:16,y:(t+b)/2,transform:`rotate(-90 16 ${(t+b)/2})`,'text-anchor':'middle',class:'axis-title','data-axis':'y'},unit);
+ el(svg,'line',{x1:l,x2:r,y1:y(limit),y2:y(limit),class:'limit'});
+ el(svg,'text',{x:id==='e17-p99'?l+6:r-3,y:id==='e17-p99'?t+16:y(limit)-6,'text-anchor':id==='e17-p99'?'start':'end'},id==='e17-p99'?'50 ms limit':'1 core');
+ for(const field of fields){
+  const worst=counts.map(n=>({n,value:Math.max(...rows.filter(d=>d.n===n).map(d=>d[field.key]))}));
+  el(svg,'path',{d:worst.map((d,i)=>(i?'L':'M')+x(d.n)+','+y(d.value)).join(' '),class:'series',stroke:`var(${field.color})`});
+  for(const d of rows){const px=x(d.n)+(d.r?3:-3),py=y(d[field.key]);
+   const shape=id==='e17-cpu'?(field.key==='main'?'diamond':field.key==='bots'?'square':'circle'):(d.r?'diamond':'circle');
+   const mark=shape==='diamond'?el(svg,'path',{d:`M${px},${py-4}l4,4l-4,4l-4,-4Z`,fill:`var(${field.color})`}):shape==='square'?el(svg,'rect',{x:px-3.5,y:py-3.5,width:7,height:7,fill:`var(${field.color})`}):el(svg,'circle',{cx:px,cy:py,r:3.5,fill:`var(${field.color})`});
+   mark.setAttribute('data-tooltip',`${d.n} bots, repeat ${d.r}: ${field.label} ${d[field.key].toFixed(3)} ${unit}`);
+  }
+  if(id==='e17-p99')for(const d of worst)el(svg,'text',{x:x(d.n),y:y(d.value)-12,'text-anchor':'middle'},d.value.toFixed(2));
+ }
+}
+function draw(){plot('e17-p99',[{key:'p99',label:'P99',color:'--chart-1'}],50,'Milliseconds',[0,25,50,70]);plot('e17-cpu',[{key:'engine',label:'Engine',color:'--chart-1'},{key:'main',label:'Main',color:'--chart-2'},{key:'bots',label:'All bots',color:'--chart-3'}],1,'Cores',[0,.5,1,1.5]);}
+new ResizeObserver(draw).observe(root);draw();
+})();
+</script>
+</body>
+</html>

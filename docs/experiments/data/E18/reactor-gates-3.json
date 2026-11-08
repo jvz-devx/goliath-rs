@@ -1,0 +1,51 @@
+[
+  {
+    "command": [
+      "rustfmt",
+      "--edition",
+      "2024",
+      "--check",
+      "crates/meridian-handoff/src/drain.rs",
+      "crates/meridian-handoff/src/lib.rs",
+      "crates/meridian-handoff/src/session.rs",
+      "crates/meridian-handoff/src/session/reactive.rs",
+      "crates/meridian-handoff/src/switch.rs",
+      "crates/meridian-handoff/src/terrain.rs",
+      "crates/meridian-handoff/src/tests/mod.rs",
+      "crates/meridian-handoff/src/tests/reactive.rs",
+      "crates/meridian-handoff/src/transport.rs",
+      "crates/meridian-net/src/io_pool.rs",
+      "crates/meridian-net/src/io_pool/tasks.rs",
+      "crates/meridian-net/src/lib.rs",
+      "crates/meridian-proxy/src/io_runtime.rs",
+      "crates/meridian-proxy/src/main.rs",
+      "crates/meridian-proxy/src/session.rs"
+    ],
+    "exit": 0,
+    "seconds": 0.2724447910004528,
+    "test_results": []
+  },
+  {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--release",
+      "-p",
+      "meridian-handoff",
+      "-p",
+      "meridian-proxy",
+      "-p",
+      "meridian-sidecar",
+      "--all-targets",
+      "-p",
+      "meridian-net",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 101,
+    "seconds": 7.329923792000045,
+    "test_results": []
+  }
+]

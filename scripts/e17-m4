@@ -71,6 +71,7 @@ def baseline(args):
     with quiet_window(args.name) as (request,remaining):
         command=[sys.executable,'-B',str(ROOT/'scripts/capacity-bench'),
             '--loads','200,225,250,275,300,325,350,375,400','--repeat','2','--refine-step','0',
+            '--max-load','6',
             '--quiet-marker',str(request),'--out',str(DATA/(args.name+'.json'))]
         print('baseline command '+json.dumps(command),flush=True)
         process=subprocess.Popen(command,cwd=ROOT,start_new_session=True)
@@ -118,6 +119,154 @@ def snapshot(args):
         'source':str(source),'target':str(target),'binaries':before,'load':os.getloadavg(),
         'kernel_thread_settings':{key:int(subprocess.check_output(['sysctl','-n',key],text=True))
             for key in ['kern.num_taskthreads','kern.num_threads','kern.maxprocperuid']}})
+    return True
+
+
+def verify_internal_sources(root, manifest):
+    """Refuse a mutable or incomplete internal dependency snapshot."""
+    expected=manifest['internal_crates']['files']
+    actual={str(path.relative_to(root)) for path in (root/'crates').rglob('*')
+        if path.is_file() and (path.suffix=='.rs' or path.name=='Cargo.toml') and 'target' not in path.parts}
+    actual.update(['Cargo.toml','Cargo.lock','clippy.toml'])
+    if actual!=set(expected):
+        raise RuntimeError('FINAL internal source file set changed')
+    for name,digest in expected.items():
+        if sha(root/name)!=digest:
+            raise RuntimeError(f'FINAL internal source changed: {name}')
+
+
+def export_stack(project, destination, spec):
+    """Export only a pinned local revision and the manifest's exact patch bytes."""
+    patches=[]
+    for record in spec['patches']:
+        content=(ROOT/record['path']).read_bytes()
+        if hashlib.sha256(content).hexdigest()!=record['sha256']:
+            raise RuntimeError(f'FINAL patch changed: {record["path"]}')
+        patches.append(content)
+    archive=subprocess.check_output(['git','-C',ROOT/'.local/src'/project,'archive',spec['pin']])
+    destination.mkdir(parents=True)
+    with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
+        bundle.extractall(destination,filter='data')
+    subprocess.run(['git','init','--quiet',destination],check=True)
+    for content in patches:
+        subprocess.run(['git','apply','--check','-'],cwd=destination,input=content,check=True)
+        subprocess.run(['git','apply','-'],cwd=destination,input=content,check=True)
+
+
+def measurement_stack(horizon):
+    """Keep E11's measurement code, adapting only FINAL's status dispatch context."""
+    records=[]
+    for name,options in [('horizon-03-bots.patch',[]),
+            ('horizon-04-digest.patch',['--exclude=crates/horizon-client/src/game/dedicated/status.rs']),
+            ('horizon-08-m4-measurement.patch',[])]:
+        content=(ROOT/'patches'/name).read_bytes()
+        subprocess.run(['git','apply','--check',*options,'-'],cwd=horizon,input=content,check=True)
+        subprocess.run(['git','apply',*options,'-'],cwd=horizon,input=content,check=True)
+        records.append({'path':'patches/'+name,'sha256':hashlib.sha256(content).hexdigest(),'apply_options':options})
+    return records
+
+
+def prereqs(args):
+    """Build final Horizon and store without selecting an evolving proxy stack."""
+    marker=ROOT/'.local/bin/goliath-e12/FINAL'
+    manifest_path=marker.with_suffix('.json')
+    if not marker.exists() or not manifest_path.exists():
+        raise RuntimeError('wait for E12 FINAL and FINAL.json')
+    if (ROOT/'.local/quiet-request').exists():
+        raise RuntimeError('do not build during a quiet window')
+    raw_manifest=manifest_path.read_bytes()
+    final=json.loads(raw_manifest)
+    verify_internal_sources(ROOT,final)
+    retained_store=ROOT/final['binaries']['goliath-store']['path']
+    if sha(retained_store)!=final['store_binary_sha256']:
+        raise RuntimeError('retained E12 store no longer matches FINAL')
+    output={'kind':'E17-final-release-prerequisites','full_cluster_build':False,
+        'final':final,'final_sha256':hashlib.sha256(raw_manifest).hexdigest(),
+        'profile':'release','incremental':False,'proxy_selected':False,'commands':[],
+        'measurement_patches':[],'status':'running'}
+    settings={key:value for key,value in os.environ.items()
+        if key not in ['CI','CARGO_TARGET_DIR'] and not key.startswith('CARGO_PROFILE_')}
+    settings.update(CARGO_INCREMENTAL='0',CARGO_BUILD_JOBS='6')
+    RUNS.mkdir(parents=True,exist_ok=True)
+    RELEASE.mkdir(parents=True,exist_ok=True)
+    began=time.monotonic()
+    try:
+        with tempfile.TemporaryDirectory(prefix='E17-prereqs-',dir=RUNS) as temporary:
+            root=Path(temporary)
+            for name in ['Cargo.toml','Cargo.lock','clippy.toml']:
+                shutil.copy2(ROOT/name,root/name)
+            shutil.copytree(ROOT/'crates',root/'crates',ignore=shutil.ignore_patterns('target','__pycache__'))
+            verify_internal_sources(root,final)
+            horizon=root/'.local/src/horizon'
+            export_stack('horizon',horizon,final['projects']['horizon'])
+            output['measurement_patches']=measurement_stack(horizon)
+            jobs=[(root,['cargo','build','--locked','--release','-p','goliath-store','--bin','goliath-store'],['goliath-store']),
+                (horizon,['cargo','build','--locked','--release','--no-default-features',
+                    '-p','horizon-client','--bin','horizon-client','-p','horizon-bots','--bin','horizon-bots'],['horizon-client','horizon-bots'])]
+            staged=root/'finished'
+            staged.mkdir()
+            for index,(cwd,command,names) in enumerate(jobs):
+                started=time.monotonic()
+                print('PREREQS_BUILD_BEGIN '+json.dumps({'workspace':str(cwd.relative_to(root)),'command':command}),flush=True)
+                log=root/f'build-{index}.log'
+                with log.open('w') as stream:
+                    result=subprocess.run(command,cwd=cwd,env=settings,stdout=stream,stderr=subprocess.STDOUT)
+                row={'workspace':str(cwd.relative_to(root)),'command':command,'exit':result.returncode,'seconds':time.monotonic()-started}
+                output['commands'].append(row)
+                if result.returncode:
+                    row['error_tail']=log.read_text(errors='replace').splitlines()[-100:]
+                    raise RuntimeError(f'release prerequisite build failed: {row["workspace"]}')
+                for name in names: shutil.copy2(cwd/'target/release'/name,staged/name)
+                print('PREREQS_BUILD_END '+json.dumps(row),flush=True)
+            if hashlib.sha256(manifest_path.read_bytes()).hexdigest()!=output['final_sha256']:
+                raise RuntimeError('FINAL manifest changed during the build')
+            for name in ['goliath-store','horizon-client','horizon-bots']:
+                artifact=RELEASE/(name+'.new')
+                shutil.copy2(staged/name,artifact)
+                artifact.replace(RELEASE/name)
+            shutil.copy2(ROOT/'.local/bin/goliath-e12/LEASES',RELEASE/'LEASES')
+            output['binaries']={name:sha(RELEASE/name) for name in ['goliath-store','horizon-client','horizon-bots']}
+            output.update(status='complete',internal_source_verification='all FINAL files byte equal',temporary_tree_removed=True)
+    except BaseException as error:
+        output.update(status='failed',error=str(error))
+        raise
+    finally:
+        output['seconds']=time.monotonic()-began
+        save(DATA/(args.name+'.json'),output)
+    save(RELEASE/'prereqs.json',output)
+    print('PREREQS_READY '+json.dumps(output['binaries']),flush=True)
+    return True
+
+
+def smoke(args):
+    """Check the final release engine's control and measurement path in isolation."""
+    from e11_support import Engine
+    record=json.loads((RELEASE/'prereqs.json').read_text())
+    if record.get('status')!='complete': raise RuntimeError('release prerequisites are not ready')
+    for name,digest in record['binaries'].items():
+        if sha(RELEASE/name)!=digest: raise RuntimeError(f'prerequisite binary changed: {name}')
+    if (ROOT/'.local/quiet-request').exists(): raise RuntimeError('do not smoke-test during a quiet window')
+    output={'kind':'E17-release-engine-smoke','acceptance':False,'binaries':record['binaries'],
+        'final_sha256':record['final_sha256'],'status':'running'}
+    with tempfile.TemporaryDirectory(prefix='E17-release-smoke-',dir=RUNS) as temporary:
+        engine=None
+        try:
+            config={'seed':12345,'view_distance':3,'servers':[{'command':[
+                str(RELEASE/'horizon-client'),'--resources','{resources}','--control-socket','{endpoint}','--dedicated','--nogui']}]}
+            engine=Engine(Path(temporary)/'engine',config)
+            status=engine.ask('server-status')
+            samples=engine.ask('e11-samples')
+            if status.get('e11_population') is None or not samples.get('ticks') or samples.get('dropped'):
+                raise RuntimeError('release measurement control did not return complete raw ticks/population')
+            output.update(status='complete',raw_tick_count=len(samples['ticks']),
+                raw_ticks_dropped=samples['dropped'],population=status['e11_population'],players=len(status['players']))
+        except BaseException as error:
+            output.update(status='failed',error=str(error))
+            raise
+        finally:
+            if engine: engine.stop()
+            save(DATA/(args.name+'.json'),output)
+    print(json.dumps(output),flush=True)
     return True
 
 
@@ -173,11 +322,7 @@ def build(args):
                     subprocess.run(['git','apply','--check','-'],cwd=destination,input=content,check=True)
                     subprocess.run(['git','apply','-'],cwd=destination,input=content,check=True)
                 if project=='horizon':
-                    for name in ['horizon-03-bots.patch','horizon-04-digest.patch']:
-                        patch=ROOT/'patches'/name
-                        subprocess.run(['git','apply','--check',patch],cwd=destination,check=True)
-                        subprocess.run(['git','apply',patch],cwd=destination,check=True)
-                        output['measurement_patches'].append({'path':'patches/'+name,'sha256':sha(patch)})
+                    output['measurement_patches']=measurement_stack(destination)
             jobs=[(root,['cargo','build','--locked','--release','-p','goliath-store','--bin','goliath-store'],['goliath-store']),
                 (root/'.local/src/horizon',['cargo','build','--locked','--release','--no-default-features',
                     '-p','horizon-client','--bin','horizon-client','-p','horizon-bots','--bin','horizon-bots'],['horizon-client','horizon-bots']),
@@ -313,7 +458,8 @@ def pilot(args):
         bot = None
         stream = None
         try:
-            instance.__init__(folder, module.RESOURCES, 512)
+            instance.__init__(folder, module.RESOURCES, 512,max_players=10000,max_expected=10000)
+            output['admission']={'max_players':instance.max_players,'max_expected':instance.max_expected}
             output['proxy_pid']=instance.proxy.process.pid
             output['run_folder']=str(folder)
             print('E17_PROXY '+json.dumps({'pid':instance.proxy.process.pid,'run':args.name,'bots':args.bots}),flush=True)
@@ -451,7 +597,7 @@ def cell(args):
         failures=[]
         worker=None
         try:
-            instance.__init__(folder,module.RESOURCES,512,tile_env={'HORIZON_E11_MEASURE':'1'})
+            instance.__init__(folder,module.RESOURCES,512,tile_env={'HORIZON_E11_MEASURE':'1'},max_players=10000,max_expected=10000)
             def checkpoint():
                 while not done.wait(5):
                     try: instance.checkpoint_tiles()
@@ -474,7 +620,7 @@ def cell(args):
             config_path.write_text(json.dumps(config))
             command=[sys.executable,'-B',str(ROOT/'scripts/capacity-bench'),'--config',str(config_path),
                 '--loads',str(args.bots),'--repeat','1','--warmup',str(args.warmup),'--seconds',str(args.seconds),
-                '--refine-step','0','--out',str(DATA/(args.name+'.json'))]
+                '--refine-step','0','--max-load','6','--out',str(DATA/(args.name+'.json'))]
             if args.quiet_marker: command+=['--quiet-marker',args.quiet_marker]
             subprocess.run(command,cwd=ROOT,check=True)
             if failures: raise RuntimeError('background checkpoint failed: '+str(failures))
@@ -488,7 +634,7 @@ def cell(args):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['pilot','baseline','build','upstream','cell','summary','snapshot'])
+    parser.add_argument('action',choices=['pilot','baseline','build','prereqs','smoke','upstream','cell','summary','snapshot'])
     parser.add_argument('--bins',type=Path,default=ROOT/'.local/bin/goliath-e12')
     parser.add_argument('--bots',type=int,default=4)
     parser.add_argument('--seconds',type=float,default=30)

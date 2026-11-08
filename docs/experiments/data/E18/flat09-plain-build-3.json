@@ -1,0 +1,122 @@
+{
+  "kind": "E18-flat-light-release",
+  "variant": "plain",
+  "profile": "release",
+  "incremental": false,
+  "lto": "thin",
+  "codegen_units": 1,
+  "base_final_sha256": "87efedc05530f4a02e32dfd0c2f603ca931ca86baaebfc532f18fb1be832fe22",
+  "commands": [
+    {
+      "label": "unit",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client-lib",
+        "--lib",
+        "--",
+        "--exact",
+        "flatgen::tests::flat_light_views_form_a_region_in_one_pass_without_mutating_the_proto"
+      ],
+      "exit": 0,
+      "seconds": 228.57984016700357,
+      "test_results": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2194 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "integration",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client-lib",
+        "--test",
+        "flat_light",
+        "--",
+        "--exact",
+        "flat_terrain_light_region_settles_after_its_first_pass"
+      ],
+      "exit": 0,
+      "seconds": 70.89261645899387,
+      "test_results": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s"
+      ]
+    },
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client-lib",
+        "--lib",
+        "--test",
+        "flat_light",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 23.221671625011368,
+      "test_results": []
+    },
+    {
+      "label": "release",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--bin",
+        "horizon-client"
+      ],
+      "exit": 0,
+      "seconds": 248.549629000001,
+      "test_results": []
+    }
+  ],
+  "status": "complete",
+  "source_pin": "fc2868b2b26d56ec76e17414909fe58a3b87bb92",
+  "patches": [
+    {
+      "path": "patches/e2-horizon-input-trace.patch",
+      "sha256": "488a82c167465ad288c194103f51983a2020288e2bbf75db0b07c26d76ed2231"
+    },
+    {
+      "path": "patches/horizon-03-bots.patch",
+      "sha256": "f1796dc29e1e69504334dd7e949adbd7de3351aae6b9b2c8328499fd534d967f"
+    },
+    {
+      "path": "patches/horizon-04-digest.patch",
+      "sha256": "43e6ebb67869b6719d74bdfee6783d62c38dd4436fa0032b9b007937e9996afb"
+    },
+    {
+      "path": "patches/horizon-09-flat-light.patch",
+      "sha256": "74c5d288950f8fe0b2f8015cf49c2170decde6f9ca94feb1e6fa988c87fcbda0"
+    }
+  ],
+  "source_equality": {
+    "crates/horizon-client/src/flatgen.rs": "24bda94a311809479e681ba8922c28712a97b5793e86bc80d09c55eb4d6cac38",
+    "crates/horizon-client/tests/flat_light.rs": "3103d0aaf416b069108fc949c0016c5c4d67250404ce55cb1d7324727bffdc14"
+  },
+  "binaries": {
+    "horizon-client": "0ce83824bb8de036bb91cc9a7da45181be67b33d437f481ca22bbdf2f69674a4",
+    "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d"
+  },
+  "temporary_tree_removed": true,
+  "seconds": 571.9187288749963
+}

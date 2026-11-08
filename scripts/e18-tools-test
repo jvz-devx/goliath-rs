@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Small checks for E18's profiler classifications and untrimmed denominators."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import unittest
+from collections import Counter
+from unittest.mock import patch
+from types import SimpleNamespace
+
+loader = importlib.machinery.SourceFileLoader('e18_analyse', str(Path(__file__).with_name('e18-analyse')))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+proxy_loader = importlib.machinery.SourceFileLoader('e18_proxy', str(Path(__file__).with_name('e18-proxy')))
+proxy_spec = importlib.util.spec_from_loader(proxy_loader.name, proxy_loader)
+proxy = importlib.util.module_from_spec(proxy_spec)
+proxy_loader.exec_module(proxy)
+from e18_process import ProcessSampler, cpu_seconds
+from e18_d9_wire import HostPrelude, vint, varint
+from e18_d9_layout import plan
+from e18_sockets import SocketSampler
+baseline_loader = importlib.machinery.SourceFileLoader('e18_tools_baseline', str(Path(__file__).with_name('capacity-bench')))
+baseline_spec = importlib.util.spec_from_loader(baseline_loader.name, baseline_loader)
+baseline = importlib.util.module_from_spec(baseline_spec)
+baseline_loader.exec_module(baseline)
+
+
+class Analysis(unittest.TestCase):
+    def test_socket_sampler_deduplicates_cloned_fds_and_keeps_time_wait(self):
+        sampler=SocketSampler(10,25565,{30001},{30001})
+        owned='p10\nf1\nn127.0.0.1:50001->127.0.0.1:30001\nTST=ESTABLISHED\nf2\nn127.0.0.1:50001->127.0.0.1:30001\nTST=ESTABLISHED\nf3\nn127.0.0.1:25565->127.0.0.1:50002\nTST=ESTABLISHED\n'
+        network='tcp4 0 0 127.0.0.1.50001 127.0.0.1.30001 ESTABLISHED\ntcp4 0 0 127.0.0.1.30001 127.0.0.1.50001 ESTABLISHED\ntcp4 0 0 127.0.0.1.30001 127.0.0.1.50003 TIME_WAIT\n'
+        with patch('e18_sockets.subprocess.run',return_value=SimpleNamespace(returncode=0,stdout=owned)),patch('e18_sockets.subprocess.check_output',return_value=network):
+            row=sampler.capture()
+        self.assertEqual(row['proxy_tcp_fds'],3)
+        self.assertEqual(row['proxy_open_tcp_sockets'],2)
+        self.assertEqual(row['proxy_open_outbound_connections'],1)
+        self.assertEqual(row['loopback_time_wait'],1)
+        self.assertEqual(len(sampler.proxy_seen),2)
+        self.assertEqual(len(sampler.fixture_seen),2)
+
+    def test_virtual_host_prelude_preserves_fragmented_handshake_and_following_frame(self):
+        body=vint(0)+vint(777)+vint(9)+b'127.0.0.1'+bytes([99,221,2])
+        packet=vint(len(body))+body
+        prelude=HostPrelude('d9-a.test')
+        for byte in packet[:-1]:self.assertIsNone(prelude.feed(bytes([byte])))
+        actual=prelude.feed(packet[-1:]+b'\x03abc')
+        size,offset=varint(actual)
+        self.assertEqual(actual[offset:offset+size],vint(0)+vint(777)+vint(9)+b'd9-a.test'+bytes([99,221,2]))
+        self.assertEqual(actual[offset+size:],b'\x03abc')
+        self.assertEqual(prelude.feed(b'next'),b'next')
+
+    def test_d9_witnesses_are_seeded_across_tiles_and_crossing_group(self):
+        for count in [50,200]:
+            layout=plan(count,baseline.route_anchor)
+            self.assertEqual(sum(g['count'] for g in layout['groups']),count)
+            self.assertEqual(layout['crossing_players'],count//10)
+            self.assertEqual(len(set(layout['witnesses'])),8)
+            self.assertEqual(sum(name.startswith('E17BotX') for name in layout['witnesses']),2)
+            self.assertGreaterEqual(layout['minimum_interior_square_wall_distance'],300)
+            for group in layout['groups'][:4]:
+                self.assertTrue(any(name in group['starts'] for name in layout['witnesses']))
+
+    def test_top_rows_keep_the_full_denominator(self):
+        self.assertEqual(module.distribution(Counter(a=20), 100)['a']['percent'], 20)
+
+    def test_cpu_buckets_partition_the_weight(self):
+        result = module.distribution(Counter(a=3, b=7))
+        self.assertEqual(sum(row['percent'] for row in result.values()), 100)
+
+    def test_compression_and_decompression_are_separate(self):
+        self.assertEqual(module.category(['inflate_fast', 'Inflater']), 'decompression')
+        self.assertEqual(module.category(['malloc', 'zlib_rs_deflate']), 'compression')
+
+    def test_missing_unwind_is_not_discarded(self):
+        self.assertEqual(module.category([]), 'missing backtrace')
+
+    def test_main_backend_and_reader_roles_remain_separate(self):
+        self.assertEqual(module.role('session-lane-1 (123)'), 'backend lanes')
+        self.assertEqual(module.role('terrain-1 (123)'), 'terrain readers')
+        self.assertEqual(module.role('terrain-manager'), 'terrain managers')
+
+    def test_syscalls_are_not_mistaken_for_their_callers_user_code(self):
+        self.assertEqual(module.category(['__sendto', 'meridian_ghost']), 'socket read and write syscalls')
+        self.assertEqual(module.category(['__psynch_mutexwait', 'terrain']), 'locks, parking and scheduler calls')
+
+    def test_stop_accounting_reports_cycles_signals_and_both_duration_units(self):
+        budget = proxy.TrackedBudget([100001, 100002], 4)
+        with patch.object(proxy.os, 'kill') as signal_call, patch.object(proxy.time, 'monotonic', side_effect=[1,1.1,1.2,2.1,2.2,2.3,2.4]):
+            budget.signal(proxy.signal.SIGSTOP)
+            budget.signal(proxy.signal.SIGCONT)
+            result = budget.report()
+        self.assertEqual(signal_call.call_count, 4)
+        self.assertEqual(result['stop_cycles'], 1)
+        self.assertEqual(result['process_stop_signals'], 2)
+        self.assertAlmostEqual(result['stop_wall_s'], 1.3)
+        self.assertAlmostEqual(result['sum_process_pause_s'], 2)
+
+    def test_ps_time_parses_days_hours_and_centiseconds(self):
+        self.assertEqual(cpu_seconds('03:24.50'), 204.5)
+        self.assertEqual(cpu_seconds('1-02:03:04.50'), 93784.5)
+
+    def test_process_phases_retroactively_exclude_known_fixture_pids(self):
+        sampler = ProcessSampler()
+        sampler.roles = {'tile-a': 20}
+        a = dict(at=0, processes={10:dict(cpu_s=100, name='outside')})
+        b = dict(at=1, processes={10:dict(cpu_s=100.2, name='outside'),20:dict(cpu_s=2,name='horizon')})
+        c = dict(at=2, processes={10:dict(cpu_s=100.8, name='outside'),20:dict(cpu_s=3,name='horizon')})
+        sampler.rows = [a,b,c]
+        sampler.marks = {'cell-start':a,'joined':b,'steady-first':b,'steady-last':c}
+        cold, steady = sampler.phase('cell-start','joined'), sampler.phase('steady-first','steady-last')
+        self.assertEqual(cold['fixture']['tile-a']['cores'], 2)
+        self.assertEqual(steady['fixture']['tile-a']['cores'], 1)
+        self.assertAlmostEqual(steady['outside_max_process_cores'], .6)
+        self.assertFalse(steady['no_outside_process_above_half_core'])
+
+
+if __name__ == '__main__':
+    unittest.main()

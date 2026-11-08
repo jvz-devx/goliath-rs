@@ -1,0 +1,211 @@
+diff --git a/crates/horizon-client-lib/Cargo.toml b/crates/horizon-client-lib/Cargo.toml
+--- a/crates/horizon-client-lib/Cargo.toml
++++ b/crates/horizon-client-lib/Cargo.toml
+@@ -223,6 +223,10 @@
+ path = "../horizon-client/tests/forced_chunks.rs"
+ 
+ [[test]]
++name = "flat_light"
++path = "../horizon-client/tests/flat_light.rs"
++
++[[test]]
+ name = "generation_saves"
+ path = "../horizon-client/tests/generation_saves.rs"
+ 
+diff --git a/crates/horizon-client/src/flatgen.rs b/crates/horizon-client/src/flatgen.rs
+--- a/crates/horizon-client/src/flatgen.rs
++++ b/crates/horizon-client/src/flatgen.rs
+@@ -359,6 +359,9 @@
+         }
+         Box::new(chunk)
+     }
++    fn light_view(&self, proto: &crate::streaming::Proto) -> Option<Chunk> {
++        proto.downcast_ref::<Chunk>().cloned()
++    }
+     /// FlatLevelSource.spawnOriginalMobs is empty: no generation-time spawns.
+     fn finish(&self, proto: crate::streaming::Proto) -> Chunk {
+         *proto.downcast::<Chunk>().expect("flat terrain proto")
+@@ -370,6 +373,31 @@
+     use super::*;
+     use crate::save::{number, text};
+     use crate::server::json::{self, Json};
++
++    #[test]
++    fn flat_light_views_form_a_region_in_one_pass_without_mutating_the_proto() {
++        let terrain = FlatTerrain {
++            shape: LevelShape::OVERWORLD,
++            layers: vec![1, 2, 3],
++            biome: 0,
++            surface: None,
++            void_platform: None,
++        };
++        for z in -1..=1 {
++            for x in -1..=1 {
++                let proto = terrain.proto(&mut (), x, z);
++                let mut view = terrain.light_view(&proto).expect("flat neighbour is ready");
++                assert_eq!(view.block(x * 16, -64, z * 16), BlockStateId(1));
++                assert_eq!(view.block(x * 16, -63, z * 16), BlockStateId(2));
++                assert_eq!(view.block(x * 16, -62, z * 16), BlockStateId(3));
++                view.set(x * 16, -64, z * 16, 4);
++                assert_eq!(
++                    terrain.finish(proto).block(x * 16, -64, z * 16),
++                    BlockStateId(1)
++                );
++            }
++        }
++    }
+ 
+     fn read(text: &str) -> (Option<Tag>, Vec<String>) {
+         let json: Json = json::parse(text, false).unwrap();
+diff --git a/crates/horizon-client/tests/flat_light.rs b/crates/horizon-client/tests/flat_light.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client/tests/flat_light.rs
+@@ -0,0 +1,147 @@
++//! Flat proto light views settle instead of cycling through LightView forever.
++extern crate horizon_client_lib as horizon_client;
++use horizon_client::{
++    assets::Assets,
++    biome::Biomes,
++    blocks::BlockFacts,
++    chunk::{Chunk, LevelShape},
++    flatgen::FlatTerrain,
++    light::LightTables,
++    mesher::MeshTables,
++    models,
++    streaming::{ChunkGenerator, Proto, Streaming, WorkerContext},
++    world::World,
++};
++use horizon_world::{nbt::Tag, registry::BlockStateId};
++use std::{
++    path::{Path, PathBuf},
++    sync::{
++        Arc,
++        atomic::{AtomicUsize, Ordering},
++    },
++    time::{Duration, Instant},
++};
++
++struct CountedFlat {
++    terrain: FlatTerrain,
++    requests: Arc<AtomicUsize>,
++}
++impl ChunkGenerator for CountedFlat {
++    type Worker = ();
++    fn worker(&self) {}
++    fn proto(&self, worker: &mut (), x: i32, z: i32) -> Proto {
++        self.terrain.proto(worker, x, z)
++    }
++    fn finish(&self, proto: Proto) -> Chunk {
++        self.terrain.finish(proto)
++    }
++    fn light_view(&self, proto: &Proto) -> Option<Chunk> {
++        self.requests.fetch_add(1, Ordering::Relaxed);
++        self.terrain.light_view(proto)
++    }
++}
++
++#[test]
++fn flat_terrain_light_region_settles_after_its_first_pass() {
++    let root = std::env::var_os("HORIZON_TEST_RESOURCES")
++        .map(PathBuf::from)
++        .unwrap_or_else(|| {
++            Path::new(env!("CARGO_MANIFEST_DIR"))
++                .join("../../.local/horizon-client")
++                .join(horizon_core::VANILLA_VERSION)
++        });
++    let assets = Arc::new(
++        Assets::load(&root).expect("prepared resources, or HORIZON_TEST_RESOURCES, required"),
++    );
++    let render = Arc::new(assets.reload(&root).unwrap());
++    let facts = BlockFacts::load(&root, assets.registry).unwrap();
++    let visibility = models::load_visibility(&root, assets.registry).unwrap();
++    let biomes = Arc::new(Biomes::load(&root).unwrap());
++    let layers = [
++        ("minecraft:bedrock", 1),
++        ("minecraft:dirt", 2),
++        ("minecraft:grass_block", 1),
++    ]
++    .into_iter()
++    .map(|(block, height)| {
++        Tag::compound([
++            ("block", Tag::String(block.into())),
++            ("height", Tag::Int(height)),
++        ])
++    })
++    .collect();
++    let settings = Tag::compound([(
++        "dimensions",
++        Tag::compound([(
++            "minecraft:overworld",
++            Tag::compound([(
++                "generator",
++                Tag::compound([
++                    ("type", Tag::String("minecraft:flat".into())),
++                    (
++                        "settings",
++                        Tag::compound([
++                            ("biome", Tag::String("minecraft:plains".into())),
++                            ("features", Tag::Byte(0)),
++                            ("lakes", Tag::Byte(0)),
++                            ("layers", Tag::List(layers)),
++                        ]),
++                    ),
++                ]),
++            )]),
++        )]),
++    )]);
++    let terrain =
++        FlatTerrain::from_settings(&settings, assets.registry, &biomes, LevelShape::OVERWORLD)
++            .unwrap();
++    let context = Arc::new(WorkerContext {
++        tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
++        light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
++        biomes,
++        assets,
++        render,
++    });
++    let requests = Arc::new(AtomicUsize::new(0));
++    let mut streaming = Streaming::new(
++        Arc::new(CountedFlat {
++            terrain,
++            requests: Arc::clone(&requests),
++        }),
++        context,
++        2,
++    );
++    streaming.radius = -1;
++    streaming.forced.insert((0, 0));
++    let mut world = World::new(BlockStateId(0), 0);
++    let deadline = Instant::now() + Duration::from_secs(10);
++    let mut quiet = 0;
++    while quiet < 5 {
++        assert!(
++            Instant::now() < deadline,
++            "flat light_region kept requeuing; requests={}",
++            requests.load(Ordering::Relaxed)
++        );
++        let _ = streaming.update(&mut world);
++        quiet = if !streaming.busy() && streaming.is_lit(0, 0) {
++            quiet + 1
++        } else {
++            0
++        };
++        streaming.wait(Duration::from_millis(2));
++    }
++    let completed = requests.load(Ordering::Relaxed);
++    assert!(
++        completed > 0,
++        "fixture must exercise the proto light-view path"
++    );
++    for _ in 0..20 {
++        let _ = streaming.update(&mut world);
++        streaming.wait(Duration::from_millis(1));
++    }
++    assert_eq!(
++        requests.load(Ordering::Relaxed),
++        completed,
++        "a settled flat region was queued again"
++    );
++    assert!(streaming.is_lit(0, 0));
++}

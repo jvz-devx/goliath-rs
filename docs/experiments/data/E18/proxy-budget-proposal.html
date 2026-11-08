@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+:root { --viz-series-1: var(--chart-1); --viz-series-2: var(--chart-2); }
+body { margin:0; color:var(--foreground); font-family:var(--font-sans); }
+figure { margin:0; } h3 { font-size:16px; font-weight:500; margin:0 0 12px; }
+svg { width:100%; height:258px; display:block; }
+svg text { fill:var(--foreground); font-size:12px; font-family:var(--font-sans); }
+figcaption { color:var(--muted-foreground); font-size:12px; line-height:1.5; }
+</style></head><body>
+<figure id="e18-budget"><h3>975-player illustration, not a measurement</h3><svg role="img" aria-label="Current proxy plus quadratic tile illustration uses 4.018 cores before store and sidecars. Expected event-loop range is 3.517 to 3.712. Ten-percent reserve requires 3.6 or less."></svg><figcaption>Tiles use the parent's quadratic crowding illustration. The proxy uses the measured 50-to-200 slope. Store and sidecars are additional. Event-loop savings are a planning expectation.</figcaption></figure>
+<script>
+const root=document.getElementById('e18-budget'),svg=root.querySelector('svg'),ns='http://www.w3.org/2000/svg';
+function draw(){
+ const w=root.clientWidth,L=24,R=58,span=w-L-R,x=v=>L+span*v/4.5;
+ svg.setAttribute('viewBox',`0 0 ${w} 258`);svg.replaceChildren();
+ function add(tag,attrs,text){const n=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))n.setAttribute(k,v);if(text!==undefined)n.textContent=text;svg.append(n);return n;}
+ for(const v of [0,1,2,3,4]){add('line',{x1:x(v),x2:x(v),y1:34,y2:215,stroke:'var(--border)'});add('text',{x:x(v),y:235,'text-anchor':'middle'},String(v));}
+ add('text',{x:L,y:253},'Server CPU cores');
+ for(const[v,label,y]of [[3.6,'3.6: ten-percent reserve',14],[4,'4.0: shared cap',30]]){add('line',{x1:x(v),x2:x(v),y1:34,y2:215,stroke:'var(--foreground)','stroke-dasharray':'3 4',opacity:'.65'});add('text',{x:x(v),y,'text-anchor':'end'},label);}
+ function bar(y,proxy,label){add('text',{x:L,y:y-9},label);add('rect',{x:L,y,width:x(2.8125)-L,height:28,fill:'var(--viz-series-2)',opacity:'.45'});add('rect',{x:x(2.8125),y,width:x(2.8125+proxy)-x(2.8125),height:28,fill:'var(--viz-series-1)',opacity:'.7'});add('text',{x:(L+x(2.8125))/2,y:y+18,'text-anchor':'middle'},'2.813');add('text',{x:(x(2.8125)+x(2.8125+proxy))/2,y:y+18,'text-anchor':'middle'},proxy.toFixed(3));}
+ bar(66,1.205253673,'Current proxy: about 4.018 total');
+ bar(154,.704825866,'Event-loop expectation: 3.517 to 3.712 total');
+ add('rect',{x:x(3.517325866),y:154,width:x(3.712325866)-x(3.517325866),height:28,fill:'var(--viz-series-1)',opacity:'.28'});
+ add('text',{x:L,y:117},'Tiles');add('text',{x:x(2.8125),y:117},'Proxy');
+}
+new ResizeObserver(draw).observe(root);draw();
+</script></body></html>

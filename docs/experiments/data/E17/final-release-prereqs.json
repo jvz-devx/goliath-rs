@@ -1,0 +1,197 @@
+{
+  "kind": "E17-final-release-prerequisites",
+  "full_cluster_build": false,
+  "final": {
+    "schema_version": 1,
+    "created_at": "2026-11-08T02:09:46.885323+00:00",
+    "projects": {
+      "horizon": {
+        "pin": "fc2868b2b26d56ec76e17414909fe58a3b87bb92",
+        "patches": [
+          {
+            "path": "patches/e2-horizon-input-trace.patch",
+            "sha256": "488a82c167465ad288c194103f51983a2020288e2bbf75db0b07c26d76ed2231"
+          },
+          {
+            "path": "patches/horizon-01-tile-cut.patch",
+            "sha256": "b3c431a977a061d392eeba65d628a194c5a240cb053c4a4ca66ba0f46b8239e1"
+          },
+          {
+            "path": "patches/horizon-02-tile-ownership.patch",
+            "sha256": "3e80f9473fefabf15b57407364d124d8b4ceab98e69c2c0ffc4d8768ae46ea48"
+          },
+          {
+            "path": "patches/horizon-03-cluster.patch",
+            "sha256": "015123a3aa23b8245cee25412e63effa340c7c08e4091fb5a4ffe97828345417"
+          },
+          {
+            "path": "patches/horizon-05-m2.patch",
+            "sha256": "5acdf77df7e55ef98d615a94676e7d0f83bd22a5c4aed7dfcacef7c70d4b0f90"
+          },
+          {
+            "path": "patches/horizon-06-leases.patch",
+            "sha256": "bcb54b07f5db962f9bf2cff8b2b5b1b16d397c78fbe784f130bd664fd7d527a6"
+          },
+          {
+            "path": "patches/horizon-07-observer-status.patch",
+            "sha256": "a61e38b926741a89ddd82bdc2550852cd0d66c424e166155705d4eaa91f0cb1d"
+          }
+        ],
+        "clean_checkout_apply": "passed",
+        "source_reproduction": "byte_equal",
+        "source_identity": "working Horizon source at publication"
+      },
+      "meridian": {
+        "pin": "902dcf195e0a8bbd3f39a5f560684af00e64bf5d",
+        "patches": [
+          {
+            "path": "patches/e2-meridian-client.patch",
+            "sha256": "76153e124f7dfd30acffe95207c92c3df852c03875a71bc887bfd087a53e55b4"
+          },
+          {
+            "path": "patches/meridian-01-wall-trigger.patch",
+            "sha256": "87468885e90981666b3df2a478f648774f50fdc42d72216a8439c781610b17c0"
+          },
+          {
+            "path": "patches/meridian-02-fast-crossing.patch",
+            "sha256": "16f3d8b789a74580567d4be88932d4a6162228ea27209371d5d199c013a145c1"
+          },
+          {
+            "path": "patches/meridian-03-cluster.patch",
+            "sha256": "e22565803765a3d286fdd9ba1a9a12955f35f6d938948d9e96856bd3269ce864"
+          },
+          {
+            "path": "patches/meridian-04-m2.patch",
+            "sha256": "d7587b8c786534ade48d38b5cf6779a93d7144efabc0a1d93c0bcfc18dab5e96"
+          }
+        ],
+        "clean_checkout_apply": "passed",
+        "source_reproduction": "byte_equal",
+        "source_identity": "docs/experiments/data/E12/meridian-handover.json"
+      }
+    },
+    "internal_crates": {
+      "goliath_rs_commit": "b4dc5af04b41a70c68d0e5d8608c4d7dd983b3ec",
+      "identity": "working_source_sha256",
+      "files": {
+        "crates/goliath-model/Cargo.toml": "5a17df642add3412ceeb364995b6283cc9010dea9028a5b8586516f3cd211b69",
+        "crates/goliath-model/src/authority.rs": "0aa489502455ba95d1e063f842908d631952ebc4240b6df8f88c0eb012d057a6",
+        "crates/goliath-model/src/cut_log.rs": "af1d6842410f3d22bf9941656a9d747d8c4641d3af12dd545401b01e2a8a820a",
+        "crates/goliath-model/src/lease.rs": "8caa39b415f7ec3cf7a7fe060752ab5d5eaadb5aad1319be38673f83767354a2",
+        "crates/goliath-model/src/lib.rs": "31bfbb0b4718ac6ae82dc71c83700d6973867ddaf36ddd2907c18fa2cae89b8d",
+        "crates/goliath-model/src/tile.rs": "f358be4510bcd0fe3285296296f9c2b3abd7ae736eca741f949248954b20da82",
+        "crates/goliath-model/src/transfer.rs": "5bd97e2806f5b16a997157dd6a4b5262b39c50e13d80c155339248e36a6f38be",
+        "crates/goliath-model/tests/it/leases.rs": "8d07692697ed68934c466c67e94fa8a57894b7a0c38a6d4601d0082434dbae64",
+        "crates/goliath-model/tests/it.rs": "0f020387f0b78d3efc6094bddec60180b1b7b1bd39b8f50a1f74bb12658ef068",
+        "crates/goliath-sim/Cargo.toml": "9373de6621e2f0abec89d20d44d79cfae188bc3ded05a132a1b4c5cb3772b838",
+        "crates/goliath-sim/src/lease_sweep.rs": "877c34a8ae3479bd43f94e41cd7df43efc390eef41db5d9c2e3ff6999e056c1b",
+        "crates/goliath-sim/src/leases.rs": "b8132b907d0bed421fe4aae6110b9aefe63325ca4742c9d9e818347d7ea82a6e",
+        "crates/goliath-sim/src/lib.rs": "933e8f97d041fc038e5a83e380036e1533a55be29ace853440fe07e28ab24f6f",
+        "crates/goliath-sim/src/main.rs": "c6ae08cb258f2a07ecf8f7f6e966dab75e4ed61f4238ae966b60d22aa2bdc495",
+        "crates/goliath-sim/src/scenario.rs": "0d7b2a1837fc3287713ab5ce7644106ef7d8554c32d47851a7ce8c236648eadf",
+        "crates/goliath-sim/src/scheduler.rs": "cd33131eee34449ea16f3c9c9c6a772553302317b8ba12e164e3e31abdbaf8d7",
+        "crates/goliath-sim/src/settings.rs": "3a2c761f780cf873ff9ac62b5fe7f328a0640e6fc40ed4c6d6f61fa9b471e56e",
+        "crates/goliath-sim/src/sweep.rs": "c7fae9e779be01606f20a4d8e70bc2a66569e93c30f580f91e26e9c34a6b2c46",
+        "crates/goliath-sim/tests/it.rs": "87a80062f4753cd4cab219e562873f722e8e99dc5368d145af0a8c3005443cb2",
+        "crates/goliath-store/Cargo.toml": "9b948a9a61937af707c745edfd1871956024916bbfa221d1285c414342f08431",
+        "crates/goliath-store/src/bin/goliath-store-load.rs": "5aa07985f199507b3411612431127d3ec5272fcc7a9126f8c5b73a9518dc540b",
+        "crates/goliath-store/src/client.rs": "396bb4e152a9212d5218d741bf0625a8c34a9b5ba6fa855e0c8b37d02bac2bb5",
+        "crates/goliath-store/src/codec.rs": "a6d5393a650f17850fc2b87244b5b6a32e43d65b833fb6be6561d5c4d78aae01",
+        "crates/goliath-store/src/durable.rs": "538d765055f8218f5cfb871aabe1790b21ebaaaed20bb5e262744840590719f1",
+        "crates/goliath-store/src/engine.rs": "7ce9b3a3194be0f1b0014ba54aa1b56ee2edff9f82c09d97e0792ac5d0af54a5",
+        "crates/goliath-store/src/journal.rs": "34bb0ed34973fa9bdf7e25430a7f8c171c3d6ca49636fe0cd2a1eacfb4639e8e",
+        "crates/goliath-store/src/lib.rs": "0f9ad039ea6143493fd75d0ba5a4ae520e6fa9f5064b376afae85806be707133",
+        "crates/goliath-store/src/main.rs": "2ee11251eddb48abf980a8a156c25df58840c2c044fcfb6739502375a24634d3",
+        "crates/goliath-store/src/state.rs": "e7b12a2db741b935df1055b105ba0170ff39964b29105fa2b7234458a6d2de2e",
+        "crates/goliath-store/tests/it/leases.rs": "a31dbefeec6efcf461681c153142bda5a80375f15d6333dd77d4e15d565db80a",
+        "crates/goliath-store/tests/it.rs": "9024c307178c009daf124607d0f4b9dfc6c9733c580cd85b4fe3e802492e31a2",
+        "Cargo.toml": "8e8422b6cf0a97e95844b4c26679e691454c32fb21a13e2b633d2d1aa9457d77",
+        "Cargo.lock": "6f7c41fd47fbdea97d9c00cb0fcc3a6e9492cbcdbb617594cde6de8b5f43f9a3",
+        "clippy.toml": "9172190bdab311ba8baac23f783186c1466ae91e7d278a7cd4723e03299adbfa"
+      }
+    },
+    "binaries": {
+      "horizon-client": {
+        "path": ".local/bin/goliath-e12/horizon-client",
+        "sha256": "fe38586a5b2103e1ee4e3ce3c2f7b63ec670abe950bda3b8bd5f7978fcb6f208"
+      },
+      "meridian": {
+        "path": ".local/bin/goliath-e12/meridian",
+        "sha256": "94d1dfad6e36146deff9d899340eac69e39fa902b99306b62c6de3514456c0c5"
+      },
+      "meridian-sidecar": {
+        "path": ".local/bin/goliath-e12/meridian-sidecar",
+        "sha256": "8d300a00afaf7fa9fc3b4ef50d9a65f81276d8d8de71d712c3e69f5638c92705"
+      },
+      "e4-client": {
+        "path": ".local/bin/goliath-e12/e4-client",
+        "sha256": "8afa1b47cfefed78ee7a738f21a338766b7660fe632724430b7270960fc3235b"
+      },
+      "goliath-store": {
+        "path": ".local/bin/goliath-e12/goliath-store",
+        "sha256": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af"
+      }
+    },
+    "store_binary_sha256": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+    "launcher": {
+      "path": "scripts/goliath-cluster",
+      "sha256": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5",
+      "default_max_players": 128,
+      "max_expected": {
+        "formula": "4 * max_players",
+        "default": 512
+      },
+      "expect_seconds": 20,
+      "max_expect_seconds": 60,
+      "max_freeze_seconds": 30,
+      "max_hold_seconds": 60,
+      "leases": {
+        "lease_ms": 1000,
+        "margin_ms": 100,
+        "renew_every_ms": 250,
+        "critical_io_reserve_ms": 100
+      },
+      "leased_marker": ".local/bin/goliath-e12/LEASES"
+    },
+    "terrain_readers": {
+      "lazy": false,
+      "implementation": "E12 eager four-per-player Meridian handover; E18 owns successor stack",
+      "observer_radius_min": 2,
+      "observer_radius_max": 32,
+      "status_fields": [
+        "placed",
+        "held",
+        "terrain_reader",
+        "frozen",
+        "released",
+        "tracked_chunks",
+        "queued_chunks",
+        "view_distance",
+        "wire_bytes"
+      ]
+    },
+    "validation": {
+      "partition": "docs/experiments/data/E13/e12-radius16-partition-v2-13001.json",
+      "stale_login": "docs/experiments/data/E13/e12-radius16-stale-login-13801.json",
+      "campaign": "docs/experiments/data/E13/e12-final15-crossings-200-campaign.json",
+      "fault_seeds": 200,
+      "campaign_engine_sha256": "f21e5ead143f0a38d621874f1828f00972e5e687d64f28d6d3e74c5aaa4da6c3",
+      "note": "Campaign engine predates observer-radius/status interface only; final engine repeated both exact fencing seeds. No unbounded physical-IO or arbitrary-pause storage-fence claim."
+    },
+    "meridian_handover": ".local/bin/goliath-e12/MERIDIAN-HANDOVER"
+  },
+  "final_sha256": "87efedc05530f4a02e32dfd0c2f603ca931ca86baaebfc532f18fb1be832fe22",
+  "profile": "release",
+  "incremental": false,
+  "proxy_selected": false,
+  "commands": [],
+  "measurement_patches": [
+    {
+      "path": "patches/horizon-03-bots.patch",
+      "sha256": "f1796dc29e1e69504334dd7e949adbd7de3351aae6b9b2c8328499fd534d967f"
+    }
+  ],
+  "status": "failed",
+  "error": "Command ['git', 'apply', '--check', '-'] returned non-zero exit status 1.",
+  "seconds": 3.338092375008273
+}

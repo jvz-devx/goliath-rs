@@ -1,0 +1,99 @@
+{
+  "request": {
+    "owner": "E18",
+    "name": "quiet-candidate-2",
+    "pid": 77599,
+    "time": "2026-11-08T02:45:47.993133+00:00"
+  },
+  "status": "failed",
+  "commands": [
+    {
+      "name": "quiet-candidate-2-direct-50",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e18-proxy",
+        "--bins",
+        ".local/bin/meridian-e18/candidate-1",
+        "--bots",
+        "50",
+        "--seconds",
+        "30",
+        "--settle",
+        "20",
+        "--name",
+        "quiet-candidate-2-direct-50",
+        "--proxy-profile",
+        "release",
+        "--tile-profile",
+        "release",
+        "--quiet-marker",
+        "$REPO/.local/quiet-request",
+        "--timing",
+        "--eager-readers",
+        "--writes-direct",
+        "--server-cores",
+        "4",
+        "--bot-cores",
+        "1"
+      ],
+      "exit": 0,
+      "seconds": 59.3367772079946
+    },
+    {
+      "name": "quiet-candidate-2-direct-200",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e18-proxy",
+        "--bins",
+        ".local/bin/meridian-e18/candidate-1",
+        "--bots",
+        "200",
+        "--seconds",
+        "30",
+        "--settle",
+        "20",
+        "--name",
+        "quiet-candidate-2-direct-200",
+        "--proxy-profile",
+        "release",
+        "--tile-profile",
+        "release",
+        "--quiet-marker",
+        "$REPO/.local/quiet-request",
+        "--timing",
+        "--eager-readers",
+        "--writes-direct",
+        "--server-cores",
+        "4",
+        "--bot-cores",
+        "1"
+      ],
+      "exit": 0,
+      "seconds": 121.79333987500286
+    }
+  ],
+  "load_start": [
+    21.474609375,
+    18.5849609375,
+    16.912109375
+  ],
+  "wait_seconds": 154.06225304199324,
+  "acknowledgements": {
+    "quiet-ack-E13": "E13 quiet. All active trials finished; no new engines or builds.\n",
+    "quiet-ack-E17": "E17 is idle. No E17 load, build, engine, proxy or smoke test is running.\nAcknowledges E18 quiet-candidate-2, owner PID 77599, requested 2026-11-08T02:45:47.993133+00:00.\nNo E17 harness edits or load will run during this window. E17 will remain idle until this request is removed.\n"
+  },
+  "load_ready": [
+    3.7763671875,
+    11.95166015625,
+    14.4560546875
+  ],
+  "error": "",
+  "seconds": 399.85558462499466,
+  "load_end": [
+    7.6455078125,
+    8.90234375,
+    12.4091796875
+  ]
+}

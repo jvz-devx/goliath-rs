@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""The five requested post-09 release cells, with no proxy redesign or extra controls."""
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT=Path(__file__).resolve().parent.parent
+sys.path.insert(0,str(ROOT/'scripts'))
+import e11_support as support
+from e18_process import ProcessSampler
+DATA=ROOT/'docs/experiments/data/E18'
+
+
+def load():
+    loader=importlib.machinery.SourceFileLoader('e18_flat_diag_e17',str(ROOT/'scripts/e17-m4'))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module);return module
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    args=parser.parse_args()
+    bins={name:ROOT/'.local/bin/meridian-e18'/('flat09-'+name) for name in ['plain','tiles']}
+    for folder in bins.values():
+        if not (folder/'horizon-client').exists(): raise SystemExit('both release engines must be ready')
+    request=ROOT/'.local/quiet-request';ack=ROOT/'.local/quiet-ack-E17'
+    if request.exists() or ack.exists(): raise SystemExit('quiet state exists')
+    while os.getloadavg()[0]>4: time.sleep(1)
+    identity=json.dumps(dict(owner='E18',name=args.name,pid=os.getpid(),time=datetime.now(timezone.utc).isoformat()))+'\n'
+    with request.open('x') as stream: stream.write(identity)
+    began=time.monotonic();deadline=began+600
+    result=dict(kind='E18-post-flat09-five-cells',status='waiting',uncapped=True,limiter_stops=0,
+        warmup_seconds=30,measurement_seconds=30,cells={},engines={name:hashlib.sha256((folder/'horizon-client').read_bytes()).hexdigest() for name,folder in bins.items()})
+    def save(): support.save(DATA/(args.name+'.json'),result)
+    def check():
+        if time.monotonic()>deadline-20: raise TimeoutError('post-09 quiet cleanup reserve')
+        if not request.exists() or request.read_text()!=identity: raise RuntimeError('quiet identity changed')
+    def wait(seconds):
+        end=time.monotonic()+seconds
+        while time.monotonic()<end: check();time.sleep(min(.25,end-time.monotonic()))
+    def settle():
+        while os.getloadavg()[0]>4: check();time.sleep(1)
+    def population(engine):
+        value=engine.ask('server-status');players=value['players'];readers=[p for p in players if p.get('terrain_reader') or p['name'].startswith('E12View')]
+        return dict(chunks=value['chunks'],players=len(players)-len(readers),reader_sessions=len(readers),
+            placed=sum(p.get('placed',False) and p not in readers for p in players),held=sum(p.get('held',False) and p not in readers for p in players))
+    def game_time(engine):
+        sent=time.monotonic();reply=engine.ask('console time query gametime');received=time.monotonic()
+        values=[int(v) for line in reply.get('output',[]) for v in re.findall(r'-?\d+',line)]
+        return dict(sent=sent,received=received,tick=values[-1] if values else None)
+    def measure(monitor,label,engines):
+        start_status={name:population(engine) for name,engine in engines.items()};a={name:game_time(engine) for name,engine in engines.items()}
+        monitor.capture(label+'-start');wait(30);monitor.capture(label+'-end')
+        b={name:game_time(engine) for name,engine in engines.items()};end_status={name:population(engine) for name,engine in engines.items()}
+        cpu=monitor.phase(label+'-start',label+'-end')
+        return dict(cpu=cpu,before=start_status,after=end_status,
+            tps={name:(b[name]['tick']-first['tick'])/((b[name]['sent']+b[name]['received']-first['sent']-first['received'])/2) if first['tick'] is not None and b[name]['tick'] is not None else None for name,first in a.items()},
+            noise_valid=cpu['no_outside_process_above_half_core'])
+    def bots(folder,port,count,folder_bins):
+        stream=(folder/'bots.jsonl').open('w')
+        command=[str(folder_bins/'horizon-bots'),'--event-loop','--server',f'127.0.0.1:{port}','--bots',str(count),'--behaviour','route','--path','-12,12;12,12;12,-12;-12,-12','--speed','4','--height','2','--seconds','240','--join-every','.1','--view-distance','3','--name','E17Bot','--report',str(folder/'bots-report.json')]
+        process=subprocess.Popen(command,cwd=folder,env=support.private_env(folder/'bots-home'),stdout=stream,stderr=subprocess.STDOUT)
+        def joined():
+            rows=[row for row in support.complete_json_lines(folder/'bots.jsonl') if 'online' in row];last=rows[-1] if rows else {}
+            if process.poll() is not None or last.get('failed'): raise RuntimeError('post-09 bot join failed')
+            return last.get('online')==count
+        try:
+            support.wait(joined,60,'post-09 join')
+            return process,stream
+        except BaseException:
+            if process.poll() is None:
+                process.terminate();process.wait(10)
+            stream.close()
+            raise
+    try:
+        while not ack.exists(): check();time.sleep(1)
+        result.update(status='running',load_start=os.getloadavg(),ack_E17=ack.read_text());save()
+        for variant in ['plain','tiles']:
+            settle();print('POST09 '+variant+' A12',flush=True)
+            with tempfile.TemporaryDirectory(prefix='E18-post09-'+variant+'-',dir=support.RUNS) as temporary:
+                folder=Path(temporary);monitor=ProcessSampler().start();engine=None;bot=None;stream=None;popen=subprocess.Popen
+                def plain_popen(command,*positional,**keywords):
+                    if command and Path(str(command[0])).name=='horizon-client':
+                        command=[str(bins[variant]/'horizon-client'),*command[1:]];env=dict(keywords['env'])
+                        for key in list(env):
+                            if key.startswith('GOLIATH_') or key.startswith(('HORIZON_E3_','HORIZON_E7_','HORIZON_TILE','HORIZON_E11_')): env.pop(key,None)
+                        keywords['env']=env
+                    return popen(command,*positional,**keywords)
+                try:
+                    subprocess.Popen=plain_popen
+                    engine=support.Engine(folder/'engine',dict(seed=12345,view_distance=3,servers=[dict(properties={'difficulty':'peaceful'})]));subprocess.Popen=popen;monitor.register('plain',engine.pid)
+                    for text in ['gamerule spawn_mobs false','gamerule advance_weather false','gamerule random_tick_speed 0','gamerule respawn_radius 0']: engine.console(text)
+                    bot,stream=bots(folder,engine.port,12,bins[variant]);monitor.register('bots',bot.pid);wait(30)
+                    label=variant+'-A12';result['cells'][label]=measure(monitor,label,{'plain':engine});save()
+                    if variant=='plain':
+                        forced=engine.console('forceload add -64 -64 63 63');bot.terminate();bot.wait(10);bot=None;stream.close();stream=None
+                        support.wait(lambda:not engine.ask('server-status')['players'],15,'post-09 players leave');wait(30)
+                        label='plain-zero-loaded';result['cells'][label]=measure(monitor,label,{'plain':engine});result['cells'][label]['forceload_reply']=forced;save()
+                finally:
+                    subprocess.Popen=popen
+                    if bot and bot.poll() is None: bot.terminate();bot.wait(10)
+                    if stream: stream.close()
+                    if engine: engine.stop()
+                    monitor.stop();support.save(DATA/(args.name+'-'+variant+'-processes.json'),monitor.report())
+        adapter=load()
+        for count,label in [(0,'tiles-B0'),(50,'tiles-C50')]:
+            settle();print('POST09 '+label,flush=True)
+            with tempfile.TemporaryDirectory(prefix='E18-post09-cluster-',dir=support.RUNS) as temporary:
+                folder=Path(temporary);module=adapter.cluster_module(bins['tiles']);instance=module.Cluster.__new__(module.Cluster);monitor=ProcessSampler().start();bot=None;stream=None
+                try:
+                    os.environ['E18_TERRAIN_EAGER']='1';os.environ['E18_WRITES_DIRECT']='1'
+                    instance.__init__(folder,module.RESOURCES,512,max_players=10000,max_expected=10000)
+                    for name,tile in instance.tiles.items(): monitor.register('tile-'+name,tile.server.process.pid)
+                    monitor.register('proxy',instance.proxy.process.pid);monitor.register('store',instance.store_process.pid)
+                    for index,child in enumerate(instance.sidecars): monitor.register('sidecar-'+str(index),child.process.pid)
+                    if count: bot,stream=bots(folder,instance.port,count,bins['tiles']);monitor.register('bots',bot.pid)
+                    wait(30);result['cells'][label]=measure(monitor,label,instance.tiles);result['cells'][label]['proxy_mode']='eager/direct, matched to pre-09 tile control';save()
+                finally:
+                    if bot and bot.poll() is None: bot.terminate();bot.wait(10)
+                    if stream: stream.close()
+                    instance.stop();monitor.stop();support.save(DATA/(args.name+'-'+label+'-processes.json'),monitor.report())
+        result['status']='complete'
+    except BaseException as error: result.update(status='failed',error=repr(error));raise
+    finally:
+        if request.exists() and request.read_text()==identity: request.unlink();ack.unlink(missing_ok=True)
+        result.update(seconds=time.monotonic()-began,load_end=os.getloadavg());save()
+
+
+if __name__=='__main__':main()

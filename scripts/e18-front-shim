@@ -1,0 +1,30 @@
+#!/usr/bin/env python3
+"""Test-only virtual-host prefix for native bots, not a production world service."""
+import argparse
+import json
+import os
+import signal
+import threading
+from e18_d9_wire import D9Observer
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--target',type=int,required=True);parser.add_argument('--host',required=True);parser.add_argument('--index',type=int,required=True)
+    args=parser.parse_args();observer=D9Observer([])
+    observer.source_ports=(20000+4000*args.index,24000+4000*args.index);observer.next_source_port=observer.source_ports[0]
+    port=observer.listen(('127.0.0.1',args.target),front=True,host=args.host)
+    done=threading.Event()
+    for action in [signal.SIGINT,signal.SIGTERM]:signal.signal(action,lambda *_:done.set())
+    observer.start()
+    def report():
+        value=observer.report()
+        print(json.dumps(dict(port=port,pid=os.getpid(),errors=value['errors'],forwarded_bytes=value['forwarded_bytes'],
+            maximum_pending_bytes=value['maximum_pending_bytes'],outbound_connections=value['outbound_connections'])),flush=True)
+    try:
+        report()
+        while not done.wait(1):report()
+    finally:observer.stop();report()
+
+
+if __name__=='__main__':main()

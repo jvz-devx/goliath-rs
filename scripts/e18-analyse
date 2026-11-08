@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Reduce E18 native Time Profiler samples and process counters without trimming."""
+import argparse
+from collections import Counter, defaultdict
+import gzip
+import json
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT/'docs/experiments/data/E18'
+
+
+def role(name):
+    for prefix, group in [('terrain-manager', 'terrain managers'), ('terrain-', 'terrain readers'),
+        ('session-lane-', 'backend lanes'), ('session-to-backend', 'client input'),
+        ('player ', 'player supervisors'), ('wall-', 'wall handoffs')]:
+        if name.startswith(prefix):
+            return group
+    return 'other'
+
+
+def category(frames):
+    leaf = frames[0] if frames else 'missing'
+    stack = ' '.join(frames)
+    if any(part in stack for part in ['inflate', 'Inflater', 'Decompress']):
+        return 'decompression'
+    if any(part in stack for part in ['zlib_rs', 'flate2', 'Deflater', 'deflate']):
+        return 'compression'
+    if not frames:
+        return 'missing backtrace'
+    if leaf in ['__sendto', '__recvfrom', 'write', 'read', '__write_nocancel', '__read_nocancel']:
+        return 'socket read and write syscalls'
+    if any(part in leaf for part in ['psynch', 'ulock', 'semaphore', 'mutex', 'cond_wait', 'semwait', 'thread_switch']):
+        return 'locks, parking and scheduler calls'
+    if leaf in ['socket', '__connect', 'connect', 'setsockopt', 'getsockopt', 'fcntl', 'close', '__open', 'open', 'poll', 'select']:
+        return 'connection and control syscalls'
+    if any(part in leaf for part in ['bsdthread', 'pthread_start', 'thread_start', 'pthread_detach', '__mmap', '__munmap']):
+        return 'thread lifecycle and mappings'
+    if any(part in leaf for part in ['alloc', '_free', 'memmove', 'memcpy', 'realloc', 'RawVec', 'memset']):
+        return 'allocation and byte copies'
+    if 'meridian_ghost' in stack:
+        return 'ghost view state'
+    if 'meridian_rewrite' in stack or 'packets4play' in stack or 'protocol3buf' in stack:
+        return 'packet parse and rewrite'
+    if 'meridian_sidecar' in stack or 'goliath_store' in stack or 'meridian7cluster' in stack:
+        return 'control and store user code'
+    if 'horizon_protocol' in stack:
+        return 'protocol framing and connection buffers'
+    if 'terrain' in stack:
+        return 'terrain management and composition'
+    return 'other user code'
+
+
+def distribution(counts, total=None):
+    total = sum(counts.values()) if total is None else total
+    return {key: {'weight_ns': value, 'percent': 100*value/total if total else None}
+        for key, value in counts.most_common()}
+
+
+def counters(path):
+    data = json.loads(path.read_text())
+    rows = data.get('samples', [])
+    if len(rows) < 2:
+        return {'status': data.get('status'), 'error': data.get('error')}
+    first, last = rows[0], rows[-1]
+    seconds = last['at']-first['at']
+    cpu = last['proxy']['cpu_s']-first['proxy']['cpu_s']
+    output = dict(status=data.get('status'), players=data['bots'], seconds=seconds,
+        survived=all(row['bots']['online'] == data['bots'] and row['bots']['failed'] == 0 for row in rows),
+        cores=cpu/seconds, peak_threads=max(row['proxy']['threads'] for row in rows),
+        peak_rss_mb=max(row['proxy']['rss_mb'] for row in rows),
+        cores_per_player=cpu/seconds/data['bots'],
+        incremental_threads_per_player=(max(row['proxy']['threads'] for row in rows)-data['idle_proxy']['threads'])/data['bots'])
+    for field in ['user_cpu_s', 'system_cpu_s', 'context_switches', 'unix_syscalls', 'mach_syscalls']:
+        if field in last['proxy']:
+            delta = last['proxy'][field]-first['proxy'][field]
+            output[field+'_per_second'] = delta/seconds
+            if field.endswith('cpu_s'):
+                output[field+'_percent'] = 100*delta/cpu
+    return output
+
+
+def analyse(name):
+    document = ET.fromstring(gzip.decompress((DATA/(name+'-time-profile.xml.gz')).read_bytes()))
+    definitions = {element.get('id'): element for element in document.iter() if element.get('id')}
+
+    def resolve(element):
+        if element is None:
+            raise ValueError('missing required trace field')
+        while element.get('ref'):
+            element = definitions[element.get('ref')]
+        return element
+
+    roles, categories, leaves, states = Counter(), Counter(), Counter(), Counter()
+    by_role = defaultdict(Counter)
+    times, sample_count = [], 0
+    for row in document.findall('.//row'):
+        state = resolve(row.find('thread-state')).text
+        weight = int(resolve(row.find('weight')).text)
+        states[state] += weight
+        if state != 'Running':
+            continue
+        thread = resolve(row.find('thread')).get('fmt', '')
+        group = role(thread)
+        trace = row.find('tagged-backtrace')
+        if trace is None:
+            frames = []
+        else:
+            trace = resolve(trace)
+            frames = [resolve(frame).get('name', '') for frame in resolve(trace.find('backtrace')).findall('frame')]
+        bucket = category(frames)
+        roles[group] += weight
+        categories[bucket] += weight
+        by_role[group][bucket] += weight
+        leaves[frames[0] if frames else 'missing'] += weight
+        times.append(int(resolve(row.find('sample-time')).text))
+        sample_count += 1
+    output = dict(kind='E18-native-cpu-profile', source=name+'-time-profile.xml.gz',
+        denominator='sum of Time Profiler Running row weights, not blocked-thread occupancy',
+        samples=sample_count, duration_seconds=(max(times)-min(times))/1e9,
+        sampled_cpu_seconds=sum(categories.values())/1e9,
+        roles=distribution(roles), categories=distribution(categories),
+        categories_by_role={key: distribution(value) for key, value in by_role.items()},
+        top_leaves=distribution(Counter(dict(leaves.most_common(30))), sum(leaves.values())),
+        states=distribution(states))
+    # Native thread times are nanoseconds. proc_taskinfo uses Mach absolute ticks.
+    profile = json.loads((DATA/(name+'-profile.json')).read_text())
+    before, after = profile['thread_before'], profile['thread_after']
+    thread_cpu = Counter()
+    for identity, last in after['threads'].items():
+        first = before['threads'].get(identity)
+        if first and first['name'] == last['name']:
+            delta = last['user']+last['system']-first['user']-first['system']
+        else:
+            delta = last['user']+last['system']
+        if delta >= 0:
+            thread_cpu[role(last['name'])] += delta
+    process_delta = after['usage']['cpu_s']-before['usage']['cpu_s']
+    output['sample_thread_cpu'] = dict(roles=distribution(thread_cpu),
+        surviving_and_new_thread_cpu_s=sum(thread_cpu.values())/1e9,
+        process_cpu_s=process_delta,
+        note='Thread snapshots are serial and omit exited threads; not complete process accounting.')
+    output['runs'] = {run: counters(DATA/(run+'.json')) for run in [
+        'before-50-profile', 'before-200-profile', 'pooled-50', 'pooled-200', name]}
+    (DATA/(name+'-breakdown.json')).write_text(json.dumps(output, indent=2)+'\n')
+    print(json.dumps({key: output[key] for key in ['samples', 'duration_seconds', 'sampled_cpu_seconds', 'roles', 'categories', 'sample_thread_cpu']}, indent=2))
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('name')
+    analyse(parser.parse_args().name)

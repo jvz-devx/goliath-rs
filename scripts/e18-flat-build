@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Build patch 09 on matched plain and FINAL stacks, outside owned upstream worktrees."""
+import argparse
+import difflib
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E18'
+PIN='fc2868b2b26d56ec76e17414909fe58a3b87bb92'
+
+
+def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def load():
+    loader=importlib.machinery.SourceFileLoader('e18_flat_e17',str(ROOT/'scripts/e17-m4'))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--variant',choices=['plain','tiles'],required=True)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--red-test',action='store_true')
+    parser.add_argument('--source',type=Path,help='resume an owned failed build tree after inspection')
+    args=parser.parse_args()
+    if (ROOT/'.local/quiet-request').exists(): raise SystemExit('no build during a quiet window')
+    adapter=load()
+    final_path=ROOT/'.local/bin/goliath-e12/FINAL.json'
+    final=json.loads(final_path.read_text())
+    patch=ROOT/'patches/horizon-09-flat-light.patch'
+    patch_digest=sha(patch)
+    if args.variant=='plain':
+        records=[{'path':'patches/'+name,'sha256':sha(ROOT/'patches'/name)} for name in
+            ['e2-horizon-input-trace.patch','horizon-03-bots.patch','horizon-04-digest.patch']]
+        spec=dict(pin=PIN,patches=records)
+    else:
+        spec=final['projects']['horizon']
+        adapter.verify_internal_sources(ROOT,final)
+    root=args.source.resolve() if args.source else Path(tempfile.mkdtemp(prefix='E18-flat-'+args.variant+'-',dir=ROOT/'.local/runs'))
+    horizon=root/'.local/src/horizon'
+    output=dict(kind='E18-flat-light-release',variant=args.variant,profile='release',incremental=False,lto='thin',codegen_units=1,
+        base_final_sha256=sha(final_path),commands=[],status='running',source_pin=PIN,patches=list(spec['patches']))
+    began=time.monotonic()
+    env={key:value for key,value in os.environ.items() if key not in ['CI','CARGO_TARGET_DIR'] and not key.startswith('CARGO_PROFILE_')}
+    env.update(CARGO_INCREMENTAL='0',CARGO_PROFILE_RELEASE_LTO='thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',CARGO_BUILD_JOBS='6',
+        HORIZON_TEST_RESOURCES=str(Path.home()/'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'))
+    def run(label,command,red=False):
+        print('FLAT_BUILD '+args.variant+' '+label,flush=True)
+        start=time.monotonic();log=root/(label+'.log')
+        with log.open('w') as stream: completed=subprocess.run(command,cwd=horizon,env=env,stdout=stream,stderr=subprocess.STDOUT)
+        text=log.read_text(errors='replace').replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME')
+        (DATA/(args.name+'-'+label+'.log.gz')).write_bytes(gzip.compress(text.encode(),mtime=0))
+        row=dict(label=label,command=command,exit=completed.returncode,seconds=time.monotonic()-start,
+            test_results=re.findall(r'test result: .*',text))
+        output['commands'].append(row)
+        if red:
+            row['expected_failure_observed']=completed.returncode!=0 and 'flat light_region kept requeuing' in text and 'running 1 test' in text
+            valid=row['expected_failure_observed']
+        else:
+            valid=completed.returncode==0
+            if label in ['unit','integration']:
+                valid=valid and any('1 passed;' in result for result in row['test_results'])
+        if not valid:
+            row['error_tail']=text.splitlines()[-60:]
+            print('\n'.join(row['error_tail']),flush=True)
+            raise RuntimeError('gate failed: '+label)
+    try:
+        if not args.source:
+            for name in ['Cargo.toml','Cargo.lock','clippy.toml']: shutil.copy2(ROOT/name,root/name)
+            shutil.copytree(ROOT/'crates',root/'crates',ignore=shutil.ignore_patterns('target','__pycache__'))
+            if args.variant=='tiles': adapter.verify_internal_sources(root,final)
+            adapter.export_stack('horizon',horizon,spec)
+            if args.variant=='tiles': output['patches']+=adapter.measurement_stack(horizon)
+            subprocess.run(['git','apply','--check',patch],cwd=horizon,check=True)
+            subprocess.run(['git','apply',patch],cwd=horizon,check=True)
+        output['patches'].append(dict(path=str(patch.relative_to(ROOT)),sha256=sha(patch)))
+        flat=horizon/'crates/horizon-client/src/flatgen.rs'
+        feature='    fn light_view(&self, proto: &crate::streaming::Proto) -> Option<Chunk> {\n        proto.downcast_ref::<Chunk>().cloned()\n    }\n'
+        if args.red_test:
+            with_feature=flat.read_text()
+            if with_feature.count(feature)!=1: raise RuntimeError('production hunk identity changed')
+            without=with_feature.replace(feature,'',1)
+            delta='diff --git a/crates/horizon-client/src/flatgen.rs b/crates/horizon-client/src/flatgen.rs\n'+''.join(difflib.unified_diff(
+                without.splitlines(keepends=True),with_feature.splitlines(keepends=True),fromfile='a/crates/horizon-client/src/flatgen.rs',tofile='b/crates/horizon-client/src/flatgen.rs'))
+            subprocess.run(['git','apply','--reverse','-'],cwd=horizon,input=delta.encode(),check=True)
+            try: run('red', ['cargo','test','--locked','--release','--no-default-features','-p','horizon-client-lib','--test','flat_light','--','--exact','flat_terrain_light_region_settles_after_its_first_pass'],red=True)
+            finally: subprocess.run(['git','apply','-'],cwd=horizon,input=delta.encode(),check=True)
+        run('unit',['cargo','test','--locked','--release','--no-default-features','-p','horizon-client-lib','--lib','--','--exact','flatgen::tests::flat_light_views_form_a_region_in_one_pass_without_mutating_the_proto'])
+        run('integration',['cargo','test','--locked','--release','--no-default-features','-p','horizon-client-lib','--test','flat_light','--','--exact','flat_terrain_light_region_settles_after_its_first_pass'])
+        run('clippy',['cargo','clippy','--locked','--release','--no-default-features','-p','horizon-client-lib','--lib','--test','flat_light','--','-D','warnings'])
+        run('release',['cargo','build','--locked','--release','--no-default-features','-p','horizon-client','--bin','horizon-client'])
+        output['source_equality']={name:sha(horizon/name) for name in ['crates/horizon-client/src/flatgen.rs','crates/horizon-client/tests/flat_light.rs']}
+        proof=json.loads((DATA/'flat09-patch-proof.json').read_text())
+        if sha(patch)!=patch_digest or proof['patch_sha256']!=patch_digest:
+            raise RuntimeError('canonical patch changed during build')
+        if any(digest!=proof['files'][name] for name,digest in output['source_equality'].items()):
+            raise RuntimeError('compiled source differs from canonical patch proof')
+        output['source_equality_status']='passed'
+        output['canonical_patch_sha256']=patch_digest
+        target=ROOT/'.local/bin/meridian-e18'/('flat09-'+args.variant)
+        target.mkdir(parents=True,exist_ok=True)
+        staged=target/'horizon-client.new';shutil.copy2(horizon/'target/release/horizon-client',staged);staged.replace(target/'horizon-client')
+        shutil.copy2(ROOT/'.local/bin/goliath-e17-release/horizon-bots',target/'horizon-bots')
+        if args.variant=='tiles':
+            for name in ['meridian','meridian-sidecar','goliath-store','e4-client','LEASES']: shutil.copy2(ROOT/'.local/bin/meridian-e18/candidate-1'/name,target/name)
+        output.update(status='complete',binaries={name:sha(target/name) for name in ['horizon-client','horizon-bots']})
+        (target/'build.json').write_text(json.dumps(output,indent=2)+'\n')
+        shutil.rmtree(root);output['temporary_tree_removed']=True
+    except BaseException as error:
+        output.update(status='failed',error=repr(error),retained_owned_build=str(root.relative_to(ROOT)))
+        raise
+    finally:
+        output['seconds']=time.monotonic()-began
+        (DATA/(args.name+'.json')).write_text(json.dumps(output,indent=2)+'\n')
+        print(json.dumps({key:output.get(key) for key in ['variant','status','error','seconds','retained_owned_build','binaries']},indent=2),flush=True)
+
+
+if __name__=='__main__': main()

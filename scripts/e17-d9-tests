@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Check exact shared D9 placement and cohort movement without launching game load."""
+import importlib.machinery
+import importlib.util
+import json
+import io
+import tempfile
+from contextlib import redirect_stdout
+from unittest.mock import patch
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+from e11_support import ROOT
+from e18_d9_layout import plan,CROSS_PATH
+import e17_d9_baseline as fixture
+from e17_d9_baseline import combined_telemetry,movement_contract
+
+loader=importlib.machinery.SourceFileLoader('d9_test_bench',str(ROOT/'scripts/capacity-bench'))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+bench=importlib.util.module_from_spec(spec);loader.exec_module(bench)
+
+
+class D9Tests(unittest.TestCase):
+    def test_mocked_fixture_uses_one_engine_five_clients_and_256_pigs(self):
+        layout=plan(300,bench.route_anchor,seed=18)
+        clock=SimpleNamespace(value=0.)
+        def sleep(seconds): clock.value+=seconds
+        fake_time=SimpleNamespace(monotonic=lambda:clock.value,sleep=sleep)
+        budgets=[]
+        positions={name:[0.,-58.,0.] for group in layout['groups'][:4] for name in group['starts']}
+        positions.update({'E17BotX'+str(i):[0.,-58.,0.] for i in range(layout['crossing_players'])})
+        positioned=set()
+        class Budget:
+            error=None
+            stops=0
+            def __init__(self,pids,cores): self.pids=pids;self.cores=cores;budgets.append(self)
+            def start(self): return self
+            def stop(self): pass
+            def report(self): return {'cores':self.cores,'stops':0,'error':None}
+        class Monitor:
+            def start(self): return self
+            def register(self,*values): pass
+            def capture(self,*values): pass
+            def stop(self): pass
+            def report(self): return {'error':None,'phases':{name:{'fixture':{'engine-0':{'cores':.1}},
+                'outside_max_process_cores':.1} for name in ['steady','whole_cell']}}
+        class Engine:
+            pid=100;port=12345
+            def __init__(self,*values): self.commands=[]
+            def console(self,command):
+                self.commands.append(command)
+                if command.startswith('tp '):
+                    _,name,x,y,z=command.split();positions[name]=[float(x),float(y),float(z)];positioned.add(name)
+            def ask(self,command):
+                if command=='e11-samples': return {'ticks':[{'ms':1}],'digests':[],'dropped':0}
+                return {'players':[{'name':name,'position':value} for name,value in positions.items()]}
+            def stop(self): pass
+        class Client:
+            next_pid=200
+            def __init__(self,command,**kwargs):
+                self.pid=Client.next_pid;Client.next_pid+=1;self.alive=True
+                prefix=command[command.index('--name')+1]
+                group=next(g for g in layout['groups'] if g['prefix']==prefix)
+                if group['kind']=='interior':
+                    kwargs['stdout'].write(json.dumps({'routes':[{'name':name,'start':start} for name,start in group['starts'].items()]})+'\n')
+                    kwargs['stdout'].flush()
+            def poll(self): return None if self.alive else 0
+            def terminate(self): self.alive=False
+            def wait(self,*values): return 0
+        def latest(log):
+            group=next(g for g in layout['groups'] if g['label']==log.stem)
+            return {'online':group['count']-int(len(positioned)<270),'failed':0,'late_rounds':0,'waited_ticks':0,
+                'elapsed':clock.value,'distance':bench.steady_route_speed(fixture.cohort_config(group),group['count'])*group['count']*clock.value}
+        def evaluate(samples,raw,count,server_cores,bot_cores,max_load,mobs,config):
+            self.assertEqual((count,server_cores,bot_cores,mobs),(300,4,1,256))
+            self.assertEqual(samples[-1]['bots']['online'],300)
+            return {'pass':True,'valid':True,'reasons':[],'server_cpu_cores':.1,'bot_cpu_cores':.05}
+        fake_bench=SimpleNamespace(route_anchor=bench.route_anchor,latest=latest,evaluate=evaluate,
+            steady_route_speed=bench.steady_route_speed,game_time=lambda engine:{'ticks':int(clock.value*20),'at':clock.value,'rtt_s':0})
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);request=root/'request';ack=root/'ack'
+            request.write_text(json.dumps({'owner':'E17'}));ack.write_text('idle')
+            base=SimpleNamespace(BINS=root,REQUEST=request,ACK=ack,provenance=lambda:{'test':True},load_bench=lambda:fake_bench)
+            with patch.object(fixture,'RUNS',root),patch.object(fixture,'Engine',Engine), \
+                    patch.object(fixture,'CpuBudget',Budget),patch.object(fixture,'ProcessSampler',Monitor), \
+                    patch.object(fixture,'time',fake_time),patch.object(fixture,'thread_ids',return_value=[1]), \
+                    patch.object(fixture,'thread_usage',side_effect=lambda *values:{'id':1,'name':'main','at':clock.value,'cpu_s':clock.value*.1}), \
+                    patch.object(fixture,'usage',side_effect=lambda pid:{'cpu_s':clock.value*.01,'threads':1,'rss_mb':1}), \
+                    patch.object(fixture.subprocess,'Popen',Client), \
+                    patch.object(fixture,'wait',side_effect=lambda predicate,*args:next(value for value in (predicate() for _ in range(100)) if value)), \
+                    patch.object(fixture.os,'getloadavg',return_value=(1.,1.,1.)),redirect_stdout(io.StringIO()):
+                row=fixture.cell(SimpleNamespace(cell=300,repeat=0,out=root/'row.json'),base)
+            self.assertTrue(row['valid'],row['reasons'])
+            self.assertEqual(len(row['bot_commands']),5)
+            self.assertEqual(len(row['placement_commands']),270)
+            self.assertEqual(len(row['pig_commands']),256)
+            self.assertEqual([(len(b.pids),b.cores) for b in budgets],[(1,4),(5,1)])
+
+    def test_same_plan_as_retained_e18_production_fixture(self):
+        source=ROOT/'docs/experiments/data/E18/production-D9-50-200-1.json'
+        evidence=json.loads(source.read_text())
+        for count in [50,200]:
+            actual=plan(count,bench.route_anchor,seed=18)
+            self.assertEqual(json.dumps(actual,sort_keys=True),json.dumps(evidence['layouts'][str(count)],sort_keys=True))
+
+    def test_counts_centres_and_all_anchors_stay_in_expected_squares(self):
+        for count in [300,350,575,975]:
+            layout=plan(count,bench.route_anchor,seed=18)
+            self.assertEqual(layout['total_pigs'],256)
+            self.assertEqual(sum(group['count'] for group in layout['groups']),count)
+            self.assertEqual(layout['crossing_players'],count//10)
+            self.assertEqual(len(layout['witnesses']),8)
+            self.assertEqual(layout['groups'][-1]['path'],CROSS_PATH)
+            for group in layout['groups'][:4]:
+                self.assertEqual([abs(v) for v in group['center']],[1024,1024])
+                lo_x,lo_z,hi_x,hi_z=group['spread']
+                for x,z in group['starts'].values():
+                    self.assertTrue(lo_x<=x<=hi_x and lo_z<=z<=hi_z)
+
+    def test_one_weak_cohort_cannot_hide_inside_98_percent_aggregate_progress(self):
+        groups=[{'label':'a','kind':'interior','count':90,'spread':[-64,-64,64,64]},
+            {'label':'cross','kind':'crossing','count':10,'path':CROSS_PATH}]
+        first={name:{'elapsed':0,'distance':0} for name in ['a','cross']}
+        last={'a':{'elapsed':60,'distance':21600},'cross':{'elapsed':60,'distance':2400}}
+        native=SimpleNamespace(steady_route_speed=lambda config,count:4.)
+        offered,records,reasons=movement_contract(native,groups,first,last,60)
+        self.assertEqual(offered,24000)
+        self.assertEqual(reasons,[])
+        self.assertEqual(combined_telemetry(groups,last)['distance'],24000)
+        last['cross']['distance']=1920
+        self.assertGreater(combined_telemetry(groups,last)['distance']/offered,.95)
+        self.assertIn('cross route progress below 95%',movement_contract(native,groups,first,last,60)[2])
+
+
+if __name__=='__main__': unittest.main()

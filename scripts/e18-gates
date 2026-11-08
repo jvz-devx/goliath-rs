@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Run scoped release gates once and retain small sanitized command evidence."""
+import argparse
+import gzip
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT/'.local/src/meridian'
+DATA = ROOT/'docs/experiments/data/E18'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--build', action='store_true')
+    parser.add_argument('--event-loop', action='store_true')
+    args = parser.parse_args()
+    manifest = json.loads((DATA/('event-patch.json' if args.event_loop else 'patch.json')).read_text())
+    files = [name for name in manifest['changed'] if name.endswith('.rs')]
+    commands = [
+        ['rustfmt', '--edition', '2024', '--check', *files],
+        ['cargo', 'clippy', '--locked', '--release', '-p', 'meridian-handoff', '-p', 'meridian-proxy', '-p', 'meridian-sidecar', '--all-targets', '--', '-D', 'warnings'],
+        ['cargo', 'test', '--locked', '--release', '-p', 'meridian-config', '-p', 'meridian-ghost', '-p', 'meridian-handoff', '-p', 'meridian-proxy', '-p', 'meridian-sidecar', '--', '--skip', 'serve::tests::the_listener_queues_a_large_burst'],
+    ]
+    if args.event_loop:
+        for command in commands[1:]:
+            at=command.index('--')
+            command[at:at]=['-p','meridian-net']
+    if args.build:
+        commands.append(['cargo', 'build', '--locked', '--release', '-p', 'meridian-proxy', '--bin', 'meridian', '-p', 'meridian-sidecar', '--bin', 'meridian-sidecar', '-p', 'meridian-testkit', '--bin', 'e4-client'])
+    env = dict(os.environ, CARGO_INCREMENTAL='0', CARGO_PROFILE_RELEASE_LTO='thin', CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1')
+    env.pop('CI', None)
+    env.pop('CARGO_TARGET_DIR', None)
+    rows = []
+    for index, command in enumerate(commands):
+        if (ROOT/'.local/quiet-request').exists():
+            (ROOT/'.local/quiet-ack-E18').write_text('E18 is at a gate break, no load or build running.\n')
+            raise SystemExit('another quiet window requested, remaining gates not started')
+        began = time.monotonic()
+        completed = subprocess.run(command, cwd=SOURCE, env=env, capture_output=True, text=True)
+        output = (completed.stdout+'\n'+completed.stderr).replace(str(ROOT), '$REPO').replace(str(Path.home()), '$HOME')
+        (DATA/f'{args.name}-{index}.log.gz').write_bytes(gzip.compress(output.encode(), mtime=0))
+        row = dict(command=command, exit=completed.returncode, seconds=time.monotonic()-began,
+            test_results=re.findall(r'test result: .*', output))
+        rows.append(row)
+        (DATA/(args.name+'.json')).write_text(json.dumps(rows, indent=2)+'\n')
+        print(json.dumps(row), flush=True)
+        if completed.returncode:
+            print(output[-4000:], flush=True)
+            raise SystemExit(completed.returncode)
+
+
+if __name__ == '__main__':
+    main()

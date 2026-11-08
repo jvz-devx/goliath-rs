@@ -1,0 +1,91 @@
+{
+  "request": {
+    "owner": "E18",
+    "name": "quiet-candidate-1",
+    "pid": 53264,
+    "time": "2026-11-08T02:38:32.462632+00:00"
+  },
+  "status": "failed",
+  "commands": [
+    {
+      "name": "quiet-candidate-1-direct-50",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e18-proxy",
+        "--bins",
+        ".local/bin/meridian-e18/candidate-1",
+        "--bots",
+        "50",
+        "--seconds",
+        "30",
+        "--settle",
+        "20",
+        "--name",
+        "quiet-candidate-1-direct-50",
+        "--proxy-profile",
+        "release",
+        "--tile-profile",
+        "release",
+        "--quiet-marker",
+        "$REPO/.local/quiet-request",
+        "--timing",
+        "--eager-readers",
+        "--writes-direct"
+      ],
+      "exit": 0,
+      "seconds": 59.596784249995835
+    },
+    {
+      "name": "quiet-candidate-1-direct-200",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e18-proxy",
+        "--bins",
+        ".local/bin/meridian-e18/candidate-1",
+        "--bots",
+        "200",
+        "--seconds",
+        "30",
+        "--settle",
+        "20",
+        "--name",
+        "quiet-candidate-1-direct-200",
+        "--proxy-profile",
+        "release",
+        "--tile-profile",
+        "release",
+        "--quiet-marker",
+        "$REPO/.local/quiet-request",
+        "--timing",
+        "--eager-readers",
+        "--writes-direct"
+      ],
+      "exit": 1,
+      "seconds": 74.37962375000643
+    }
+  ],
+  "load_start": [
+    18.7099609375,
+    19.34814453125,
+    16.9677734375
+  ],
+  "wait_seconds": 118.7788092080009,
+  "acknowledgements": {
+    "quiet-ack-E13": "E13 quiet. All active trials finished; no new engines or builds.\n",
+    "quiet-ack-E17": "E17 is idle. No E17 load, build, engine, proxy or smoke test is running.\nAcknowledges E18 quiet-candidate-1, owner PID 53264, requested 2026-11-08T02:38:32.462632+00:00.\nE17 will remain idle until this quiet request is removed.\n"
+  },
+  "load_ready": [
+    3.76904296875,
+    13.62060546875,
+    15.01708984375
+  ],
+  "error": "quiet cell failed: quiet-candidate-1-direct-200",
+  "seconds": 252.75720975000877,
+  "load_end": [
+    28.3974609375,
+    17.84619140625,
+    16.39013671875
+  ]
+}

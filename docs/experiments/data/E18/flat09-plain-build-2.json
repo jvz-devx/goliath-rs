@@ -1,0 +1,125 @@
+{
+  "kind": "E18-flat-light-release",
+  "variant": "plain",
+  "profile": "release",
+  "incremental": false,
+  "lto": "thin",
+  "codegen_units": 1,
+  "base_final_sha256": "87efedc05530f4a02e32dfd0c2f603ca931ca86baaebfc532f18fb1be832fe22",
+  "commands": [
+    {
+      "label": "red",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client-lib",
+        "--test",
+        "flat_light",
+        "--",
+        "--exact",
+        "flat_terrain_light_region_settles_after_its_first_pass"
+      ],
+      "exit": 101,
+      "seconds": 133.30206854100106,
+      "test_results": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.42s"
+      ],
+      "expected_failure_observed": true
+    },
+    {
+      "label": "unit",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client-lib",
+        "--lib",
+        "--",
+        "--exact",
+        "flatgen::tests::flat_light_views_form_a_region_in_one_pass_without_mutating_the_proto"
+      ],
+      "exit": 101,
+      "seconds": 9.569095625003683,
+      "test_results": [],
+      "error_tail": [
+        "   Compiling horizon-client-lib v0.1.0 ($REPO/.local/runs/E18-flat-plain-wcpny1er/.local/src/horizon/crates/horizon-client-lib)",
+        "error[E0308]: mismatched types",
+        "   --> crates/horizon-client-lib/../horizon-client/src/flatgen.rs:390:61",
+        "    |",
+        "390 |                 assert_eq!(view.block(x * 16, -64, z * 16), 1);",
+        "    |                                                             ^ expected `BlockStateId`, found integer",
+        "    |",
+        "help: try wrapping the expression in `horizon_world::registry::BlockStateId`",
+        "    |",
+        "390 |                 assert_eq!(view.block(x * 16, -64, z * 16), horizon_world::registry::BlockStateId(1));",
+        "    |                                                             ++++++++++++++++++++++++++++++++++++++ +",
+        "",
+        "error[E0308]: mismatched types",
+        "   --> crates/horizon-client-lib/../horizon-client/src/flatgen.rs:391:61",
+        "    |",
+        "391 |                 assert_eq!(view.block(x * 16, -63, z * 16), 2);",
+        "    |                                                             ^ expected `BlockStateId`, found integer",
+        "    |",
+        "help: try wrapping the expression in `horizon_world::registry::BlockStateId`",
+        "    |",
+        "391 |                 assert_eq!(view.block(x * 16, -63, z * 16), horizon_world::registry::BlockStateId(2));",
+        "    |                                                             ++++++++++++++++++++++++++++++++++++++ +",
+        "",
+        "error[E0308]: mismatched types",
+        "   --> crates/horizon-client-lib/../horizon-client/src/flatgen.rs:392:61",
+        "    |",
+        "392 |                 assert_eq!(view.block(x * 16, -62, z * 16), 3);",
+        "    |                                                             ^ expected `BlockStateId`, found integer",
+        "    |",
+        "help: try wrapping the expression in `horizon_world::registry::BlockStateId`",
+        "    |",
+        "392 |                 assert_eq!(view.block(x * 16, -62, z * 16), horizon_world::registry::BlockStateId(3));",
+        "    |                                                             ++++++++++++++++++++++++++++++++++++++ +",
+        "",
+        "error[E0308]: mismatched types",
+        "   --> crates/horizon-client-lib/../horizon-client/src/flatgen.rs:394:78",
+        "    |",
+        "394 |                 assert_eq!(terrain.finish(proto).block(x * 16, -64, z * 16), 1);",
+        "    |                                                                              ^ expected `BlockStateId`, found integer",
+        "    |",
+        "help: try wrapping the expression in `horizon_world::registry::BlockStateId`",
+        "    |",
+        "394 |                 assert_eq!(terrain.finish(proto).block(x * 16, -64, z * 16), horizon_world::registry::BlockStateId(1));",
+        "    |                                                                              ++++++++++++++++++++++++++++++++++++++ +",
+        "",
+        "For more information about this error, try `rustc --explain E0308`.",
+        "error: could not compile `horizon-client-lib` (lib test) due to 4 previous errors"
+      ]
+    }
+  ],
+  "status": "failed",
+  "source_pin": "fc2868b2b26d56ec76e17414909fe58a3b87bb92",
+  "patches": [
+    {
+      "path": "patches/e2-horizon-input-trace.patch",
+      "sha256": "488a82c167465ad288c194103f51983a2020288e2bbf75db0b07c26d76ed2231"
+    },
+    {
+      "path": "patches/horizon-03-bots.patch",
+      "sha256": "f1796dc29e1e69504334dd7e949adbd7de3351aae6b9b2c8328499fd534d967f"
+    },
+    {
+      "path": "patches/horizon-04-digest.patch",
+      "sha256": "43e6ebb67869b6719d74bdfee6783d62c38dd4436fa0032b9b007937e9996afb"
+    },
+    {
+      "path": "patches/horizon-09-flat-light.patch",
+      "sha256": "2e242d308d06991687c109cfc36b72676da1b390797bd4b97967c9a7e473fa3a"
+    }
+  ],
+  "error": "RuntimeError('gate failed: unit')",
+  "retained_owned_build": ".local/runs/E18-flat-plain-wcpny1er",
+  "seconds": 142.88886962500692
+}

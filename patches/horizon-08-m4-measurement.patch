@@ -1,0 +1,20 @@
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -73,6 +73,8 @@
+                 Some(("tile-fence", args)) => super::tile_cut::fence_request(args),
+                 _ if request.line.trim() == "server-status" => self.server_status(state),
++                Some(("e11-digest", rest)) => self.e11_digest_request(rest),
++                _ if request.line.trim() == "e11-samples" => self.e11_samples(),
+                 _ if request.line.trim() == "cluster-authority" => {
+                     super::cluster::authority_status()
+                 }
+                 // A proxy reading whether it may send players here (transfer.rs).
+@@ -212,6 +214,7 @@
+             "max_players": max_players,
+             "chunks": self.world.chunks.len(),
+             "levels": self.status_levels(),
++            "e11_population": self.e11_population(),
+             "paused": state.paused,
+         })
+     }

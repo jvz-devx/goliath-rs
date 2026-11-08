@@ -1,0 +1,26 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><style>
+body{margin:0;color:var(--foreground);font-family:var(--font-sans)}
+figure{margin:0}h3,h4{font-weight:500}h3{margin:0 0 14px}h4{margin:12px 0 4px}
+svg{display:block;width:100%;height:180px}svg text{font-size:12px;font-family:var(--font-sans);fill:var(--foreground)}
+figcaption{font-size:12px;color:var(--muted-foreground);line-height:1.5}
+</style></head><body>
+<figure id="e18-final"><h3>975 players: lower proxy cost, still below 20 TPS</h3>
+<h4>Proxy CPU at the observed throughput</h4><svg id="e18-cpu" role="img" aria-label="Patch05 proxy1.829cores4350threads. Reactor06 proxy1.495cores1992threads. Both exceed0.975core planning budget."></svg>
+<h4>Mean tile throughput</h4><svg id="e18-tps" role="img" aria-label="Patch05 mean5.49TPS. Reactor06 mean7.41TPS. Required20TPS. Both diagnostics failed."></svg>
+<figcaption>Both runs use the shared four-core server cap and keep all 975 players online. Limiter stop intervals total 42.6 s before and 35.6 s after, per 60 s window. Traffic rates differ. This is not M4 acceptance.</figcaption></figure>
+<script>
+const root=document.getElementById('e18-final'),ns='http://www.w3.org/2000/svg';
+function plot(id,values,reference,referenceLabel,unit,ticks,detail){
+const svg=document.getElementById(id),w=root.clientWidth,L=104,R=54,maximum=Math.max(...values,reference)*1.1,x=v=>L+(w-L-R)*v/maximum;
+svg.setAttribute('viewBox',`0 0 ${w} 180`);svg.replaceChildren();
+function add(tag,attrs,text){const node=document.createElementNS(ns,tag);for(const[k,v]of Object.entries(attrs))node.setAttribute(k,v);if(text!==undefined)node.textContent=text;svg.append(node);return node;}
+for(const value of ticks){add('line',{x1:x(value),x2:x(value),y1:35,y2:137,stroke:'var(--border)'});add('text',{x:x(value),y:153,'text-anchor':'middle'},String(value));}
+add('text',{x:x(reference),y:22,'text-anchor':'end'},referenceLabel);add('line',{x1:x(reference),x2:x(reference),y1:31,y2:137,stroke:'var(--foreground)','stroke-dasharray':'3 4',opacity:'.65'});
+add('text',{x:0,y:29,'data-axis':'y',class:'axis-title'},'Build');
+for(let i=0;i<2;i++){const y=52+i*49;add('text',{x:0,y:y+17},i?'Reactor 06':'Patch 05');if(detail)add('text',{x:0,y:y+33},detail[i]);add('rect',{x:L,y,width:x(values[i])-L,height:25,fill:i?'var(--chart-1)':'var(--foreground)',opacity:i?'.7':'.3'});add('text',{x:x(values[i])+5,y:y+17},values[i].toFixed(unit==='CPU cores'?3:2));}
+add('text',{x:L,y:174,'data-axis':'x',class:'axis-title'},unit);
+}
+function draw(){plot('e18-cpu',[1.829208867,1.495104027],.975,'0.975 planning budget','CPU cores',[0,.5,1,1.5,2],['4,350 threads','1,992 threads']);plot('e18-tps',[5.4882468,7.4104945],20,'20 TPS required','Ticks per second',[0,5,10,15,20]);}
+new ResizeObserver(draw).observe(root);draw();
+</script></body></html>

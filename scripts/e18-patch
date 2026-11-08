@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Reproduce the frozen E12 stack plus E18 and verify every source byte."""
+import difflib
+import argparse
+import hashlib
+import io
+import json
+from pathlib import Path
+import subprocess
+import tarfile
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT/'.local/src/meridian'
+DATA = ROOT/'docs/experiments/data/E18'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--event-loop',action='store_true')
+    args=parser.parse_args()
+    handover = json.loads((ROOT/'docs/experiments/data/E12/meridian-handover.json').read_text())
+    patches = handover['patches']
+    if args.event_loop:
+        frozen=json.loads((DATA/'patch.json').read_text())
+        patches=patches+[frozen['patches'][-1]]
+    elif (SOURCE/'crates/meridian-net/src/io_pool.rs').exists():
+        raise SystemExit('event-loop work exists; preserve frozen patch 05 and use --event-loop')
+    # The handover manifest is deliberately immutable, not regenerated from E18.
+    for record in patches:
+        if sha(ROOT/record['path']) != record['sha256']:
+            raise RuntimeError('E12 patch changed: '+record['path'])
+    paths = set(subprocess.check_output(['git', '-C', SOURCE, 'ls-files'], text=True).splitlines())
+    paths.update(subprocess.check_output(['git', '-C', SOURCE, 'ls-files', '--others', '--exclude-standard'], text=True).splitlines())
+    paths = sorted(p for p in paths if p.endswith(('.rs', '.toml', '.lock')))
+    patch = ROOT/'patches'/('meridian-06-io-pool.patch' if args.event_loop else 'meridian-05-proxy-cost.patch')
+    with tempfile.TemporaryDirectory(prefix='E18-patch-', dir=ROOT/'.local/runs') as temporary:
+        baseline = Path(temporary)
+        archive = subprocess.check_output(['git', '-C', SOURCE, 'archive', handover['pin']])
+        with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
+            bundle.extractall(baseline, filter='data')
+        subprocess.run(['git', 'init', '--quiet', baseline], check=True)
+        for record in patches:
+            subprocess.run(['git', 'apply', ROOT/record['path']], cwd=baseline, check=True)
+        parts, changed = [], []
+        for relative in paths:
+            old, new = baseline/relative, SOURCE/relative
+            before = old.read_text() if old.exists() else ''
+            after = new.read_text() if new.exists() else ''
+            if before == after:
+                continue
+            changed.append(relative)
+            parts.append(f'diff --git a/{relative} b/{relative}\n')
+            if not old.exists():
+                parts.append('new file mode 100644\n')
+            parts.extend(difflib.unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True),
+                fromfile=f'a/{relative}' if old.exists() else '/dev/null',
+                tofile=f'b/{relative}' if new.exists() else '/dev/null'))
+        patch.write_text(''.join(parts))
+        subprocess.run(['git', 'apply', '--check', patch], cwd=baseline, check=True)
+        subprocess.run(['git', 'apply', patch], cwd=baseline, check=True)
+        files = {}
+        for relative in paths:
+            old, new = baseline/relative, SOURCE/relative
+            if old.exists() != new.exists() or new.exists() and old.read_bytes() != new.read_bytes():
+                raise RuntimeError('source differs: '+relative)
+            if new.exists():
+                files[relative] = sha(new)
+    output = {'project': 'meridian', 'pin': handover['pin'],
+        'patches': patches+[{'path': str(patch.relative_to(ROOT)), 'sha256': sha(patch)}],
+        'source_files': files, 'changed': changed, 'source_equality': 'passed', 'apply_check': 'passed'}
+    DATA.mkdir(parents=True, exist_ok=True)
+    (DATA/('event-patch.json' if args.event_loop else 'patch.json')).write_text(json.dumps(output, indent=2)+'\n')
+    print(json.dumps({key: output[key] for key in ['changed', 'source_equality', 'apply_check']}, indent=2))
+
+
+if __name__ == '__main__':
+    main()

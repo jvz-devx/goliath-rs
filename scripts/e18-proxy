@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""E18 proxy profiles. Imports E17's private-cluster pilot without editing it."""
+import argparse
+import gzip
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import ctypes
+import sys
+import xml.etree.ElementTree as ET
+import random
+import time
+import e17_wire
+import struct
+import re
+import threading
+import signal
+from e18_process import ProcessSampler
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import e11_support
+
+
+class ThreadInfo(ctypes.Structure):
+    _fields_ = [('user', ctypes.c_uint64), ('system', ctypes.c_uint64)] + [
+        (name, ctypes.c_int32) for name in ['cpu', 'policy', 'state', 'flags', 'sleep', 'current_priority', 'priority', 'maximum_priority']
+    ] + [('name', ctypes.c_char*64)]
+
+
+def threads(pid):
+    identifiers = (ctypes.c_uint64*8192)()
+    size = e11_support.LIBPROC.proc_pidinfo(pid, 6, 0, identifiers, ctypes.sizeof(identifiers))
+    output = {}
+    for identity in identifiers[:max(0, size)//ctypes.sizeof(ctypes.c_uint64)]:
+        info = ThreadInfo()
+        if e11_support.LIBPROC.proc_pidinfo(pid, 5, identity, ctypes.byref(info), ctypes.sizeof(info)) == ctypes.sizeof(info):
+            output[str(identity)] = dict(name=info.name.decode(errors='replace'), user=info.user, system=info.system)
+    return output
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E18'
+
+
+class TrackedBudget(e11_support.CpuBudget):
+    """E11 allocation, with controller-clock STOP/CONT interval accounting."""
+    def __init__(self, pids, cores):
+        super().__init__(pids, cores)
+        self.tracking = threading.Lock()
+        self.paused = {}
+        self.process_pause = {pid: 0.0 for pid in pids}
+        self.pause_wall = 0.0
+        self.pause_began = None
+        self.stop_cycles = 0
+        self.stop_signals = 0
+
+    def signal(self, action):
+        with self.tracking:
+            if action == signal.SIGSTOP:
+                self.pause_began = time.monotonic()
+                self.stop_cycles += 1
+            for pid in self.pids:
+                os.kill(pid, action)
+                now = time.monotonic()
+                if action == signal.SIGSTOP:
+                    self.paused[pid] = now
+                    self.stop_signals += 1
+                elif pid in self.paused:
+                    self.process_pause[pid] += now-self.paused.pop(pid)
+            if action == signal.SIGCONT and self.pause_began is not None:
+                self.pause_wall += time.monotonic()-self.pause_began
+                self.pause_began = None
+
+    def stop(self):
+        super().stop()
+        with self.tracking:
+            now = time.monotonic()
+            for pid, began in self.paused.items(): self.process_pause[pid] += now-began
+            self.paused.clear()
+            if self.pause_began is not None: self.pause_wall += now-self.pause_began
+            self.pause_began = None
+
+    def report(self):
+        with self.tracking:
+            now = time.monotonic()
+            result = super().report()
+            result.update(stop_cycles=self.stop_cycles, process_stop_signals=self.stop_signals,
+                stop_wall_s=self.pause_wall+(now-self.pause_began if self.pause_began is not None else 0),
+                sum_process_pause_s=sum(self.process_pause.values())+sum(now-began for began in self.paused.values()),
+                duration_scope='controller SIGSTOP-to-SIGCONT intervals; final resume uses completion upper bound')
+            return result
+
+
+def load():
+    loader = importlib.machinery.SourceFileLoader('e18_e17', str(ROOT/'scripts/e17-m4'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    module.DATA = DATA
+    return module
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--bins', type=Path, default=ROOT/'.local/bin/goliath-e17-pilot')
+    parser.add_argument('--bots', type=int, required=True)
+    parser.add_argument('--seconds', type=float, default=30)
+    parser.add_argument('--settle', type=float, default=10)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--sample', action='store_true')
+    parser.add_argument('--observe', action='store_true')
+    parser.add_argument('--fresh-control', action='store_true')
+    parser.add_argument('--proxy-profile', choices=['fast', 'release'], default='fast')
+    parser.add_argument('--instruments', action='store_true')
+    parser.add_argument('--witnesses', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=18)
+    parser.add_argument('--timing', action='store_true')
+    parser.add_argument('--eager-readers', action='store_true')
+    parser.add_argument('--writes-direct', action='store_true')
+    parser.add_argument('--quiet-marker', type=Path)
+    parser.add_argument('--tile-profile', choices=['fast', 'release'], default='fast')
+    parser.add_argument('--server-cores', type=float)
+    parser.add_argument('--bot-cores', type=float)
+    parser.add_argument('--process-sample', action='store_true')
+    parser.add_argument('--allow-200', action='store_true')
+    args = parser.parse_args()
+    if args.quiet_marker and args.bots > 50 and not args.allow_200:
+        raise SystemExit('report the 50-player process diagnostic to the parent before allowing a 200-player cell')
+    if args.quiet_marker:
+        args.process_sample = True
+        if args.server_cores is None: args.server_cores = 4
+        if args.bot_cores is None: args.bot_cores = 1
+        wait_began = time.monotonic()
+        while os.getloadavg()[0] > 4:
+            if time.monotonic()-wait_began > 600:
+                raise SystemExit('quiet cell could not settle to host load <=4 within ten minutes')
+            time.sleep(1)
+    request = ROOT/'.local/quiet-request'
+    if request.exists() and (not args.quiet_marker or args.quiet_marker.resolve() != request.resolve()
+        or json.loads(request.read_text()).get('owner') != 'E18'):
+        raise SystemExit('another agent owns the quiet window')
+    DATA.mkdir(parents=True, exist_ok=True)
+    result = DATA/(args.name+'.json')
+    if result.exists():
+        raise SystemExit('result already exists, use a distinct name')
+    module = load()
+    if (args.bins/'horizon-bots').exists():
+        module.BOT_BINS = args.bins.resolve()
+    if args.fresh_control:
+        os.environ['E18_CONTROL_FRESH'] = '1'
+    if args.eager_readers: os.environ['E18_TERRAIN_EAGER'] = '1'
+    if args.writes_direct: os.environ['E18_WRITES_DIRECT'] = '1'
+    if args.timing: os.environ['E18_PATH_TIMING'] = '1'
+    witnesses = []
+    if args.witnesses:
+        if args.witnesses != 8 or args.bots < 16 or not args.observe:
+            raise SystemExit('witness mode needs --observe, eight witnesses and at least 16 bots')
+        rng = random.Random(args.seed)
+        witnesses = ['E17Bot'+str(index) for phase in range(4)
+            for index in rng.sample(list(range(phase, min(args.bots, 16), 4)), 2)]
+        original_decoder = e17_wire.Decoder
+        class WitnessDecoder(original_decoder):
+            def feed(self, direction, data, at):
+                # Every socket still traverses the identical forwarding queues.
+                # Only packet decoding stops for non-witness streams after Hello.
+                if self.name is None or self.name in witnesses:
+                    return super().feed(direction, data, at)
+        e17_wire.Decoder = WitnessDecoder
+        original_observer = module.PacketObserver
+        class WitnessObserver(original_observer):
+            def __init__(self):
+                super().__init__()
+                self.witness_positions = {}
+            def reset(self):
+                super().reset()
+                self.witness_positions.clear()
+            def observe(self, front, name, body, at):
+                if front and name in witnesses and name not in self.witness_positions:
+                    _, offset = e17_wire.varint(body)
+                    self.witness_positions[name] = dict(position=struct.unpack_from('>ddd', body, offset), at=at)
+                return super().observe(front, name, body, at)
+            def report(self):
+                result = super().report()
+                result['witness_positions'] = dict(self.witness_positions)
+                return result
+        module.PacketObserver = WitnessObserver
+    current = {}
+    budgets = {}
+    monitor = None
+    if args.bot_cores or args.process_sample:
+        popen = module.subprocess.Popen
+        def limited_popen(*arguments, **keywords):
+            child = popen(*arguments, **keywords)
+            command = arguments[0] if arguments else keywords.get('args', [])
+            if command and str(command[0]).endswith('horizon-bots'):
+                if monitor: monitor.register('bots', child.pid)
+                if args.bot_cores:
+                    budget = TrackedBudget([child.pid], args.bot_cores).start()
+                    budgets['bots'] = budget
+                    terminate, kill = child.terminate, child.kill
+                    def stop_then(action):
+                        if not budget.done.is_set(): budget.stop()
+                        return action()
+                    child.terminate = lambda: stop_then(terminate)
+                    child.kill = lambda: stop_then(kill)
+            return child
+        module.subprocess.Popen = limited_popen
+    factory = module.cluster_module
+    def cluster_module(bins):
+        cluster = factory(bins)
+        start = cluster.Cluster.start_proxy
+        def started(instance):
+            start(instance)
+            current['instance'] = instance
+            if monitor:
+                for label, tile in instance.tiles.items(): monitor.register('tile-'+label, tile.server.process.pid)
+                monitor.register('proxy', instance.proxy.process.pid)
+                monitor.register('store', instance.store_process.pid)
+                for index, sidecar in enumerate(instance.sidecars): monitor.register('sidecar-'+str(index), sidecar.process.pid)
+            if args.server_cores:
+                pids = [tile.server.process.pid for tile in instance.tiles.values()]
+                pids += [instance.proxy.process.pid, instance.store_process.pid]
+                pids += [sidecar.process.pid for sidecar in instance.sidecars]
+                budgets['servers'] = TrackedBudget(pids, args.server_cores).start()
+        cluster.Cluster.start_proxy = started
+        stop = cluster.Cluster.stop
+        def stopped(instance):
+            if 'servers' in budgets and not budgets['servers'].done.is_set(): budgets['servers'].stop()
+            return stop(instance)
+        cluster.Cluster.stop = stopped
+        return cluster
+    module.cluster_module = cluster_module
+    wait = module.wait
+    def joined_wait(predicate, seconds, message):
+        value = wait(predicate, seconds, message)
+        if message == 'cluster bot join timeout' and monitor: monitor.capture('joined')
+        return value
+    module.wait = joined_wait
+    timing = {'witnesses': witnesses, 'seed': args.seed, 'chosen_before_run': True}
+    saved_once = False
+    save = module.save
+    game_samples = []
+    def game_times(instance):
+        output = {}
+        for label, tile in instance.tiles.items():
+            sent = time.monotonic()
+            reply = tile.ask('console time query gametime')
+            received = time.monotonic()
+            values = [int(value) for line in reply.get('output', []) for value in re.findall(r'-?\d+', line)]
+            output[label] = dict(sent=sent, received=received, reply=reply, tick=values[-1] if values else None)
+        return output
+    def path_command(reset=False):
+        instance = current['instance']
+        path = instance.root/'proxy.log'
+        offset = len(path.read_bytes())
+        instance.proxy.send('e18-path'+(' reset' if reset else ''))
+        def reply():
+            raw = path.read_bytes()[offset:]
+            for line in raw[:raw.rfind(b'\n')+1].decode(errors='replace').splitlines():
+                if 'E18_PATH ' in line:
+                    return json.loads(line.split('E18_PATH ', 1)[1])
+            return None
+        return e11_support.wait(reply, 5, 'proxy did not return timing histogram')
+    def steady_save(path, value):
+        nonlocal saved_once
+        live_sample = Path(path) == result and value.get('samples') and value.get('status') is None
+        if live_sample and not saved_once:
+            saved_once = True
+            if monitor: monitor.capture('steady-first')
+            instance = current['instance']
+            timing['placements'] = {label: [player for player in tile.ask('server-status')['players'] if player['name'] in witnesses]
+                for label, tile in instance.tiles.items()} if witnesses else {}
+            if args.timing:
+                timing['reset'] = path_command(True)
+                timing['start_ns'] = time.time_ns()
+                timing['budget_start'] = {name: budget.report() for name, budget in budgets.items()}
+        if live_sample:
+            game_samples.append(game_times(current['instance']))
+            if monitor: monitor.capture('steady-last')
+        save(path, value)
+    module.save = steady_save
+    # The pilot calls its imported cluster's phase reader during finalization.
+    original_factory = module.cluster_module
+    def instrumented_cluster(bins):
+        cluster = original_factory(bins)
+        phase_reader = cluster.phase_events
+        def phase_events(path):
+            if args.timing and saved_once:
+                timing['histogram'] = path_command()
+                timing['end_ns'] = time.time_ns()
+                timing['budget_end'] = {name: budget.report() for name, budget in budgets.items()}
+            return phase_reader(path)
+        cluster.phase_events = phase_events
+        return cluster
+    module.cluster_module = instrumented_cluster
+    usage = module.usage
+    sampled = False
+
+    def profiled_usage(pid):
+        nonlocal sampled
+        # The pilot saves after its first steady-population sample. Never profile joins.
+        if args.sample and not sampled and result.exists():
+            saved = json.loads(result.read_text())
+            if saved.get('samples'):
+                sampled = True
+                with tempfile.TemporaryDirectory(prefix='E18-sample-', dir=ROOT/'.local/runs') as folder:
+                    path = Path(folder)/'sample.txt'
+                    command = ['sample', str(pid), '5', '1', '-file', str(path)]
+                    before = dict(usage=usage(pid), threads=threads(pid))
+                    completed = subprocess.run(command, capture_output=True, text=True)
+                    after = dict(usage=usage(pid), threads=threads(pid))
+                    raw = path.read_text() if path.exists() else ''
+                    raw = raw.replace(str(ROOT), '$REPO').replace(str(Path.home()), '$HOME')
+                    (DATA/(args.name+'-sample.txt.gz')).write_bytes(gzip.compress(raw.encode(), mtime=0))
+                    module.save(DATA/(args.name+'-profile.json'), {
+                        'command': command, 'exit': completed.returncode,
+                        'stdout': completed.stdout, 'stderr': completed.stderr,
+                        'population': saved['samples'][-1]['bots'],
+                        'load': os.getloadavg(), 'usage': usage(pid),
+                        'thread_before': before, 'thread_after': after,
+                        'note': 'sample perturbs timing, this is not acceptance evidence'})
+                    if args.instruments:
+                        trace = Path(folder)/'proxy.trace'
+                        command = ['xcrun', 'xctrace', 'record', '--template', 'Time Profiler',
+                            '--attach', str(pid), '--time-limit', '8s', '--no-prompt', '--output', str(trace)]
+                        recorded = subprocess.run(command, capture_output=True, text=True, timeout=60)
+                        details = dict(command=command, exit=recorded.returncode,
+                            stdout=recorded.stdout, stderr=recorded.stderr)
+                        if recorded.returncode == 0:
+                            toc = subprocess.check_output(['xcrun', 'xctrace', 'export', '--input', str(trace), '--toc'], text=True)
+                            details['toc'] = toc
+                            tables = ET.fromstring(toc).findall('.//table')
+                            details['schemas'] = [table.get('schema') for table in tables]
+                            for schema in details['schemas']:
+                                if schema in ['time-profile', 'cpu-profile']:
+                                    exported = subprocess.check_output(['xcrun', 'xctrace', 'export', '--input', str(trace),
+                                        '--xpath', f'/trace-toc/run[@number="1"]/data/table[@schema="{schema}"]'])
+                                    exported = exported.replace(str(ROOT).encode(), b'$REPO').replace(str(Path.home()).encode(), b'$HOME')
+                                    (DATA/(args.name+'-'+schema+'.xml.gz')).write_bytes(gzip.compress(exported, mtime=0))
+                        module.save(DATA/(args.name+'-instruments.json'), details)
+        info = e11_support.TaskInfo()
+        current_usage = usage(pid)
+        count = e11_support.LIBPROC.proc_pidinfo(pid, 4, 0, ctypes.byref(info), ctypes.sizeof(info))
+        if count != ctypes.sizeof(info):
+            raise ProcessLookupError(pid)
+        current_usage.update(user_cpu_s=info.user*e11_support.TICK_SECONDS,
+            system_cpu_s=info.system*e11_support.TICK_SECONDS,
+            context_switches=info.csw, unix_syscalls=info.syscalls_unix,
+            mach_syscalls=info.syscalls_mach)
+        return current_usage
+
+    module.usage = profiled_usage
+    if args.process_sample: monitor = ProcessSampler(observer=args.observe).start()
+    process_report = None
+    try:
+        ok = module.pilot(args)
+    except BaseException as error:
+        save(DATA/(args.name+'-harness-failure.json'), dict(status='failed', error=str(error)))
+        raise
+    finally:
+        if monitor:
+            monitor.stop()
+            process_report = monitor.report()
+            save(DATA/(args.name+'-processes.json'), process_report)
+    output = json.loads(result.read_text())
+    output.update(profile='release' if args.proxy_profile == args.tile_profile == 'release' else 'mixed',
+        proxy_profile=args.proxy_profile, tile_profile=args.tile_profile,
+        control_transport='fresh' if args.fresh_control else 'pool',
+        acceptance=False)
+    loads = [row['load'][0] for row in output.get('samples', [])]
+    loads += [row['load'][0] for row in output.get('join_samples', [])]
+    loads += [output['load_start'][0], output['load_end'][0]]
+    output['max_host_load'] = max(loads)
+    output['measurement_valid'] = bool(output.get('samples')) and output['max_host_load'] <= 6
+    if process_report:
+        phases = process_report['phases']
+        complete = all(phases.get(name) for name in ['cold_join', 'warmup', 'steady', 'whole_cell'])
+        output['measurement_valid'] = bool(complete) and output['load_start'][0] <= 4 and not process_report['error'] and all(phases[name]['no_outside_process_above_half_core'] for name in ['steady','whole_cell'])
+        output['load_rule'] = 'parent refined: start <=4; outside-process average <=0.5 core, sampled every second; fixture load is not a rejection'
+        output['process_cpu'] = {key: process_report[key] for key in ['method','precision','error','roles','phases']}
+        output['process_trace'] = args.name+'-processes.json'
+    output['quiet_window'] = str(args.quiet_marker) if args.quiet_marker else None
+    output['cpu_latency_acceptance_eligible'] = bool(args.quiet_marker) and output['measurement_valid'] and args.proxy_profile == args.tile_profile == 'release'
+    output['invalid_reason'] = None if output['measurement_valid'] else ('incomplete process sampling, start load >4 or outside process >0.5 core' if process_report else 'host one-minute load exceeded 6 or no complete measured interval')
+    if witnesses:
+        placed = {p['name']: (label, p) for label, players in timing['placements'].items() for p in players}
+        uuids = {player['uuid'].replace('-', '') for _, player in placed.values()}
+        timing['crossing_activations'] = [phase for phase in output.get('phases', [])
+            if phase.get('phase') == 'activation' and phase.get('uuid') in uuids
+            and timing.get('start_ns', 0) <= phase.get('ns', 0) <= timing.get('end_ns', time.time_ns())]
+        positions = output.get('packet_latency', {}).get('witness_positions', {})
+        timing['geometry_source'] = 'first frontend movement per preselected witness after observer reset, not held-session status duplicates'
+        timing['all_four_tiles_at_start'] = {(int(p['position'][0]//512), int(p['position'][2]//512)) for p in positions.values()} == {(0,0),(-1,0),(-1,-1),(0,-1)}
+        timing['wall_near_count'] = sum(min(abs(p['position'][0]), abs(p['position'][2])) <= 32 for p in positions.values())
+        timing['valid'] = len(positions) == 8 and timing['all_four_tiles_at_start'] and timing['wall_near_count'] >= 2 and bool(timing['crossing_activations'])
+    output['internal_and_witness_timing'] = timing
+    timing['window_limiter'] = {name: {field: final[field]-timing['budget_start'][name][field]
+        for field in ['stop_cycles', 'process_stop_signals', 'stop_wall_s', 'sum_process_pause_s']}
+        for name, final in timing.get('budget_end', {}).items() if name in timing.get('budget_start', {})}
+    output['cpu_budgets'] = {name: budget.report() for name, budget in budgets.items()}
+    output['cpu_latency_acceptance_eligible'] &= ok and output.get('clients_survived', False) and args.server_cores == 4 and args.bot_cores == 1 and all(not report['error'] for report in output['cpu_budgets'].values())
+    if args.observe:
+        output['cpu_latency_acceptance_eligible'] &= bool(timing.get('valid')) and not output.get('packet_latency', {}).get('errors')
+    output['game_time_samples'] = game_samples
+    if len(game_samples) > 1:
+        output['tile_tps'] = {label: (last['tick']-game_samples[0][label]['tick'])/
+            ((last['sent']+last['received']-game_samples[0][label]['sent']-game_samples[0][label]['received'])/2)
+            if last['tick'] is not None and game_samples[0][label]['tick'] is not None else None
+            for label, last in game_samples[-1].items()}
+    module.save(result, output)
+    if args.sample and not sampled:
+        raise SystemExit('no steady population profile was captured')
+    raise SystemExit(0 if ok else 1)
+
+
+if __name__ == '__main__':
+    main()

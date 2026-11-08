@@ -1,0 +1,66 @@
+{
+  "request": {
+    "owner": "E18",
+    "name": "quiet-process-50",
+    "pid": 19375,
+    "time": "2026-11-08T02:59:45.095781+00:00"
+  },
+  "status": "complete",
+  "commands": [
+    {
+      "name": "quiet-process-50-direct-50",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e18-proxy",
+        "--bins",
+        ".local/bin/meridian-e18/candidate-1",
+        "--bots",
+        "50",
+        "--seconds",
+        "30",
+        "--settle",
+        "30",
+        "--name",
+        "quiet-process-50-direct-50",
+        "--proxy-profile",
+        "release",
+        "--tile-profile",
+        "release",
+        "--quiet-marker",
+        "$REPO/.local/quiet-request",
+        "--timing",
+        "--eager-readers",
+        "--writes-direct",
+        "--process-sample",
+        "--server-cores",
+        "4",
+        "--bot-cores",
+        "1"
+      ],
+      "exit": 0,
+      "seconds": 69.41527787499945
+    }
+  ],
+  "load_start": [
+    16.482421875,
+    14.8818359375,
+    14.2001953125
+  ],
+  "wait_seconds": 108.71743858300033,
+  "acknowledgements": {
+    "quiet-ack-E13": "E13 quiet. All active trials finished; no new engines or builds.\n",
+    "quiet-ack-E17": "E17 is idle. No E17 load, build, engine, proxy or smoke test is running.\nAcknowledges E18 quiet-process-50, owner PID 19375, requested 2026-11-08T02:59:45.095781+00:00.\nNo E17 harness edits, builds or load will run during this window. E17 will remain idle until this request is removed.\n"
+  },
+  "load_ready": [
+    3.91552734375,
+    10.99853515625,
+    12.7705078125
+  ],
+  "seconds": 178.13431766600115,
+  "load_end": [
+    3.859375,
+    9.6201171875,
+    12.115234375
+  ]
+}

@@ -7,7 +7,14 @@ import importlib.util
 from pathlib import Path
 import unittest
 import struct
+import hashlib
+import json
+import tempfile
+import io
+from contextlib import redirect_stdout
+from unittest import mock
 from e14_support import attributes
+from e14_snapshot_support import create_snapshot, validate_snapshot, REQUIRED
 
 ROOT = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader('e14_analysis', str(ROOT / 'scripts/e14-analyse'))
@@ -18,6 +25,14 @@ packet_loader = importlib.machinery.SourceFileLoader('e14_packet_check', str(ROO
 packet_spec = importlib.util.spec_from_loader('e14_packet_check', packet_loader)
 packet_check = importlib.util.module_from_spec(packet_spec)
 packet_loader.exec_module(packet_check)
+cluster_loader = importlib.machinery.SourceFileLoader('e14_cluster_test', str(ROOT / 'scripts/e14-cluster'))
+cluster_spec = importlib.util.spec_from_loader('e14_cluster_test', cluster_loader)
+cluster_adapter = importlib.util.module_from_spec(cluster_spec)
+cluster_loader.exec_module(cluster_adapter)
+physics_loader = importlib.machinery.SourceFileLoader('e14_physics_test', str(ROOT / 'scripts/e14-physics'))
+physics_spec = importlib.util.spec_from_loader('e14_physics_test', physics_loader)
+physics = importlib.util.module_from_spec(physics_spec)
+physics_loader.exec_module(physics)
 
 
 def fixture(stall=0):
@@ -39,6 +54,150 @@ def fixture(stall=0):
             servers['a'].append(dict(ns=began + i * 50_000_000, tick=len(frames)))
     return dict(status='complete', frames=frames, baselines=[legs[0]], trials=[legs[1]],
                 servers=servers, wire=[], errors=[])
+
+
+class SnapshotContract(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='E14-snapshot-test-', dir=ROOT / '.local/runs')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.source, self.destination = self.root / 'source', self.root / 'retained'
+        self.source.mkdir()
+        self.records = {}
+        for name in REQUIRED:
+            body = ('fake executable: ' + name).encode()
+            (self.source / name).write_bytes(body)
+            self.records[name] = hashlib.sha256(body).hexdigest()
+        self.launcher = self.root / 'launcher.py'
+        self.launcher.write_text('# fake launcher, never executed\n')
+        self.final = {'schema_version': 1, 'binaries': {
+            name: {'path': '.local/bin/goliath-e12/' + name, 'sha256': value}
+            for name, value in self.records.items()},
+            'store_binary_sha256': self.records['goliath-store'],
+            'launcher': {'sha256': hashlib.sha256(self.launcher.read_bytes()).hexdigest(),
+                         'leased_marker': '.local/bin/goliath-e12/LEASES'}}
+        (self.source / 'FINAL.json').write_text(json.dumps(self.final))
+        (self.source / 'LEASES').write_text('test leased contract\n')
+        (self.source / 'READY').write_text('\n'.join(
+            '.local/bin/goliath-e12/' + name + ' sha256=' + value for name, value in self.records.items()))
+
+    def snapshot(self):
+        return create_snapshot(self.source, self.destination, self.launcher)
+
+    def test_final_snapshot_keeps_marker_and_exact_final_metadata(self):
+        target = self.snapshot()
+        self.assertEqual((target / 'FINAL.json').read_bytes(), (self.source / 'FINAL.json').read_bytes())
+        self.assertEqual((target / 'LEASES').read_bytes(), (self.source / 'LEASES').read_bytes())
+        self.assertEqual(validate_snapshot(target), {'binaries': self.records, 'leased': True, 'final': self.final})
+
+    def test_publication_with_wrong_binary_is_refused(self):
+        (self.source / 'horizon-client').write_bytes(b'wrong build')
+        with self.assertRaisesRegex(ValueError, 'hash mismatch: horizon-client'):
+            self.snapshot()
+
+    def test_tampered_snapshot_is_refused(self):
+        target = self.snapshot()
+        (target / 'meridian').write_bytes(b'wrong proxy')
+        with self.assertRaisesRegex(ValueError, 'hash mismatch: meridian'):
+            validate_snapshot(target)
+
+    def test_snapshot_manifest_cannot_override_final_hash(self):
+        target = self.snapshot()
+        altered = dict(self.records, **{'horizon-client': '0' * 64})
+        (target / 'manifest.json').write_text(json.dumps(altered))
+        with self.assertRaisesRegex(ValueError, 'manifest differs from FINAL'):
+            validate_snapshot(target)
+
+    def test_final_snapshot_missing_marker_is_refused(self):
+        target = self.snapshot()
+        (target / 'LEASES').unlink()
+        with self.assertRaisesRegex(ValueError, 'LEASES marker differs'):
+            validate_snapshot(target)
+
+    def test_marker_without_final_is_refused(self):
+        target = self.snapshot()
+        (target / 'FINAL.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'requires FINAL'):
+            validate_snapshot(target)
+
+    def test_removing_both_final_metadata_files_cannot_fall_back_to_legacy(self):
+        target = self.snapshot()
+        (target / 'FINAL.json').unlink()
+        (target / 'LEASES').unlink()
+        with self.assertRaisesRegex(ValueError, 'lost FINAL'):
+            validate_snapshot(target)
+
+    def test_existing_corrupt_snapshot_is_not_silently_repaired(self):
+        target = self.snapshot()
+        (target / 'horizon-client').write_bytes(b'changed retained build')
+        with self.assertRaisesRegex(ValueError, 'hash mismatch: horizon-client'):
+            self.snapshot()
+
+    def test_tampered_launcher_is_refused_before_loading(self):
+        target = self.snapshot()
+        (target / 'cluster-launcher.py').write_text('# different launcher\n')
+        with self.assertRaisesRegex(ValueError, 'launcher hash differs'):
+            validate_snapshot(target)
+
+    def test_physics_refuses_mismatch_before_any_process_starts(self):
+        target = self.snapshot()
+        (target / 'goliath-store').write_bytes(b'wrong store')
+        run = physics.Run(self.root, False, variant='e12', snapshot=target)
+        with mock.patch.object(physics, 'quiet'), mock.patch.object(physics.subprocess, 'Popen') as popen:
+            with self.assertRaisesRegex(ValueError, 'hash mismatch: goliath-store'):
+                run.start()
+            popen.assert_not_called()
+
+    def test_constructor_gets_leased_true_even_when_main_uses_new_then_init(self):
+        class Recorder:
+            def __init__(self, *args, **kwargs):
+                self.received = kwargs
+        selected = cluster_adapter.leased_cluster(Recorder, True)
+        instance = selected.__new__(selected)
+        instance.__init__('root', 'resources', 512)
+        self.assertIs(instance.received['leased'], True)
+        with self.assertRaisesRegex(ValueError, 'cannot construct an unleased'):
+            selected('root', 'resources', 512, leased=False)
+
+    def test_checker_selects_engine_and_store_from_final(self):
+        expected, contract = packet_check.expected_for_snapshot(self.snapshot())
+        self.assertEqual(expected['cluster-engine'], self.records['horizon-client'])
+        self.assertEqual(expected['cluster-store'], self.records['goliath-store'])
+        self.assertTrue(contract['leased'])
+
+    def test_cluster_entrypoint_explicitly_constructs_a_leased_cluster(self):
+        self.launcher.write_text(
+            'class Cluster:\n'
+            '    def __init__(self, *args, **kwargs):\n'
+            '        assert kwargs.get("leased") is True, "lease flag was not explicit"\n'
+            'def main():\n'
+            '    instance = Cluster.__new__(Cluster)\n'
+            '    instance.__init__("root", "resources", 512)\n')
+        self.final['launcher']['sha256'] = hashlib.sha256(self.launcher.read_bytes()).hexdigest()
+        (self.source / 'FINAL.json').write_text(json.dumps(self.final))
+        target = self.snapshot()
+        with mock.patch.object(cluster_adapter.sys, 'argv', ['e14-cluster', '--bins', str(target)]), \
+                mock.patch.object(physics.subprocess, 'Popen') as popen:
+            cluster_adapter.main()
+            popen.assert_not_called()
+
+    def test_validation_only_entrypoint_starts_no_process(self):
+        target = self.snapshot()
+        output = io.StringIO()
+        with mock.patch.object(physics.sys, 'argv', ['e14-physics', '--snapshot', str(target), '--validate-only']), \
+                mock.patch.object(physics.subprocess, 'Popen') as popen, redirect_stdout(output):
+            self.assertEqual(physics.main(), 0)
+            popen.assert_not_called()
+        self.assertTrue(json.loads(output.getvalue())['leased'])
+
+    def test_legacy_snapshot_and_constructor_remain_unleased(self):
+        (self.source / 'FINAL.json').unlink()
+        (self.source / 'LEASES').unlink()
+        target = self.snapshot()
+        self.assertFalse(validate_snapshot(target)['leased'])
+        class Legacy:
+            pass
+        self.assertIs(cluster_adapter.leased_cluster(Legacy, False), Legacy)
 
 
 class Measurements(unittest.TestCase):

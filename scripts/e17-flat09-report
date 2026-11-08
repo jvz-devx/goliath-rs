@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Independently recheck retained plain-09 cells and print the complete results table."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import math
+import gzip
+import hashlib
+from pathlib import Path
+from e11_support import ROOT,save
+from e17_flat09_metrics import outside_validity
+from e17_d9_baseline import movement_contract
+from e18_d9_layout import plan,TILES
+
+
+def read_row(path):
+    with (gzip.open(path,'rt') if path.suffix=='.gz' else path.open()) as stream:
+        return json.load(stream)
+
+
+def compress_rows(directory):
+    manifest_path=directory/'staircase.json'
+    manifest=json.loads(manifest_path.read_text())
+    if manifest['status']!='complete': raise RuntimeError('cannot compress an unfinished staircase')
+    verified=json.loads((directory/'verified-summary.json').read_text())
+    assert verified['verified']
+    replacements={};records=[]
+    for reference in manifest['rows']:
+        source=ROOT/reference['path']
+        if source.suffix=='.gz': continue
+        assert source.parent.resolve()==directory.resolve()
+        assert source.name==f'{reference["bots"]}-r{reference["repeat"]}-a{reference["attempt"]}.json'
+        raw=source.read_bytes();compressed=gzip.compress(raw,mtime=0)
+        target=source.with_suffix('.json.gz')
+        if target.exists(): raise RuntimeError('compressed target already exists')
+        target.write_bytes(compressed)
+        assert gzip.decompress(target.read_bytes())==raw
+        replacement=str(target.relative_to(ROOT))
+        replacements[reference['path']]=replacement
+        records.append({'original':reference['path'],'compressed':replacement,'bytes_before':len(raw),
+            'bytes_after':len(compressed),'original_and_decompressed_sha256':hashlib.sha256(raw).hexdigest(),
+            'compressed_sha256':hashlib.sha256(compressed).hexdigest()})
+    if not records: return
+    for reference in manifest['rows']: reference['path']=replacements.get(reference['path'],reference['path'])
+    for reference in verified['rows']: reference['source']=replacements.get(reference['source'],reference['source'])
+    save(directory/'lossless-compression.json',{'lossless':True,'records':records,
+        'original_json_recoverable_by_gzip':True})
+    save(manifest_path,manifest);save(directory/'verified-summary.json',verified)
+    # Only these six validated originals are removed; every byte is in its gzip.
+    for record in records: (ROOT/record['original']).unlink()
+
+
+def check_d9_layout(row,bench):
+    layout=plan(row['bots'],bench.route_anchor,seed=18)
+    assert row['layout']==layout
+    expected_pigs=[]
+    targets={name:group['spread'] for group in layout['groups'][:4] for name in group['starts']}
+    names=set(targets)|{layout['groups'][-1]['prefix']+str(i) for i in range(layout['crossing_players'])}
+    for group in layout['groups'][:4]:
+        cx,cz=group['center']
+        expected_pigs.extend(f'summon minecraft:pig {cx+i%8-4} -60 {cz+i//8-4} {{Invulnerable:1b,PersistenceRequired:1b}}' for i in range(64))
+    assert row['pig_commands']==expected_pigs
+    virtual=[]
+    labels={index:label for label,index in TILES.items()}
+    for sample in row['samples']:
+        players=sample['tiles'][0]['player_positions']
+        assert len(players)==row['bots'] and {p['name'] for p in players}==names
+        counts={label:0 for label in TILES}
+        for player in players:
+            x,_,z=player['position']
+            if player['name'] in targets:
+                lo_x,lo_z,hi_x,hi_z=targets[player['name']]
+                assert lo_x<=x<=hi_x and lo_z<=z<=hi_z,'interior actor left its D9 square'
+            else:
+                assert abs(x)<=12.001 and abs(z)<=12.001,'crossing actor left shared D9 path area'
+            counts[labels[(math.floor(x/2048),math.floor(z/2048))]]+=1
+        virtual.append(counts)
+    return {'virtual_players_first':virtual[0],'virtual_players_last':virtual[-1],
+        'virtual_players_range':{label:[min(row[label] for row in virtual),max(row[label] for row in virtual)] for label in TILES},
+        'all_interior_poses_inside_shared_squares':True,'reader_sessions':0,'planned_pigs_per_square':64}
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--data-dir',type=Path,default=ROOT/'docs/experiments/data/E17/flat09-baseline-v2')
+    parser.add_argument('--compress',action='store_true',help='losslessly gzip verified raw rows, preserving every byte')
+    args=parser.parse_args()
+    if args.compress: compress_rows(args.data_dir)
+    loader=importlib.machinery.SourceFileLoader('flat09_report_bench',str(ROOT/'scripts/capacity-bench'))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    bench=importlib.util.module_from_spec(spec)
+    loader.exec_module(bench)
+    staircase=json.loads((args.data_dir/'staircase.json').read_text())
+    if staircase['status']!='complete': raise RuntimeError('staircase is not complete')
+    rows=[]
+    d9=staircase['kind']=='E17-D9-plain09-baseline'
+    native_speed=bench.steady_route_speed
+    stable={key:set() for key in ['canonical_sha256','build_sha256','harness_sha256','limiter_sha256',
+        'process_sampler_sha256','thread_metrics_sha256']}
+    for reference in sorted(staircase['rows'],key=lambda row:(row['bots'],row['repeat'],row['attempt'])):
+        row=read_row(ROOT/reference['path'])
+        bench.steady_route_speed=native_speed
+        geometry={}
+        if d9:
+            geometry=check_d9_layout(row,bench)
+            first,last=row['samples'][0],row['samples'][-1]
+            expected,cohorts,reasons=movement_contract(bench,row['layout']['groups'],first['cohorts'],last['cohorts'],last['at']-first['at'])
+            assert not reasons,reasons
+            assert cohorts==row['cohort_movement']
+            elapsed=last['bots']['elapsed']-first['bots']['elapsed']
+            bench.steady_route_speed=lambda config,count:expected/(count*elapsed)
+            for key in [key for key in row['build'] if key.endswith('_sha256') and key not in stable and key!='runner_sha256']:
+                stable[key]=set()
+        checked=bench.evaluate(row['samples'],row['raw_ticks'],row['bots'],4,1,float('inf'),256 if d9 else 64,row['config'])
+        noise_ok,noise_reasons=outside_validity(row['outside_process_cpu'])
+        assert noise_ok,noise_reasons
+        assert checked['pass']==row['pass'] and checked['valid']==row['valid']
+        assert checked['reasons']==row['reasons'] and row['valid']
+        assert row['start_load'][0]<=4
+        assert [limit['cores'] for limit in row['cpu_limits_measured']]==[4,1]
+        assert all(limit['error'] is None for limit in row['cpu_limits'])
+        assert checked['tick_p99_ms']==row['tick_p99_ms']
+        a,b=row['samples'][0]['main_threads'][0],row['samples'][-1]['main_threads'][0]
+        assert a['id']==b['id'] and a['name']=='main' and b['name']=='main'
+        assert abs((b['cpu_s']-a['cpu_s'])/(b['at']-a['at'])-row['main_thread_cpu_cores'][0])<1e-10
+        for key in stable: stable[key].add(row['build'][key])
+        times=[sample['at'] for sample in row['outside_process_cpu']['samples']]
+        noise=row['outside_process_cpu']['phases']
+        rows.append({'bots':row['bots'],'repeat':row['repeat'],'pass':row['pass'],'valid':row['valid'],
+            'tps':row['tps'][0],'tick_p99_ms':row['tick_p99_ms'][0],
+            'engine_cpu_cores':row['server_cpu_cores'],'main_cpu_cores':row['main_thread_cpu_cores'][0],
+            'bot_cpu_cores':row['bot_cpu_cores'],'server_stops_measured':row['cpu_limits_measured'][0]['stops'],
+            'bot_stops_measured':row['cpu_limits_measured'][1]['stops'],
+            'server_stops_whole':row['cpu_limits'][0]['stops'],'bot_stops_whole':row['cpu_limits'][1]['stops'],
+            'outside_max_steady_cores':noise['steady']['outside_max_process_cores'],
+            'outside_max_whole_cores':noise['whole_cell']['outside_max_process_cores'],
+            'outside_trace_samples':len(times),'outside_sample_max_gap_s':max(b-a for a,b in zip(times,times[1:])),
+            'start_load':row['start_load'][0],
+            'chunks_range':[min(row['work_per_tile'][0]['chunks']),max(row['work_per_tile'][0]['chunks'])],
+            'movement_fraction':row['bot_movement_fraction'],'late_rounds':row['bot_late_rounds'],
+            'source':reference['path'],**geometry})
+    assert all(len(values)==1 for values in stable.values())
+    lower,upper=staircase['frontier_pass'],staircase['frontier_fail']
+    assert upper-lower==25
+    assert len([row for row in rows if row['bots']==lower and row['pass']])==2
+    assert len([row for row in rows if row['bots']==upper and not row['pass']])==2
+    output={'kind':'E17-verified-D9-plain09-baseline' if d9 else 'E17-verified-plain09-reference','verified':True,'frontier_pass':lower,'frontier_fail':upper,
+        'tested_three_times_target':3*lower,'conservative_three_times_target':3*upper,'rows':rows,
+        'm4_pass_line':3*lower if d9 else None,
+        'stable_measurement_sources':{key:next(iter(values)) for key,values in stable.items()},
+        'outside_process_counter_limit':'one-second ps counters can miss final CPU from a process that exits between samples'}
+    save(args.data_dir/'verified-summary.json',output)
+    print('| Bots | Repeat | TPS | Tick P99 ms | Engine cores | Main cores | Bot cores | Chunks | STOP engine/bot | Outside max cores | Verdict |')
+    print('| ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | ---: | --- |')
+    for row in rows:
+        print(f'| {row["bots"]} | {row["repeat"]} | {row["tps"]:.3f} | {row["tick_p99_ms"]:.3f} | '
+            f'{row["engine_cpu_cores"]:.3f} | {row["main_cpu_cores"]:.3f} | {row["bot_cpu_cores"]:.3f} | '
+            f'{row["chunks_range"][0]}..{row["chunks_range"][1]} | '
+            f'{row["server_stops_measured"]}/{row["bot_stops_measured"]} | {row["outside_max_steady_cores"]:.3f} | '
+            f'{"Pass" if row["pass"] else "Valid overload"} |')
+    print(json.dumps({'frontier_pass':lower,'frontier_fail':upper,'target':3*lower,'conservative_target':3*upper}))
+
+
+if __name__=='__main__': main()

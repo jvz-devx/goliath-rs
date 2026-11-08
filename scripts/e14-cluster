@@ -7,13 +7,30 @@ import importlib.util
 from pathlib import Path
 import sys
 
+from e14_snapshot_support import validate_snapshot
+
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def leased_cluster(base, enabled):
+    if not enabled:
+        return base
+
+    class LeasedCluster(base):
+        def __init__(self, *args, **kwargs):
+            if kwargs.get('leased') is False:
+                raise ValueError('LEASES snapshot cannot construct an unleased cluster')
+            kwargs['leased'] = True
+            super().__init__(*args, **kwargs)
+
+    return LeasedCluster
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bins', type=Path, required=True)
     args = parser.parse_args()
+    contract = validate_snapshot(args.bins)
     loader = importlib.machinery.SourceFileLoader('e14_cluster_base', str(ROOT / 'scripts/goliath-cluster'))
     spec = importlib.util.spec_from_loader('e14_cluster_base', loader)
     cluster = importlib.util.module_from_spec(spec)
@@ -25,6 +42,7 @@ def main():
     else:
         loader.exec_module(cluster)
     cluster.BINS = args.bins.resolve()
+    cluster.Cluster = leased_cluster(cluster.Cluster, contract['leased'])
     sys.argv = ['goliath-cluster', 'start', '--edge', '512']
     cluster.main()
 

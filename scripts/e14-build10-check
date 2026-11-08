@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the exact E14 build-10 matrix and the sprint modifier on both sides of activation."""
+"""Check E14's matrix against build 10 or an explicitly validated final snapshot."""
 
 import argparse
 import gzip
@@ -7,9 +7,10 @@ import importlib.machinery
 import importlib.util
 import json
 import math
-import hashlib
 from pathlib import Path
 import re
+
+from e14_snapshot_support import validate_snapshot
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / 'docs/experiments/data/E14'
@@ -26,6 +27,16 @@ loader = importlib.machinery.SourceFileLoader('e14_build10_analysis', str(ROOT /
 spec = importlib.util.spec_from_loader('e14_build10_analysis', loader)
 analysis = importlib.util.module_from_spec(spec)
 loader.exec_module(analysis)
+
+
+def expected_for_snapshot(snapshot):
+    expected = dict(EXPECTED)
+    contract = validate_snapshot(snapshot) if snapshot is not None else None
+    if contract and contract['final'] is not None:
+        for key, name in [('cluster-engine', 'horizon-client'), ('cluster-proxy', 'meridian'),
+                          ('cluster-store', 'goliath-store')]:
+            expected[key] = contract['binaries'][name]
+    return expected, contract
 
 
 def sprint_present(attribute):
@@ -81,6 +92,7 @@ def main():
     args = parser.parse_args()
     if args.output.exists():
         parser.error('verification output exists; choose a new name')
+    expected, contract = expected_for_snapshot(args.snapshot)
     result = {'runs': {}, 'failures': [], 'unresolved': [], 'sprint_packets': [],
               'corrections': [], 'actual_crossings': 0}
     particle_settings = set()
@@ -89,7 +101,12 @@ def main():
         assert not re.search(rb'/Users/|/home/|E14Physics|(?i:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', raw_bytes)
         run = json.loads(raw_bytes)
         particle_settings.add(run['particles'])
-        assert run['binaries'] == EXPECTED and run['resources_manifest_unchanged']
+        assert run['binaries'] == expected and run['resources_manifest_unchanged']
+        if contract and contract['final'] is not None:
+            assert run.get('leased') == contract['leased']
+            assert run.get('snapshot_manifest') == contract['binaries']
+            assert run.get('final') == contract['final']
+            assert run['launcher_sha256'] == contract['final']['launcher']['sha256']
         assert run['collection_complete'] and len(run['trials']) == 56 and not run['errors']
         derived = analysis.analyse(run)
         source = 'a'
@@ -130,16 +147,18 @@ def main():
         assert restored['status_and_diff_identical'] and restored['all_file_bytes_identical']
         result['restoration_exact'] = True
     if args.snapshot:
-        manifest = json.loads((args.snapshot / 'manifest.json').read_text())
-        assert manifest['horizon-client'] == EXPECTED['cluster-engine']
-        assert manifest['meridian'] == EXPECTED['cluster-proxy']
-        assert manifest['goliath-store'] == EXPECTED['cluster-store']
-        assert manifest['meridian-sidecar'] == '8d300a00afaf7fa9fc3b4ef50d9a65f81276d8d8de71d712c3e69f5638c92705'
-        assert manifest['e4-client'] == '8afa1b47cfefed78ee7a738f21a338766b7660fe632724430b7270960fc3235b'
-        for name, expected in manifest.items():
-            assert hashlib.sha256((args.snapshot / name).read_bytes()).hexdigest() == expected
+        manifest = contract['binaries']
+        assert manifest['horizon-client'] == expected['cluster-engine']
+        assert manifest['meridian'] == expected['cluster-proxy']
+        assert manifest['goliath-store'] == expected['cluster-store']
+        if contract['final'] is None:
+            assert manifest['meridian-sidecar'] == '8d300a00afaf7fa9fc3b4ef50d9a65f81276d8d8de71d712c3e69f5638c92705'
+            assert manifest['e4-client'] == '8afa1b47cfefed78ee7a738f21a338766b7660fe632724430b7270960fc3235b'
+        else:
+            result['final'] = contract['final']
+            result['leased'] = contract['leased']
         result['snapshot_still_matches_ready'] = manifest
-    result['expected_binaries'] = EXPECTED
+    result['expected_binaries'] = expected
     result['resolved_windows'] = result['actual_crossings'] - len(result['unresolved'])
     result['sprint_packet_passes'] = sum(row['pass'] for row in result['sprint_packets'])
     result['status'] = 'passed' if not result['failures'] and result['sprint_packet_passes'] == 28 else 'failed'

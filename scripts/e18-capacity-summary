@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""Compact diagnostic rows without changing raw samples or inventing uncapped demand."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import e11_support as support
+
+
+def summarize(data):
+    result=dict(kind='E18-derived-capacity-diagnostic',acceptance=False,status=data['status'],binaries=data['binaries'],cells={})
+    for count,cell in data['cells'].items():
+        if cell['status']!='complete':
+            result['cells'][count]={key:cell[key] for key in ['status','reason','error','failure_evidence'] if key in cell};continue
+        steady=cell['processes']['phases']['steady'];cpu={name:row['cores'] for name,row in steady['fixture'].items()}
+        tiles={name:dict(cores=cpu['tile-'+name],main_cores=cell['tile_thread_cpu'][name]['main']['cores'],tps=cell['game_time_tps'][name],
+            **cell['tick_summary'][name],placed=cell['before'][name]['placed'],held=cell['before'][name]['held'],readers=cell['before'][name]['readers'],chunks=cell['before'][name]['chunks'],
+            pigs=sum(row['mobs_by_kind'].get('minecraft:pig',0) for row in cell['before'][name]['population'])) for name in cell['before']}
+        paths={name:{key:row[key] for key in ['count','p95_us_upper','p99_us_upper','maximum_us','unstamped_writes','overflow_at_100ms']} for name,row in cell['histogram']['paths'].items()}
+        sockets=cell['socket_pressure'];rows=sockets['samples'];a=next(row for row in rows if row['mark']=='steady-first');b=next(row for row in rows if row['mark']=='steady-last')
+        window=[row for row in rows if a['at']<row['at']<=b['at']];seconds=b['at']-a['at']
+        socket_summary=dict(error=sockets['error'],rate_limit=sockets['rate_limit'],
+            window_proxy_new_observed_per_s=sum(row['proxy_new_observed_lower_bound'] for row in window)/seconds,
+            window_fixture_new_observed_per_s=sum(row['fixture_new_observed_upper_envelope'] for row in window)/seconds,
+            **{key+'_max':max(row[key] for row in rows) for key in ['proxy_open_tcp_sockets','proxy_open_outbound_connections','proxy_tcp_fds','loopback_time_wait','loopback_ephemeral_ports_observed']})
+        thread_roles={}
+        for thread in cell.get('proxy_thread_cpu',{}).get('threads',[]):
+            name=thread['name']
+            role='IO drivers' if name.startswith('proxy-io-') else 'command workers' if name.startswith('proxy-control-') else 'terrain managers' if name=='terrain-manager' else 'wall workers' if name.startswith('wall-') else 'other matching threads'
+            thread_roles[role]=thread_roles.get(role,0)+thread['cores']
+        result['cells'][count]=dict(status=cell['status'],diagnostic_pass=cell['diagnostic_pass'],failures=cell['diagnostic_failures'],
+            proxy=cell['proxy'],tiles=tiles,server_cores=steady['server_cores'],process_cores=cpu,proxy_matching_thread_cores=thread_roles,
+            proxy_thread_counter_scope='matching native IDs at both endpoints; short-lived workers can be absent',internal_paths=paths,
+            limiter_window=cell['limiter_window'],latency_includes_sigstop=cell['latency_includes_sigstop'],external_witness_p95_ms=None,
+            bot_cores=cell['bot_cores'],bots_last=cell['bot_last'],shims_cores=cell['shim_cores'],shim_reports=cell['shim_reports'],
+            shim_production_required=cell['shim_production_required'],socket_pressure=socket_summary,
+            noise_valid=cell['noise_valid'],outside_max_steady=steady['outside_max_process_cores'],
+            io_pool_started=cell.get('io_pool_started',[]),warnings=cell['causal_warnings'])
+    return result
+
+
+if __name__=='__main__':
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('raw',type=Path);parser.add_argument('output',type=Path);args=parser.parse_args()
+    result=summarize(json.loads(args.raw.read_text()));result['raw_sha256']=hashlib.sha256(args.raw.read_bytes()).hexdigest();support.save(args.output,result)
+    print(json.dumps({key:{field:value.get(field) for field in ['status','diagnostic_pass','failures','server_cores']} for key,value in result['cells'].items()},indent=2))

@@ -1,0 +1,106 @@
+[
+  {
+    "command": [
+      "rustfmt",
+      "--edition",
+      "2024",
+      "--check",
+      "crates/meridian-handoff/src/drain.rs",
+      "crates/meridian-handoff/src/lane_input.rs",
+      "crates/meridian-handoff/src/lib.rs",
+      "crates/meridian-handoff/src/path_timing.rs",
+      "crates/meridian-handoff/src/prepare.rs",
+      "crates/meridian-handoff/src/session.rs",
+      "crates/meridian-handoff/src/switch.rs",
+      "crates/meridian-handoff/src/terrain.rs",
+      "crates/meridian-proxy/src/console.rs",
+      "crates/meridian-proxy/src/terrain.rs",
+      "crates/meridian-proxy/src/wall_approach.rs",
+      "crates/meridian-sidecar/src/endpoint.rs",
+      "crates/meridian-testkit/src/bin/e4-client.rs"
+    ],
+    "exit": 0,
+    "seconds": 0.14077841700054705,
+    "test_results": []
+  },
+  {
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--release",
+      "-p",
+      "meridian-handoff",
+      "-p",
+      "meridian-proxy",
+      "-p",
+      "meridian-sidecar",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "seconds": 3.378140084008919,
+    "test_results": []
+  },
+  {
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--release",
+      "-p",
+      "meridian-config",
+      "-p",
+      "meridian-ghost",
+      "-p",
+      "meridian-handoff",
+      "-p",
+      "meridian-proxy",
+      "-p",
+      "meridian-sidecar",
+      "--",
+      "--skip",
+      "serve::tests::the_listener_queues_a_large_burst"
+    ],
+    "exit": 0,
+    "seconds": 66.84988408299978,
+    "test_results": [
+      "test result: ok. 202 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s",
+      "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+      "test result: ok. 93 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.92s",
+      "test result: ok. 562 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.18s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s",
+      "test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.53s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "--release",
+      "-p",
+      "meridian-proxy",
+      "--bin",
+      "meridian",
+      "-p",
+      "meridian-sidecar",
+      "--bin",
+      "meridian-sidecar",
+      "-p",
+      "meridian-testkit",
+      "--bin",
+      "e4-client"
+    ],
+    "exit": 0,
+    "seconds": 5.987274083992816,
+    "test_results": []
+  }
+]

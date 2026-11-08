@@ -19,6 +19,10 @@ loader=importlib.machinery.SourceFileLoader('e17_bench',str(Path(__file__).with_
 spec=importlib.util.spec_from_loader(loader.name,loader)
 bench=importlib.util.module_from_spec(spec)
 loader.exec_module(bench)
+prereq_loader=importlib.machinery.SourceFileLoader('e17_prereqs',str(Path(__file__).with_name('e17-m4')))
+prereq_spec=importlib.util.spec_from_loader(prereq_loader.name,prereq_loader)
+prereqs=importlib.util.module_from_spec(prereq_spec)
+prereq_loader.exec_module(prereqs)
 
 
 def encode(value):
@@ -36,6 +40,23 @@ def frame(body, compressed=False):
 
 
 class ObserverTests(unittest.TestCase):
+    def test_prerequisite_snapshot_refuses_changed_or_added_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            source=root/'crates/example/src/lib.rs'
+            source.parent.mkdir(parents=True)
+            source.write_text('//! Test fixture.\n')
+            for name in ['Cargo.toml','Cargo.lock','clippy.toml']: (root/name).write_text('')
+            files={str(path.relative_to(root)):prereqs.sha(path) for path in [source,*[root/name for name in ['Cargo.toml','Cargo.lock','clippy.toml']]]}
+            manifest={'internal_crates':{'files':files}}
+            prereqs.verify_internal_sources(root,manifest)
+            source.write_text('//! Changed fixture.\n')
+            with self.assertRaisesRegex(RuntimeError,'source changed'):
+                prereqs.verify_internal_sources(root,manifest)
+            source.with_name('extra.rs').write_text('//! Extra fixture.\n')
+            with self.assertRaisesRegex(RuntimeError,'file set changed'):
+                prereqs.verify_internal_sources(root,manifest)
+
     def test_outbound_socket_does_not_use_system_ephemeral_range(self):
         observer=PacketObserver()
         with socket.socket() as listener:

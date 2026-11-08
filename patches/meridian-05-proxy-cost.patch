@@ -1,0 +1,1636 @@
+diff --git a/crates/meridian-handoff/src/drain.rs b/crates/meridian-handoff/src/drain.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/drain.rs
+@@ -0,0 +1,268 @@
++//! Bounded packet writes flushed at the end of an already-buffered read burst.
++use crate::path_timing::{self, Path};
++use crate::session::{Lane, Shared, lock};
++use horizon_protocol::{
++    Result,
++    connection::{ConnReader, ConnWriter},
++    frame,
++};
++use std::{sync::Arc, time::Instant};
++
++const WRITE_CAP: usize = 64 * 1024;
++
++pub(crate) struct Writer {
++    inner: ConnWriter,
++    pending: Vec<u8>,
++    drains: usize,
++    broken: bool,
++    batching: bool,
++    path: Path,
++    stamps: Vec<Option<Instant>>,
++}
++
++impl Writer {
++    pub(crate) fn new(inner: ConnWriter) -> Self {
++        Self {
++            inner,
++            pending: Vec::new(),
++            drains: 0,
++            broken: false,
++            batching: std::env::var_os("E18_WRITES_DIRECT").is_none(),
++            path: Path::Backend,
++            stamps: Vec::new(),
++        }
++    }
++
++    pub(crate) fn client(inner: ConnWriter) -> Self {
++        Self {
++            path: Path::Client,
++            ..Self::new(inner)
++        }
++    }
++    pub(crate) fn observer(inner: ConnWriter) -> Self {
++        Self {
++            path: Path::Reader,
++            ..Self::new(inner)
++        }
++    }
++
++    pub(crate) fn begin(&mut self) {
++        self.drains += 1;
++    }
++
++    pub(crate) fn end(&mut self) -> Result<()> {
++        self.drains = self.drains.checked_sub(1).expect("balanced read drains");
++        // Flush each completed drain even if another producer is draining too.
++        // Otherwise an overlapping busy lane could indefinitely hold a reply.
++        self.flush()
++    }
++
++    pub(crate) fn flush(&mut self) -> Result<()> {
++        if self.broken {
++            return Err(horizon_protocol::Error::new(
++                "a coalesced write already failed",
++            ));
++        }
++        if !self.pending.is_empty() {
++            if let Err(error) = self.inner.write_raw(&self.pending) {
++                // A partial encrypted write is uncertain. Never replay that buffer.
++                self.pending.clear();
++                self.stamps.clear();
++                self.broken = true;
++                self.inner.shutdown();
++                return Err(error);
++            }
++            self.pending.clear();
++            let completed = Instant::now();
++            for stamp in self.stamps.drain(..) {
++                path_timing::record(self.path, stamp, completed);
++            }
++        }
++        Ok(())
++    }
++
++    pub(crate) fn send(&mut self, body: &[u8]) -> Result<()> {
++        if self.drains == 0 || !self.batching {
++            self.flush()?;
++            self.inner.send(body)?;
++            if path_timing::enabled() {
++                path_timing::record(self.path, path_timing::current(), Instant::now());
++            }
++            return Ok(());
++        }
++        // Meridian accepts only the pinned protocol. There is no backend adapter.
++        // Keep the writer's client conversion and cipher state, never concatenate
++        // plaintext frames after encryption or reorder a direct control write.
++        let Some(body) = self.inner.for_client(body)? else {
++            return Ok(());
++        };
++        let contents = frame::contents(&body, self.inner.threshold)?;
++        if self.pending.len() + contents.len() + 5 > WRITE_CAP || self.stamps.len() >= 2048 {
++            self.flush()?;
++        }
++        if contents.len() + 5 > WRITE_CAP {
++            // One legal large packet uses the ordinary bounded protocol path.
++            self.inner.send_contents(&contents)?;
++            if path_timing::enabled() {
++                path_timing::record(self.path, path_timing::current(), Instant::now());
++            }
++            return Ok(());
++        }
++        self.inner.frame_into(&contents, &mut self.pending);
++        if path_timing::enabled() {
++            self.stamps.push(path_timing::current());
++        }
++        Ok(())
++    }
++}
++
++/// A drain owns no thread or timer. It never waits for another packet before
++/// flushing. Ordinary blocking reads still provide the existing backpressure.
++pub(crate) struct ReadDrain<'a> {
++    shared: &'a Shared,
++    client: bool,
++    lane: Option<Arc<Lane>>,
++    arrived: Option<Instant>,
++}
++
++impl<'a> ReadDrain<'a> {
++    pub(crate) fn new(shared: &'a Shared, client: bool) -> Self {
++        Self {
++            shared,
++            client,
++            lane: None,
++            arrived: None,
++        }
++    }
++
++    pub(crate) fn next(
++        &mut self,
++        reader: &mut ConnReader,
++        lane: impl FnOnce() -> Arc<Lane>,
++    ) -> Result<(i32, Vec<u8>)> {
++        if self.lane.is_some() {
++            if let Some(packet) = reader.buffered()? {
++                path_timing::stamp(self.arrived);
++                return Ok(packet);
++            }
++            self.finish()?;
++        }
++        // There is no outstanding write when this read blocks.
++        let packet = reader.recv()?;
++        self.arrived = path_timing::enabled().then(Instant::now);
++        path_timing::stamp(self.arrived);
++        let lane = lane();
++        if self.client {
++            self.shared.down().writer.begin();
++        }
++        lock(&lane.writer).begin();
++        self.lane = Some(lane);
++        Ok(packet)
++    }
++
++    fn finish(&mut self) -> Result<()> {
++        if let Some(lane) = self.lane.take() {
++            let client = if self.client {
++                self.shared.down().writer.end()
++            } else {
++                Ok(())
++            };
++            let backend = lock(&lane.writer).end();
++            client?;
++            backend?;
++        }
++        path_timing::stamp(None);
++        Ok(())
++    }
++}
++
++impl Drop for ReadDrain<'_> {
++    fn drop(&mut self) {
++        // The caller observes normal end-of-drain errors. On an early exit the
++        // session is already closing, so a final flush failure cannot revive it.
++        let _ = self.finish();
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use horizon_protocol::connection::{Connection, Pipe};
++    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    fn pair() -> (Connection, Connection, Arc<AtomicUsize>) {
++        let (left, right) = Pipe::pair();
++        let writes = Arc::new(AtomicUsize::new(0));
++        let observed = Arc::clone(&writes);
++        right.on_ready(move || {
++            observed.fetch_add(1, Ordering::Relaxed);
++        });
++        (Connection::local(left), Connection::local(right), writes)
++    }
++
++    #[test]
++    fn a_drain_is_one_write_with_compression_encryption_and_fifo() {
++        let (mut source, mut peer, writes) = pair();
++        for connection in [&mut source, &mut peer] {
++            connection.set_compression(32);
++            connection.enable_encryption(&[7; 16]);
++        }
++        let mut writer = Writer::new(source.writer);
++        writer.begin();
++        for index in 0..128u8 {
++            let mut body = vec![index; 512];
++            body[0] = 2;
++            writer.send(&body).unwrap();
++        }
++        assert_eq!(writes.load(Ordering::Relaxed), 0);
++        writer.end().unwrap();
++        assert_eq!(writes.load(Ordering::Relaxed), 1);
++        for index in 0..128u8 {
++            assert_eq!(peer.recv().unwrap(), (2, vec![index; 511]));
++        }
++    }
++
++    #[test]
++    fn the_size_cap_flushes_without_a_timer_or_an_unbounded_queue() {
++        let (source, mut peer, writes) = pair();
++        let mut writer = Writer::new(source.writer);
++        writer.begin();
++        for _ in 0..100 {
++            writer.send(&vec![1; 1000]).unwrap();
++            assert!(writer.pending.len() <= WRITE_CAP);
++        }
++        assert!(writes.load(Ordering::Relaxed) > 0);
++        writer.end().unwrap();
++        for _ in 0..100 {
++            assert_eq!(peer.recv().unwrap(), (1, vec![1; 999]));
++        }
++    }
++
++    #[test]
++    fn an_overlapping_producer_cannot_hold_the_completed_drain() {
++        let (source, mut peer, writes) = pair();
++        let mut writer = Writer::new(source.writer);
++        writer.begin();
++        writer.begin();
++        writer.send(&[1, 2]).unwrap();
++        writer.end().unwrap();
++        assert_eq!(writes.load(Ordering::Relaxed), 1);
++        assert_eq!(peer.recv().unwrap(), (1, vec![2]));
++        writer.send(&[3, 4]).unwrap();
++        writer.end().unwrap();
++        assert_eq!(peer.recv().unwrap(), (3, vec![4]));
++    }
++
++    #[test]
++    fn a_write_failure_discards_the_buffer_and_latches_closed() {
++        let (source, peer, _) = pair();
++        let mut writer = Writer::new(source.writer);
++        writer.begin();
++        writer.send(&[1, 2]).unwrap();
++        peer.writer.shutdown();
++        assert!(writer.end().is_err());
++        assert!(writer.pending.is_empty());
++        assert!(writer.broken);
++        assert!(writer.send(&[3, 4]).is_err());
++    }
++}
+diff --git a/crates/meridian-handoff/src/lane_input.rs b/crates/meridian-handoff/src/lane_input.rs
+--- a/crates/meridian-handoff/src/lane_input.rs
++++ b/crates/meridian-handoff/src/lane_input.rs
+@@ -9,6 +9,7 @@
+ use std::{
+     collections::{BTreeMap, VecDeque},
+     sync::{Arc, Weak},
++    time::Instant,
+ };
+ 
+ const PACKETS: usize = 256;
+@@ -19,6 +20,7 @@
+ pub(crate) struct Inputs {
+     packets: VecDeque<Packet>,
+     bytes: usize,
++    stamps: VecDeque<Option<Instant>>,
+ }
+ 
+ impl Inputs {
+@@ -43,6 +45,12 @@
+         for _ in 0..count {
+             if let Some(packet) = self.packets.pop_front() {
+                 self.bytes -= packet.payload.len();
++                let began = self.stamps.pop_front().flatten();
++                crate::path_timing::record(
++                    crate::path_timing::Path::Activation,
++                    began,
++                    Instant::now(),
++                );
+             }
+         }
+     }
+@@ -52,10 +60,15 @@
+         }
+         self.bytes += packet.payload.len();
+         self.packets.push_back(packet);
++        self.stamps.push_back(crate::path_timing::current());
+         Ok(())
+     }
++    #[cfg(test)]
+     pub fn into_packets(self) -> VecDeque<Packet> {
+         self.packets
++    }
++    pub fn into_timed_packets(self) -> impl Iterator<Item = (Packet, Option<Instant>)> {
++        self.packets.into_iter().zip(self.stamps)
+     }
+ }
+ 
+@@ -312,7 +325,7 @@
+         let (_reader, writer) = connection.split();
+         Arc::new(Lane {
+             id,
+-            writer: Mutex::new(writer),
++            writer: Mutex::new(crate::drain::Writer::new(writer)),
+             closer,
+             target: None,
+         })
+diff --git a/crates/meridian-handoff/src/lib.rs b/crates/meridian-handoff/src/lib.rs
+--- a/crates/meridian-handoff/src/lib.rs
++++ b/crates/meridian-handoff/src/lib.rs
+@@ -139,6 +139,9 @@
+ mod cluster_sky;
+ mod configure;
+ mod control;
++mod drain;
++mod path_timing;
++pub use path_timing::path_timing;
+ mod lane_input;
+ mod prepare;
+ mod reason;
+diff --git a/crates/meridian-handoff/src/path_timing.rs b/crates/meridian-handoff/src/path_timing.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/path_timing.rs
+@@ -0,0 +1,111 @@
++//! Optional complete write-latency histograms, including buffered and frozen inputs.
++use std::{
++    cell::Cell,
++    sync::{
++        OnceLock,
++        atomic::{AtomicU64, Ordering},
++    },
++    time::Instant,
++};
++
++const BUCKETS: usize = 10_001;
++const STEP_US: u64 = 10;
++
++#[derive(Clone, Copy)]
++pub(crate) enum Path {
++    Client = 0,
++    Backend = 1,
++    Reader = 2,
++    Activation = 3,
++}
++
++struct Histogram {
++    bins: [AtomicU64; BUCKETS],
++    maximum: AtomicU64,
++    unstamped: AtomicU64,
++}
++impl Histogram {
++    const fn new() -> Self {
++        Self {
++            bins: [const { AtomicU64::new(0) }; BUCKETS],
++            maximum: AtomicU64::new(0),
++            unstamped: AtomicU64::new(0),
++        }
++    }
++}
++static HISTOGRAMS: [Histogram; 4] = [const { Histogram::new() }; 4];
++thread_local! { static READ: Cell<Option<Instant>> = const { Cell::new(None) }; }
++
++pub(crate) fn enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var_os("E18_PATH_TIMING").is_some())
++}
++
++pub(crate) fn stamp(at: Option<Instant>) {
++    READ.set(at);
++}
++pub(crate) fn current() -> Option<Instant> {
++    READ.get()
++}
++
++pub(crate) fn record(path: Path, began: Option<Instant>, completed: Instant) {
++    if !enabled() {
++        return;
++    }
++    let histogram = &HISTOGRAMS[path as usize];
++    let Some(began) = began else {
++        histogram.unstamped.fetch_add(1, Ordering::Relaxed);
++        return;
++    };
++    let micros = completed
++        .saturating_duration_since(began)
++        .as_micros()
++        .min(u128::from(u64::MAX)) as u64;
++    let bucket = (micros / STEP_US).min((BUCKETS - 1) as u64) as usize;
++    histogram.bins[bucket].fetch_add(1, Ordering::Relaxed);
++    histogram.maximum.fetch_max(micros, Ordering::Relaxed);
++}
++
++/// Console-owned snapshot/reset. No histograms or queues grow with packet count.
++pub fn path_timing(reset: bool) -> serde_json::Value {
++    let mut output = serde_json::Map::new();
++    for (name, histogram) in [
++        "clientbound",
++        "serverbound",
++        "reader-replies",
++        "activation-ack",
++    ]
++    .into_iter()
++    .zip(&HISTOGRAMS)
++    {
++        let read = |counter: &AtomicU64| {
++            if reset {
++                counter.swap(0, Ordering::Relaxed)
++            } else {
++                counter.load(Ordering::Relaxed)
++            }
++        };
++        let bins: Vec<_> = histogram.bins.iter().map(read).collect();
++        let count: u64 = bins.iter().sum();
++        let percentile = |numerator: u64| {
++            let rank = (count * numerator).div_ceil(100);
++            let mut seen = 0;
++            for (index, value) in bins.iter().enumerate() {
++                seen += value;
++                if count > 0 && seen >= rank {
++                    return (index < BUCKETS - 1).then_some((index as u64 + 1) * STEP_US);
++                }
++            }
++            None
++        };
++        let nonzero: std::collections::BTreeMap<_, _> = bins
++            .iter()
++            .enumerate()
++            .filter_map(|(index, count)| (*count > 0).then_some((index as u64 * STEP_US, *count)))
++            .collect();
++        output.insert(name.into(), serde_json::json!({"count":count,"p50_us_upper":percentile(50),"p95_us_upper":percentile(95),"p99_us_upper":percentile(99),
++            "maximum_us":read(&histogram.maximum),"overflow_at_100ms":bins[BUCKETS-1],"unstamped_writes":read(&histogram.unstamped),"bins_us":nonzero}));
++    }
++    serde_json::json!({"enabled":enabled(),"reset":reset,"scope":"first decoded frame read in each socket read burst to completed socket write; activation inputs use activation acknowledgement",
++        "bin_width_us":STEP_US,"paths":output})
++}
+diff --git a/crates/meridian-handoff/src/prepare.rs b/crates/meridian-handoff/src/prepare.rs
+--- a/crates/meridian-handoff/src/prepare.rs
++++ b/crates/meridian-handoff/src/prepare.rs
+@@ -2,10 +2,10 @@
+ //! target view, in the client's numbering, and the proxy answers for the client
+ //! what the target asks of a joining player (keep-alives, pings, teleports, chunk
+ //! batches, the end of loading), as Horizon's held player is expected to answer.
++use crate::drain::Writer as ConnWriter;
+ use crate::session::lock;
+ use horizon_protocol::{
+     buf::{Reader, Writer, write_varint},
+-    connection::ConnWriter,
+     ids::play::{clientbound as c, serverbound as s},
+     packets::play::{self, Clientbound as C, Serverbound},
+ };
+diff --git a/crates/meridian-handoff/src/session.rs b/crates/meridian-handoff/src/session.rs
+--- a/crates/meridian-handoff/src/session.rs
++++ b/crates/meridian-handoff/src/session.rs
+@@ -37,7 +37,7 @@
+ };
+ use horizon_protocol::{
+     buf::{Reader, write_varint},
+-    connection::{Closer, ConnReader, ConnWriter, Counters},
++    connection::{Closer, ConnReader, Counters},
+     ids,
+     packets::{configuration, play},
+     text,
+@@ -193,7 +193,7 @@
+ /// What goes to the client.
+ pub(crate) struct Down {
+     pub terrain: Option<crate::terrain::Terrain>,
+-    pub writer: ConnWriter,
++    pub writer: crate::drain::Writer,
+     /// The phase the client reads packets in.
+     pub phase: Phase,
+     /// What the client holds, in the client's numbering.
+@@ -243,7 +243,7 @@
+ /// One connection to a backend.
+ pub(crate) struct Lane {
+     pub id: u64,
+-    pub writer: Mutex<ConnWriter>,
++    pub writer: Mutex<crate::drain::Writer>,
+     pub closer: Closer,
+     /// The prepare state, for a switch's target.
+     pub target: Option<Arc<Target>>,
+@@ -286,7 +286,7 @@
+         let (backend_reader, backend_writer) = backend.connection.split();
+         let lane = Arc::new(Lane {
+             id: 0,
+-            writer: Mutex::new(backend_writer),
++            writer: Mutex::new(crate::drain::Writer::new(backend_writer)),
+             closer: backend_reader.closer()?,
+             target: None,
+         });
+@@ -295,7 +295,7 @@
+             client_counters: Arc::clone(&client_reader.counters),
+             down: Mutex::new(Down {
+                 terrain: None,
+-                writer: client_writer,
++                writer: crate::drain::Writer::client(client_writer),
+                 phase: Phase::Configuration,
+                 ghost: View::ghost(),
+                 active: lane.id,
+@@ -631,7 +631,7 @@
+         .map_err(|e| End::Broken(horizon_protocol::Error::new(e.to_string())))?;
+     let lane = Arc::new(Lane {
+         id: shared.lane_id(),
+-        writer: Mutex::new(writer),
++        writer: Mutex::new(crate::drain::Writer::new(writer)),
+         closer,
+         target: None,
+     });
+@@ -954,8 +954,9 @@
+ /// client while it is the active lane, nowhere otherwise.
+ fn copy_from_backend(mut from: ConnReader, lane: &Arc<Lane>, shared: &Shared) -> End {
+     let mut body = Vec::new();
++    let mut drain = crate::drain::ReadDrain::new(shared, true);
+     loop {
+-        let (id, payload) = match from.recv() {
++        let (id, payload) = match drain.next(&mut from, || Arc::clone(lane)) {
+             Ok(packet) => packet,
+             Err(e) if e.is_end_of_stream() => return End::Closed,
+             Err(e) => return End::Broken(e),
+@@ -1024,7 +1025,13 @@
+             }
+             crate::terrain::initial(terrain, id, &payload);
+             if crate::terrain::packet(id) {
+-                // Only the stable owner readers write terrain during cluster crossings.
++                // Lazy composition takes owned columns from the actual lane.
++                // Foreign columns still come only from their static owner's reader.
++                if crate::terrain::active(shared, &mut down, Packet { id, payload }, &mut body)
++                    .is_err()
++                {
++                    return End::ClientGone;
++                }
+                 continue;
+             }
+         }
+@@ -1141,8 +1148,9 @@
+     let mut body = Vec::new();
+     let mut sending = Phase::Configuration;
+     let mut configured = false;
++    let mut drain = crate::drain::ReadDrain::new(shared, false);
+     loop {
+-        let (id, payload) = match from.recv() {
++        let (id, payload) = match drain.next(&mut from, || Arc::clone(&shared.up().lane)) {
+             Ok(packet) => packet,
+             Err(e) if e.is_end_of_stream() => return End::Closed,
+             Err(e) => return End::Broken(e),
+@@ -1275,11 +1283,23 @@
+ 
+     pub fn replay_inputs(&self) -> std::result::Result<usize, String> {
+         let mut up = self.up();
+-        let packets = up.inputs.take().unwrap_or_default().into_packets();
++        let packets: Vec<_> = up
++            .inputs
++            .take()
++            .unwrap_or_default()
++            .into_timed_packets()
++            .collect();
+         let count = packets.len();
+-        for packet in packets {
+-            send_input(&mut up, packet.id, packet.payload)?;
+-        }
++        let lane = Arc::clone(&up.lane);
++        lock(&lane.writer).begin();
++        let sent = packets.into_iter().try_for_each(|(packet, stamp)| {
++            crate::path_timing::stamp(stamp);
++            send_input(&mut up, packet.id, packet.payload)
++        });
++        crate::path_timing::stamp(None);
++        let flushed = lock(&lane.writer).end().map_err(|e| e.to_string());
++        sent?;
++        flushed?;
+         Ok(count)
+     }
+ }
+diff --git a/crates/meridian-handoff/src/switch.rs b/crates/meridian-handoff/src/switch.rs
+--- a/crates/meridian-handoff/src/switch.rs
++++ b/crates/meridian-handoff/src/switch.rs
+@@ -746,7 +746,7 @@
+     let state = Arc::new(Target::new(client_id));
+     let lane = Arc::new(Lane {
+         id: shared.lane_id(),
+-        writer: Mutex::new(writer),
++        writer: Mutex::new(crate::drain::Writer::new(writer)),
+         closer,
+         target: Some(Arc::clone(&state)),
+     });
+@@ -1160,6 +1160,7 @@
+         let mut body = Vec::new();
+         let mut bytes = 0;
+         let mut sent = true;
++        down.writer.begin();
+         for packet in packets.iter().chain(&extras) {
+             let payload = if let Some(ids) = &mut shared.up().identities {
+                 match ids.clientbound(&lane, packet.id, &packet.payload) {
+@@ -1183,6 +1184,9 @@
+             add(&mut down.flow, &body);
+             let _ = down.ghost.apply(packet);
+         }
++        if down.writer.end().is_err() {
++            sent = false;
++        }
+         #[cfg(test)]
+         if let Some((written, go)) = shared
+             .delta_gate
+diff --git a/crates/meridian-handoff/src/terrain.rs b/crates/meridian-handoff/src/terrain.rs
+--- a/crates/meridian-handoff/src/terrain.rs
++++ b/crates/meridian-handoff/src/terrain.rs
+@@ -3,7 +3,7 @@
+     TargetBackend,
+     configure::configure,
+     prepare::Target,
+-    session::{SessionHandle, add, encode},
++    session::{Down, Lane, SessionHandle, Shared, add, encode},
+ };
+ use horizon_protocol::{
+     buf::Reader, connection::Closer, ids::play::clientbound as c, packets::play,
+@@ -11,9 +11,12 @@
+ use meridian_ghost::Packet;
+ use meridian_net::{Profile, backend};
+ use std::{
+-    collections::{HashMap, hash_map::DefaultHasher},
++    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+     hash::{Hash, Hasher},
+-    sync::Mutex,
++    sync::{
++        Arc, Mutex,
++        atomic::{AtomicBool, AtomicU64, Ordering},
++    },
+     time::Duration,
+ };
+ 
+@@ -33,6 +36,8 @@
+     initial: Option<[f64; 3]>,
+     radius: i32,
+     center: Option<(i32, i32)>,
++    lazy: bool,
++    reader_columns: HashMap<usize, HashSet<(i32, i32)>>,
+ }
+ impl TerrainOwners {
+     fn owner(&self, x: i32, z: i32) -> Option<usize> {
+@@ -44,9 +49,10 @@
+     }
+ }
+ /// The manager owns the connection, closing it on session exit or setup failure.
+-pub struct TerrainReader(Closer);
++pub struct TerrainReader(Closer, Arc<AtomicBool>);
+ impl Drop for TerrainReader {
+     fn drop(&mut self) {
++        self.1.store(true, Ordering::Release);
+         self.0.close();
+     }
+ }
+@@ -102,6 +108,32 @@
+             return false;
+         };
+         let (x, z) = ((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4);
++        if terrain.lazy {
++            let Some(source) = terrain
++                .owners
++                .backends
++                .iter()
++                .position(|b| b == &down.backend)
++            else {
++                return false;
++            };
++            // The actual source lane is released after CAS. Its passive reader
++            // must already cover every still-visible source column, not merely
++            // the target's arrival ring, before that lane can disappear.
++            for dx in -terrain.radius..=terrain.radius {
++                for dz in -terrain.radius..=terrain.radius {
++                    let key = (x + dx, z + dz);
++                    if terrain.owners.owner(key.0, key.1) == Some(source)
++                        && !terrain
++                            .reader_columns
++                            .get(&source)
++                            .is_some_and(|set| set.contains(&key))
++                    {
++                        return false;
++                    }
++                }
++            }
++        }
+         (-1..=1).all(|dx| {
+             (-1..=1).all(|dz| {
+                 let key = (x + dx, z + dz);
+@@ -124,7 +156,91 @@
+             initial: None,
+             radius: 3,
+             center: None,
++            lazy: std::env::var_os("E18_TERRAIN_EAGER").is_none(),
++            reader_columns: HashMap::new(),
+         });
++    }
++    pub fn terrain_radius(&self) -> i32 {
++        self.0
++            .down()
++            .terrain
++            .as_ref()
++            .map_or(3, |terrain| terrain.radius)
++    }
++
++    /// Retire an invisible foreign view before closing its reader. Owned active
++    /// terrain remains live and must not be forgotten with its temporary reader.
++    pub fn retire_terrain_reader(
++        &self,
++        owner: usize,
++        reader: &TerrainReader,
++    ) -> Result<bool, String> {
++        let mut down = self.0.down();
++        let active = down.backend.clone();
++        let position = {
++            let up = self.0.up();
++            up.authoritative_pose
++                .map(|(_, pose)| pose)
++                .or(up.client_pose)
++                .map(|pose| pose.at)
++                .or_else(|| down.terrain.as_ref()?.initial)
++        };
++        let Some(terrain) = &mut down.terrain else {
++            return Ok(true);
++        };
++        let Some(position) = position else {
++            return Ok(false);
++        };
++        let center = (
++            (position[0].floor() as i32) >> 4,
++            (position[2].floor() as i32) >> 4,
++        );
++        let active_owner = terrain
++            .owners
++            .backends
++            .iter()
++            .position(|backend| backend == &active);
++        // Recheck the actual pose under the session locks. The manager's earlier
++        // position may already be stale. Keep one extra ring for fast movement.
++        let margin = terrain.radius + 2;
++        for dx in -margin..=margin {
++            for dz in -margin..=margin {
++                let index = terrain.owners.owner(center.0 + dx, center.1 + dz);
++                if active_owner == Some(owner) {
++                    if index.is_some() && index != active_owner {
++                        return Ok(false);
++                    }
++                } else if index == Some(owner) {
++                    return Ok(false);
++                }
++            }
++        }
++        // Stop the old producer while still holding down. It cannot repopulate
++        // columns after the retirement's Forget packets have removed them.
++        reader.1.store(true, Ordering::Release);
++        reader.0.close();
++        terrain.reader_columns.remove(&owner);
++        if terrain.owners.backends.get(owner) == Some(&active) {
++            return Ok(true);
++        }
++        let columns: Vec<_> = terrain
++            .loaded
++            .iter()
++            .filter_map(|(at, index)| (*index == owner).then_some(*at))
++            .collect();
++        let mut body = Vec::new();
++        for at in columns {
++            let terrain = down.terrain.as_mut().expect("composed terrain");
++            terrain.loaded.remove(&at);
++            terrain.signatures.remove(&at);
++            let packet = Packet::of(&play::Clientbound::ForgetLevelChunk(
++                play::ForgetLevelChunk { pos: [at.0, at.1] },
++            ));
++            encode(&mut body, packet.id, &packet.payload);
++            down.writer.send(&body).map_err(|e| e.to_string())?;
++            let _ = down.ghost.apply(&packet);
++        }
++        Ok(true)
+     }
+     /// The actual client pose, falling back to the first server placement during login.
+     pub fn terrain_position(&self) -> Option<[f64; 3]> {
+@@ -170,14 +286,16 @@
+     }
+     /// Synthetic profile for one private reader. Never use the actual player's identity.
+     pub fn terrain_profile(&self, index: usize) -> Profile {
++        static NEXT: AtomicU64 = AtomicU64::new(1);
++        let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+         let mut uuid = self.0.profile.uuid;
+         uuid[0] ^= 0xa7;
+         uuid[1] ^= index as u8;
++        for (byte, salt) in uuid[4..12].iter_mut().zip(nonce.to_be_bytes()) {
++            *byte ^= salt;
++        }
+         Profile {
+-            name: format!(
+-                "E12View{index}{:08x}",
+-                u32::from_be_bytes(uuid[12..].try_into().expect("four bytes"))
+-            ),
++            name: format!("E12View{index}{:08x}", nonce as u32),
+             uuid,
+             properties: Vec::new(),
+         }
+@@ -221,95 +339,51 @@
+             .map_err(|e| e.to_string())?;
+         let (mut reader, writer) = link.connection.split();
+         let closer = reader.closer().map_err(|e| e.to_string())?;
+-        let handle = TerrainReader(closer);
++        let intentional = Arc::new(AtomicBool::new(false));
++        let handle = TerrainReader(closer, Arc::clone(&intentional));
++        if let Some(terrain) = &mut self.0.down().terrain {
++            terrain.reader_columns.remove(&owner);
++        }
++        let lane = Arc::new(Lane {
++            id: u64::MAX,
++            writer: Mutex::new(crate::drain::Writer::observer(writer)),
++            closer: reader.closer().map_err(|e| e.to_string())?,
++            target: None,
++        });
+         let session = self.clone();
+         std::thread::Builder::new()
+             .name(format!("terrain-{owner}"))
+             .spawn(move || {
+-                let writer = Mutex::new(writer);
+                 let target = Target::terrain_reader(player_id);
+                 let mut body = Vec::new();
++                let mut drain = crate::drain::ReadDrain::new(&session.0, true);
+                 while !session.is_over() {
+-                    let Ok((id, payload)) = reader.recv() else {
++                    let Ok((id, payload)) = drain.next(&mut reader, || Arc::clone(&lane)) else {
+                         break;
+                     };
+                     // This answers lane-local flow control. It never relays an observer entity.
+-                    target.take(&writer, id, &payload);
+-                    let mut packets = Vec::new();
+-                    if id == c::CHUNKS_BIOMES {
+-                        if let Ok(play::Clientbound::ChunksBiomes(p)) =
+-                            play::Clientbound::decode(id, &payload)
+-                        {
+-                            packets.extend(p.chunks.into_iter().map(|chunk| {
+-                                (
+-                                    (chunk.pos[0], chunk.pos[1]),
+-                                    Packet::of(&play::Clientbound::ChunksBiomes(
+-                                        play::ChunksBiomes {
+-                                            chunks: vec![chunk],
+-                                        },
+-                                    )),
+-                                )
+-                            }));
+-                        }
+-                    } else if let Some(at) = column(id, &payload) {
+-                        packets.push((at, Packet { id, payload }));
++                    target.take(&lane.writer, id, &payload);
++                    let mut down = session.0.down();
++                    if intentional.load(Ordering::Acquire) {
++                        break;
+                     }
+-                    if packets.is_empty() {
+-                        continue;
+-                    }
+-                    let mut down = session.0.down();
+-                    let position = {
+-                        let up = session.0.up();
+-                        up.authoritative_pose
+-                            .map(|(_, pose)| pose)
+-                            .or(up.client_pose)
+-                            .map(|p| p.at)
+-                            .or_else(|| down.terrain.as_ref()?.initial)
+-                    };
+-                    let Some(position) = position else {
+-                        continue;
+-                    };
+-                    for (at, packet) in packets {
+-                        let Some(terrain) = &mut down.terrain else {
+-                            return;
+-                        };
+-                        if terrain.owners.owner(at.0, at.1) != Some(owner) {
+-                            continue;
+-                        }
+-                        let center = (
+-                            (position[0].floor() as i32) >> 4,
+-                            (position[2].floor() as i32) >> 4,
+-                        );
+-                        let visible =
+-                            (at.0 - center.0).abs().max((at.1 - center.1).abs()) <= terrain.radius;
+-                        if packet.id == c::FORGET_LEVEL_CHUNK {
+-                            if visible || terrain.loaded.remove(&at).is_none() {
+-                                continue;
+-                            }
+-                            terrain.signatures.remove(&at);
+-                        } else if packet.id == c::LEVEL_CHUNK_WITH_LIGHT {
+-                            let mut hash = DefaultHasher::new();
+-                            packet.payload.hash(&mut hash);
+-                            let hash = hash.finish();
+-                            if terrain.signatures.insert(at, hash) == Some(hash) {
+-                                continue;
+-                            }
+-                            terrain.loaded.insert(at, owner);
+-                        } else if !terrain.loaded.contains_key(&at) {
+-                            continue;
+-                        }
+-                        encode(&mut body, packet.id, &packet.payload);
+-                        if down.writer.send(&body).is_err() {
+-                            drop(down);
+-                            session.close();
+-                            return;
+-                        }
+-                        add(&mut down.flow, &body);
+-                        let _ = down.ghost.apply(&packet);
++                    if relay(
++                        &session.0,
++                        &mut down,
++                        owner,
++                        true,
++                        Packet { id, payload },
++                        &mut body,
++                    )
++                    .is_err()
++                    {
++                        drop(down);
++                        session.close();
++                        return;
+                     }
+                 }
+                 // A lost terrain source cannot silently leave stale foreign columns visible.
+-                if !session.is_over() {
++                if !session.is_over() && !intentional.load(Ordering::Acquire) {
+                     session.close();
+                 }
+             })
+@@ -317,10 +391,123 @@
+         Ok(handle)
+     }
+ }
++
++pub(crate) fn active(
++    shared: &Shared,
++    down: &mut Down,
++    packet: Packet,
++    body: &mut Vec<u8>,
++) -> horizon_protocol::Result<()> {
++    let Some(terrain) = &down.terrain else {
++        return Ok(());
++    };
++    if !terrain.lazy {
++        return Ok(());
++    }
++    let Some(owner) = terrain
++        .owners
++        .backends
++        .iter()
++        .position(|name| name == &down.backend)
++    else {
++        return Ok(());
++    };
++    relay(shared, down, owner, false, packet, body)
++}
++
++fn relay(
++    shared: &Shared,
++    down: &mut Down,
++    owner: usize,
++    reader: bool,
++    packet: Packet,
++    body: &mut Vec<u8>,
++) -> horizon_protocol::Result<()> {
++    let mut packets = Vec::new();
++    if packet.id == c::CHUNKS_BIOMES {
++        if let Ok(play::Clientbound::ChunksBiomes(p)) = packet.decode() {
++            packets.extend(p.chunks.into_iter().map(|chunk| {
++                (
++                    (chunk.pos[0], chunk.pos[1]),
++                    Packet::of(&play::Clientbound::ChunksBiomes(play::ChunksBiomes {
++                        chunks: vec![chunk],
++                    })),
++                )
++            }));
++        }
++    } else if let Some(at) = column(packet.id, &packet.payload) {
++        packets.push((at, packet));
++    }
++    if packets.is_empty() {
++        return Ok(());
++    }
++    let position = {
++        let up = shared.up();
++        up.authoritative_pose
++            .map(|(_, pose)| pose)
++            .or(up.client_pose)
++            .map(|p| p.at)
++            .or_else(|| down.terrain.as_ref()?.initial)
++    };
++    let Some(position) = position else {
++        return Ok(());
++    };
++    let active = down.backend.clone();
++    for (at, packet) in packets {
++        let Some(terrain) = &mut down.terrain else {
++            return Ok(());
++        };
++        if terrain.owners.owner(at.0, at.1) != Some(owner) {
++            continue;
++        }
++        if reader {
++            let columns = terrain.reader_columns.entry(owner).or_default();
++            if packet.id == c::LEVEL_CHUNK_WITH_LIGHT {
++                columns.insert(at);
++            }
++            if packet.id == c::FORGET_LEVEL_CHUNK {
++                columns.remove(&at);
++            }
++            // While active, this reader is only a prewarmed replacement for the
++            // source's terrain stream. Its entities and terrain remain hidden.
++            if terrain.lazy && terrain.owners.backends.get(owner) == Some(&active) {
++                continue;
++            }
++        }
++        let center = (
++            (position[0].floor() as i32) >> 4,
++            (position[2].floor() as i32) >> 4,
++        );
++        let visible = (at.0 - center.0).abs().max((at.1 - center.1).abs()) <= terrain.radius;
++        if packet.id == c::FORGET_LEVEL_CHUNK {
++            if visible || terrain.loaded.remove(&at).is_none() {
++                continue;
++            }
++            terrain.signatures.remove(&at);
++        } else if packet.id == c::LEVEL_CHUNK_WITH_LIGHT {
++            let mut hash = DefaultHasher::new();
++            packet.payload.hash(&mut hash);
++            let hash = hash.finish();
++            if terrain.signatures.insert(at, hash) == Some(hash) {
++                continue;
++            }
++            terrain.loaded.insert(at, owner);
++        } else if !terrain.loaded.contains_key(&at) {
++            continue;
++        }
++        encode(body, packet.id, &packet.payload);
++        down.writer.send(body)?;
++        add(&mut down.flow, body);
++        let _ = down.ghost.apply(&packet);
++    }
++    Ok(())
++}
++
+ pub(crate) fn initial(terrain: &mut Terrain, id: i32, payload: &[u8]) {
+     if id == c::RESPAWN {
+         terrain.loaded.clear();
+         terrain.signatures.clear();
++        terrain.reader_columns.clear();
+         terrain.initial = None;
+         terrain.center = None;
+         terrain.reset = true;
+diff --git a/crates/meridian-proxy/src/console.rs b/crates/meridian-proxy/src/console.rs
+--- a/crates/meridian-proxy/src/console.rs
++++ b/crates/meridian-proxy/src/console.rs
+@@ -43,6 +43,20 @@
+     pub fn builtin() -> Self {
+         let mut commands = Commands { list: Vec::new() };
+         for command in [
++            command(
++                "e18-path",
++                "e18-path [reset]",
++                "reads or resets the optional E18 packet write timing histograms",
++                |_, _, args| {
++                    if args.len() > 1 || args.first().is_some_and(|word| *word != "reset") {
++                        return Err("usage: e18-path [reset]".into());
++                    }
++                    Ok(vec![format!(
++                        "E18_PATH {}",
++                        meridian_handoff::path_timing(args == ["reset"])
++                    )])
++                },
++            ),
+             command(
+                 "help",
+                 "help [command]",
+diff --git a/crates/meridian-proxy/src/terrain.rs b/crates/meridian-proxy/src/terrain.rs
+--- a/crates/meridian-proxy/src/terrain.rs
++++ b/crates/meridian-proxy/src/terrain.rs
+@@ -1,11 +1,27 @@
+ //! Lifetimes and recenter requests for private, read-only per-tile terrain readers.
+ use meridian_config::Config;
+-use meridian_handoff::{SessionHandle, TargetBackend, TerrainOwners};
++use meridian_handoff::{SessionHandle, TargetBackend, TerrainOwners, TerrainReader};
+ use meridian_net::backend::BackendOptions;
+ use std::{
+     net::IpAddr,
+     time::{Duration, Instant},
+ };
++
++struct Live {
++    _reader: TerrainReader,
++    uuid: String,
++    center: (i32, i32),
++    refreshed: Instant,
++}
++
++fn near(position: [f64; 3], origin: [i32; 2], edge: i32, tile: [i32; 2], chunks: i32) -> bool {
++    let margin = f64::from(chunks) * 16.0;
++    [0, 1].into_iter().all(|axis| {
++        let low = i64::from(origin[axis]) + i64::from(edge) * i64::from(tile[axis]);
++        let coordinate = position[if axis == 0 { 0 } else { 2 }];
++        coordinate >= low as f64 - margin && coordinate < (low + i64::from(edge)) as f64 + margin
++    })
++}
+ 
+ pub(crate) fn start(
+     config: &Config,
+@@ -43,10 +59,9 @@
+                     player_address: address,
+                 };
+                 let timeout = Duration::from_secs(8);
+-                let mut readers = Vec::new();
+-                let mut profiles = Vec::new();
+-                let mut last_center = None;
+-                let mut refreshed = Instant::now();
++                let mut readers: Vec<Option<Live>> = (0..map.entries.len()).map(|_| None).collect();
++                let mut retry_after: Vec<Option<Instant>> = vec![None; map.entries.len()];
++                let eager = std::env::var_os("E18_TERRAIN_EAGER").is_some();
+                 while !handle.is_over() {
+                     let Some(position) = handle.terrain_position() else {
+                         std::thread::sleep(Duration::from_millis(20));
+@@ -56,19 +71,33 @@
+                         (position[0].floor() as i32) >> 4,
+                         (position[2].floor() as i32) >> 4,
+                     );
+-                    if !readers.is_empty() && handle.terrain_reset_requested() {
+-                        for (endpoint, id) in endpoints.iter().zip(&profiles) {
+-                            let reply = endpoint
+-                                .ask(&format!("player-observe-reset {id}"), timeout)
+-                                .map_err(|e| e.to_string())?;
+-                            if reply["ok"] != true {
+-                                return Err(format!("observer reset refused: {reply}"));
++                    let active = handle.backend();
++                    let radius = handle.terrain_radius();
++                    let reset = handle.terrain_reset_requested();
++                    let near_foreign = map.entries.iter().any(|tile| tile.backend != active
++                        && near(position, map.origin, map.edge, tile.index, radius+2));
++                    handle.terrain_center(position)?;
++                    for (index, tile) in map.entries.iter().enumerate() {
++                        // The own reader exists only near a wall. It is prepared
++                        // before the source lane can be released at a crossing.
++                        let margin = radius + if readers[index].is_some() { 4 } else { 2 };
++                        let wanted = eager || if tile.backend == active {
++                            near_foreign || readers[index].is_some() && map.entries.iter().any(|other|
++                                other.backend != active && near(position, map.origin, map.edge, other.index, radius+4))
++                        } else {
++                            near(position, map.origin, map.edge, tile.index, margin)
++                        };
++                        if !wanted {
++                            if let Some(live) = &readers[index]
++                                && handle.retire_terrain_reader(index, &live._reader)? {
++                                drop(readers[index].take()); // Intentional EOF never closes the real session.
+                             }
++                            continue;
+                         }
+-                        last_center = None;
+-                    }
+-                    if readers.is_empty() {
+-                        for (index, tile) in map.entries.iter().enumerate() {
++                        if readers[index].is_none() {
++                            if retry_after[index].is_some_and(|deadline| Instant::now() < deadline) {
++                                continue;
++                            }
+                             let profile = handle.terrain_profile(index);
+                             let id = horizon_protocol::crypto::uuid_string(u128::from_be_bytes(
+                                 profile.uuid,
+@@ -80,12 +109,19 @@
+                                 )
+                                 .map_err(|e| e.to_string())?;
+                             if reply["ok"] != true {
++                                if reply.to_string().contains("too many players are expected at once") {
++                                    if retry_after[index].is_none() {
++                                        crate::log::warning!("terrain admission deferred for {}", tile.backend);
++                                    }
++                                    retry_after[index] = Some(Instant::now()+Duration::from_secs(1));
++                                    continue;
++                                }
+                                 return Err(format!("observer prepare refused: {reply}"));
+                             }
+                             let backend = config
+                                 .backend(&tile.backend)
+                                 .ok_or("missing terrain backend")?;
+-                            readers.push(handle.open_terrain_reader(
++                            let reader = handle.open_terrain_reader(
+                                 TargetBackend {
+                                     name: &tile.backend,
+                                     address: &backend.address,
+@@ -93,17 +129,19 @@
+                                 },
+                                 index,
+                                 &profile,
+-                            )?);
+-                            profiles.push(id);
++                            )?;
++                            readers[index] = Some(Live { _reader: reader, uuid: id, center, refreshed: Instant::now() });
++                            retry_after[index] = None;
+                         }
+-                    }
+-                    if last_center != Some(center) || refreshed.elapsed() >= Duration::from_secs(5)
+-                    {
+-                        handle.terrain_center(position)?;
+-                        for (index,(endpoint, id)) in endpoints.iter().zip(&profiles).enumerate() {
+-                            let reply = endpoint
++                        let live = readers[index].as_mut().expect("wanted reader");
++                        if reset {
++                            let reply = endpoints[index].ask(&format!("player-observe-reset {}", live.uuid), timeout).map_err(|e| e.to_string())?;
++                            if reply["ok"] != true { return Err(format!("observer reset refused: {reply}")); }
++                        }
++                        if reset || live.center != center || live.refreshed.elapsed() >= Duration::from_secs(5) {
++                            let reply = endpoints[index]
+                                 .ask(
+-                                    &format!("player-observe {id} {}", serde_json::json!(position)),
++                                    &format!("player-observe {} {}", live.uuid, serde_json::json!(position)),
+                                     timeout,
+                                 )
+                                 .map_err(|e| e.to_string())?;
+@@ -113,9 +151,9 @@
+                             if std::env::var_os("E12_TERRAIN_TRACE").is_some() {
+                                 eprintln!("E12_TERRAIN {}",serde_json::json!({"owner":index,"position":position,"ns":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("clock").as_nanos()}));
+                             }
++                            live.center = center;
++                            live.refreshed = Instant::now();
+                         }
+-                        last_center = Some(center);
+-                        refreshed = Instant::now();
+                     }
+                     std::thread::sleep(Duration::from_millis(20));
+                 }
+@@ -130,3 +168,23 @@
+         .map_err(|e| e.to_string())?;
+     Ok(())
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::near;
++
++    #[test]
++    fn an_interior_needs_no_foreign_reader() {
++        assert!(!near([256., 2., 256.], [0, 0], 512, [-1, 0], 5));
++        assert!(!near([256., 2., 256.], [0, 0], 512, [0, -1], 5));
++        assert!(!near([256., 2., 256.], [0, 0], 512, [-1, -1], 5));
++    }
++
++    #[test]
++    fn preload_and_retirement_have_distinct_margins_at_a_corner() {
++        assert!(near([79., 2., 79.], [0, 0], 512, [-1, -1], 5));
++        assert!(!near([81., 2., 79.], [0, 0], 512, [-1, -1], 5));
++        assert!(near([100., 2., 79.], [0, 0], 512, [-1, -1], 7));
++        assert!(!near([113., 2., 79.], [0, 0], 512, [-1, -1], 7));
++    }
++}
+diff --git a/crates/meridian-proxy/src/wall_approach.rs b/crates/meridian-proxy/src/wall_approach.rs
+--- a/crates/meridian-proxy/src/wall_approach.rs
++++ b/crates/meridian-proxy/src/wall_approach.rs
+@@ -21,6 +21,18 @@
+     retry_after: Option<Instant>,
+     preparing: Option<String>,
+     crossing: Option<[f64; 3]>,
++}
++
++fn cut_deferred(why: &str) -> bool {
++    // Only a definite pre-CAS refusal is retryable. Never convert uncertain
++    // authority or activation failures into a resume on the source.
++    ((why.contains("freeze: the player's server would not give their record")
++        && why.contains("cut queue is full"))
++        || (why.contains("prepare:")
++            && why.contains("would not expect the player")
++            && (why.contains("too many players are expected at once")
++                || why.contains("already connected to this server"))))
++        && !why.contains("result unknown")
+ }
+ 
+ /// Experimental cumulative changes, fixed for the life of the proxy process.
+@@ -184,6 +196,7 @@
+                             };
+                             let abandoned = why.contains("E8 preparation abandoned:");
+                             let retry = abandoned
++                                || cut_deferred(&why)
+                                 || (why.contains("that player is dead") && !handle.is_over());
+                             warning!("wall refusal (retry {retry}): {why}");
+                             if !abandoned {
+@@ -211,3 +224,27 @@
+         }
+     })
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::cut_deferred;
++
++    #[test]
++    fn only_a_definite_cut_refusal_defers_the_crossing() {
++        assert!(cut_deferred(
++            "freeze: the player's server would not give their record (asked 3 times): {\"error\":\"cut queue is full\"}"
++        ));
++        assert!(!cut_deferred(
++            "hand over: store CAS result unknown: cut queue is full"
++        ));
++        assert!(!cut_deferred(
++            "freeze: the player's server would not give their record: connection timed out"
++        ));
++        assert!(cut_deferred(
++            "prepare: b would not expect the player: too many players are expected at once"
++        ));
++        assert!(!cut_deferred(
++            "hand over: store CAS result unknown: too many players are expected at once"
++        ));
++    }
++}
+diff --git a/crates/meridian-sidecar/src/endpoint.rs b/crates/meridian-sidecar/src/endpoint.rs
+--- a/crates/meridian-sidecar/src/endpoint.rs
++++ b/crates/meridian-sidecar/src/endpoint.rs
+@@ -5,13 +5,16 @@
+ use crate::Error;
+ use serde::Deserialize;
+ use serde_json::Value;
++use std::collections::HashMap;
+ use std::io::{BufRead, BufReader, Write};
+ use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+ use std::path::Path;
++use std::sync::atomic::{AtomicU64, Ordering};
++use std::sync::{Mutex, OnceLock};
+ use std::time::Duration;
+ 
+ /// Where the endpoint listens and the token it asks for.
+-#[derive(Clone, Debug, PartialEq, Eq)]
++#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+ pub struct Endpoint {
+     pub port: u16,
+     pub token: String,
+@@ -22,6 +25,21 @@
+     transport: String,
+     port: Option<u16>,
+     token: Option<String>,
++}
++
++// A control reply ends a request. Only fully consumed replies return a connection
++// to the pool. Failed requests are never replayed here: their effects may exist.
++type Connection = BufReader<TcpStream>;
++struct Idle {
++    generation: u64,
++    sockets: Vec<Connection>,
++}
++static CONNECTIONS: OnceLock<Mutex<HashMap<Endpoint, Idle>>> = OnceLock::new();
++const IDLE_PER_ENDPOINT: usize = 8;
++const IDLE_ENDPOINTS: usize = 64;
++
++fn connections() -> &'static Mutex<HashMap<Endpoint, Idle>> {
++    CONNECTIONS.get_or_init(|| Mutex::new(HashMap::new()))
+ }
+ 
+ impl Endpoint {
+@@ -48,23 +66,65 @@
+         }
+     }
+ 
+-    /// Sends one command and returns the endpoint's answer. Each command has a
+-    /// connection of its own, so a sidecar never holds one open while idle.
++    /// Sends one command on a pooled authenticated connection. Network IO never
++    /// holds the pool lock. An uncertain write or read is returned, not retried.
+     pub fn ask(&self, line: &str, timeout: Duration) -> Result<Value, Error> {
+-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, self.port));
+-        let mut stream = TcpStream::connect_timeout(&address, timeout)?;
+-        stream.set_read_timeout(Some(timeout))?;
+-        stream.set_write_timeout(Some(timeout))?;
+-        let mut reader = BufReader::new(stream.try_clone()?);
+-        writeln!(stream, "auth {}", self.token)?;
+-        let welcome = read_json(&mut reader)?;
+-        if welcome.get("ok") != Some(&Value::Bool(true)) {
+-            return Err(Error::Endpoint(format!(
+-                "the backend refused the sidecar's token: {welcome}"
+-            )));
+-        }
+-        writeln!(stream, "{line}")?;
+-        read_json(&mut reader)
++        let reuse = std::env::var_os("E18_CONTROL_FRESH").is_none();
++        let (idle, generation) = if reuse {
++            static NEXT: AtomicU64 = AtomicU64::new(1);
++            let mut pool = connections().lock().expect("control pool poisoned");
++            let evicted = if !pool.contains_key(self) && pool.len() >= IDLE_ENDPOINTS {
++                let old = pool.keys().next().cloned().expect("full pool");
++                pool.remove(&old)
++            } else {
++                None
++            };
++            let idle = pool.entry(self.clone()).or_insert_with(|| Idle {
++                generation: NEXT.fetch_add(1, Ordering::Relaxed),
++                sockets: Vec::new(),
++            });
++            let result = (idle.sockets.pop(), idle.generation);
++            drop(pool);
++            drop(evicted); // Closing an evicted socket is outside the pool lock.
++            result
++        } else {
++            (None, 0)
++        };
++        let mut reader = if let Some(reader) = idle {
++            reader
++        } else {
++            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, self.port));
++            let stream = TcpStream::connect_timeout(&address, timeout)?;
++            stream.set_read_timeout(Some(timeout))?;
++            stream.set_write_timeout(Some(timeout))?;
++            stream.set_nodelay(true)?;
++            let mut reader = BufReader::new(stream);
++            writeln!(reader.get_mut(), "auth {}", self.token)?;
++            let welcome = read_json(&mut reader)?;
++            if welcome.get("ok") != Some(&Value::Bool(true)) {
++                return Err(Error::Endpoint(format!(
++                    "the backend refused the sidecar's token: {welcome}"
++                )));
++            }
++            reader
++        };
++        reader.get_mut().set_read_timeout(Some(timeout))?;
++        reader.get_mut().set_write_timeout(Some(timeout))?;
++        writeln!(reader.get_mut(), "{line}")?;
++        let reply = read_json(&mut reader)?;
++        if !reuse {
++            return Ok(reply);
++        }
++        let mut pool = connections().lock().expect("control pool poisoned");
++        // Eviction or explicit retirement invalidates outstanding borrowers too.
++        // A late reply cannot recreate a retired entry and keep its server alive.
++        if let Some(idle) = pool.get_mut(self)
++            && idle.generation == generation
++            && idle.sockets.len() < IDLE_PER_ENDPOINT
++        {
++            idle.sockets.push(reader);
++        }
++        Ok(reply)
+     }
+ }
+ 
+@@ -102,6 +162,8 @@
+         let seen = Arc::new(Mutex::new(Vec::new()));
+         let (kept, wanted) = (Arc::clone(&seen), token.to_owned());
+         let thread = std::thread::spawn(move || {
++            let execution = Arc::new(Mutex::new(()));
++            let mut workers = Vec::new();
+             for stream in listener.incoming() {
+                 let Ok(mut stream) = stream else { return };
+                 let mut reader = BufReader::new(stream.try_clone().unwrap());
+@@ -110,7 +172,7 @@
+                     continue;
+                 }
+                 if first.trim() == "quit" {
+-                    return;
++                    break;
+                 }
+                 if first.trim().strip_prefix("auth ") != Some(wanted.as_str()) {
+                     let _ = writeln!(
+@@ -120,18 +182,31 @@
+                     continue;
+                 }
+                 let _ = writeln!(stream, r#"{{"ok":true}}"#);
+-                let mut line = String::new();
+-                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+-                    kept.lock().unwrap().push(line.trim().to_owned());
+-                    match answer(line.trim()) {
+-                        Some(reply) => {
+-                            let _ = writeln!(stream, "{reply}");
++                let (kept, answer, execution) = (
++                    Arc::clone(&kept),
++                    Arc::clone(&answer),
++                    Arc::clone(&execution),
++                );
++                workers.push(std::thread::spawn(move || {
++                    let mut line = String::new();
++                    while reader.read_line(&mut line).unwrap_or(0) > 0 {
++                        // Commands remain serialized, including the old timeout
++                        // test's slow first command. Idle pooled connections no
++                        // longer prevent another connection from being accepted.
++                        let _executing = execution.lock().unwrap();
++                        kept.lock().unwrap().push(line.trim().to_owned());
++                        match answer(line.trim()) {
++                            Some(reply) => {
++                                let _ = writeln!(stream, "{reply}");
++                            }
++                            None => std::thread::sleep(std::time::Duration::from_secs(1)),
+                         }
+-                        // Silent: hold the connection until the caller gives up.
+-                        None => std::thread::sleep(std::time::Duration::from_secs(1)),
++                        line.clear();
+                     }
+-                    line.clear();
+-                }
++                }));
++            }
++            for worker in workers {
++                let _ = worker.join();
+             }
+         });
+         (
+@@ -146,6 +221,8 @@
+ 
+     /// Stops a fake endpoint's thread.
+     pub fn stop(endpoint: &Endpoint, thread: JoinHandle<()>) {
++        let retired = super::connections().lock().unwrap().remove(endpoint);
++        drop(retired);
+         if let Ok(mut s) = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, endpoint.port)) {
+             let _ = writeln!(s, "quit");
+         }
+@@ -188,6 +265,10 @@
+         let answer = endpoint.ask("player-drop {}", WAIT).unwrap();
+         assert_eq!(answer, serde_json::json!({ "held": true }));
+         assert_eq!(*seen.lock().unwrap(), ["player-drop {}"]);
++        // The serial fake accepts no second connection until the first closes.
++        // A successful second command proves authenticated connection reuse.
++        assert_eq!(endpoint.ask("transfer-status", WAIT).unwrap(), answer);
++        assert_eq!(seen.lock().unwrap().len(), 2);
+         fake::stop(&endpoint, thread);
+     }
+ 
+@@ -206,14 +287,56 @@
+ 
+     #[test]
+     fn a_silent_endpoint_times_out() {
+-        let (endpoint, _, thread) = fake::start("t", Arc::new(|_| None));
++        let (endpoint, seen, thread) = fake::start("t", Arc::new(|_| None));
+         let started = std::time::Instant::now();
+         let error = endpoint
+             .ask("player-export {}", Duration::from_millis(300))
+             .unwrap_err();
+         assert!(matches!(error, Error::Timeout), "{error}");
+         assert!(started.elapsed() < Duration::from_secs(3));
+-        fake::stop(&endpoint, thread);
++        assert_eq!(
++            seen.lock().unwrap().len(),
++            1,
++            "uncertain command was not replayed"
++        );
++        fake::stop(&endpoint, thread);
++    }
++
++    #[test]
++    fn a_failed_reply_discards_the_connection_without_replay() {
++        let (endpoint, seen, thread) = fake::start(
++            "discard",
++            Arc::new(|line| Some(if line == "bad" { "not JSON" } else { "{}" }.to_owned())),
++        );
++        assert!(endpoint.ask("bad", WAIT).is_err());
++        assert_eq!(endpoint.ask("next", WAIT).unwrap(), serde_json::json!({}));
++        assert_eq!(*seen.lock().unwrap(), ["bad", "next"]);
++        fake::stop(&endpoint, thread);
++    }
++
++    #[test]
++    fn a_retired_pool_entry_cannot_be_recreated_by_a_late_borrower() {
++        let entered = Arc::new(std::sync::Barrier::new(2));
++        let resume = Arc::new(std::sync::Barrier::new(2));
++        let (arrival, release) = (Arc::clone(&entered), Arc::clone(&resume));
++        let (endpoint, _, server) = fake::start(
++            "retired",
++            Arc::new(move |_| {
++                arrival.wait();
++                release.wait();
++                Some("{}".into())
++            }),
++        );
++        let target = endpoint.clone();
++        let borrower = std::thread::spawn(move || target.ask("read", WAIT));
++        entered.wait();
++        let retired = connections().lock().unwrap().remove(&endpoint);
++        drop(retired);
++        resume.wait();
++        assert_eq!(borrower.join().unwrap().unwrap(), serde_json::json!({}));
++        let returned = connections().lock().unwrap().contains_key(&endpoint);
++        fake::stop(&endpoint, server);
++        assert!(!returned, "late return resurrected the retired pool entry");
+     }
+ 
+     #[test]
+diff --git a/crates/meridian-testkit/src/bin/e4-client.rs b/crates/meridian-testkit/src/bin/e4-client.rs
+--- a/crates/meridian-testkit/src/bin/e4-client.rs
++++ b/crates/meridian-testkit/src/bin/e4-client.rs
+@@ -70,6 +70,7 @@
+     let mut pose = [0.0; 3];
+     let mut goal: Option<(String, [f64; 2])> = None;
+     let mut reached = false;
++    let mut step = 0.28;
+     let mut container = 0;
+     let mut container_state = 0;
+     let mut next = Instant::now();
+@@ -272,6 +273,14 @@
+                         json!({"kind":"walk", "token":token, "ns":now(), "from":pose, "to":[x.parse::<f64>()?,z.parse::<f64>()?]}),
+                     );
+                 }
++                ["pace", speed] => {
++                    let speed = speed.parse::<f64>()?;
++                    if !speed.is_finite() || !(0.1..=64.0).contains(&speed) {
++                        return Err("pace must be 0.1 through 64 blocks per second".into());
++                    }
++                    step = speed * 0.05;
++                    emit(json!({"kind":"pace", "speed":speed,"ns":now()}));
++                }
+                 ["snapshot", token] => {
+                     emit(json!({"kind":"snapshot", "token":token, "ns":now(), "pos":pose}))
+                 }
+@@ -285,13 +294,13 @@
+                 let dz = destination[1] - pose[2];
+                 let length = dx.hypot(dz);
+                 let scale = if length > 0.0 {
+-                    (0.28 / length).min(1.0)
++                    (step / length).min(1.0)
+                 } else {
+                     0.0
+                 };
+                 pose[0] += dx * scale;
+                 pose[2] += dz * scale;
+-                if length <= 0.28 && !reached {
++                if length <= step && !reached {
+                     reached = true;
+                     emit(
+                         json!({"kind":"reached", "token":goal.as_ref().unwrap().0, "ns":now(), "pos":pose}),

@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Bounded E18-only quiet window for final release CPU and latency rows."""
+import argparse
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+import signal
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT/'docs/experiments/data/E18'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--bins', type=Path, required=True)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--mode', choices=['cpu', 'witness', 'all', 'diagnostic50'], default='all')
+    parser.add_argument('--max-minutes', type=float, default=30)
+    args = parser.parse_args()
+    if not 1 <= args.max_minutes <= 30:
+        raise SystemExit('quiet window must be between one and thirty minutes')
+    request = ROOT/'.local/quiet-request'
+    acknowledgements = [ROOT/'.local/quiet-ack-E13', ROOT/'.local/quiet-ack-E17']
+    if request.exists() or any(path.exists() for path in acknowledgements):
+        raise SystemExit('existing quiet request or stale acknowledgement; not overwriting')
+    identity = json.dumps(dict(owner='E18', name=args.name, pid=os.getpid(),
+        time=datetime.now(timezone.utc).isoformat()))+'\n'
+    with request.open('x') as stream:
+        stream.write(identity)
+    began = time.monotonic()
+    deadline = began+args.max_minutes*60
+    metadata = dict(request=json.loads(identity), status='waiting', commands=[], load_start=os.getloadavg())
+    def save():
+        (DATA/(args.name+'-quiet.json')).write_text(json.dumps(metadata, indent=2)+'\n')
+    try:
+        next_notice = 0
+        while not all(path.exists() for path in acknowledgements) or os.getloadavg()[0] > 4:
+            now = time.monotonic()
+            if now >= deadline:
+                raise TimeoutError('30-minute quiet-window deadline reached while waiting')
+            if request.read_text() != identity:
+                raise RuntimeError('quiet request changed')
+            if now >= next_notice:
+                print(json.dumps(dict(waiting=True, acks={path.name:path.exists() for path in acknowledgements}, load=os.getloadavg())), flush=True)
+                next_notice = now+30
+            time.sleep(1)
+        metadata.update(status='running', wait_seconds=time.monotonic()-began,
+            acknowledgements={path.name:path.read_text() for path in acknowledgements}, load_ready=os.getloadavg())
+        save()
+        cells = []
+        if args.mode == 'diagnostic50':
+            cells.append((args.name+'-direct-50', 50, ['--eager-readers', '--writes-direct', '--process-sample']))
+        if args.mode in ['cpu', 'all']:
+            for label, switches in [('direct', ['--eager-readers', '--writes-direct']),
+                ('coalesced', ['--eager-readers']), ('lazy', [])]:
+                for bots in [50, 200]:
+                    cells.append((f'{args.name}-{label}-{bots}', bots, switches))
+        if args.mode in ['witness', 'all']:
+            for label, switches in [('coalesced', ['--eager-readers']), ('lazy', [])]:
+                for bots in [50, 200]:
+                    cells.append((f'{args.name}-{label}-{bots}-witness', bots,
+                        switches+['--observe', '--witnesses', '8', '--seed', '18']))
+        for name, bots, switches in cells:
+            remaining = deadline-time.monotonic()
+            if remaining < 150:
+                raise TimeoutError('insufficient quiet-window time for another complete cell')
+            command = [sys.executable, '-B', str(ROOT/'scripts/e18-proxy'),
+                '--bins', str(args.bins), '--bots', str(bots), '--seconds', '30', '--settle', '30',
+                '--name', name, '--proxy-profile', 'release', '--tile-profile', 'release',
+                '--quiet-marker', str(request), '--timing', *switches]
+            command += ['--server-cores', '4', '--bot-cores', '1']
+            print('E18 quiet cell '+name, flush=True)
+            start = time.monotonic()
+            process = subprocess.Popen(command, cwd=ROOT, start_new_session=True)
+            try:
+                code = process.wait(timeout=remaining-30)
+            except subprocess.TimeoutExpired:
+                process.send_signal(signal.SIGINT)
+                try:
+                    process.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    # Only this run's verified descendants. Game processes have
+                    # separate sessions, so killing only the Python group leaks them.
+                    records = [line.split(None, 2) for line in subprocess.check_output(['ps','-axo','pid=,ppid=,command='], text=True).splitlines()]
+                    children = {process.pid}
+                    while True:
+                        found = {int(pid) for pid, parent, _ in records if int(parent) in children}
+                        if found.issubset(children): break
+                        children.update(found)
+                    for target in children:
+                        try: os.kill(target, signal.SIGKILL)
+                        except ProcessLookupError: pass
+                    process.wait(timeout=5)
+                raise TimeoutError('cell reached reserved quiet-window cleanup deadline')
+            metadata['commands'].append(dict(name=name, command=[word.replace(str(ROOT), '$REPO') for word in command],
+                exit=code, seconds=time.monotonic()-start))
+            save()
+            if code:
+                raise RuntimeError('quiet cell failed: '+name)
+        metadata['status'] = 'complete'
+    except BaseException as error:
+        metadata.update(status='failed', error=str(error))
+        raise
+    finally:
+        if request.exists() and request.read_text() == identity:
+            request.unlink()
+            for path in acknowledgements: path.unlink(missing_ok=True)
+        metadata.update(seconds=time.monotonic()-began, load_end=os.getloadavg())
+        save()
+
+
+if __name__ == '__main__':
+    main()

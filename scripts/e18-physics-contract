@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Add an honest E18 candidate contract for the read-only E14 snapshot validator."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+
+ROOT=Path(__file__).resolve().parent.parent
+REQUIRED=['horizon-client','meridian','meridian-sidecar','e4-client','goliath-store']
+
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('snapshot',type=Path);args=parser.parse_args()
+    folder=args.snapshot.resolve()
+    if not folder.is_relative_to(ROOT/'.local/bin/meridian-e18'):raise SystemExit('only an E18 retained candidate')
+    candidate=json.loads((folder/'candidate.json').read_text())
+    for name in REQUIRED:
+        if sha(folder/name)!=candidate['binaries'][name]:raise SystemExit('candidate executable changed: '+name)
+    paths=[folder/name for name in ['FINAL.json','manifest.json','cluster-launcher.py','READY']]
+    if any(path.exists() for path in paths):raise SystemExit('physics contract already exists')
+    launcher=ROOT/'scripts/goliath-cluster';shutil.copy2(launcher,folder/'cluster-launcher.py')
+    records={name:sha(folder/name) for name in REQUIRED}
+    final=dict(schema_version=1,kind='E18-derived-release-candidate-not-M4-acceptance',
+        base_e12_final_sha256=candidate['final_sha256'],candidate_sha256=sha(folder/'candidate.json'),
+        projects=candidate['projects'],measurement_patches=candidate.get('measurement_patches'),
+        binaries={name:dict(path=str((folder/name).relative_to(ROOT)),sha256=digest) for name,digest in records.items()},
+        store_binary_sha256=records['goliath-store'],
+        launcher=dict(path='cluster-launcher.py',sha256=sha(launcher),leased_marker='LEASES'),
+        validation=dict(release_gates='passed',native_M2='pending',capacity='unverified'))
+    (folder/'FINAL.json').write_text(json.dumps(final,indent=2)+'\n');(folder/'manifest.json').write_text(json.dumps(records,indent=2)+'\n')
+    (folder/'READY').write_text('E18 derived release candidate. Release gates passed; native M2 and capacity are verified separately.\n')
+    print(json.dumps(dict(candidate=str(folder.relative_to(ROOT)),final_sha256=sha(folder/'FINAL.json'),launcher_sha256=sha(launcher)),indent=2))
+
+
+if __name__=='__main__':main()

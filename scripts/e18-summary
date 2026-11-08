@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Produce compact E18 rows, retaining invalid runs and conservative witness tails."""
+import argparse
+import json
+import math
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT/'docs/experiments/data/E18'
+
+
+def upper_witness_p95(latency):
+    # Put unmatched frontend packets at infinity. Never trim them away to pass.
+    rank = math.ceil(latency.get('front_packets', 0)*.95)
+    if not rank or latency.get('matched', 0) < rank:
+        return None
+    total = 0
+    for micros, count in sorted((int(key), value) for key, value in latency.get('histogram_us', {}).items()):
+        total += count
+        if total >= rank:
+            return micros/1000
+    return None
+
+
+def row(path):
+    data = json.loads(path.read_text())
+    samples = data.get('samples', [])
+    if data.get('kind') != 'E17-proxy-pilot': return None
+    output = dict(name=path.stem, status=data.get('status'), requested=data['bots'],
+        eligible=data.get('cpu_latency_acceptance_eligible', False),
+        max_host_load=data.get('max_host_load'), error=data.get('error'),
+        budget=data.get('cpu_budgets', {}))
+    if len(samples) > 1:
+        first, last = samples[0], samples[-1]
+        duration = last['at']-first['at']
+        output.update(seconds=duration, online_min=min(sample['bots'].get('online', 0) for sample in samples),
+            cores=(last['proxy']['cpu_s']-first['proxy']['cpu_s'])/duration,
+            threads_max=max(sample['proxy']['threads'] for sample in samples),
+            rss_mb_max=max(sample['proxy']['rss_mb'] for sample in samples),
+            bot_late=any(sample['bots'].get('falling_behind') for sample in samples),
+            tile_tps=data.get('tile_tps'))
+        for key in ['unix_syscalls', 'context_switches']:
+            if key in last['proxy']:
+                output[key+'_per_s']=(last['proxy'][key]-first['proxy'][key])/duration
+        output['cores_per_player']=output['cores']/data['bots']
+        output['threads_increment_per_player']=(output['threads_max']-data['idle_proxy']['threads'])/data['bots']
+    timing = data.get('internal_and_witness_timing', {})
+    output['latency_window_limiter']=timing.get('window_limiter', {})
+    output['latency_includes_sigstop']=any(value.get('stop_wall_s', 0)>0 for value in output['latency_window_limiter'].values())
+    output['internal_paths']={name:{key:value.get(key) for key in ['count','p95_us_upper','maximum_us','overflow_at_100ms','unstamped_writes']}
+        for name,value in timing.get('histogram', {}).get('paths', {}).items()}
+    if data.get('packet_latency'):
+        latency=data['packet_latency']
+        output.update(witness_valid=timing.get('valid'), witness_p95_ms=latency['p95_ms'],
+            witness_conservative_p95_ms=upper_witness_p95(latency),
+            witness_matched=latency['matched'], witness_front=latency['front_packets'],
+            observer_cores=data.get('observer_cpu_cores'), observer_errors=latency['errors'])
+    return output
+
+
+if __name__ == '__main__':
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('prefix')
+    args=parser.parse_args()
+    rows=[value for path in sorted(DATA.glob(args.prefix+'*.json')) if (value:=row(path)) is not None]
+    (DATA/(args.prefix+'-summary.json')).write_text(json.dumps(rows,indent=2)+'\n')
+    print(json.dumps(rows,indent=2))

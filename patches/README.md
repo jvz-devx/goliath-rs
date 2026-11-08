@@ -154,3 +154,52 @@ default E10 evidence. Keep the marker when making a leased binary snapshot.
 and checks exact working-source byte equality, including the separate lease
 delta. E12's report and permanent packet checks are in
 `docs/experiments/E12-m2.md`. No E12 patch has been committed or sent upstream.
+
+- `meridian-05-proxy-cost.patch`: E18 after the immutable E12 Meridian stack,
+  ending at `meridian-04-m2.patch`, on
+  `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`. Pools authenticated Horizon
+  control connections without replaying uncertain commands. Definite full-cut-
+  queue refusals defer wall crossings with backoff. Adds bounded read-drain
+  write coalescing without a timer. `E18_CONTROL_FRESH=1` and
+  `E18_WRITES_DIRECT=1` select transport ablations. Store authority and leases
+  are unchanged. `python3 -B scripts/e18-patch` verifies the frozen parent
+  patch hashes, clean application and complete source byte equality. This patch
+  is still under test, not an M2 or M4 acceptance claim. See
+  `docs/experiments/E18-proxy-cost.md`.
+
+- `horizon-09-flat-light.patch`: E18's local patch for an upstream flat-world
+  light-view retry loop at `fc2868b2b26d56ec76e17414909fe58a3b87bb92`.
+  `FlatTerrain` already stores a full `Chunk` as its proto. It now provides a
+  cloned read-only light view, so normal lighting can finish instead of repeatedly
+  receiving `None`. No pacing, condvar, lease or ownership rule changes.
+  Apply this exact patch to both the W1-equivalent plain stack and FINAL tile
+  stack before comparing capacity. The old 325-bot baseline and 975-bot target
+  remain provisional until E17 repeats its staircase with this patch.
+  A resource-free unit test covers the 3 by 3 views and COW immutability. The
+  `flat_light` streaming regression requires prepared resources through
+  `HORIZON_TEST_RESOURCES` or the standard local resource directory; it never
+  silently skips missing resources. Native release red/green builds are recorded
+  by `scripts/e18-flat-build`. Patch application and exact source equality are in
+  `docs/experiments/data/E18/flat09-patch-proof.json`. This is an upstream issue
+  patched locally. Nothing has been sent upstream or to GitHub.
+
+- `meridian-06-io-pool.patch`: E18's experimental event-loop delta after
+  frozen patch 05. The runtime-free `meridian-net::io_pool` transport gives the
+  application caller-owned readiness drivers, bounded per-connection FIFO
+  output, actual-write completion callbacks and nonblocking partial-frame IO.
+  Mio 1.2.4 supplies portable readiness notifications. No Horizon, store,
+  authority or lease code changes. Four caller-owned IO drivers share all of a
+  session's sockets; four bounded workers isolate command hooks. Pending input
+  and output are bounded, and graceful closes wait for queued output. Per-player
+  management/supervisor threads remain. Scoped strict release gates pass,
+  including encrypted/compressed loopback forwarding, command isolation and
+  routing-gate replay. The separate `reactor-1` candidate passed E10's 1,000
+  crossings and item/restart fixtures, E12's terrain, border and live-state
+  regressions, and the unchanged real-physics checker over 112 crossings.
+  One physics timing window remains unresolved and is retained. At 975 players
+  under the shared four-core cap it used 1.495 proxy cores and 1,992 threads,
+  but failed capacity at 7.23 to 7.49 tile TPS and internal clientbound P95
+  20.30 ms with limiter stops. This is not an M4 acceptance or production
+  release. Full evidence and residual risks are in `docs/experiments/E18-proxy-cost.md`.
+  `python3 -B scripts/e18-patch --event-loop` verifies the frozen stack including
+  patch 05, clean application and every source byte without rewriting patch 05.

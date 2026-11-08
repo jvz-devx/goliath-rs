@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""E18's binary-isolated E10/E12 correctness fixtures, without editing their owners."""
+import argparse
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import os
+import tempfile
+import time
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT/'docs/experiments/data/E18'
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['proof', 'items', 'terrain', 'borders', 'live', 'teleport', 'lifecycle'])
+    parser.add_argument('--bins', type=Path, required=True)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--crossings', type=int, default=14)
+    parser.add_argument('--edge', type=int)
+    args = parser.parse_args()
+    if (ROOT/'.local/quiet-request').exists():
+        raise SystemExit('another agent owns the quiet window')
+    if (DATA/(args.name+'.json')).exists():
+        raise SystemExit('result exists; use a distinct name')
+    adapter = load('e18_check_e17', ROOT/'scripts/e17-m4')
+    adapter.DATA = DATA
+    module = adapter.cluster_module(args.bins)
+    args.timeout = 30
+    args.materialize = False
+    args.normal = False
+    args.terrain_off = False
+    args.initial_off = False
+    args.trace_terrain = False
+    outcome = dict(action=args.action, status='running', load_start=os.getloadavg(),
+        binaries={name: adapter.sha(args.bins/name) for name in ['meridian', 'horizon-client', 'goliath-store', 'e4-client']})
+    began = time.monotonic()
+    try:
+        with tempfile.TemporaryDirectory(prefix='E18-check-', dir=ROOT/'.local/runs') as temporary:
+            instance = module.Cluster.__new__(module.Cluster)
+            try:
+                instance.__init__(Path(temporary), module.RESOURCES,
+                    args.edge or (512 if args.action in ['borders', 'teleport', 'lifecycle'] else 64))
+                log=(Path(temporary)/'proxy.log').read_text().rpartition('\n')[0]
+                outcome['io_pool_started']=[line for line in log.splitlines() if 'E18 fixed IO pool:' in line]
+                if args.action in ['proof', 'items']:
+                    getattr(module, args.action)(instance, args)
+                else:
+                    fixtures = load('e18_check_fixtures', ROOT/'scripts'/('e18_fixtures.py' if args.action == 'lifecycle' else 'e12_fixtures.py'))
+                    getattr(fixtures, args.action)(module, instance, args)
+                outcome['status'] = 'complete'
+            except BaseException:
+                capture=load('e18_check_capture',ROOT/'scripts/e18-production-slope')
+                import gzip,json
+                evidence=capture.failure_evidence(Path(temporary),instance,[],[])
+                path=DATA/(args.name+'-failure-native.json.gz')
+                import e11_support
+                path.write_bytes(gzip.compress(e11_support.sanitize(json.dumps(evidence,indent=2)).encode(),mtime=0))
+                outcome['failure_evidence']=str(path.relative_to(ROOT))
+                raise
+            finally:
+                instance.stop()
+    except BaseException as error:
+        outcome.update(status='failed', error=str(error))
+        raise
+    finally:
+        outcome.update(seconds=time.monotonic()-began, load_end=os.getloadavg())
+        module.save(args.name+'-outcome.json', outcome)
+
+
+if __name__ == '__main__':
+    main()

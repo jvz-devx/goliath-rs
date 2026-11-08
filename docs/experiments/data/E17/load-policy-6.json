@@ -1,0 +1,23 @@
+{
+  "kind": "E17-stricter-load-policy",
+  "authority": "Parent instruction relayed with E18 release-prerequisite request",
+  "start_load_1m_max": 4,
+  "performance_row_load_1m_max": 6,
+  "applies_to": ["plain", "cluster", "proxy performance"],
+  "original_raw_results_unchanged": true,
+  "void_prior_baseline_rows": [
+    {
+      "file": "docs/experiments/data/E17/plain-frontier.json",
+      "bots": 250,
+      "repeat": 1,
+      "load_1m_range": [5.28564453125, 6.775390625],
+      "reason": "Peak load exceeds the new limit of 6; original E11 classification used 8"
+    }
+  ],
+  "frontier_unchanged": {
+    "passing_step": 325,
+    "first_overload_step": 350,
+    "all_four_frontier_rows_below_load_6": true
+  },
+  "high_load_pilot_timing_rows": "Void for performance acceptance; functional and failure observations remain retained"
+}

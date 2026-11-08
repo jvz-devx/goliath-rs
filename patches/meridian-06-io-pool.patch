@@ -1,0 +1,2784 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -553,6 +553,7 @@
+  "meridian-config",
+  "meridian-hmac",
+  "meridian-testkit",
++ "mio",
+  "serde_json",
+  "ureq",
+ ]
+@@ -630,6 +631,18 @@
+ ]
+ 
+ [[package]]
++name = "mio"
++version = "1.2.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
++dependencies = [
++ "libc",
++ "log",
++ "wasi",
++ "windows-sys 0.61.2",
++]
++
++[[package]]
+ name = "nix"
+ version = "0.31.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+diff --git a/crates/meridian-handoff/src/drain.rs b/crates/meridian-handoff/src/drain.rs
+--- a/crates/meridian-handoff/src/drain.rs
++++ b/crates/meridian-handoff/src/drain.rs
+@@ -6,7 +6,13 @@
+     connection::{ConnReader, ConnWriter},
+     frame,
+ };
+-use std::{sync::Arc, time::Instant};
++use meridian_net::io_pool::Output;
++use std::{
++    io::Write,
++    net::{Shutdown, TcpStream},
++    sync::Arc,
++    time::Instant,
++};
+ 
+ const WRITE_CAP: usize = 64 * 1024;
+ 
+@@ -18,6 +24,8 @@
+     batching: bool,
+     path: Path,
+     stamps: Vec<Option<Instant>>,
++    output: Option<Output>,
++    raw: Option<TcpStream>,
+ }
+ 
+ impl Writer {
+@@ -30,6 +38,8 @@
+             batching: std::env::var_os("E18_WRITES_DIRECT").is_none(),
+             path: Path::Backend,
+             stamps: Vec::new(),
++            output: None,
++            raw: None,
+         }
+     }
+ 
+@@ -44,6 +54,26 @@
+             path: Path::Reader,
+             ..Self::new(inner)
+         }
++    }
++
++    pub(crate) fn detached(inner: ConnWriter, raw: TcpStream, path: Path) -> Self {
++        Self {
++            raw: Some(raw),
++            path,
++            ..Self::new(inner)
++        }
++    }
++
++    pub(crate) fn attach(&mut self, output: Output) {
++        self.output = Some(output);
++        self.raw = None;
++    }
++
++    pub(crate) fn pending_output(&mut self) -> Option<Output> {
++        // Cleanup must still drain an already-queued disconnect if a later
++        // producer was refused after the output entered its finishing state.
++        let _ = self.flush();
++        self.output.clone()
+     }
+ 
+     pub(crate) fn begin(&mut self) {
+@@ -64,12 +94,34 @@
+             ));
+         }
+         if !self.pending.is_empty() {
+-            if let Err(error) = self.inner.write_raw(&self.pending) {
++            let result = if let Some(output) = &self.output {
++                let stamps = std::mem::take(&mut self.stamps);
++                let path = self.path;
++                output
++                    .push(
++                        std::mem::take(&mut self.pending),
++                        Some(Box::new(move |completed| {
++                            for stamp in stamps {
++                                path_timing::record(path, stamp, completed);
++                            }
++                        })),
++                    )
++                    .map_err(horizon_protocol::Error::from)
++            } else if let Some(raw) = &mut self.raw {
++                raw.write_all(&self.pending)
++                    .map_err(horizon_protocol::Error::from)
++            } else {
++                self.inner.write_raw(&self.pending)
++            };
++            if let Err(error) = result {
+                 // A partial encrypted write is uncertain. Never replay that buffer.
+                 self.pending.clear();
+                 self.stamps.clear();
+                 self.broken = true;
+                 self.inner.shutdown();
++                if let Some(raw) = &self.raw {
++                    let _ = raw.shutdown(Shutdown::Both);
++                }
+                 return Err(error);
+             }
+             self.pending.clear();
+@@ -82,6 +134,28 @@
+     }
+ 
+     pub(crate) fn send(&mut self, body: &[u8]) -> Result<()> {
++        if self.raw.is_some() || self.output.is_some() {
++            if self.broken {
++                return Err(horizon_protocol::Error::new(
++                    "a coalesced write already failed",
++                ));
++            }
++            let Some(body) = self.inner.for_client(body)? else {
++                return Ok(());
++            };
++            let contents = frame::contents(&body, self.inner.threshold)?;
++            if self.pending.len() + contents.len() + 5 > WRITE_CAP || self.stamps.len() >= 2048 {
++                self.flush()?;
++            }
++            self.inner.frame_into(&contents, &mut self.pending);
++            if path_timing::enabled() {
++                self.stamps.push(path_timing::current());
++            }
++            if self.drains == 0 || self.pending.len() >= WRITE_CAP || !self.batching {
++                self.flush()?;
++            }
++            return Ok(());
++        }
+         if self.drains == 0 || !self.batching {
+             self.flush()?;
+             self.inner.send(body)?;
+diff --git a/crates/meridian-handoff/src/lib.rs b/crates/meridian-handoff/src/lib.rs
+--- a/crates/meridian-handoff/src/lib.rs
++++ b/crates/meridian-handoff/src/lib.rs
+@@ -148,6 +148,7 @@
+ mod session;
+ mod switch;
+ mod terrain;
++mod transport;
+ pub use terrain::{TerrainOwners, TerrainReader};
+ 
+ pub use configure::{ClientConfiguration, Digest, DigestBuilder, Summary, configure};
+diff --git a/crates/meridian-handoff/src/session.rs b/crates/meridian-handoff/src/session.rs
+--- a/crates/meridian-handoff/src/session.rs
++++ b/crates/meridian-handoff/src/session.rs
+@@ -35,6 +35,7 @@
+     prepare::{Pose, Target},
+     reason::{Notice, Reason},
+ };
++use crate::{path_timing::Path, transport::Source};
+ use horizon_protocol::{
+     buf::{Reader, write_varint},
+     connection::{Closer, ConnReader, Counters},
+@@ -43,6 +44,7 @@
+     text,
+ };
+ use meridian_ghost::{Packet, View};
++use meridian_net::io_pool::Affinity;
+ use meridian_net::{
+     Profile, Result,
+     backend::BackendLink,
+@@ -56,6 +58,7 @@
+     mpsc,
+ };
+ use std::time::{Duration, Instant};
++mod reactive;
+ 
+ /// How long the client has to acknowledge that it goes back to the configuration phase,
+ /// when the player is moved off a backend that was lost.
+@@ -108,7 +111,7 @@
+ /// A replacement waiting for the client to acknowledge.
+ struct Pending {
+     lane: Arc<Lane>,
+-    reader: ConnReader,
++    reader: Source,
+     backend: String,
+     notice: Option<Notice>,
+     keep: Option<Box<dyn std::any::Any + Send>>,
+@@ -120,20 +123,38 @@
+ /// thread.
+ pub struct Session {
+     shared: Arc<Shared>,
+-    client_reader: ConnReader,
+-    first: (Arc<Lane>, ConnReader),
++    client_reader: Source,
++    first: (Arc<Lane>, Source),
+     /// Kept here and then by the thread that reads the client, never in [`Shared`]: a hook
+     /// may hold a [`SessionHandle`], which would then keep the session alive for good.
+     commands: Option<Arc<CommandHook>>,
+     positions: Option<Arc<dyn Fn([f64; 3]) + Send + Sync>>,
+ }
+ 
++/// Also runs on an admission/spawn error before the session's event loop starts.
++struct FinishSession(Arc<Shared>);
++impl Drop for FinishSession {
++    fn drop(&mut self) {
++        self.0.client_gone.store(true, Ordering::SeqCst);
++        self.0.ended.store(true, Ordering::SeqCst);
++        self.0.client_closer.close();
++        if !self.0.switching.load(Ordering::SeqCst) {
++            self.0.up().lane.closer.close();
++        }
++        if let Some(pending) = lock(&self.0.pending).take() {
++            pending.lane.closer.close();
++        }
++        *lock(&self.0.events) = None;
++    }
++}
++
+ /// Switches a session to another backend (`crate::switch`), or ends it, from another
+ /// thread. It can be cloned and kept after the session is over.
+ #[derive(Clone)]
+ pub struct SessionHandle(pub(crate) Arc<Shared>);
+ 
+ pub(crate) struct Shared {
++    pub io: Option<Affinity>,
+     pub profile: Profile,
+     client_counters: Arc<Counters>,
+     down: Mutex<Down>,
+@@ -281,21 +302,33 @@
+         backend: BackendLink,
+         name: &str,
+     ) -> Result<(Session, SessionHandle)> {
+-        let (client_reader, client_writer) = client.connection.split();
+-        let client_closer = client_reader.closer()?;
+-        let (backend_reader, backend_writer) = backend.connection.split();
++        Self::new_with_io(client, backend, name, None)
++    }
++
++    pub fn new_with_io(
++        client: ClientSession,
++        backend: BackendLink,
++        name: &str,
++        io: Option<Affinity>,
++    ) -> Result<(Session, SessionHandle)> {
++        let client_counters = Arc::clone(&client.connection.reader.counters);
++        let (client_reader, client_writer, client_closer) =
++            crate::transport::split(client.connection, io.is_some(), Path::Client)?;
++        let (backend_reader, backend_writer, backend_closer) =
++            crate::transport::split(backend.connection, io.is_some(), Path::Backend)?;
+         let lane = Arc::new(Lane {
+             id: 0,
+-            writer: Mutex::new(crate::drain::Writer::new(backend_writer)),
+-            closer: backend_reader.closer()?,
++            writer: Mutex::new(backend_writer),
++            closer: backend_closer,
+             target: None,
+         });
+         let shared = Arc::new(Shared {
++            io,
+             profile: client.profile,
+-            client_counters: Arc::clone(&client_reader.counters),
++            client_counters,
+             down: Mutex::new(Down {
+                 terrain: None,
+-                writer: crate::drain::Writer::client(client_writer),
++                writer: client_writer,
+                 phase: Phase::Configuration,
+                 ghost: View::ghost(),
+                 active: lane.id,
+@@ -394,6 +427,7 @@
+             commands,
+             positions,
+         } = self;
++        let _finish = FinishSession(Arc::clone(&shared));
+         shared
+             .fallback_kick
+             .store(fallback.on_kick, Ordering::SeqCst);
+@@ -402,19 +436,27 @@
+             .store(fallback.on_crash, Ordering::SeqCst);
+         let (events, ended) = mpsc::channel();
+         *lock(&shared.events) = Some(events.clone());
+-        let to_backend = {
+-            let shared = Arc::clone(&shared);
+-            std::thread::Builder::new()
+-                .name("session-to-backend".to_owned())
+-                .spawn(move || {
+-                    let end = copy_to_backend(
+-                        client_reader,
+-                        &shared,
+-                        commands.as_deref(),
+-                        positions.as_deref(),
+-                    );
+-                    let _ = events.send(Event::Client(end));
+-                })?
++        let to_backend = match client_reader {
++            Source::Blocking(client_reader) => {
++                let shared = Arc::clone(&shared);
++                Some(
++                    std::thread::Builder::new()
++                        .name("session-to-backend".to_owned())
++                        .spawn(move || {
++                            let end = copy_to_backend(
++                                client_reader,
++                                &shared,
++                                commands.as_deref(),
++                                positions.as_deref(),
++                            );
++                            let _ = events.send(Event::Client(end));
++                        })?,
++                )
++            }
++            Source::Ready(stream, reader) => {
++                reactive::client(&shared, stream, reader, events, commands, positions)?;
++                None
++            }
+         };
+         spawn_lane(&shared, lane, backend_reader)?;
+         let mut first = None;
+@@ -498,6 +540,11 @@
+         }
+         *lock(&shared.events) = None;
+         shared.client_gone.store(true, Ordering::SeqCst);
++        let output = shared.down().writer.pending_output();
++        if let Some(output) = output {
++            // Never hold the down lock while a driver needs it to make progress.
++            let _ = output.wait_empty(Duration::from_secs(2));
++        }
+         shared.client_closer.close();
+         shared.ended.store(true, Ordering::SeqCst);
+         // A replacement the client never took.
+@@ -508,7 +555,9 @@
+         if !shared.switching.load(Ordering::SeqCst) {
+             shared.up().lane.closer.close();
+         }
+-        let _ = to_backend.join();
++        if let Some(to_backend) = to_backend {
++            let _ = to_backend.join();
++        }
+         let report = Report {
+             to_client: shared.down().flow,
+             to_backend: shared.up().flow,
+@@ -625,13 +674,12 @@
+         keep,
+         on_active,
+     } = replacement;
+-    let (reader, writer) = link.connection.split();
+-    let closer = reader
+-        .closer()
+-        .map_err(|e| End::Broken(horizon_protocol::Error::new(e.to_string())))?;
++    let (reader, writer, closer) =
++        crate::transport::split(link.connection, shared.io.is_some(), Path::Backend)
++            .map_err(|e| End::Broken(horizon_protocol::Error::new(e.to_string())))?;
+     let lane = Arc::new(Lane {
+         id: shared.lane_id(),
+-        writer: Mutex::new(crate::drain::Writer::new(writer)),
++        writer: Mutex::new(writer),
+         closer,
+         target: None,
+     });
+@@ -805,15 +853,21 @@
+     /// then closes it.
+     pub fn disconnect(&self, reason: configuration::Disconnect) {
+         self.0.closing.store(true, Ordering::SeqCst);
+-        {
++        let output = {
+             let mut down = self.0.down();
+             let body = match down.phase {
+                 Phase::Configuration => configuration::Clientbound::Disconnect(reason).encode(),
+                 Phase::Play => play::Clientbound::Disconnect(reason).encode(),
+             };
+             let _ = down.writer.send(&body);
+-        }
+-        self.close();
++            down.writer.pending_output()
++        };
++        if let Some(output) = output {
++            let _ = output.finish();
++            self.0.up().lane.closer.close();
++        } else {
++            self.close();
++        }
+     }
+ 
+     /// Closes the session without a word.
+@@ -838,12 +892,19 @@
+ pub(crate) struct Routing {
+     shut: Mutex<bool>,
+     opened: Condvar,
++    ready: Mutex<Option<meridian_net::io_pool::Output>>,
+ }
+ 
+ /// Opens the [`Routing`] again when it goes out of scope, however the switch ends.
+ pub(crate) struct Shut<'a>(&'a Routing);
+ 
+ impl Routing {
++    fn follow(&self, output: meridian_net::io_pool::Output) {
++        *lock(&self.ready) = Some(output);
++    }
++    fn is_shut(&self) -> bool {
++        *lock(&self.shut)
++    }
+     /// Shuts the routing until the returned guard is dropped.
+     pub(crate) fn shut(&self) -> Shut<'_> {
+         *lock(&self.shut) = true;
+@@ -875,6 +936,9 @@
+     fn drop(&mut self) {
+         *lock(&self.0.shut) = false;
+         self.0.opened.notify_all();
++        if let Some(output) = lock(&self.0.ready).as_ref() {
++            let _ = output.resume();
++        }
+     }
+ }
+ 
+@@ -924,30 +988,59 @@
+ }
+ 
+ /// Starts the thread that reads a lane.
+-pub(crate) fn spawn_lane(shared: &Arc<Shared>, lane: Arc<Lane>, reader: ConnReader) -> Result<()> {
++pub(crate) fn spawn_lane(shared: &Arc<Shared>, lane: Arc<Lane>, reader: Source) -> Result<()> {
++    let reader = match reader {
++        Source::Ready(stream, reader) => return reactive::backend(shared, lane, stream, reader),
++        Source::Blocking(reader) => reader,
++    };
+     let events = lock(&shared.events).clone();
+     let shared = Arc::clone(shared);
+     std::thread::Builder::new()
+         .name(format!("session-lane-{}", lane.id))
+         .spawn(move || {
+             let end = copy_from_backend(reader, &lane, &shared);
+-            // The active lane ends while a switch moves the player (their server stopped):
+-            // the switch must know before it freezes them. `down` orders this with the
+-            // switch's hand-over, which changes the active lane under it.
+-            if shared.switching.load(Ordering::SeqCst) && shared.down().active == lane.id {
+-                shared.lost_in_switch.store(true, Ordering::SeqCst);
+-            }
+-            if let Some(target) = &lane.target {
+-                target.closed(match &end {
+-                    End::Broken(e) => Some(e),
+-                    End::Closed | End::ClientGone | End::Kicked(_) => None,
+-                });
+-            }
+-            if let Some(events) = events {
+-                let _ = events.send(Event::Lane(lane.id, end));
+-            }
++            lane_ended(&shared, &lane, events, end);
+         })?;
+     Ok(())
++}
++
++fn lane_ended(shared: &Shared, lane: &Lane, events: Option<mpsc::Sender<Event>>, end: End) {
++    // The active lane ends while a switch moves the player (their server stopped):
++    // the switch must know before it freezes them. `down` orders this with the
++    // switch's hand-over, which changes the active lane under it.
++    if shared.switching.load(Ordering::SeqCst) && shared.down().active == lane.id {
++        shared.lost_in_switch.store(true, Ordering::SeqCst);
++    }
++    if let Some(target) = &lane.target {
++        target.closed(match &end {
++            End::Broken(e) => Some(e),
++            End::Closed | End::ClientGone | End::Kicked(_) => None,
++        });
++    }
++    if let Some(events) = events {
++        let _ = events.send(Event::Lane(lane.id, end));
++    }
++}
++
++pub(crate) fn spawn_terrain_io(
++    session: SessionHandle,
++    lane: Arc<Lane>,
++    source: Source,
++    owner: usize,
++    player_id: i32,
++    intentional: Arc<AtomicBool>,
++) -> Result<()> {
++    let Source::Ready(stream, reader) = source else {
++        return Err(std::io::Error::other("terrain IO source is not ready-driven").into());
++    };
++    reactive::terrain(
++        session,
++        lane,
++        (stream, reader),
++        owner,
++        player_id,
++        intentional,
++    )
+ }
+ 
+ /// Copies a lane's packets: to the switch's target view while it prepares, to the
+@@ -961,157 +1054,169 @@
+             Err(e) if e.is_end_of_stream() => return End::Closed,
+             Err(e) => return End::Broken(e),
+         };
+-        if let Some(target) = &lane.target
+-            && target.take(&lane.writer, id, &payload)
++        if let Some(end) = backend_packet(id, payload, lane, shared, &mut body) {
++            return end;
++        }
++    }
++}
++
++/// The same transition kernel serves blocking and readiness-driven readers.
++fn backend_packet(
++    id: i32,
++    payload: Vec<u8>,
++    lane: &Arc<Lane>,
++    shared: &Shared,
++    body: &mut Vec<u8>,
++) -> Option<End> {
++    if let Some(target) = &lane.target
++        && target.take(&lane.writer, id, &payload)
++    {
++        return None;
++    }
++    let mut down = shared.down();
++    if down.phase == Phase::Play
++        && down.active == lane.id
++        && down.terrain.is_some()
++        && id == ids::play::clientbound::CHUNK_BATCH_FINISHED
++    {
++        // The client sees owner readers' terrain, not this lane's batches. Complete
++        // active-lane flow control here, without registering a client acknowledgement.
++        encode(
++            body,
++            ids::play::serverbound::CHUNK_BATCH_RECEIVED,
++            &64.0f32.to_be_bytes(),
++        );
++        if lock(&lane.writer).send(body).is_err() {
++            return Some(End::Closed);
++        }
++        return None;
++    }
++    // Retired lanes may still owe a block prediction acknowledgement.
++    // Do this before the active-lane filter, but translate only ack packets.
++    let payload = if down.phase == Phase::Play
++        && (down.active == lane.id || id == ids::play::clientbound::BLOCK_CHANGED_ACK)
++        && let Some(identities) = &mut shared.up().identities
++    {
++        match identities.clientbound(lane, id, &payload) {
++            Ok(Some(payload)) => payload,
++            Ok(None) => return None,
++            Err(why) => return Some(End::Broken(horizon_protocol::Error::new(why))),
++        }
++    } else {
++        payload
++    };
++    if id == ids::play::clientbound::BLOCK_CHANGED_ACK
++        && down.active != lane.id
++        && shared.up().identities.is_some()
++    {
++        encode(body, id, &payload);
++        if down.writer.send(body).is_err() {
++            return Some(End::ClientGone);
++        }
++        return None;
++    }
++    if down.active != lane.id {
++        return None;
++    }
++    if down.phase == Phase::Play
++        && let Some(terrain) = &mut down.terrain
++    {
++        if id == ids::play::clientbound::PLAYER_POSITION
++            && let Ok(play::Clientbound::PlayerPosition(position)) =
++                play::Clientbound::decode(id, &payload)
+         {
+-            continue;
+-        }
+-        let mut down = shared.down();
+-        if down.phase == Phase::Play
+-            && down.active == lane.id
+-            && down.terrain.is_some()
+-            && id == ids::play::clientbound::CHUNK_BATCH_FINISHED
+-        {
+-            // The client sees owner readers' terrain, not this lane's batches. Complete
+-            // active-lane flow control here, without registering a client acknowledgement.
+-            encode(
+-                &mut body,
+-                ids::play::serverbound::CHUNK_BATCH_RECEIVED,
+-                &64.0f32.to_be_bytes(),
+-            );
+-            if lock(&lane.writer).send(&body).is_err() {
+-                return End::Closed;
+-            }
+-            continue;
+-        }
+-        // Retired lanes may still owe a block prediction acknowledgement.
+-        // Do this before the active-lane filter, but translate only ack packets.
+-        let payload = if down.phase == Phase::Play
+-            && (down.active == lane.id || id == ids::play::clientbound::BLOCK_CHANGED_ACK)
+-            && let Some(identities) = &mut shared.up().identities
+-        {
+-            match identities.clientbound(lane, id, &payload) {
+-                Ok(Some(payload)) => payload,
+-                Ok(None) => continue,
+-                Err(why) => return End::Broken(horizon_protocol::Error::new(why)),
+-            }
+-        } else {
+-            payload
+-        };
+-        if id == ids::play::clientbound::BLOCK_CHANGED_ACK
+-            && down.active != lane.id
+-            && shared.up().identities.is_some()
+-        {
+-            encode(&mut body, id, &payload);
+-            if down.writer.send(&body).is_err() {
+-                return End::ClientGone;
+-            }
+-            continue;
+-        }
+-        if down.active != lane.id {
+-            continue;
+-        }
+-        if down.phase == Phase::Play
+-            && let Some(terrain) = &mut down.terrain
+-        {
++            let mut up = shared.up();
++            let mut pose = up.client_pose.unwrap_or_default();
++            pose.placed(&position);
++            up.authoritative_pose = Some((position.teleport, pose));
++        }
++        crate::terrain::initial(terrain, id, &payload);
++        if crate::terrain::packet(id) {
++            // Lazy composition takes owned columns from the actual lane.
++            // Foreign columns still come only from their static owner's reader.
++            if crate::terrain::active(shared, &mut down, Packet { id, payload }, body).is_err() {
++                return Some(End::ClientGone);
++            }
++            return None;
++        }
++    }
++    // The backend disconnects the player: with the fallback on, the player is moved
++    // instead, and is not shown the disconnect. During a switch too: a server that
++    // stops at once kicks a player it is being asked to let go, and the session waits
++    // for the switch before it moves them.
++    if down.phase == Phase::Play
++        && id == ids::play::clientbound::DISCONNECT
++        && shared.fallback_kick.load(Ordering::SeqCst)
++        && !shared.closing.load(Ordering::SeqCst)
++        && !shared.client_gone.load(Ordering::SeqCst)
++        && let Ok(play::Clientbound::Disconnect(d)) = play::Clientbound::decode(id, &payload)
++    {
++        return Some(End::Kicked(Reason::of(&d)));
++    }
++    if id == ids::play::clientbound::DISCONNECT && down.phase == Phase::Play {
++        shared.disconnected.store(true, Ordering::SeqCst);
++    }
++    let payload = if down.phase == Phase::Play
++        && !down.swap.is_identity()
++        && meridian_rewrite::clientbound_has_ids(id)
++    {
++        rewrite(down.swap.clientbound(id, payload.clone()), payload)
++    } else {
++        payload
++    };
++    let payload = if down.phase == Phase::Play {
++        crate::cluster_sky::rewrite(id, payload)
++    } else {
++        payload
++    };
++    encode(body, id, &payload);
++    if down.writer.send(body).is_err() {
++        return Some(End::ClientGone);
++    }
++    add(&mut down.flow, body);
++    match down.phase {
++        Phase::Configuration => {
++            if down.config_digest.is_none() {
++                down.digest.add(id, &payload);
++            }
++            if id == ids::configuration::clientbound::FINISH_CONFIGURATION {
++                if down.config_digest.is_none() {
++                    down.config_digest = Some(down.digest.finish());
++                    down.config_summary = Some(down.digest.summary());
++                }
++                down.phase = Phase::Play;
++            }
++        }
++        Phase::Play => {
++            if id == ids::play::clientbound::START_CONFIGURATION {
++                down.phase = Phase::Configuration;
++                return None;
++            }
++            follow(&mut down, id, &payload);
++            // Why the player was moved, once the new world has begun.
++            if id == ids::play::clientbound::LOGIN
++                && let Some(notice) = down.notice.take()
++            {
++                let chat = play::Clientbound::SystemChat(notice.chat());
++                let _ = down.writer.send(&chat.encode());
++            }
++            let packet = Packet { id, payload };
++            // A packet the ghost cannot read leaves it as it was; it is noted
++            // for the log of the next switch.
++            if let Err(e) = down.ghost.apply(&packet) {
++                crate::prepare::note_unreadable(&mut down.unreadable, id, &e);
++            }
+             if id == ids::play::clientbound::PLAYER_POSITION
+-                && let Ok(play::Clientbound::PlayerPosition(position)) =
+-                    play::Clientbound::decode(id, &payload)
++                && let Ok(play::Clientbound::PlayerPosition(p)) = packet.decode()
+             {
+                 let mut up = shared.up();
+-                let mut pose = up.client_pose.unwrap_or_default();
+-                pose.placed(&position);
+-                up.authoritative_pose = Some((position.teleport, pose));
+-            }
+-            crate::terrain::initial(terrain, id, &payload);
+-            if crate::terrain::packet(id) {
+-                // Lazy composition takes owned columns from the actual lane.
+-                // Foreign columns still come only from their static owner's reader.
+-                if crate::terrain::active(shared, &mut down, Packet { id, payload }, &mut body)
+-                    .is_err()
+-                {
+-                    return End::ClientGone;
++                if up.identities.is_none() {
++                    up.teleports.sent(p.teleport);
+                 }
+-                continue;
+-            }
+-        }
+-        // The backend disconnects the player: with the fallback on, the player is moved
+-        // instead, and is not shown the disconnect. During a switch too: a server that
+-        // stops at once kicks a player it is being asked to let go, and the session waits
+-        // for the switch before it moves them.
+-        if down.phase == Phase::Play
+-            && id == ids::play::clientbound::DISCONNECT
+-            && shared.fallback_kick.load(Ordering::SeqCst)
+-            && !shared.closing.load(Ordering::SeqCst)
+-            && !shared.client_gone.load(Ordering::SeqCst)
+-            && let Ok(play::Clientbound::Disconnect(d)) = play::Clientbound::decode(id, &payload)
+-        {
+-            return End::Kicked(Reason::of(&d));
+-        }
+-        if id == ids::play::clientbound::DISCONNECT && down.phase == Phase::Play {
+-            shared.disconnected.store(true, Ordering::SeqCst);
+-        }
+-        let payload = if down.phase == Phase::Play
+-            && !down.swap.is_identity()
+-            && meridian_rewrite::clientbound_has_ids(id)
+-        {
+-            rewrite(down.swap.clientbound(id, payload.clone()), payload)
+-        } else {
+-            payload
+-        };
+-        let payload = if down.phase == Phase::Play {
+-            crate::cluster_sky::rewrite(id, payload)
+-        } else {
+-            payload
+-        };
+-        encode(&mut body, id, &payload);
+-        if down.writer.send(&body).is_err() {
+-            return End::ClientGone;
+-        }
+-        add(&mut down.flow, &body);
+-        match down.phase {
+-            Phase::Configuration => {
+-                if down.config_digest.is_none() {
+-                    down.digest.add(id, &payload);
+-                }
+-                if id == ids::configuration::clientbound::FINISH_CONFIGURATION {
+-                    if down.config_digest.is_none() {
+-                        down.config_digest = Some(down.digest.finish());
+-                        down.config_summary = Some(down.digest.summary());
+-                    }
+-                    down.phase = Phase::Play;
+-                }
+-            }
+-            Phase::Play => {
+-                if id == ids::play::clientbound::START_CONFIGURATION {
+-                    down.phase = Phase::Configuration;
+-                    continue;
+-                }
+-                follow(&mut down, id, &payload);
+-                // Why the player was moved, once the new world has begun.
+-                if id == ids::play::clientbound::LOGIN
+-                    && let Some(notice) = down.notice.take()
+-                {
+-                    let chat = play::Clientbound::SystemChat(notice.chat());
+-                    let _ = down.writer.send(&chat.encode());
+-                }
+-                let packet = Packet { id, payload };
+-                // A packet the ghost cannot read leaves it as it was; it is noted
+-                // for the log of the next switch.
+-                if let Err(e) = down.ghost.apply(&packet) {
+-                    crate::prepare::note_unreadable(&mut down.unreadable, id, &e);
+-                }
+-                if id == ids::play::clientbound::PLAYER_POSITION
+-                    && let Ok(play::Clientbound::PlayerPosition(p)) = packet.decode()
+-                {
+-                    let mut up = shared.up();
+-                    if up.identities.is_none() {
+-                        up.teleports.sent(p.teleport);
+-                    }
+-                }
+-            }
+-        }
+-    }
++            }
++        }
++    }
++    None
+ }
+ 
+ /// Notes what a switch checks from the active backend's Login and Respawn.
+@@ -1144,10 +1249,7 @@
+     commands: Option<&CommandHook>,
+     positions: Option<&(dyn Fn([f64; 3]) + Send + Sync)>,
+ ) -> End {
+-    use ids::{configuration::serverbound as cfg, play::serverbound as s};
+-    let mut body = Vec::new();
+-    let mut sending = Phase::Configuration;
+-    let mut configured = false;
++    let mut packets = ClientPackets::new();
+     let mut drain = crate::drain::ReadDrain::new(shared, false);
+     loop {
+         let (id, payload) = match drain.next(&mut from, || Arc::clone(&shared.up().lane)) {
+@@ -1155,21 +1257,52 @@
+             Err(e) if e.is_end_of_stream() => return End::Closed,
+             Err(e) => return End::Broken(e),
+         };
++        if let Some(end) = packets.packet(id, payload, shared, commands, positions) {
++            return end;
++        }
++    }
++}
++
++/// Client phase and rewrite state, independent of how the next frame arrives.
++struct ClientPackets {
++    body: Vec<u8>,
++    sending: Phase,
++    configured: bool,
++}
++
++impl ClientPackets {
++    fn new() -> Self {
++        Self {
++            body: Vec::new(),
++            sending: Phase::Configuration,
++            configured: false,
++        }
++    }
++
++    fn packet(
++        &mut self,
++        id: i32,
++        payload: Vec<u8>,
++        shared: &Arc<Shared>,
++        commands: Option<&CommandHook>,
++        positions: Option<&(dyn Fn([f64; 3]) + Send + Sync)>,
++    ) -> Option<End> {
++        use ids::{configuration::serverbound as cfg, play::serverbound as s};
+         // A player being moved off a lost backend: what they sent for it is dropped, up to
+         // their acknowledgement, which is not passed on either: the replacement is in its
+         // configuration phase already.
+-        if shared.reconnecting.load(Ordering::SeqCst) && sending == Phase::Play {
++        if shared.reconnecting.load(Ordering::SeqCst) && self.sending == Phase::Play {
+             if id == s::CONFIGURATION_ACKNOWLEDGED {
+-                sending = Phase::Configuration;
++                self.sending = Phase::Configuration;
+                 activate(shared);
+             }
+-            continue;
+-        }
+-        if sending == Phase::Play
++            return None;
++        }
++        if self.sending == Phase::Play
+             && let Some(hook) = commands
+             && answer_command(id, &payload, shared, hook)
+         {
+-            continue;
++            return None;
+         }
+         // While a switch writes the target's world to the client and changes the lane, what the
+         // client says in answer to that world must wait for the lane, or it goes to the
+@@ -1178,7 +1311,7 @@
+             shared.ended.load(Ordering::SeqCst) || shared.client_gone.load(Ordering::SeqCst)
+         });
+         let mut up = shared.up();
+-        let payload = match sending {
++        let payload = match self.sending {
+             Phase::Play => {
+                 if let Some(pose) = up
+                     .client_pose
+@@ -1200,44 +1333,44 @@
+                     && let Ok(teleport) = Reader::new(&payload).varint()
+                     && !up.teleports.forward(teleport)
+                 {
+-                    continue;
++                    return None;
+                 }
+                 payload
+             }
+             Phase::Configuration => {
+-                if !configured {
++                if !self.configured {
+                     up.client.record(id, &payload);
+                 }
+                 payload
+             }
+         };
+         let mut control = false;
+-        if sending == Phase::Play
++        if self.sending == Phase::Play
+             && let Some(identities) = &mut up.identities
+         {
+             match identities.answer(id, &payload) {
+-                Ok(Answer::Ignore) => continue,
++                Ok(Answer::Ignore) => return None,
+                 Ok(Answer::Lane(lane, answer)) => {
+-                    encode(&mut body, id, &answer);
+-                    let _ = lock(&lane.writer).send(&body);
++                    encode(&mut self.body, id, &answer);
++                    let _ = lock(&lane.writer).send(&self.body);
+                     control = true;
+                 }
+                 Ok(Answer::Input) => {}
+-                Err(why) => return End::Broken(horizon_protocol::Error::new(why)),
++                Err(why) => return Some(End::Broken(horizon_protocol::Error::new(why))),
+             }
+         }
+         if !control {
+-            if sending == Phase::Play
++            if self.sending == Phase::Play
+                 && let Some(inputs) = &mut up.inputs
+             {
+                 if let Err(why) = inputs.push(Packet { id, payload }) {
+-                    return End::Broken(horizon_protocol::Error::new(why));
++                    return Some(End::Broken(horizon_protocol::Error::new(why)));
+                 }
+             } else if let Err(why) = send_input(&mut up, id, payload) {
+-                return End::Broken(horizon_protocol::Error::new(why));
+-            }
+-        }
+-        let position = (sending == Phase::Play
++                return Some(End::Broken(horizon_protocol::Error::new(why)));
++            }
++        }
++        let position = (self.sending == Phase::Play
+             && matches!(id, s::MOVE_PLAYER_POS | s::MOVE_PLAYER_POS_ROT))
+         .then_some(up.client_pose)
+         .flatten();
+@@ -1245,14 +1378,15 @@
+         if let (Some(hook), Some(pose)) = (positions, position) {
+             hook(pose.at);
+         }
+-        sending = match (sending, id) {
++        self.sending = match (self.sending, id) {
+             (Phase::Configuration, cfg::FINISH_CONFIGURATION) => {
+-                configured = true;
++                self.configured = true;
+                 Phase::Play
+             }
+             (Phase::Play, s::CONFIGURATION_ACKNOWLEDGED) => Phase::Configuration,
+             (phase, _) => phase,
+         };
++        None
+     }
+ }
+ 
+diff --git a/crates/meridian-handoff/src/session/reactive.rs b/crates/meridian-handoff/src/session/reactive.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/session/reactive.rs
+@@ -0,0 +1,364 @@
++//! Ready-read callbacks reuse the session's packet transitions and drain boundaries.
++use super::{
++    ClientPackets, End, Event, Lane, SessionHandle, Shared, backend_packet, lane_ended, lock,
++};
++use crate::path_timing;
++use horizon_protocol::connection::ConnReader;
++use meridian_net::{Result, io_pool::Handler, relay::CommandHook};
++use std::{
++    collections::VecDeque,
++    io,
++    net::TcpStream,
++    sync::{
++        Arc,
++        atomic::{AtomicBool, Ordering},
++        mpsc,
++    },
++    time::Instant,
++};
++
++pub(super) fn client(
++    shared: &Arc<Shared>,
++    stream: TcpStream,
++    reader: ConnReader,
++    events: mpsc::Sender<Event>,
++    commands: Option<Arc<CommandHook>>,
++    positions: Option<Arc<dyn Fn([f64; 3]) + Send + Sync>>,
++) -> Result<()> {
++    shared
++        .io
++        .as_ref()
++        .expect("ready reader has an IO affinity")
++        .register_with(stream, reader, |output| {
++            shared.down().writer.attach(output.clone());
++            shared.routing.follow(output.clone());
++            Box::new(Client {
++                shared: Arc::clone(shared),
++                events,
++                commands,
++                positions,
++                packets: Arc::new(std::sync::Mutex::new(ClientPackets::new())),
++                control_end: Arc::new(std::sync::Mutex::new(None)),
++                busy: Arc::new(AtomicBool::new(false)),
++                output: output.clone(),
++                pending: VecDeque::new(),
++                pending_bytes: 0,
++                burst: Burst::new(false),
++                end: None,
++            })
++        })?;
++    Ok(())
++}
++
++pub(super) fn backend(
++    shared: &Arc<Shared>,
++    lane: Arc<Lane>,
++    stream: TcpStream,
++    reader: ConnReader,
++) -> Result<()> {
++    let events = lock(&shared.events).clone();
++    shared
++        .io
++        .as_ref()
++        .expect("ready reader has an IO affinity")
++        .register_with(stream, reader, |output| {
++            lock(&lane.writer).attach(output.clone());
++            Box::new(Backend {
++                shared: Arc::clone(shared),
++                lane,
++                events,
++                body: Vec::new(),
++                burst: Burst::new(true),
++                end: None,
++            })
++        })?;
++    Ok(())
++}
++
++struct Burst {
++    lane: Option<Arc<Lane>>,
++    client: bool,
++}
++impl Burst {
++    fn new(client: bool) -> Self {
++        Self { lane: None, client }
++    }
++    fn begin(&mut self, shared: &Shared, lane: Arc<Lane>, arrived: Instant) {
++        path_timing::stamp(Some(arrived));
++        if self.lane.is_none() {
++            if self.client {
++                shared.down().writer.begin();
++            }
++            lock(&lane.writer).begin();
++            self.lane = Some(lane);
++        }
++    }
++    fn finish(&mut self, shared: &Shared) -> io::Result<()> {
++        let mut result = Ok(());
++        if let Some(lane) = self.lane.take() {
++            let client = if self.client {
++                shared.down().writer.end()
++            } else {
++                Ok(())
++            };
++            let backend = lock(&lane.writer).end();
++            result = client.and(backend).map_err(io::Error::other);
++        }
++        path_timing::stamp(None);
++        result
++    }
++}
++
++pub(super) fn terrain(
++    session: SessionHandle,
++    lane: Arc<Lane>,
++    source: (TcpStream, ConnReader),
++    owner: usize,
++    player_id: i32,
++    intentional: Arc<AtomicBool>,
++) -> Result<()> {
++    let shared = Arc::clone(&session.0);
++    shared
++        .io
++        .as_ref()
++        .expect("ready reader has an IO affinity")
++        .register_with(source.0, source.1, |output| {
++            lock(&lane.writer).attach(output.clone());
++            Box::new(Terrain {
++                session,
++                lane,
++                owner,
++                intentional,
++                target: crate::prepare::Target::terrain_reader(player_id),
++                body: Vec::new(),
++                burst: Burst::new(true),
++            })
++        })?;
++    Ok(())
++}
++
++struct Terrain {
++    session: SessionHandle,
++    lane: Arc<Lane>,
++    owner: usize,
++    intentional: Arc<AtomicBool>,
++    target: crate::prepare::Target,
++    body: Vec<u8>,
++    burst: Burst,
++}
++impl Handler for Terrain {
++    fn packet(&mut self, id: i32, payload: Vec<u8>, arrived: Instant) -> io::Result<()> {
++        if self.session.is_over()
++            || self.session.0.closing.load(Ordering::Acquire)
++            || self.intentional.load(Ordering::Acquire)
++        {
++            return Err(io::ErrorKind::ConnectionAborted.into());
++        }
++        self.burst
++            .begin(&self.session.0, Arc::clone(&self.lane), arrived);
++        self.target.take(&self.lane.writer, id, &payload);
++        let mut down = self.session.0.down();
++        if self.intentional.load(Ordering::Acquire) {
++            return Err(io::ErrorKind::ConnectionAborted.into());
++        }
++        crate::terrain::relay(
++            &self.session.0,
++            &mut down,
++            self.owner,
++            true,
++            meridian_ghost::Packet { id, payload },
++            &mut self.body,
++        )
++        .map_err(io::Error::other)
++    }
++    fn drained(&mut self) -> io::Result<()> {
++        self.burst.finish(&self.session.0)
++    }
++    fn closed(&mut self, _: io::Error) {
++        let _ = self.burst.finish(&self.session.0);
++        if !self.session.is_over()
++            && !self.session.0.closing.load(Ordering::Acquire)
++            && !self.intentional.load(Ordering::Acquire)
++        {
++            self.session.close();
++        }
++    }
++}
++
++fn ended(error: io::Error) -> End {
++    match error.kind() {
++        io::ErrorKind::UnexpectedEof
++        | io::ErrorKind::BrokenPipe
++        | io::ErrorKind::ConnectionAborted
++        | io::ErrorKind::ConnectionReset => End::Closed,
++        _ => End::Broken(horizon_protocol::Error::new(error.to_string())),
++    }
++}
++
++struct Backend {
++    shared: Arc<Shared>,
++    lane: Arc<Lane>,
++    events: Option<mpsc::Sender<Event>>,
++    body: Vec<u8>,
++    burst: Burst,
++    end: Option<End>,
++}
++impl Handler for Backend {
++    fn packet(&mut self, id: i32, payload: Vec<u8>, arrived: Instant) -> io::Result<()> {
++        if self.shared.closing.load(Ordering::Acquire) {
++            self.end = Some(End::Closed);
++            return Err(io::ErrorKind::ConnectionAborted.into());
++        }
++        self.burst
++            .begin(&self.shared, Arc::clone(&self.lane), arrived);
++        self.end = backend_packet(id, payload, &self.lane, &self.shared, &mut self.body);
++        if self.end.is_some() {
++            Err(io::ErrorKind::ConnectionAborted.into())
++        } else {
++            Ok(())
++        }
++    }
++    fn drained(&mut self) -> io::Result<()> {
++        self.burst.finish(&self.shared)
++    }
++    fn closed(&mut self, error: io::Error) {
++        let _ = self.burst.finish(&self.shared);
++        let end = self.end.take().unwrap_or_else(|| ended(error));
++        lane_ended(&self.shared, &self.lane, self.events.take(), end);
++    }
++}
++
++struct Client {
++    shared: Arc<Shared>,
++    events: mpsc::Sender<Event>,
++    commands: Option<Arc<CommandHook>>,
++    positions: Option<Arc<dyn Fn([f64; 3]) + Send + Sync>>,
++    packets: Arc<std::sync::Mutex<ClientPackets>>,
++    control_end: Arc<std::sync::Mutex<Option<End>>>,
++    busy: Arc<AtomicBool>,
++    output: meridian_net::io_pool::Output,
++    pending: VecDeque<(i32, Vec<u8>, Instant)>,
++    pending_bytes: usize,
++    burst: Burst,
++    end: Option<End>,
++}
++impl Handler for Client {
++    fn ready(&mut self) -> io::Result<()> {
++        let end = lock(&self.control_end).take();
++        if let Some(end) = end {
++            self.end = Some(end);
++            return Err(io::ErrorKind::ConnectionAborted.into());
++        }
++        self.drain_pending()
++    }
++    fn packet(&mut self, id: i32, payload: Vec<u8>, arrived: Instant) -> io::Result<()> {
++        if self.shared.closing.load(Ordering::Acquire) {
++            self.end = Some(End::Closed);
++            return Err(io::ErrorKind::ConnectionAborted.into());
++        }
++        if self.busy.load(Ordering::Acquire)
++            || self.shared.routing.is_shut()
++            || !self.pending.is_empty()
++        {
++            if self.pending.len() >= 2048
++                || payload.len() + 5 > 4 * 1024 * 1024 - self.pending_bytes
++            {
++                self.end = Some(End::Broken(horizon_protocol::Error::new(
++                    "bounded command input queue exceeded",
++                )));
++                return Err(io::ErrorKind::ConnectionAborted.into());
++            }
++            self.pending_bytes += payload.len() + 5;
++            self.pending.push_back((id, payload, arrived));
++            return self.drain_pending();
++        }
++        self.consume(id, payload, arrived)
++    }
++    fn drained(&mut self) -> io::Result<()> {
++        self.burst.finish(&self.shared)
++    }
++    fn closed(&mut self, error: io::Error) {
++        let _ = self.burst.finish(&self.shared);
++        let _ = self.events.send(Event::Client(
++            self.end.take().unwrap_or_else(|| ended(error)),
++        ));
++    }
++}
++
++impl Client {
++    fn drain_pending(&mut self) -> io::Result<()> {
++        while !self.busy.load(Ordering::Acquire) && !self.shared.routing.is_shut() {
++            let Some((id, payload, arrived)) = self.pending.pop_front() else {
++                break;
++            };
++            self.pending_bytes -= payload.len() + 5;
++            self.consume(id, payload, arrived)?;
++        }
++        Ok(())
++    }
++
++    fn consume(&mut self, id: i32, payload: Vec<u8>, arrived: Instant) -> io::Result<()> {
++        use horizon_protocol::ids::play::serverbound as s;
++        self.burst
++            .begin(&self.shared, Arc::clone(&self.shared.up().lane), arrived);
++        let command = self.commands.is_some()
++            && matches!(id, s::CHAT_COMMAND | s::CHAT_COMMAND_SIGNED)
++            && lock(&self.packets).sending == meridian_net::relay::Phase::Play;
++        if command {
++            let (packets, end, busy, output, shared, commands, positions) = (
++                Arc::clone(&self.packets),
++                Arc::clone(&self.control_end),
++                Arc::clone(&self.busy),
++                self.output.clone(),
++                Arc::clone(&self.shared),
++                self.commands.clone(),
++                self.positions.clone(),
++            );
++            self.busy.store(true, Ordering::Release);
++            let submitted = self
++                .shared
++                .io
++                .as_ref()
++                .expect("ready reader has an IO affinity")
++                .submit(move || {
++                    if !shared.client_gone.load(Ordering::Acquire)
++                        && !shared.ended.load(Ordering::Acquire)
++                    {
++                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                            path_timing::stamp(Some(arrived));
++                            let ended = lock(&packets).packet(
++                                id,
++                                payload,
++                                &shared,
++                                commands.as_deref(),
++                                positions.as_deref(),
++                            );
++                            path_timing::stamp(None);
++                            ended
++                        }));
++                        *lock(&end) = match result {
++                            Ok(ended) => ended,
++                            Err(_) => Some(End::Broken(horizon_protocol::Error::new(
++                                "command callback panicked; session closed",
++                            ))),
++                        };
++                    }
++                    busy.store(false, Ordering::Release);
++                    let _ = output.resume();
++                });
++            if !submitted {
++                self.busy.store(false, Ordering::Release);
++                SessionHandle(Arc::clone(&self.shared))
++                    .tell("Proxy busy; command not run, please retry.");
++            }
++            return Ok(());
++        }
++        self.end =
++            lock(&self.packets).packet(id, payload, &self.shared, None, self.positions.as_deref());
++        if self.end.is_some() {
++            Err(io::ErrorKind::ConnectionAborted.into())
++        } else {
++            Ok(())
++        }
++    }
++}
+diff --git a/crates/meridian-handoff/src/switch.rs b/crates/meridian-handoff/src/switch.rs
+--- a/crates/meridian-handoff/src/switch.rs
++++ b/crates/meridian-handoff/src/switch.rs
+@@ -735,9 +735,12 @@
+         return Err(run.fail(Step::Prepare, differs(target.name, kind, detail)));
+     }
+     note("prepare: the target configures clients as the first server did (digest)");
+-    let (reader, writer) = link.connection.split();
+-    let closer = match reader.closer() {
+-        Ok(closer) => closer,
++    let (reader, writer, closer) = match crate::transport::split(
++        link.connection,
++        shared.io.is_some(),
++        crate::path_timing::Path::Backend,
++    ) {
++        Ok(parts) => parts,
+         Err(e) => {
+             let _ = run.drop_target();
+             return Err(run.fail(Step::Prepare, e.to_string()));
+@@ -746,7 +749,7 @@
+     let state = Arc::new(Target::new(client_id));
+     let lane = Arc::new(Lane {
+         id: shared.lane_id(),
+-        writer: Mutex::new(crate::drain::Writer::new(writer)),
++        writer: Mutex::new(writer),
+         closer,
+         target: Some(Arc::clone(&state)),
+     });
+diff --git a/crates/meridian-handoff/src/terrain.rs b/crates/meridian-handoff/src/terrain.rs
+--- a/crates/meridian-handoff/src/terrain.rs
++++ b/crates/meridian-handoff/src/terrain.rs
+@@ -337,8 +337,13 @@
+             .reader
+             .set_read_timeout(None)
+             .map_err(|e| e.to_string())?;
+-        let (mut reader, writer) = link.connection.split();
+-        let closer = reader.closer().map_err(|e| e.to_string())?;
++        let closer = link.connection.reader.closer().map_err(|e| e.to_string())?;
++        let (source, writer, lane_closer) = crate::transport::split(
++            link.connection,
++            self.0.io.is_some(),
++            crate::path_timing::Path::Reader,
++        )
++        .map_err(|e| e.to_string())?;
+         let intentional = Arc::new(AtomicBool::new(false));
+         let handle = TerrainReader(closer, Arc::clone(&intentional));
+         if let Some(terrain) = &mut self.0.down().terrain {
+@@ -346,11 +351,26 @@
+         }
+         let lane = Arc::new(Lane {
+             id: u64::MAX,
+-            writer: Mutex::new(crate::drain::Writer::observer(writer)),
+-            closer: reader.closer().map_err(|e| e.to_string())?,
++            writer: Mutex::new(writer),
++            closer: lane_closer,
+             target: None,
+         });
+         let session = self.clone();
++        let mut reader = match source {
++            source @ crate::transport::Source::Ready(..) => {
++                crate::session::spawn_terrain_io(
++                    session,
++                    lane,
++                    source,
++                    owner,
++                    player_id,
++                    intentional,
++                )
++                .map_err(|e| e.to_string())?;
++                return Ok(handle);
++            }
++            crate::transport::Source::Blocking(reader) => reader,
++        };
+         std::thread::Builder::new()
+             .name(format!("terrain-{owner}"))
+             .spawn(move || {
+@@ -415,7 +435,7 @@
+     relay(shared, down, owner, false, packet, body)
+ }
+ 
+-fn relay(
++pub(crate) fn relay(
+     shared: &Shared,
+     down: &mut Down,
+     owner: usize,
+diff --git a/crates/meridian-handoff/src/tests/mod.rs b/crates/meridian-handoff/src/tests/mod.rs
+--- a/crates/meridian-handoff/src/tests/mod.rs
++++ b/crates/meridian-handoff/src/tests/mod.rs
+@@ -33,6 +33,7 @@
+ mod configure;
+ mod fallback;
+ mod hostile;
++mod reactive;
+ mod session;
+ mod switch;
+ 
+diff --git a/crates/meridian-handoff/src/tests/reactive.rs b/crates/meridian-handoff/src/tests/reactive.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/tests/reactive.rs
+@@ -0,0 +1,162 @@
++//! Loopback proofs for the same handoff state machine on caller-owned IO drivers.
++use super::*;
++use meridian_net::io_pool::{Pool, Tasks};
++use std::{
++    net::{TcpListener, TcpStream},
++    sync::mpsc,
++    thread,
++};
++
++struct Io {
++    pool: Arc<Pool>,
++    tasks: Arc<Tasks>,
++    threads: Vec<JoinHandle<()>>,
++}
++impl Io {
++    fn new() -> Self {
++        let (pool, drivers) = Pool::new(1).unwrap();
++        let pool = Arc::new(pool);
++        let (tasks, workers) = Tasks::new(1, 8);
++        pool.install_tasks(&tasks);
++        let mut threads = drivers
++            .into_iter()
++            .map(|driver| thread::spawn(move || driver.run().unwrap()))
++            .collect::<Vec<_>>();
++        threads.extend(
++            workers
++                .into_iter()
++                .map(|worker| thread::spawn(move || worker.run())),
++        );
++        Self {
++            pool,
++            tasks,
++            threads,
++        }
++    }
++}
++impl Drop for Io {
++    fn drop(&mut self) {
++        self.pool.stop();
++        self.tasks.stop();
++        for thread in self.threads.drain(..) {
++            thread.join().unwrap();
++        }
++    }
++}
++
++fn pair() -> (Connection, Connection) {
++    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++    let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
++    let source = listener.accept().unwrap().0;
++    let mut a = Connection::from_stream(source).unwrap();
++    let mut b = Connection::from_stream(peer).unwrap();
++    for connection in [&mut a, &mut b] {
++        connection.set_compression(64);
++        connection.enable_encryption(&[7; 16]);
++        connection.reader.set_read_timeout(Some(WAIT)).unwrap();
++    }
++    (a, b)
++}
++
++fn session(io: &Io) -> (Session, SessionHandle, Connection, Connection) {
++    let (client, player) = pair();
++    let (backend, source) = pair();
++    let (session, handle) = Session::new_with_io(
++        ClientSession {
++            profile: profile(),
++            auth: AuthKind::Offline,
++            virtual_host: None,
++            connection: client,
++        },
++        BackendLink {
++            connection: backend,
++        },
++        "source",
++        Some(io.pool.affinity()),
++    )
++    .unwrap();
++    (session, handle, player, source)
++}
++
++#[test]
++fn ready_relay_preserves_compressed_encrypted_packets_and_disconnect_order() {
++    let io = Io::new();
++    let (session, handle, mut player, mut source) = session(&io);
++    let run = thread::spawn(move || session.run());
++    join_source_as(&mut player, &mut source, &INFORMATION);
++    handle.disconnect(horizon_protocol::packets::configuration::Disconnect {
++        reason: horizon_protocol::text::literal("done"),
++    });
++    let (id, payload) = player.recv().unwrap();
++    assert!(matches!(decode(id, &payload), C::Disconnect(_)));
++    assert!(player.recv().unwrap_err().is_end_of_stream());
++    run.join().unwrap().unwrap();
++    assert!(handle.is_over());
++}
++
++#[test]
++fn a_blocked_command_does_not_block_another_player_on_the_same_io_driver() {
++    let io = Io::new();
++    let (first, _handle, mut player, mut source) = session(&io);
++    let (started, seen) = mpsc::channel();
++    let (release, wait) = mpsc::channel();
++    let wait = Arc::new(Mutex::new(wait));
++    let first = first.with_commands(Arc::new(move |_| {
++        started.send(()).unwrap();
++        let _ = wait.lock().unwrap().recv_timeout(WAIT);
++        Some("done".into())
++    }));
++    let first = thread::spawn(move || first.run());
++    join_source_as(&mut player, &mut source, &INFORMATION);
++    player
++        .send(
++            &play::Serverbound::ChatCommand(play::ChatCommand {
++                command: "server".into(),
++            })
++            .encode(),
++        )
++        .unwrap();
++    seen.recv_timeout(WAIT).unwrap();
++    let (second, _handle, mut other, mut backend) = session(&io);
++    let second = thread::spawn(move || second.run());
++    other
++        .reader
++        .set_read_timeout(Some(Duration::from_millis(400)))
++        .unwrap();
++    send(&mut backend, cfg::clientbound::FINISH_CONFIGURATION, &[]);
++    expect(&mut other, cfg::clientbound::FINISH_CONFIGURATION).unwrap();
++    release.send(()).unwrap();
++    let (id, payload) = player.recv().unwrap();
++    assert!(matches!(decode(id, &payload), C::SystemChat(_)));
++    drop(player);
++    drop(other);
++    first.join().unwrap().unwrap();
++    second.join().unwrap().unwrap();
++}
++
++#[test]
++fn a_shut_route_replays_its_buffered_move_when_the_gate_opens() {
++    let io = Io::new();
++    let (session, handle, mut player, mut source) = session(&io);
++    let run = thread::spawn(move || session.run());
++    join_source_as(&mut player, &mut source, &INFORMATION);
++    let gate = handle.0.routing.shut();
++    let mut payload = Vec::new();
++    for value in [1.0f64, 64.0, 2.0] {
++        payload.extend(value.to_be_bytes());
++    }
++    payload.push(0);
++    send(&mut player, ps::MOVE_PLAYER_POS, &payload);
++    source
++        .reader
++        .set_read_timeout(Some(Duration::from_millis(30)))
++        .unwrap();
++    assert!(source.recv().is_err());
++    source.reader.set_read_timeout(Some(WAIT)).unwrap();
++    drop(gate);
++    let (id, actual) = source.recv().unwrap();
++    assert_eq!(id, ps::MOVE_PLAYER_POS);
++    assert_eq!(actual, payload);
++    drop(player);
++    run.join().unwrap().unwrap();
++}
+diff --git a/crates/meridian-handoff/src/transport.rs b/crates/meridian-handoff/src/transport.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/transport.rs
+@@ -0,0 +1,37 @@
++//! Transfers socket ownership to a caller-owned IO driver without losing codec state.
++use crate::{drain::Writer, path_timing::Path};
++use horizon_protocol::connection::{Closer, ConnReader, Connection, Socket};
++use std::net::TcpStream;
++
++pub(crate) enum Source {
++    Blocking(ConnReader),
++    Ready(TcpStream, ConnReader),
++}
++
++pub(crate) fn split(
++    connection: Connection,
++    ready: bool,
++    path: Path,
++) -> meridian_net::Result<(Source, Writer, Closer)> {
++    let closer = connection.reader.closer()?;
++    if ready {
++        let (socket, reader, writer) = connection.detach();
++        let Socket::Tcp(stream) = socket else {
++            return Err(std::io::Error::other("readiness IO requires a TCP connection").into());
++        };
++        let raw = stream.try_clone()?;
++        Ok((
++            Source::Ready(stream, reader),
++            Writer::detached(writer, raw, path),
++            closer,
++        ))
++    } else {
++        let (reader, writer) = connection.split();
++        let writer = match path {
++            Path::Client => Writer::client(writer),
++            Path::Reader => Writer::observer(writer),
++            _ => Writer::new(writer),
++        };
++        Ok((Source::Blocking(reader), writer, closer))
++    }
++}
+diff --git a/crates/meridian-net/Cargo.toml b/crates/meridian-net/Cargo.toml
+--- a/crates/meridian-net/Cargo.toml
++++ b/crates/meridian-net/Cargo.toml
+@@ -17,6 +17,8 @@
+ # HMAC-SHA256 for the player information forwarding's signature (the function is shared with
+ # the extension protocol's proofs).
+ meridian-hmac.workspace = true
++# Readiness and cross-thread wakeups. Runtime threads remain caller-owned.
++mio = { version = "1.2.4", features = ["net", "os-poll"] }
+ 
+ [dev-dependencies]
+ meridian-testkit.workspace = true
+diff --git a/crates/meridian-net/src/io_pool.rs b/crates/meridian-net/src/io_pool.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-net/src/io_pool.rs
+@@ -0,0 +1,668 @@
++//! Bounded readiness-driven TCP transport; the proxy owns and runs its drivers.
++use horizon_protocol::connection::ConnReader;
++use mio::{Events, Interest, Poll, Token, Waker, net::TcpStream};
++use std::{
++    cell::Cell,
++    collections::{HashMap, HashSet, VecDeque},
++    io::{self, IoSlice, Write},
++    net::{Shutdown, TcpStream as StdStream},
++    sync::{
++        Arc, Condvar, Mutex, OnceLock,
++        atomic::{AtomicBool, AtomicUsize, Ordering},
++        mpsc,
++    },
++    time::{Duration, Instant},
++};
++
++const CONNECTIONS: usize = 4096;
++const OUTPUT_CAP: usize = 8 * 1024 * 1024;
++const OUTPUT_CHUNKS: usize = 8192;
++const TURN_BYTES: usize = 256 * 1024;
++const WAKE: Token = Token(0);
++mod tasks;
++pub use tasks::{Tasks, Worker};
++static NEXT_DRIVER: AtomicUsize = AtomicUsize::new(1);
++thread_local! {
++    static DRIVER: Cell<usize> = const { Cell::new(0) };
++    static LOCAL_WORK: Cell<bool> = const { Cell::new(false) };
++}
++
++/// Per-connection packet state. A callback must never perform blocking IO.
++pub trait Handler: Send {
++    fn ready(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++    fn packet(&mut self, id: i32, payload: Vec<u8>, arrived: Instant) -> io::Result<()>;
++    /// End the current ready read burst, even when another producer has work.
++    fn drained(&mut self) -> io::Result<()>;
++    fn closed(&mut self, error: io::Error);
++}
++
++type Completed = Box<dyn FnOnce(Instant) + Send>;
++
++struct WriteChunk {
++    bytes: Vec<u8>,
++    offset: usize,
++    completed: Option<Completed>,
++}
++
++#[derive(Default)]
++struct Queue {
++    chunks: VecDeque<WriteChunk>,
++    bytes: usize,
++    notified: bool,
++    closed: bool,
++    finishing: bool,
++    resume_notified: bool,
++}
++
++struct SharedOutput {
++    queue: Mutex<Queue>,
++    emptied: Condvar,
++    closer: StdStream,
++}
++
++struct Shard {
++    identity: usize,
++    commands: mpsc::SyncSender<Command>,
++    wake: Waker,
++    slots: AtomicUsize,
++    next: AtomicUsize,
++    stopping: AtomicBool,
++    tasks: OnceLock<Arc<Tasks>>,
++}
++
++impl Shard {
++    fn notify(&self) -> io::Result<()> {
++        if DRIVER.get() == self.identity {
++            LOCAL_WORK.set(true);
++            Ok(())
++        } else {
++            self.wake.wake()
++        }
++    }
++}
++
++/// FIFO encrypted bytes awaiting the physical socket write, with a hard cap.
++#[derive(Clone)]
++pub struct Output {
++    token: Token,
++    shared: Arc<SharedOutput>,
++    shard: Arc<Shard>,
++}
++
++impl Output {
++    pub fn resume(&self) -> io::Result<()> {
++        let mut queue = self.shared.queue.lock().expect("IO output queue poisoned");
++        if queue.closed || queue.resume_notified {
++            return Ok(());
++        }
++        queue.resume_notified = true;
++        self.shard
++            .commands
++            .try_send(Command::Resume(self.token))
++            .map_err(|_| io::Error::other("IO driver stopped"))?;
++        drop(queue);
++        self.shard.notify()
++    }
++    pub fn push(&self, bytes: Vec<u8>, completed: Option<Completed>) -> io::Result<()> {
++        if bytes.is_empty() {
++            if let Some(done) = completed {
++                done(Instant::now());
++            }
++            return Ok(());
++        }
++        let mut queue = self.shared.queue.lock().expect("IO output queue poisoned");
++        if queue.closed || queue.finishing {
++            return Err(io::ErrorKind::BrokenPipe.into());
++        }
++        if bytes.len() > OUTPUT_CAP.saturating_sub(queue.bytes)
++            || queue.chunks.len() >= OUTPUT_CHUNKS
++        {
++            queue.closed = true;
++            drop(queue);
++            self.shared.emptied.notify_all();
++            let _ = self.shared.closer.shutdown(Shutdown::Both);
++            return Err(io::Error::other("bounded IO output queue exceeded"));
++        }
++        queue.bytes += bytes.len();
++        queue.chunks.push_back(WriteChunk {
++            bytes,
++            offset: 0,
++            completed,
++        });
++        if !queue.notified {
++            queue.notified = true;
++            // At most one dirty command per live connection, plus one admission.
++            // The channel holds twice the shard's admission limit plus its stop.
++            if self
++                .shard
++                .commands
++                .try_send(Command::Dirty(self.token))
++                .is_err()
++            {
++                queue.closed = true;
++                drop(queue);
++                self.shared.emptied.notify_all();
++                let _ = self.shared.closer.shutdown(Shutdown::Both);
++                return Err(io::Error::other("IO driver no longer accepts writes"));
++            }
++            drop(queue);
++            self.shard.notify()?;
++        }
++        Ok(())
++    }
++
++    pub fn is_current_driver(&self) -> bool {
++        DRIVER.get() == self.shard.identity
++    }
++
++    /// Close only after all already-queued bytes have been physically written.
++    pub fn finish(&self) -> io::Result<()> {
++        let mut queue = self.shared.queue.lock().expect("IO output queue poisoned");
++        if queue.closed {
++            return Ok(());
++        }
++        queue.finishing = true;
++        if !queue.notified {
++            queue.notified = true;
++            self.shard
++                .commands
++                .try_send(Command::Dirty(self.token))
++                .map_err(|_| io::Error::other("IO driver stopped"))?;
++            drop(queue);
++            self.shard.notify()?;
++        }
++        Ok(())
++    }
++
++    /// Only a non-reactor control worker may wait for a handover write barrier.
++    pub fn wait_empty(&self, timeout: Duration) -> io::Result<()> {
++        let queue = self.shared.queue.lock().expect("IO output queue poisoned");
++        let (queue, result) = self
++            .shared
++            .emptied
++            .wait_timeout_while(queue, timeout, |queue| queue.bytes != 0 && !queue.closed)
++            .expect("IO output queue poisoned");
++        if queue.closed {
++            return Err(io::ErrorKind::BrokenPipe.into());
++        }
++        if result.timed_out() && queue.bytes != 0 {
++            return Err(io::ErrorKind::TimedOut.into());
++        }
++        Ok(())
++    }
++}
++
++struct Entry {
++    stream: TcpStream,
++    reader: ConnReader,
++    handler: Box<dyn Handler>,
++    output: Output,
++    writable: bool,
++    closed: bool,
++}
++
++enum Command {
++    Install(Box<Entry>),
++    Dirty(Token),
++    Resume(Token),
++    Stop,
++    #[cfg(test)]
++    AfterDrain(mpsc::Sender<()>),
++}
++
++/// A registration handle, not a process-global runtime or a thread owner.
++pub struct Pool {
++    shards: Vec<Arc<Shard>>,
++    next: AtomicUsize,
++}
++
++/// Keep a session's client, backend lanes and readers on the same IO driver.
++#[derive(Clone)]
++pub struct Affinity(Arc<Shard>);
++
++impl Pool {
++    /// Returns drivers for the application's fixed threads to own and run.
++    pub fn new(count: usize) -> io::Result<(Self, Vec<Driver>)> {
++        if count == 0 {
++            return Err(io::Error::other("IO pool needs a driver"));
++        }
++        let mut shards = Vec::new();
++        let mut drivers = Vec::new();
++        for _ in 0..count {
++            let poll = Poll::new()?;
++            let wake = Waker::new(poll.registry(), WAKE)?;
++            let (commands, receive) = mpsc::sync_channel(CONNECTIONS * 3 + 1);
++            let shard = Arc::new(Shard {
++                identity: NEXT_DRIVER.fetch_add(1, Ordering::Relaxed),
++                commands,
++                wake,
++                slots: AtomicUsize::new(0),
++                next: AtomicUsize::new(1),
++                stopping: AtomicBool::new(false),
++                tasks: OnceLock::new(),
++            });
++            drivers.push(Driver {
++                identity: shard.identity,
++                poll,
++                receive,
++                entries: HashMap::new(),
++                reading: HashSet::new(),
++                writing: HashSet::new(),
++            });
++            shards.push(shard);
++        }
++        Ok((
++            Self {
++                shards,
++                next: AtomicUsize::new(0),
++            },
++            drivers,
++        ))
++    }
++
++    pub fn register(
++        &self,
++        stream: StdStream,
++        reader: ConnReader,
++        handler: Box<dyn Handler>,
++    ) -> io::Result<Output> {
++        self.register_with(stream, reader, |_| handler)
++    }
++
++    /// Installs the writer handle before the selector can call the reader.
++    pub fn register_with(
++        &self,
++        stream: StdStream,
++        reader: ConnReader,
++        handler: impl FnOnce(&Output) -> Box<dyn Handler>,
++    ) -> io::Result<Output> {
++        self.affinity().register_with(stream, reader, handler)
++    }
++
++    pub fn affinity(&self) -> Affinity {
++        Affinity(Arc::clone(
++            &self.shards[self.next.fetch_add(1, Ordering::Relaxed) % self.shards.len()],
++        ))
++    }
++
++    pub fn install_tasks(&self, tasks: &Arc<Tasks>) {
++        for shard in &self.shards {
++            assert!(shard.tasks.set(Arc::clone(tasks)).is_ok());
++        }
++    }
++
++    pub fn stop(&self) {
++        for shard in &self.shards {
++            if shard.stopping.swap(true, Ordering::AcqRel) {
++                continue;
++            }
++            let _ = shard.commands.try_send(Command::Stop);
++            let _ = shard.notify();
++        }
++    }
++}
++
++impl Affinity {
++    pub fn submit(&self, job: impl FnOnce() + Send + 'static) -> bool {
++        self.0.tasks.get().is_some_and(|tasks| tasks.submit(job))
++    }
++    pub fn register_with(
++        &self,
++        stream: StdStream,
++        reader: ConnReader,
++        handler: impl FnOnce(&Output) -> Box<dyn Handler>,
++    ) -> io::Result<Output> {
++        let shard = Arc::clone(&self.0);
++        if shard.stopping.load(Ordering::Acquire) {
++            return Err(io::Error::other("IO pool is stopping"));
++        }
++        shard
++            .slots
++            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |slots| {
++                (slots < CONNECTIONS).then_some(slots + 1)
++            })
++            .map_err(|_| io::Error::other("IO admission deferred: driver is full"))?;
++        // All fallible socket setup precedes transfer of the admission slot.
++        let setup = || -> io::Result<_> {
++            stream.set_nodelay(true)?;
++            let shared = Arc::new(SharedOutput {
++                queue: Mutex::new(Queue::default()),
++                emptied: Condvar::new(),
++                closer: stream.try_clone()?,
++            });
++            let token = Token(shard.next.fetch_add(1, Ordering::Relaxed));
++            if token == WAKE {
++                return Err(io::Error::other("IO token space exhausted"));
++            }
++            Ok(Output {
++                token,
++                shared,
++                shard: Arc::clone(&shard),
++            })
++        };
++        let output = match setup() {
++            Ok(output) => output,
++            Err(error) => {
++                shard.slots.fetch_sub(1, Ordering::Release);
++                return Err(error);
++            }
++        };
++        let handler = handler(&output);
++        // A producer may already hold the writer. Attach its queue before the
++        // shared socket becomes nonblocking; only the driver writes afterwards.
++        let nonblocking = stream.set_nonblocking(true);
++        let mut entry = Entry {
++            stream: TcpStream::from_std(stream),
++            reader,
++            handler,
++            output: output.clone(),
++            writable: false,
++            closed: false,
++        };
++        if let Err(error) = nonblocking {
++            entry.close(io::Error::other(error.to_string()));
++            return Err(error);
++        }
++        if shard
++            .commands
++            .try_send(Command::Install(Box::new(entry)))
++            .is_err()
++        {
++            return Err(io::Error::other("IO driver stopped before admission"));
++        }
++        shard.notify()?;
++        Ok(output)
++    }
++}
++
++/// Application-owned selector loop. No task creates a thread per connection.
++pub struct Driver {
++    identity: usize,
++    poll: Poll,
++    receive: mpsc::Receiver<Command>,
++    entries: HashMap<Token, Entry>,
++    reading: HashSet<Token>,
++    writing: HashSet<Token>,
++}
++
++impl Driver {
++    pub fn run(mut self) -> io::Result<()> {
++        DRIVER.set(self.identity);
++        LOCAL_WORK.set(false);
++        let result = self.run_inner();
++        let tokens: Vec<_> = self.entries.keys().copied().collect();
++        for token in tokens {
++            self.remove(token, io::Error::other("IO driver stopped"));
++        }
++        // Also close admissions that raced the stop but never reached the map.
++        while let Ok(command) = self.receive.try_recv() {
++            if let Command::Install(mut entry) = command {
++                entry.close(io::Error::other("IO driver stopped before registration"));
++            }
++        }
++        DRIVER.set(0);
++        LOCAL_WORK.set(false);
++        result
++    }
++
++    fn run_inner(&mut self) -> io::Result<()> {
++        let mut events = Events::with_capacity(1024);
++        #[cfg(test)]
++        let mut after_drain = Vec::new();
++        loop {
++            while let Ok(command) = self.receive.try_recv() {
++                match command {
++                    Command::Stop => return Ok(()),
++                    #[cfg(test)]
++                    Command::AfterDrain(reply) => after_drain.push(reply),
++                    Command::Dirty(token) => {
++                        self.writing.insert(token);
++                    }
++                    Command::Resume(token) => {
++                        if let Some(entry) = self.entries.get(&token) {
++                            entry
++                                .output
++                                .shared
++                                .queue
++                                .lock()
++                                .expect("IO output queue poisoned")
++                                .resume_notified = false;
++                            self.reading.insert(token);
++                        }
++                    }
++                    Command::Install(mut entry) => {
++                        let token = entry.output.token;
++                        if let Err(error) = self.poll.registry().register(
++                            &mut entry.stream,
++                            token,
++                            Interest::READABLE,
++                        ) {
++                            entry.close(error);
++                        } else {
++                            {
++                                let mut queue = entry
++                                    .output
++                                    .shared
++                                    .queue
++                                    .lock()
++                                    .expect("IO output queue poisoned");
++                                if queue.bytes > 0 || queue.finishing {
++                                    self.writing.insert(token);
++                                }
++                                queue.resume_notified = false;
++                            }
++                            self.entries.insert(token, *entry);
++                            self.reading.insert(token); // Includes frames buffered during login.
++                        }
++                    }
++                }
++            }
++            let reading: Vec<_> = self.reading.drain().collect();
++            for token in reading {
++                let Some(entry) = self.entries.get_mut(&token) else {
++                    continue;
++                };
++                match entry.read() {
++                    Ok(true) => {
++                        self.reading.insert(token);
++                    }
++                    Ok(false) => {}
++                    Err(error) => self.remove(token, error),
++                }
++            }
++            let writing: Vec<_> = self.writing.drain().collect();
++            for token in writing {
++                let Some(entry) = self.entries.get_mut(&token) else {
++                    continue;
++                };
++                match entry.write() {
++                    Ok(pending) => {
++                        if pending || pending != entry.writable {
++                            entry.writable = pending;
++                            let interest = if pending {
++                                Interest::READABLE | Interest::WRITABLE
++                            } else {
++                                Interest::READABLE
++                            };
++                            if let Err(error) =
++                                self.poll
++                                    .registry()
++                                    .reregister(&mut entry.stream, token, interest)
++                            {
++                                self.remove(token, error);
++                            }
++                        }
++                    }
++                    Err(error) => self.remove(token, error),
++                }
++            }
++            #[cfg(test)]
++            for reply in after_drain.drain(..) {
++                let _ = reply.send(());
++            }
++            // Local producers only queue work. They never issue a cross-thread
++            // wake syscall, and their queued writes must run before sleeping.
++            if LOCAL_WORK.replace(false) {
++                continue;
++            }
++            let timeout = (!self.reading.is_empty()).then_some(Duration::ZERO);
++            match self.poll.poll(&mut events, timeout) {
++                Ok(()) => {}
++                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
++                Err(error) => return Err(error),
++            }
++            for event in &events {
++                let token = event.token();
++                if token == WAKE {
++                    continue;
++                }
++                if event.is_readable() || event.is_read_closed() || event.is_error() {
++                    self.reading.insert(token);
++                }
++                if event.is_writable() || event.is_write_closed() {
++                    self.writing.insert(token);
++                }
++            }
++        }
++    }
++
++    fn remove(&mut self, token: Token, error: io::Error) {
++        if let Some(mut entry) = self.entries.remove(&token) {
++            let _ = self.poll.registry().deregister(&mut entry.stream);
++            entry.close(error);
++        }
++        self.reading.remove(&token);
++        self.writing.remove(&token);
++    }
++}
++
++#[cfg(test)]
++mod tests;
++
++impl Entry {
++    fn read(&mut self) -> io::Result<bool> {
++        let result = self.handler.ready().and_then(|()| self.read_inner());
++        let drained = self.handler.drained();
++        result.and_then(|again| drained.map(|()| again))
++    }
++
++    fn read_inner(&mut self) -> io::Result<bool> {
++        let mut bytes = 0;
++        let arrived = Instant::now();
++        loop {
++            while let Some((id, payload)) = self.reader.buffered().map_err(io::Error::other)? {
++                self.handler.packet(id, payload, arrived)?;
++            }
++            if bytes >= TURN_BYTES {
++                return Ok(true);
++            }
++            match self.reader.read_from(&mut self.stream) {
++                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
++                Ok(count) => bytes += count,
++                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
++                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
++                Err(error) => return Err(error),
++            }
++        }
++    }
++
++    fn write(&mut self) -> io::Result<bool> {
++        let mut bytes = 0;
++        loop {
++            let mut queue = self
++                .output
++                .shared
++                .queue
++                .lock()
++                .expect("IO output queue poisoned");
++            if queue.closed {
++                return Err(io::ErrorKind::BrokenPipe.into());
++            }
++            if queue.chunks.is_empty() {
++                if queue.finishing {
++                    return Err(io::ErrorKind::ConnectionAborted.into());
++                }
++                queue.notified = false;
++                self.output.shared.emptied.notify_all();
++                return Ok(false);
++            }
++            if bytes >= TURN_BYTES {
++                return Ok(true);
++            }
++            let mut remaining = TURN_BYTES - bytes;
++            let slices: Vec<_> = queue
++                .chunks
++                .iter()
++                .take(16)
++                .map_while(|chunk| {
++                    if remaining == 0 {
++                        return None;
++                    }
++                    let length = remaining.min(chunk.bytes.len() - chunk.offset);
++                    remaining -= length;
++                    Some(IoSlice::new(
++                        &chunk.bytes[chunk.offset..chunk.offset + length],
++                    ))
++                })
++                .collect();
++            let count = match self.stream.write_vectored(&slices) {
++                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
++                Ok(count) => count,
++                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(true),
++                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
++                Err(error) => return Err(error),
++            };
++            drop(slices);
++            bytes += count;
++            queue.bytes -= count;
++            let mut left = count;
++            let mut completed = Vec::new();
++            while left > 0 {
++                let chunk = queue.chunks.front_mut().expect("written bytes are queued");
++                let take = left.min(chunk.bytes.len() - chunk.offset);
++                chunk.offset += take;
++                left -= take;
++                if chunk.offset == chunk.bytes.len() {
++                    if let Some(done) = queue.chunks.pop_front().expect("front exists").completed {
++                        completed.push(done);
++                    }
++                }
++            }
++            let at = Instant::now();
++            drop(queue);
++            for done in completed {
++                done(at);
++            }
++        }
++    }
++
++    fn close(&mut self, error: io::Error) {
++        if std::mem::replace(&mut self.closed, true) {
++            return;
++        }
++        let mut queue = self
++            .output
++            .shared
++            .queue
++            .lock()
++            .expect("IO output queue poisoned");
++        queue.closed = true;
++        queue.chunks.clear();
++        queue.bytes = 0;
++        drop(queue);
++        self.output.shared.emptied.notify_all();
++        let _ = self.output.shared.closer.shutdown(Shutdown::Both);
++        self.handler.closed(error);
++    }
++}
++
++impl Drop for Entry {
++    fn drop(&mut self) {
++        // Covers admissions racing a stopped receiver and a driver unwinding.
++        // No queued entry can leave its cloned socket open without an owner.
++        self.close(io::Error::other("IO connection owner dropped"));
++        self.output.shard.slots.fetch_sub(1, Ordering::Release);
++    }
++}
+diff --git a/crates/meridian-net/src/io_pool/tasks.rs b/crates/meridian-net/src/io_pool/tasks.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-net/src/io_pool/tasks.rs
+@@ -0,0 +1,50 @@
++//! Caller-owned workers for bounded blocking command hooks, outside IO drivers.
++use std::sync::{Arc, Mutex, mpsc};
++
++type Job = Box<dyn FnOnce() + Send>;
++pub struct Tasks {
++    send: mpsc::SyncSender<Option<Job>>,
++    workers: usize,
++}
++pub struct Worker {
++    receive: Arc<Mutex<mpsc::Receiver<Option<Job>>>>,
++}
++impl Tasks {
++    pub fn new(workers: usize, capacity: usize) -> (Arc<Self>, Vec<Worker>) {
++        assert!(workers > 0 && capacity > 0);
++        let (send, receive) = mpsc::sync_channel(capacity);
++        let receive = Arc::new(Mutex::new(receive));
++        (
++            Arc::new(Self { send, workers }),
++            (0..workers)
++                .map(|_| Worker {
++                    receive: Arc::clone(&receive),
++                })
++                .collect(),
++        )
++    }
++    /// A full queue rejects a command before it runs. The session stays live.
++    pub fn submit(&self, job: impl FnOnce() + Send + 'static) -> bool {
++        self.send.try_send(Some(Box::new(job))).is_ok()
++    }
++    pub fn stop(&self) {
++        for _ in 0..self.workers {
++            let _ = self.send.send(None);
++        }
++    }
++}
++impl Worker {
++    pub fn run(self) {
++        loop {
++            let next = self
++                .receive
++                .lock()
++                .expect("blocking task receiver poisoned")
++                .recv();
++            match next {
++                Ok(Some(job)) => job(),
++                _ => break,
++            }
++        }
++    }
++}
+diff --git a/crates/meridian-net/src/io_pool/tests.rs b/crates/meridian-net/src/io_pool/tests.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-net/src/io_pool/tests.rs
+@@ -0,0 +1,230 @@
++//! Transport framing, lifetime and bounded output proofs on loopback TCP.
++use super::*;
++use horizon_protocol::{
++    buf::write_varint,
++    connection::{Connection, Socket},
++};
++use std::{io::Read, net::TcpListener, thread};
++
++struct Echo {
++    output: Arc<Mutex<Option<Output>>>,
++    packets: mpsc::Sender<Vec<u8>>,
++    closed: mpsc::Sender<()>,
++    completed: mpsc::Sender<()>,
++}
++impl Handler for Echo {
++    fn packet(&mut self, id: i32, payload: Vec<u8>, _: Instant) -> io::Result<()> {
++        let mut body = Vec::new();
++        write_varint(&mut body, id);
++        body.extend(payload);
++        self.packets.send(body.clone()).unwrap();
++        let mut frame = Vec::new();
++        write_varint(&mut frame, body.len() as i32);
++        frame.extend(body);
++        let completed = self.completed.clone();
++        self.output.lock().unwrap().as_ref().unwrap().push(
++            frame,
++            Some(Box::new(move |_| {
++                let _ = completed.send(());
++            })),
++        )
++    }
++    fn drained(&mut self) -> io::Result<()> {
++        Ok(())
++    }
++    fn closed(&mut self, _: io::Error) {
++        let _ = self.closed.send(());
++    }
++}
++
++fn pair() -> (StdStream, StdStream) {
++    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++    let client = StdStream::connect(listener.local_addr().unwrap()).unwrap();
++    (client, listener.accept().unwrap().0)
++}
++
++#[test]
++fn fragmented_frames_preserve_fifo_and_complete_only_after_write() {
++    let (pool, mut drivers) = Pool::new(1).unwrap();
++    let (mut peer, stream) = pair();
++    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
++    let (socket, reader, _) = Connection::from_stream(stream).unwrap().detach();
++    let Socket::Tcp(stream) = socket else {
++        panic!("TCP fixture");
++    };
++    let output = Arc::new(Mutex::new(None));
++    let (packets, received) = mpsc::channel();
++    let (closed, ended) = mpsc::channel();
++    let (completed, written) = mpsc::channel();
++    let sink = pool
++        .register(
++            stream,
++            reader,
++            Box::new(Echo {
++                output: Arc::clone(&output),
++                packets,
++                closed,
++                completed,
++            }),
++        )
++        .unwrap();
++    *output.lock().unwrap() = Some(sink.clone());
++    let runner = thread::spawn(move || drivers.pop().unwrap().run().unwrap());
++    peer.write_all(&[3, 1]).unwrap();
++    assert!(received.recv_timeout(Duration::from_millis(20)).is_err());
++    assert!(written.try_recv().is_err());
++    peer.write_all(&[8, 9, 2, 2, 7]).unwrap();
++    assert_eq!(
++        received.recv_timeout(Duration::from_secs(2)).unwrap(),
++        [1, 8, 9]
++    );
++    assert_eq!(
++        received.recv_timeout(Duration::from_secs(2)).unwrap(),
++        [2, 7]
++    );
++    let mut bytes = [0; 7];
++    peer.read_exact(&mut bytes).unwrap();
++    assert_eq!(bytes, [3, 1, 8, 9, 2, 2, 7]);
++    written.recv_timeout(Duration::from_secs(2)).unwrap();
++    written.recv_timeout(Duration::from_secs(2)).unwrap();
++    sink.wait_empty(Duration::from_secs(2)).unwrap();
++    pool.stop();
++    runner.join().unwrap();
++    ended.recv_timeout(Duration::from_secs(2)).unwrap();
++    assert!(sink.push(vec![1], None).is_err());
++}
++
++#[test]
++fn an_over_cap_client_is_closed_without_accepting_more_bytes() {
++    let (pool, mut drivers) = Pool::new(1).unwrap();
++    let (mut peer, stream) = pair();
++    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
++    let (socket, reader, _) = Connection::from_stream(stream).unwrap().detach();
++    let Socket::Tcp(stream) = socket else {
++        panic!("TCP fixture");
++    };
++    let (packets, _) = mpsc::channel();
++    let (closed, ended) = mpsc::channel();
++    let (completed, _) = mpsc::channel();
++    let sink = pool
++        .register(
++            stream,
++            reader,
++            Box::new(Echo {
++                output: Arc::new(Mutex::new(None)),
++                packets,
++                closed,
++                completed,
++            }),
++        )
++        .unwrap();
++    assert!(sink.push(vec![0; OUTPUT_CAP + 1], None).is_err());
++    assert!(sink.push(vec![0], None).is_err());
++    let runner = thread::spawn(move || drivers.pop().unwrap().run().unwrap());
++    assert_eq!(peer.read(&mut [0]).unwrap(), 0);
++    ended.recv_timeout(Duration::from_secs(2)).unwrap();
++    assert!(sink.wait_empty(Duration::from_secs(2)).is_err());
++    pool.stop();
++    runner.join().unwrap();
++}
++
++#[test]
++fn stop_closes_queued_admissions_and_refuses_new_ones() {
++    let (pool, mut drivers) = Pool::new(1).unwrap();
++    let (_peer, stream) = pair();
++    let (socket, reader, _) = Connection::from_stream(stream).unwrap().detach();
++    let Socket::Tcp(stream) = socket else {
++        panic!("TCP fixture");
++    };
++    let (packets, _) = mpsc::channel();
++    let (closed, ended) = mpsc::channel();
++    let (completed, _) = mpsc::channel();
++    let sink = pool
++        .register(
++            stream,
++            reader,
++            Box::new(Echo {
++                output: Arc::new(Mutex::new(None)),
++                packets,
++                closed,
++                completed,
++            }),
++        )
++        .unwrap();
++    pool.stop();
++    pool.stop();
++    drivers.pop().unwrap().run().unwrap();
++    ended.recv_timeout(Duration::from_secs(2)).unwrap();
++    assert!(sink.push(vec![0], None).is_err());
++    assert_eq!(pool.shards[0].slots.load(Ordering::Acquire), 0);
++}
++
++#[test]
++fn dropping_an_unstarted_driver_closes_queued_connections() {
++    let (pool, drivers) = Pool::new(1).unwrap();
++    let (_peer, stream) = pair();
++    let (socket, reader, _) = Connection::from_stream(stream).unwrap().detach();
++    let Socket::Tcp(stream) = socket else {
++        panic!("TCP fixture");
++    };
++    let (packets, _) = mpsc::channel();
++    let (closed, ended) = mpsc::channel();
++    let (completed, _) = mpsc::channel();
++    let sink = pool
++        .register(
++            stream,
++            reader,
++            Box::new(Echo {
++                output: Arc::new(Mutex::new(None)),
++                packets,
++                closed,
++                completed,
++            }),
++        )
++        .unwrap();
++    drop(drivers);
++    ended.recv_timeout(Duration::from_secs(2)).unwrap();
++    assert!(sink.push(vec![0], None).is_err());
++    assert_eq!(pool.shards[0].slots.load(Ordering::Acquire), 0);
++}
++
++#[test]
++fn bytes_queued_before_registration_are_not_lost_with_an_early_dirty_event() {
++    let (pool, mut drivers) = Pool::new(1).unwrap();
++    let (mut peer, stream) = pair();
++    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
++    let (socket, reader, _) = Connection::from_stream(stream).unwrap().detach();
++    let Socket::Tcp(stream) = socket else {
++        panic!("TCP fixture");
++    };
++    let runner = thread::spawn(move || drivers.pop().unwrap().run().unwrap());
++    let (packets, _) = mpsc::channel();
++    let (closed, _) = mpsc::channel();
++    let (completed, _) = mpsc::channel();
++    let sink = pool
++        .register_with(stream, reader, |output| {
++            output.push(vec![3, 1, 2, 3], None).unwrap();
++            let (send, receive) = mpsc::channel();
++            output
++                .shard
++                .commands
++                .try_send(Command::AfterDrain(send))
++                .unwrap();
++            output.shard.notify().unwrap();
++            receive.recv_timeout(Duration::from_secs(2)).unwrap();
++            Box::new(Echo {
++                output: Arc::new(Mutex::new(Some(output.clone()))),
++                packets,
++                closed,
++                completed,
++            })
++        })
++        .unwrap();
++    let mut bytes = [0; 4];
++    peer.read_exact(&mut bytes).unwrap();
++    assert_eq!(bytes, [3, 1, 2, 3]);
++    sink.finish().unwrap();
++    assert_eq!(peer.read(&mut [0]).unwrap(), 0);
++    pool.stop();
++    runner.join().unwrap();
++}
+diff --git a/crates/meridian-net/src/lib.rs b/crates/meridian-net/src/lib.rs
+--- a/crates/meridian-net/src/lib.rs
++++ b/crates/meridian-net/src/lib.rs
+@@ -4,6 +4,7 @@
+ //! by its own change.
+ pub mod backend;
+ pub mod client;
++pub mod io_pool;
+ pub mod login_policy;
+ pub mod proxy_protocol;
+ pub mod relay;
+diff --git a/crates/meridian-proxy/src/io_runtime.rs b/crates/meridian-proxy/src/io_runtime.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-proxy/src/io_runtime.rs
+@@ -0,0 +1,91 @@
++//! The proxy owns the fixed IO drivers and their shutdown, not library sessions.
++use crate::{
++    log::{info, warning},
++    state::Proxy,
++};
++use meridian_net::io_pool::{Pool, Tasks};
++use std::{
++    io,
++    sync::Arc,
++    thread::{self, JoinHandle},
++};
++
++pub(crate) struct Runtime {
++    pool: Arc<Pool>,
++    tasks: Arc<Tasks>,
++    threads: Vec<JoinHandle<()>>,
++}
++
++pub(crate) fn start(proxy: &Arc<Proxy>) -> io::Result<Option<Runtime>> {
++    if std::env::var_os("GOLIATH_CLUSTER").is_none()
++        || std::env::var_os("E18_BLOCKING_IO").is_some()
++    {
++        return Ok(None);
++    }
++    let count = std::env::var("E18_IO_THREADS")
++        .ok()
++        .map(|s| s.parse::<usize>())
++        .transpose()
++        .map_err(io::Error::other)?
++        .unwrap_or(4);
++    if !(1..=8).contains(&count) {
++        return Err(io::Error::other("E18_IO_THREADS must be1..8"));
++    }
++    let (pool, drivers) = Pool::new(count)?;
++    let pool = Arc::new(pool);
++    let (tasks, workers) = Tasks::new(4, 512);
++    pool.install_tasks(&tasks);
++    let mut runtime = Runtime {
++        pool: Arc::clone(&pool),
++        tasks,
++        threads: Vec::new(),
++    };
++    for (index, worker) in workers.into_iter().enumerate() {
++        let proxy = Arc::clone(proxy);
++        runtime.threads.push(
++            thread::Builder::new()
++                .name(format!("proxy-control-{index}"))
++                .spawn(move || {
++                    let _stop = StopOnExit(proxy);
++                    worker.run();
++                })?,
++        );
++    }
++    for (index, driver) in drivers.into_iter().enumerate() {
++        let proxy = Arc::clone(proxy);
++        let thread = thread::Builder::new()
++            .name(format!("proxy-io-{index}"))
++            .spawn(move || {
++                let _stop = StopOnExit(Arc::clone(&proxy));
++                if let Err(error) = driver.run() {
++                    warning!("IO driver stopped: {error}");
++                }
++            })?;
++        runtime.threads.push(thread);
++    }
++    proxy
++        .sessions
++        .io
++        .set(pool)
++        .map_err(|_| io::Error::other("IO pool was already installed"))?;
++    info!("E18 fixed IO pool: {count} drivers");
++    Ok(Some(runtime))
++}
++
++struct StopOnExit(Arc<Proxy>);
++impl Drop for StopOnExit {
++    fn drop(&mut self) {
++        self.0.stop();
++    }
++}
++impl Drop for Runtime {
++    fn drop(&mut self) {
++        self.pool.stop();
++        self.tasks.stop();
++        for thread in self.threads.drain(..) {
++            if thread.join().is_err() {
++                warning!("IO driver panicked; its connections were closed");
++            }
++        }
++    }
++}
+diff --git a/crates/meridian-proxy/src/main.rs b/crates/meridian-proxy/src/main.rs
+--- a/crates/meridian-proxy/src/main.rs
++++ b/crates/meridian-proxy/src/main.rs
+@@ -18,6 +18,7 @@
+ mod restart;
+ // Used by the session once routing is wired in; until then only its tests call it.
+ mod cluster;
++mod io_runtime;
+ #[cfg_attr(not(test), allow(dead_code))]
+ mod route;
+ mod serve;
+@@ -146,6 +147,13 @@
+         config.default_backend.clone(),
+     );
+     let proxy = Arc::new(Proxy::new(config, path, stop));
++    let _io = match io_runtime::start(&proxy) {
++        Ok(runtime) => runtime,
++        Err(error) => {
++            error!("cannot start fixed IO pool: {error}");
++            return ExitCode::FAILURE;
++        }
++    };
+     // Installed before the signals are watched and before the line below, so that a SIGHUP
+     // never finds the lists missing.
+     if let Some(access) = access {
+diff --git a/crates/meridian-proxy/src/session.rs b/crates/meridian-proxy/src/session.rs
+--- a/crates/meridian-proxy/src/session.rs
++++ b/crates/meridian-proxy/src/session.rs
+@@ -51,6 +51,9 @@
+ /// The sessions being relayed, and the health of the backends players are sent to.
+ #[derive(Default)]
+ pub struct Sessions {
++    /// Installed by the executable before accepting logins. Tests and ordinary
++    /// non-cluster relays retain the blocking transport unless explicitly owned.
++    pub io: OnceLock<Arc<meridian_net::io_pool::Pool>>,
+     /// Which backends recently failed to take a player.
+     pub health: Arc<Health>,
+     next: AtomicU64,
+@@ -752,7 +755,8 @@
+     // What the fallback needs of the login, which the session takes over.
+     let profile = session.profile.clone();
+     let virtual_host = session.virtual_host.clone();
+-    let (relay, handle) = match Session::new(session, link, &backend.name) {
++    let io = sessions.io.get().map(|pool| pool.affinity());
++    let (relay, handle) = match Session::new_with_io(session, link, &backend.name, io) {
+         Ok(session) => session,
+         Err(e) => {
+             warning!("{peer}: {name}: cannot set up the session: {e}");

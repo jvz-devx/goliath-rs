@@ -1,0 +1,40 @@
+{
+  "kind": "E18-canonical-flat09-plain",
+  "status": "build-ready-not-capacity-accepted",
+  "projects": {
+    "horizon": {
+      "pin": "fc2868b2b26d56ec76e17414909fe58a3b87bb92",
+      "patches": [
+        {
+          "path": "patches/e2-horizon-input-trace.patch",
+          "sha256": "488a82c167465ad288c194103f51983a2020288e2bbf75db0b07c26d76ed2231"
+        },
+        {
+          "path": "patches/horizon-03-bots.patch",
+          "sha256": "f1796dc29e1e69504334dd7e949adbd7de3351aae6b9b2c8328499fd534d967f"
+        },
+        {
+          "path": "patches/horizon-04-digest.patch",
+          "sha256": "43e6ebb67869b6719d74bdfee6783d62c38dd4436fa0032b9b007937e9996afb"
+        },
+        {
+          "path": "patches/horizon-09-flat-light.patch",
+          "sha256": "10ae7266c7ffb287fd73239e8e8d43031b87fa1382a838c65d71edfff11d408e"
+        }
+      ]
+    }
+  },
+  "binaries": {
+    "horizon-client": "0ce83824bb8de036bb91cc9a7da45181be67b33d437f481ca22bbdf2f69674a4",
+    "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d"
+  },
+  "source_equality": "passed",
+  "verified_compiled_files": {
+    "crates/horizon-client/src/flatgen.rs": "24bda94a311809479e681ba8922c28712a97b5793e86bc80d09c55eb4d6cac38",
+    "crates/horizon-client/tests/flat_light.rs": "3103d0aaf416b069108fc949c0016c5c4d67250404ce55cb1d7324727bffdc14"
+  },
+  "raw_build_record": "docs/experiments/data/E18/flat09-plain-build-3.json",
+  "original_input_patch_sha256": "74c5d288950f8fe0b2f8015cf49c2170decde6f9ca94feb1e6fa988c87fcbda0",
+  "canonical_patch_sha256": "10ae7266c7ffb287fd73239e8e8d43031b87fa1382a838c65d71edfff11d408e",
+  "provenance_note": "Built from edited scratch source. Typed unit assertions and rustfmt were frozen into the canonical patch afterward; compiled flatgen and integration-test source bytes match the canonical application proof."
+}

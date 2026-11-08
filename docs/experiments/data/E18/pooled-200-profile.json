@@ -1,0 +1,43 @@
+{
+  "kind": "E17-proxy-pilot",
+  "acceptance": false,
+  "profile": "fast",
+  "bots": 200,
+  "seconds": 45.0,
+  "settle_seconds": 10,
+  "load_start": [
+    5.78125,
+    9.72998046875,
+    8.49072265625
+  ],
+  "binaries": {
+    "horizon-client": "16f0cdce2d37d8abf8736d4a28d87c3387fa766ebd698c78e6307a929ee8aa77",
+    "meridian": "fd316f2c8b409b6be21167ce03d245e84dfc29813eddd650351e817d71dcd1bb",
+    "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af"
+  },
+  "bot_binary_sha256": "76db11c864bcf01bfbcdfa533923c78f7fb833970c9debcc4863551ecc8469a4",
+  "samples": [],
+  "join_samples": [],
+  "transfers": "expect_seconds=20,max_expect_seconds=60,max_expected=10000,max_freeze_seconds=30,max_hold_seconds=60",
+  "proxy_pid": 95302,
+  "run_folder": "$REPO/.local/runs/E17-pilot-0mvgmtyr",
+  "status": "failed",
+  "error": "cannot access local variable 'result' where it is not associated with a value",
+  "traceback": "Traceback (most recent call last):\n  File \"$REPO/scripts/e17-m4\", line 324, in pilot\n    output['idle_proxy'] = usage(instance.proxy.process.pid)\n                           ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"$REPO/scripts/e18-proxy\", line 77, in profiled_usage\n    if args.sample and not sampled and result.exists():\n                                       ^^^^^^\nUnboundLocalError: cannot access local variable 'result' where it is not associated with a value\n",
+  "proxy_warnings": [
+    "2026-11-08T01:46:55.980Z WARN  127.0.0.1:52006: the client closed the connection or stopped answering; closing the connection"
+  ],
+  "phases": [],
+  "proxy_tail": [
+    "2026-11-08T01:46:55.960Z INFO  bans and whitelist: 0 bans, whitelist off",
+    "2026-11-08T01:46:55.960Z INFO  permissions: 0 groups, 0 players",
+    "2026-11-08T01:46:55.960Z INFO  meridian 0.1.0 listening on 127.0.0.1:52004, 4 backends, default backend \"a\"",
+    "2026-11-08T01:46:55.980Z WARN  127.0.0.1:52006: the client closed the connection or stopped answering; closing the connection"
+  ],
+  "elapsed_s": 4.130958832989563,
+  "load_end": [
+    6.59912109375,
+    9.833984375,
+    8.53466796875
+  ]
+}

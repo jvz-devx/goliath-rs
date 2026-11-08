@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Summarize D9 without changing raw results or projecting tiles as linear work."""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import math
+from pathlib import Path
+import re
+import json
+import e11_support as support
+
+ROOT=Path(__file__).resolve().parent.parent
+
+
+def summarize(data):
+    rows={}
+    for count,cell in data['cells'].items():
+        names={p['uuid'].replace('-',''):p['name'] for phase in ['before','after'] for tile in cell[phase].values() for p in tile['players']}
+        witnesses=cell['layout']['witnesses']
+        crossings=[dict(event,name=names.get(event['uuid'].replace('-',''))) for event in cell['activations_in_window'] if names.get(event['uuid'].replace('-','')) in witnesses]
+        geometry=cell['witness_geometry']
+        corner=any(match and set(match.groups()) in [{'a','c'},{'b','d'}] for line in cell['crossing_routes'] if (match:=re.search(r'moved from ([a-d]) to ([a-d])',line)))
+        populations={phase:{tile:{key:value[key] for key in ['placed','held','readers','chunks','population']} for tile,value in cell[phase].items()} for phase in ['before','after']}
+        steady=cell['processes']['phases']['steady']
+        cpu={role:record['cores'] for role,record in steady['fixture'].items()}
+        ticks={tile:dict(count=len(batch['ticks']),dropped=batch['dropped'],p99_ms=sorted(tick['ms'] for tick in batch['ticks'])[math.ceil(.99*len(batch['ticks']))-1],maximum_ms=max(tick['ms'] for tick in batch['ticks'])) for tile,batch in cell['tick_samples'].items()}
+        witness_valid=not cell['witness_latency']['errors'] and len(geometry['interior_tiles'])==4 and len(geometry['crossing_witnesses'])>=2 and len(geometry['wall_witnesses'])>=2 and bool(crossings) and corner
+        rows[count]=dict(proxy=cell['proxy'],process_cores=cpu,server_cores=steady['server_cores'],populations=populations,
+            native_main_thread_cores=None,main_thread_evidence='not captured in this window; process cores are upper bounds only',
+            witness_valid=witness_valid,witness_crossings=crossings,corner_crossing_observed=corner,
+            witness_p95_ms=cell['witness_conservative_p95_ms'],witness_matched=cell['witness_latency']['matched'],witness_front=cell['witness_latency']['front_packets'],
+            internal={name:{key:record[key] for key in ['count','p95_us_upper','maximum_us','unstamped_writes']} for name,record in cell['histogram']['paths'].items()},
+            limiter_window=cell['limiter_window'],latency_includes_sigstop=cell['latency_includes_sigstop'],
+            noise_valid=cell['noise_valid'],outside_max_steady=steady['outside_max_process_cores'],
+            outside_max_whole_cell=cell['processes']['phases']['whole_cell']['outside_max_process_cores'],
+            ticks=ticks,all_online=all(row['online']==group['count'] and row['failed']==0 and not row['falling_behind'] for group in cell['layout']['groups'] for row in [cell['bot_last'][group['label']]]),
+            eligible=cell['status']=='complete' and cell['noise_valid'] and witness_valid)
+    projection={}
+    if '50' in rows and '200' in rows:
+        a,b=rows['50']['proxy'],rows['200']['proxy']
+        slope=(b['cores']-a['cores'])/150;intercept=a['cores']-50*slope
+        projected=intercept+975*slope
+        # Parent's illustrative crowding estimate, not a fitted capacity model.
+        tile_estimate=4*((975/4)/325)**2*1.25
+        projection=dict(proxy_incremental_slope=slope,proxy_intercept=intercept,proxy_at_975=projected,
+            proxy_06_core_population=(.6-intercept)/slope,
+            proxy_threads_at_975=a['threads_max']+(b['threads_max']-a['threads_max'])*925/150,
+            tile_quadratic_illustration_cores=tile_estimate,
+            tiles_plus_current_proxy_illustration=tile_estimate+projected,
+            event_loop_expected_incremental_slope=[.0007,.0009],
+            event_loop_proxy_at_975=[intercept+975*value for value in [.0007,.0009]],
+            not_measured_at_975=True,warning='two-point proxy extrapolation and parent crowding illustration only; no affine tile capacity claim')
+    return dict(kind='E18-D9-derived-summary',rows=rows,projection=projection,
+        correction='normalize hyphenated status UUIDs against compact crossing UUIDs; raw cpu_latency_eligible false is a reporting mismatch, raw file untouched')
+
+
+if __name__=='__main__':
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('raw',type=Path);parser.add_argument('output',type=Path);args=parser.parse_args()
+    result=summarize(json.loads(args.raw.read_text()));result['raw_sha256']=hashlib.sha256(args.raw.read_bytes()).hexdigest()
+    support.save(args.output,result)
+    print(json.dumps(dict(eligible={count:row['eligible'] for count,row in result['rows'].items()},projection=result['projection']),indent=2))
