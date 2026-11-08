@@ -1,0 +1,315 @@
+{
+  "kind": "E23-preregistered-plans",
+  "created": "2026-11-08T18:06:41.792161+00:00",
+  "status": "pre-registered",
+  "host_release_required": true,
+  "rows_retained": true,
+  "capacity_players": 650,
+  "matched_plain_players": 325,
+  "capacity_multiple": 2.0,
+  "target_three_times_met": false,
+  "frozen": {
+    "binaries": {
+      "horizon-client": "b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d",
+      "meridian": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+      "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+      "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+      "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+      "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025"
+    },
+    "manifests": {
+      "manifest.json": "704736938e54ac6732c881f7597676d38e25a6d6d4625799b3a04fc0faac1657",
+      "candidate.json": "2bfd2e26c0c9ef61f3549b8a3c33faf96938875fd6063323e359c1910611d7b9",
+      "canonical.json": "33a2322d27331f0b6f6310d06a8be5e4cff9adda9e98dbf1a13baf219d5c9cf9",
+      "FINAL.json": "b0840ee4635d572971e23c6f6af2c9bc9f2282a82ff19d22befaaae5b76a3546",
+      "LEASES": "14e155e414ecf409b1691473aa56c568c8f25634152ab0467a0fed739dd9d65f",
+      "cluster-launcher.py": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5"
+    }
+  },
+  "plans": {
+    "vehicles": {
+      "rows": [
+        {
+          "kind": "boat",
+          "crossings": 100
+        },
+        {
+          "kind": "minecart",
+          "crossings": 100
+        },
+        {
+          "kind": "horse",
+          "crossings": 100
+        }
+      ],
+      "pass_line": "stable UUID, generation +1, one live owner, saved-file/store consistency, mounted recovery"
+    },
+    "physics": {
+      "rows": [
+        {
+          "particles": false,
+          "crossings": 56
+        },
+        {
+          "particles": true,
+          "crossings": 56
+        }
+      ],
+      "checker": "scripts/e20-build10-check-v2",
+      "maximum_backward_blocks": 0.1,
+      "minimum_speed_ratio": 0.95,
+      "approach": "prepare must precede interpolated client wall crossing; report every signed lead"
+    },
+    "identical": {
+      "rows": [
+        {
+          "tiles": 1,
+          "repeat": 1,
+          "players_per_tile": 162,
+          "pigs_per_tile": 64
+        },
+        {
+          "tiles": 1,
+          "repeat": 2,
+          "players_per_tile": 162,
+          "pigs_per_tile": 64
+        },
+        {
+          "tiles": 2,
+          "repeat": 1,
+          "players_per_tile": 162,
+          "pigs_per_tile": 64
+        },
+        {
+          "tiles": 2,
+          "repeat": 2,
+          "players_per_tile": 162,
+          "pigs_per_tile": 64
+        },
+        {
+          "tiles": 4,
+          "repeat": 1,
+          "players_per_tile": 162,
+          "pigs_per_tile": 64
+        },
+        {
+          "tiles": 4,
+          "repeat": 2,
+          "players_per_tile": 162,
+          "pigs_per_tile": 64
+        }
+      ],
+      "warmup_seconds": 30,
+      "seconds": 60,
+      "readers_enabled": true,
+      "through_proxy": true,
+      "server_cores": 4,
+      "bot_cores": 1
+    },
+    "latency": {
+      "rows": [
+        {
+          "players": 650,
+          "taps": "none"
+        },
+        {
+          "players": 650,
+          "taps": "partitioned"
+        }
+      ],
+      "warmup_seconds": 30,
+      "seconds": 60,
+      "maximum_p95_ms": 5,
+      "server_cores": 4,
+      "bot_cores": 1,
+      "intrusion": "each tap below .7 core; no errors; intact D9 throughput, online population and bot deadlines"
+    },
+    "profile": {
+      "rows": [
+        {
+          "players": 650,
+          "seconds": 60
+        }
+      ],
+      "selection": "largest native tile process CPU delta after warmup",
+      "maximum_additions_tick_fraction": 0.05,
+      "unresolved_attribution_is_not_pass": true
+    },
+    "soak": {
+      "rows": [
+        {
+          "players": 650,
+          "seconds": 1800,
+          "maximum_window_seconds": 2400
+        }
+      ],
+      "memory_from_seconds": 300,
+      "memory_to_seconds": 1800,
+      "maximum_growth_fraction": 0.1,
+      "maximum_duplicates": 0,
+      "maximum_owner_violations": 0,
+      "server_cores": 4,
+      "bot_cores": 1
+    },
+    "release": {
+      "rows": [
+        {
+          "binary": "horizon-client",
+          "sha256": "b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d"
+        },
+        {
+          "binary": "meridian",
+          "sha256": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b"
+        },
+        {
+          "binary": "goliath-store",
+          "sha256": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af"
+        },
+        {
+          "binary": "meridian-sidecar",
+          "sha256": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b"
+        },
+        {
+          "binary": "horizon-bots",
+          "sha256": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d"
+        },
+        {
+          "binary": "e4-client",
+          "sha256": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025"
+        }
+      ],
+      "pass_line": "successful retained cargo build --release record matches exact executable hash"
+    }
+  },
+  "production_release_provenance": [
+    {
+      "path": "docs/experiments/data/E17/final-release-prereqs-v2.json",
+      "sha256": "13c24a97ff354d042648bedd55dfd22ef82b5abd1b860f0bfb0fd676ed63e32e",
+      "profile": "release",
+      "incremental": false,
+      "binaries": {
+        "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+        "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d"
+      },
+      "commands": [
+        {
+          "workspace": ".",
+          "command": [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "-p",
+            "goliath-store",
+            "--bin",
+            "goliath-store"
+          ],
+          "exit": 0,
+          "seconds": 1.3837714170076651
+        },
+        {
+          "workspace": ".local/src/horizon",
+          "command": [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--no-default-features",
+            "-p",
+            "horizon-client",
+            "--bin",
+            "horizon-client",
+            "-p",
+            "horizon-bots",
+            "--bin",
+            "horizon-bots"
+          ],
+          "exit": 0,
+          "seconds": 429.35020770800475
+        }
+      ]
+    },
+    {
+      "path": "docs/experiments/data/E18/flat09-tiles-build-1.json",
+      "sha256": "3d1a9ad8e6648f6e9f9f30a760a471a0c58b90fa27bd0d4b90c0ca96b809933b",
+      "profile": "release",
+      "incremental": false,
+      "binaries": {
+        "horizon-client": "b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d"
+      },
+      "commands": [
+        {
+          "label": "release",
+          "command": [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--no-default-features",
+            "-p",
+            "horizon-client",
+            "--bin",
+            "horizon-client"
+          ],
+          "exit": 0,
+          "seconds": 252.52132366599108,
+          "test_results": []
+        }
+      ]
+    },
+    {
+      "path": ".local/bin/meridian-e18/reactor-1/candidate.json",
+      "sha256": "2bfd2e26c0c9ef61f3549b8a3c33faf96938875fd6063323e359c1910611d7b9",
+      "profile": "release",
+      "binaries": {
+        "meridian": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+        "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+        "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025"
+      },
+      "commands": [
+        {
+          "command": [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "-p",
+            "meridian-proxy",
+            "--bin",
+            "meridian",
+            "-p",
+            "meridian-sidecar",
+            "--bin",
+            "meridian-sidecar",
+            "-p",
+            "meridian-testkit",
+            "--bin",
+            "e4-client"
+          ],
+          "exit": 0,
+          "seconds": 0.08305858299718238,
+          "test_results": []
+        }
+      ]
+    }
+  ],
+  "release_verdict": "production executables verified; native physics client provenance is separate",
+  "scripts": {
+    "e23-audit": "64507593aebde820cc185d4ca0da690c58d0c4e8b17b808d0e3349667ea96e50",
+    "e23-campaign": "7832997aba8ebf24b040a0233b0cb3d6e9a33b31bbbc522ce8af1b38e29382f2",
+    "e23-cell": "d622bf0172a6243bf6ee60b446791cb6a77dca4616ad97855a67b6e34c58620f",
+    "e23-event": "02e4941c4316dc8be0b174536940c40568bcfd5bb8da1597c858664487e7587d",
+    "e23-physics": "97a349d7f427e66d1dfe9c161f672f5f3d9b7e711503803ed69238e70b8ab9ad",
+    "e23-prepare": "d9cf714ce159b83ceef60c0d94f5d21dc1f84f7913f4f8bd4cd0bfa1ea5edfc6",
+    "e23-results": "db583677fc19a6bcc5f02a980f1f20a3f324613a47474a6e1c5d347a59345b5b",
+    "e23-soak-contracts": "645c67416a878d6a6632cb3713d74ca21529636a0a64ab7dabf9dbd3619119ba",
+    "e23-soak-results": "1a05a118883d5d80974e649168d8b1e7ceb65e3d8ae65f046704ff634a199693",
+    "e23-tap": "6a3ba469272356eb53fb454be6143172c50729adbd3b1ac0f69b50c277193434",
+    "e23-tests": "0847e09cfad4db17acde341ed5ae38e6c4639b9609db3d0bd5a136cb98b15203",
+    "e23-vehicles": "8288b36f72ed2068b704cb527c40611dc65509142ff648f41c790e8da11b1477",
+    "e23-window": "10bf1b39931170768b90cf5f51c072a5a5593742646703f92db99cda43c9098a",
+    "e23_observe.py": "9a19988647f51fd618c79146b457696ab3d6775e26a3dc284509f4b24cf5c7b2",
+    "e23_support.py": "a8a5ed7e3e3bf54b32a7c2a56a99c29af963323d3b2c841f52ee4a4c86b06029"
+  },
+  "report_sha256_at_registration": "58d4e14d44ac95a45bb8e163c2968fcb6472db0ed902b70b3d06f0350dc2c86c"
+}
