@@ -1,0 +1,910 @@
+{
+  "kind": "E22-derived-builder-results-not-independent-acceptance",
+  "comparison_sha256": "6d96572bf2db7bb319946b99a0f279519a5b1f2d1c53b737eb916a7ba36f2cef",
+  "inputs": {
+    "current": {
+      "horizon-client": "21805ed6621cf138f0e3d509a91d233bee8f8fe182f625e3fcaa1bad88f87ea6",
+      "meridian": "8716c34f6e799e2ddce31aff153b86cf9c78408bfcd64b4c78551851d2b399ad",
+      "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+      "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+      "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+      "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+      "cluster-launcher.py": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5",
+      "LEASES": "14e155e414ecf409b1691473aa56c568c8f25634152ab0467a0fed739dd9d65f"
+    },
+    "shared": {
+      "horizon-client": "21805ed6621cf138f0e3d509a91d233bee8f8fe182f625e3fcaa1bad88f87ea6",
+      "meridian": "944ca279d236b1064d296c4adb5bbea31f192d25c2c3ff99f3df5432b594e483",
+      "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+      "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+      "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+      "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+      "cluster-launcher.py": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5",
+      "LEASES": "14e155e414ecf409b1691473aa56c568c8f25634152ab0467a0fed739dd9d65f"
+    }
+  },
+  "comparisons": [
+    {
+      "mode": "d9",
+      "repeat": 1,
+      "valid": true,
+      "proxy_saving_cores": -0.022319240005988283,
+      "tile_saving_cores": 0.21801469678783625,
+      "total_saving_cores": 0.19619358992771696
+    },
+    {
+      "mode": "d9",
+      "repeat": 2,
+      "valid": true,
+      "proxy_saving_cores": 0.09149730470337092,
+      "tile_saving_cores": 0.175014210881431,
+      "total_saving_cores": 0.26850796520457143
+    },
+    {
+      "mode": "contained",
+      "repeat": 1,
+      "valid": true,
+      "proxy_saving_cores": 0.03782442247922935,
+      "tile_saving_cores": 0.06699259429199333,
+      "total_saving_cores": 0.10415218642910151
+    },
+    {
+      "mode": "contained",
+      "repeat": 2,
+      "valid": true,
+      "proxy_saving_cores": 0.010549359848914808,
+      "tile_saving_cores": 0.019393790837437752,
+      "total_saving_cores": 0.03060640937306358
+    }
+  ],
+  "clearly_cheaper": true,
+  "rows": [
+    {
+      "name": "shared3-traced-fixed-d9-current-r1",
+      "mode": "d9",
+      "arm": "current",
+      "repeat": 1,
+      "valid": true,
+      "raw_sha256": "79c252e2fb4ba47059c1fbb7c62d081d3e787860ea4dcf9e1d159f88bc401527",
+      "proxy_cores": 0.8979184297724743,
+      "tile_cores": {
+        "a": 0.5449390099915943,
+        "b": 0.5296354724704626,
+        "c": 0.5446063243933086,
+        "d": 0.5053494237956236
+      },
+      "tile_sum_cores": 2.124530230650989,
+      "server_cores": 3.0510596218760133,
+      "readers": {
+        "a": 65,
+        "b": 65,
+        "c": 65,
+        "d": 65
+      },
+      "chunks": {
+        "a": 368,
+        "b": 367,
+        "c": 367,
+        "d": 367
+      },
+      "activations": 587,
+      "minimum_tps": 19.999133246516624,
+      "maximum_tick_p99_ms": 32.076917,
+      "raw_tick_drops": 0,
+      "cache_peaks": {},
+      "cache_scope": null,
+      "cache_byte_scope": null,
+      "recovery": {},
+      "availability_complete": true,
+      "lease_expiry": false,
+      "store_batches": 9135,
+      "store_maxima_ms": {
+        "admission_max_ms": 9.596959,
+        "queue_max_ms": 13.034375,
+        "execute_ms": 24.971541,
+        "barrier_ms": 23.235417,
+        "maintain_ms": 5.106333,
+        "background_ms": 46.880458
+      },
+      "store_gaps_over_200ms": 4,
+      "limiter_signal_summary": {
+        "roles": {
+          "tile-a": {
+            "stops": 207,
+            "continues": 208,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 12.543416
+          },
+          "tile-b": {
+            "stops": 207,
+            "continues": 208,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 12.5265
+          },
+          "tile-c": {
+            "stops": 207,
+            "continues": 208,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 12.561542
+          },
+          "tile-d": {
+            "stops": 207,
+            "continues": 208,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 12.543708
+          },
+          "store": {
+            "stops": 207,
+            "continues": 208,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 12.441333
+          }
+        },
+        "unclosed_stops": [],
+        "dropped": 0
+      },
+      "contained_contract": null
+    },
+    {
+      "name": "shared3-traced-fixed-d9-shared-r1",
+      "mode": "d9",
+      "arm": "shared",
+      "repeat": 1,
+      "valid": true,
+      "raw_sha256": "7b9c18634ed5e9c65e5e09b8ae4b8bdfa0c743a11b26bd417400bef3c37ac580",
+      "proxy_cores": 0.9202376697784626,
+      "tile_cores": {
+        "a": 0.46926798019613936,
+        "b": 0.48290852410825696,
+        "c": 0.47791808121357976,
+        "d": 0.4764209483451767
+      },
+      "tile_sum_cores": 1.9065155338631528,
+      "server_cores": 2.8548660319482964,
+      "readers": {
+        "a": 1,
+        "b": 1,
+        "c": 1,
+        "d": 1
+      },
+      "chunks": {
+        "a": 368,
+        "b": 367,
+        "c": 367,
+        "d": 367
+      },
+      "activations": 585,
+      "minimum_tps": 19.990886596544392,
+      "maximum_tick_p99_ms": 33.355167,
+      "raw_tick_drops": 0,
+      "cache_peaks": {
+        "a": {
+          "columns": 35,
+          "charged_bytes": 256380,
+          "groups": 1
+        },
+        "b": {
+          "columns": 35,
+          "charged_bytes": 256380,
+          "groups": 1
+        },
+        "c": {
+          "columns": 35,
+          "charged_bytes": 256307,
+          "groups": 1
+        },
+        "d": {
+          "columns": 35,
+          "charged_bytes": 256380,
+          "groups": 1
+        }
+      },
+      "cache_scope": "per live reader high-water marks since creation, including warmup",
+      "cache_byte_scope": "retained packet payload plus 64 bytes per packet; client output queues and map metadata separate",
+      "recovery": {
+        "a": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "b": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "c": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "d": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        }
+      },
+      "availability_complete": true,
+      "lease_expiry": false,
+      "store_batches": 8970,
+      "store_maxima_ms": {
+        "admission_max_ms": 3.499459,
+        "queue_max_ms": 17.759375,
+        "execute_ms": 20.239041,
+        "barrier_ms": 20.208584,
+        "maintain_ms": 5.009958,
+        "background_ms": 46.062334
+      },
+      "store_gaps_over_200ms": 3,
+      "limiter_signal_summary": {
+        "roles": {
+          "tile-a": {
+            "stops": 104,
+            "continues": 105,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 11.488041
+          },
+          "tile-b": {
+            "stops": 104,
+            "continues": 105,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 11.481958
+          },
+          "tile-c": {
+            "stops": 104,
+            "continues": 105,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 11.52175
+          },
+          "tile-d": {
+            "stops": 104,
+            "continues": 105,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 11.530541
+          },
+          "store": {
+            "stops": 104,
+            "continues": 105,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 11.555541
+          }
+        },
+        "unclosed_stops": [],
+        "dropped": 0
+      },
+      "contained_contract": null
+    },
+    {
+      "name": "shared3-traced-fixed-d9-current-r2",
+      "mode": "d9",
+      "arm": "current",
+      "repeat": 2,
+      "valid": true,
+      "raw_sha256": "047c0b4404273ac495391071e6217e3bc7fe68b64e343067a78df3d1db5d45d6",
+      "proxy_cores": 0.8978954929819372,
+      "tile_cores": {
+        "a": 0.5286239119482393,
+        "b": 0.5249644638479054,
+        "c": 0.5256298180479662,
+        "d": 0.48836998284456595
+      },
+      "tile_sum_cores": 2.067588176688677,
+      "server_cores": 2.9955909472233615,
+      "readers": {
+        "a": 65,
+        "b": 65,
+        "c": 65,
+        "d": 65
+      },
+      "chunks": {
+        "a": 368,
+        "b": 367,
+        "c": 367,
+        "d": 367
+      },
+      "activations": 585,
+      "minimum_tps": 19.99182535752516,
+      "maximum_tick_p99_ms": 38.375083,
+      "raw_tick_drops": 0,
+      "cache_peaks": {},
+      "cache_scope": null,
+      "cache_byte_scope": null,
+      "recovery": {},
+      "availability_complete": true,
+      "lease_expiry": false,
+      "store_batches": 9169,
+      "store_maxima_ms": {
+        "admission_max_ms": 9.21575,
+        "queue_max_ms": 20.275584,
+        "execute_ms": 16.71425,
+        "barrier_ms": 12.388334,
+        "maintain_ms": 8.998209,
+        "background_ms": 60.978583
+      },
+      "store_gaps_over_200ms": 4,
+      "limiter_signal_summary": {
+        "roles": {
+          "tile-a": {
+            "stops": 253,
+            "continues": 254,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 10.661666
+          },
+          "tile-b": {
+            "stops": 253,
+            "continues": 254,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 10.672917
+          },
+          "tile-c": {
+            "stops": 253,
+            "continues": 254,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 10.689875
+          },
+          "tile-d": {
+            "stops": 253,
+            "continues": 254,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 10.691042
+          },
+          "store": {
+            "stops": 253,
+            "continues": 254,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 10.689083
+          }
+        },
+        "unclosed_stops": [],
+        "dropped": 0
+      },
+      "contained_contract": null
+    },
+    {
+      "name": "shared3-traced-fixed-d9-shared-r2",
+      "mode": "d9",
+      "arm": "shared",
+      "repeat": 2,
+      "valid": true,
+      "raw_sha256": "3e14b98002eba699f08bc1e351646c2a921a2b2c9b37246eb467e49e86e0c39c",
+      "proxy_cores": 0.8063981882785662,
+      "tile_cores": {
+        "a": 0.47838308364050264,
+        "b": 0.4615831213846992,
+        "c": 0.47921476494029486,
+        "d": 0.47339299584174915
+      },
+      "tile_sum_cores": 1.8925739658072458,
+      "server_cores": 2.72708298201879,
+      "readers": {
+        "a": 1,
+        "b": 1,
+        "c": 1,
+        "d": 1
+      },
+      "chunks": {
+        "a": 368,
+        "b": 367,
+        "c": 367,
+        "d": 367
+      },
+      "activations": 587,
+      "minimum_tps": 19.992345937644952,
+      "maximum_tick_p99_ms": 35.525041,
+      "raw_tick_drops": 0,
+      "cache_peaks": {
+        "a": {
+          "columns": 35,
+          "charged_bytes": 256380,
+          "groups": 1
+        },
+        "b": {
+          "columns": 35,
+          "charged_bytes": 256380,
+          "groups": 1
+        },
+        "c": {
+          "columns": 35,
+          "charged_bytes": 256380,
+          "groups": 1
+        },
+        "d": {
+          "columns": 35,
+          "charged_bytes": 256380,
+          "groups": 1
+        }
+      },
+      "cache_scope": "per live reader high-water marks since creation, including warmup",
+      "cache_byte_scope": "retained packet payload plus 64 bytes per packet; client output queues and map metadata separate",
+      "recovery": {
+        "a": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "b": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "c": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "d": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        }
+      },
+      "availability_complete": true,
+      "lease_expiry": false,
+      "store_batches": 9165,
+      "store_maxima_ms": {
+        "admission_max_ms": 0.704292,
+        "queue_max_ms": 16.749833,
+        "execute_ms": 21.679333,
+        "barrier_ms": 21.658625,
+        "maintain_ms": 5.065125,
+        "background_ms": 53.000625
+      },
+      "store_gaps_over_200ms": 3,
+      "limiter_signal_summary": {
+        "roles": {
+          "tile-a": {
+            "stops": 34,
+            "continues": 35,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 9.6
+          },
+          "tile-b": {
+            "stops": 34,
+            "continues": 35,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 9.5615
+          },
+          "tile-c": {
+            "stops": 34,
+            "continues": 35,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 9.559875
+          },
+          "tile-d": {
+            "stops": 34,
+            "continues": 35,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 9.569583
+          },
+          "store": {
+            "stops": 34,
+            "continues": 35,
+            "failed_signals": 0,
+            "maximum_stop_upper_ms": 9.601083
+          }
+        },
+        "unclosed_stops": [],
+        "dropped": 0
+      },
+      "contained_contract": null
+    },
+    {
+      "name": "shared3-traced-fixed-contained-current-r1",
+      "mode": "contained",
+      "arm": "current",
+      "repeat": 1,
+      "valid": true,
+      "raw_sha256": "dd668aa1e66aca4e0db832e7c106b553a161ad1029d9351d59cb6d71d1c6d825",
+      "proxy_cores": 0.6768873688651487,
+      "tile_cores": {
+        "a": 0.6164391347466712,
+        "b": 0.34940407853097954,
+        "c": 0.35438607584843645,
+        "d": 0.36767140202832155
+      },
+      "tile_sum_cores": 1.6879006911544088,
+      "server_cores": 2.3734235220364828,
+      "readers": {
+        "a": 65,
+        "b": 65,
+        "c": 65,
+        "d": 65
+      },
+      "chunks": {
+        "a": 383,
+        "b": 366,
+        "c": 354,
+        "d": 366
+      },
+      "activations": 0,
+      "minimum_tps": 19.997417371496997,
+      "maximum_tick_p99_ms": 26.703333999999998,
+      "raw_tick_drops": 0,
+      "cache_peaks": {},
+      "cache_scope": null,
+      "cache_byte_scope": null,
+      "recovery": {},
+      "availability_complete": true,
+      "lease_expiry": false,
+      "store_batches": 2898,
+      "store_maxima_ms": {
+        "admission_max_ms": 0.383916,
+        "queue_max_ms": 4.162666,
+        "execute_ms": 7.778292,
+        "barrier_ms": 7.542333,
+        "maintain_ms": 4.868334,
+        "background_ms": 29.004
+      },
+      "store_gaps_over_200ms": 3,
+      "limiter_signal_summary": {
+        "roles": {},
+        "unclosed_stops": [],
+        "dropped": 0
+      },
+      "contained_contract": {
+        "expected_placed": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        },
+        "activations": 0,
+        "before": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        },
+        "after": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        }
+      }
+    },
+    {
+      "name": "shared3-traced-fixed-contained-shared-r1",
+      "mode": "contained",
+      "arm": "shared",
+      "repeat": 1,
+      "valid": true,
+      "raw_sha256": "b43d84b6d3fa0254a0ee9deb43cf38a68d7a10098cd4784be1644e144e1a16ae",
+      "proxy_cores": 0.6390629463859193,
+      "tile_cores": {
+        "a": 0.5676499872003827,
+        "b": 0.3447751238818006,
+        "c": 0.35374326294230996,
+        "d": 0.35473972283792204
+      },
+      "tile_sum_cores": 1.6209080968624154,
+      "server_cores": 2.2692713356073813,
+      "readers": {
+        "a": 1,
+        "b": 1,
+        "c": 1,
+        "d": 1
+      },
+      "chunks": {
+        "a": 383,
+        "b": 366,
+        "c": 354,
+        "d": 366
+      },
+      "activations": 0,
+      "minimum_tps": 19.98116891776734,
+      "maximum_tick_p99_ms": 25.838083,
+      "raw_tick_drops": 0,
+      "cache_peaks": {
+        "a": {
+          "columns": 48,
+          "charged_bytes": 351579,
+          "groups": 1
+        },
+        "b": {
+          "columns": 34,
+          "charged_bytes": 248984,
+          "groups": 1
+        },
+        "c": {
+          "columns": 24,
+          "charged_bytes": 175754,
+          "groups": 1
+        },
+        "d": {
+          "columns": 34,
+          "charged_bytes": 248984,
+          "groups": 1
+        }
+      },
+      "cache_scope": "per live reader high-water marks since creation, including warmup",
+      "cache_byte_scope": "retained packet payload plus 64 bytes per packet; client output queues and map metadata separate",
+      "recovery": {
+        "a": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "b": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "c": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "d": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        }
+      },
+      "availability_complete": true,
+      "lease_expiry": false,
+      "store_batches": 2895,
+      "store_maxima_ms": {
+        "admission_max_ms": 0.307291,
+        "queue_max_ms": 9.628417,
+        "execute_ms": 21.165625,
+        "barrier_ms": 21.146042,
+        "maintain_ms": 4.011833,
+        "background_ms": 29.901292
+      },
+      "store_gaps_over_200ms": 7,
+      "limiter_signal_summary": {
+        "roles": {},
+        "unclosed_stops": [],
+        "dropped": 0
+      },
+      "contained_contract": {
+        "expected_placed": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        },
+        "activations": 0,
+        "before": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        },
+        "after": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        }
+      }
+    },
+    {
+      "name": "shared3-traced-fixed-contained-current-r2",
+      "mode": "contained",
+      "arm": "current",
+      "repeat": 2,
+      "valid": true,
+      "raw_sha256": "b8e3ed4a05caf22afa6235a7b11b71ae055cac282c2a2de7822030f0af84ba39",
+      "proxy_cores": 0.666299267888334,
+      "tile_cores": {
+        "a": 0.6061795433181504,
+        "b": 0.3480965267931077,
+        "c": 0.36769356408394105,
+        "d": 0.37300801487467555
+      },
+      "tile_sum_cores": 1.6949776490698747,
+      "server_cores": 2.370577205841994,
+      "readers": {
+        "a": 65,
+        "b": 65,
+        "c": 65,
+        "d": 65
+      },
+      "chunks": {
+        "a": 383,
+        "b": 366,
+        "c": 354,
+        "d": 366
+      },
+      "activations": 0,
+      "minimum_tps": 19.998914937755767,
+      "maximum_tick_p99_ms": 27.978833,
+      "raw_tick_drops": 0,
+      "cache_peaks": {},
+      "cache_scope": null,
+      "cache_byte_scope": null,
+      "recovery": {},
+      "availability_complete": true,
+      "lease_expiry": false,
+      "store_batches": 2895,
+      "store_maxima_ms": {
+        "admission_max_ms": 0.206208,
+        "queue_max_ms": 4.5605,
+        "execute_ms": 9.550125,
+        "barrier_ms": 9.5345,
+        "maintain_ms": 4.920667,
+        "background_ms": 28.917167
+      },
+      "store_gaps_over_200ms": 3,
+      "limiter_signal_summary": {
+        "roles": {},
+        "unclosed_stops": [],
+        "dropped": 0
+      },
+      "contained_contract": {
+        "expected_placed": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        },
+        "activations": 0,
+        "before": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        },
+        "after": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        }
+      }
+    },
+    {
+      "name": "shared3-traced-fixed-contained-shared-r2",
+      "mode": "contained",
+      "arm": "shared",
+      "repeat": 2,
+      "valid": true,
+      "raw_sha256": "2dc209caa5c1f9c181b5865c55146fed17a74686de6fc617b72eb8c855dece4e",
+      "proxy_cores": 0.6557499080394192,
+      "tile_cores": {
+        "a": 0.5996092117584354,
+        "b": 0.36076210746241605,
+        "c": 0.36009772052417954,
+        "d": 0.3551148184874059
+      },
+      "tile_sum_cores": 1.675583858232437,
+      "server_cores": 2.3399707964689305,
+      "readers": {
+        "a": 1,
+        "b": 1,
+        "c": 1,
+        "d": 1
+      },
+      "chunks": {
+        "a": 383,
+        "b": 366,
+        "c": 354,
+        "d": 366
+      },
+      "activations": 0,
+      "minimum_tps": 20.0002754841752,
+      "maximum_tick_p99_ms": 26.965,
+      "raw_tick_drops": 0,
+      "cache_peaks": {
+        "a": {
+          "columns": 48,
+          "charged_bytes": 351579,
+          "groups": 1
+        },
+        "b": {
+          "columns": 34,
+          "charged_bytes": 248984,
+          "groups": 1
+        },
+        "c": {
+          "columns": 24,
+          "charged_bytes": 175754,
+          "groups": 1
+        },
+        "d": {
+          "columns": 34,
+          "charged_bytes": 248984,
+          "groups": 1
+        }
+      },
+      "cache_scope": "per live reader high-water marks since creation, including warmup",
+      "cache_byte_scope": "retained packet payload plus 64 bytes per packet; client output queues and map metadata separate",
+      "recovery": {
+        "a": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "b": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "c": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        },
+        "d": {
+          "refresh_requests": 0,
+          "refresh_deferrals": 0,
+          "recovery_resets": 0,
+          "recovery_restores": 0,
+          "recovery_failures": 0
+        }
+      },
+      "availability_complete": true,
+      "lease_expiry": false,
+      "store_batches": 2901,
+      "store_maxima_ms": {
+        "admission_max_ms": 0.492459,
+        "queue_max_ms": 5.0635,
+        "execute_ms": 8.307208,
+        "barrier_ms": 7.717875,
+        "maintain_ms": 4.045542,
+        "background_ms": 30.129666
+      },
+      "store_gaps_over_200ms": 4,
+      "limiter_signal_summary": {
+        "roles": {},
+        "unclosed_stops": [],
+        "dropped": 0
+      },
+      "contained_contract": {
+        "expected_placed": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        },
+        "activations": 0,
+        "before": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        },
+        "after": {
+          "a": 212,
+          "b": 146,
+          "c": 146,
+          "d": 146
+        }
+      }
+    }
+  ],
+  "availability_event": "docs/experiments/data/E22/lease-availability-event-1.json",
+  "prior_event_cause": "unresolved",
+  "recurrence_in_fresh_comparison": false
+}

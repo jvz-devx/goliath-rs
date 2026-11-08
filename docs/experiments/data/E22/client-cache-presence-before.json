@@ -1,0 +1,6 @@
+{
+  "base_candidate": ".local/bin/meridian-e22/shared-3",
+  "command": "CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 cargo test --locked --release -p meridian-handoff client_cache_eviction",
+  "exit": 101,
+  "output": "    Finished `release` profile [optimized] target(s) in 14.55s\n     Running unittests src/lib.rs (target/release/deps/meridian_handoff-80317face88efb25)\n\nrunning 1 test\ntest shared_terrain::tests::identical_column_bytes_are_not_suppressed_after_client_cache_eviction ... FAILED\n\nfailures:\n\n---- shared_terrain::tests::identical_column_bytes_are_not_suppressed_after_client_cache_eviction stdout ----\n\nthread 'shared_terrain::tests::identical_column_bytes_are_not_suppressed_after_client_cache_eviction' (19288220) panicked at crates/meridian-handoff/src/shared_terrain/tests.rs:69:48:\ncalled `Result::unwrap()` on an `Err` value: Error(\"Timed out\")\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    shared_terrain::tests::identical_column_bytes_are_not_suppressed_after_client_cache_eviction\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 113 filtered out; finished in 0.05s\n\nerror: test failed, to rerun pass `-p meridian-handoff --lib`\n"
+}

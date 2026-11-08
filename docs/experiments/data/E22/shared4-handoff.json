@@ -1,0 +1,121 @@
+{
+  "status": "hold-unqualified",
+  "qualifies_for_promotion": false,
+  "full_shared4_M2": "skipped: saving >=0.10 core was not reproduced in both D9 repeats",
+  "no_further_optimization": true,
+  "no_resampling_or_averaging": true,
+  "frozen_directory": ".local/bin/meridian-e22/shared-4",
+  "binaries": {
+    "horizon-client": "21805ed6621cf138f0e3d509a91d233bee8f8fe182f625e3fcaa1bad88f87ea6",
+    "meridian": "9b5dfacb43e1881f5725a8341fc59d655af924e81e2829ea49b951a14f2df275",
+    "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+    "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+    "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af"
+  },
+  "source_proof_sha256": "f4ed5e7adb8848895da9ceaec3c24c02fcfcaf32676204ee78618ff7c13c62e4",
+  "ordered_delta_patches": [
+    {
+      "path": "patches/meridian-08-shared-views.patch",
+      "sha256": "4e4814416a1b08e902ecb6aa4cad3e3b261bcd97654809d981865c7a66884a86"
+    },
+    {
+      "path": "patches/meridian-08-cache-source-retention.patch",
+      "sha256": "45ef99df12c9c9e7e8c6f35091a12277671d9246266ef01161f41d21355a6d67"
+    },
+    {
+      "path": "patches/meridian-08-refresh-interest-barrier.patch",
+      "sha256": "cee918a1ce05e593dae8672e928efe26c61d61c0f93f490f5353a90879a60b34"
+    },
+    {
+      "path": "patches/meridian-08-client-cache-presence.patch",
+      "sha256": "69abe7d1d7b01fecc0640ce41c7fdeeac372fa8b32f6406ac49c575f0256cdd2"
+    }
+  ],
+  "comparison": {
+    "path": "docs/experiments/data/E22/shared4-traced-fixed-pairs.json",
+    "sha256": "ec0eb0941f84992536f72837728d149d610269ffd67f00d3a9040dc954f862b2",
+    "comparisons": [
+      {
+        "mode": "d9",
+        "repeat": 1,
+        "valid": true,
+        "proxy_saving_cores": -0.07069002362480925,
+        "tile_saving_cores": 0.09547390496266339,
+        "total_saving_cores": 0.029619837560889817
+      },
+      {
+        "mode": "d9",
+        "repeat": 2,
+        "valid": true,
+        "proxy_saving_cores": 0.05763244408483503,
+        "tile_saving_cores": 0.1571520884288975,
+        "total_saving_cores": 0.2161123639080964
+      },
+      {
+        "mode": "contained",
+        "repeat": 1,
+        "valid": true,
+        "proxy_saving_cores": 0.02299700537321503,
+        "tile_saving_cores": 0.006342978427211543,
+        "total_saving_cores": 0.02767608299822122
+      },
+      {
+        "mode": "contained",
+        "repeat": 2,
+        "valid": true,
+        "proxy_saving_cores": 0.036782017159789904,
+        "tile_saving_cores": 0.10839457114214301,
+        "total_saving_cores": 0.14550751268529805
+      }
+    ]
+  },
+  "derived_results": {
+    "path": "docs/experiments/data/E22/shared4-results.json",
+    "sha256": "c53731863fcccb2635de604322e4cc6f7e67cb22b51dc885ae63719729308b63"
+  },
+  "release_gates": {
+    "path": "docs/experiments/data/E22/shared4-gates-1-gates.json",
+    "sha256": "3fd88b83ecda72ac1dbefac759c8460f0a16ad623de92ab5f41d144ea5eac587",
+    "status": "complete",
+    "all_exits_zero": true
+  },
+  "native_presence_probe": {
+    "path": "docs/experiments/data/E22/physics/shared4-presence-probe.json.gz",
+    "sha256": "c9841f64f61cf3a7b4c8f0d960c5b827ec17aff19cd6895e44414b0ffe61657c",
+    "status": "complete",
+    "probe": {
+      "underfoot_column": [
+        4,
+        4
+      ],
+      "present": true,
+      "client_abilities": {
+        "kind": "client_abilities",
+        "ns": 1794151028614164000,
+        "flags": 2
+      },
+      "exact_original_key_sequence": true
+    }
+  },
+  "availability_event": {
+    "path": "docs/experiments/data/E22/lease-availability-event-1.json",
+    "sha256": "95ea53ac7ab0c54ce87036d5a92c36da6358304e497ac6f456d2b45f9e814e8d",
+    "cause": "unresolved",
+    "recurrence_in_final_eight_cells": false
+  },
+  "method_finding": "Control 2.92 to 3.15 cores at the same load. Two pairs cannot reliably resolve savings below about 0.15 core on this host; the preregistered rule stays unchanged.",
+  "milestone_acceptance": false,
+  "commit_or_push": "none",
+  "cleanup": {
+    "command": "scripts/clean-builds",
+    "freed_mb": 0,
+    "project_mb": 8427,
+    "targets_mb": {
+      "root": 38,
+      "horizon": 2018,
+      "meridian": 683
+    },
+    "quiet_marker": false,
+    "own_fixture_processes": false
+  }
+}

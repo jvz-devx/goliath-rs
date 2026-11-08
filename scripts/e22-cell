@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Use the exact E20 D9 or E21 contained fixture with E22 ownership and an explicit ack waiver."""
+import argparse
+import ast
+import hashlib
+import json
+import os
+from pathlib import Path
+import sys
+import e11_support as support
+from e14_snapshot_support import validate_snapshot
+from e22_availability import Availability
+
+ROOT = support.ROOT
+DATA = ROOT / 'docs/experiments/data/E22'
+WAIVER = 'reviewer confirmed E20 finished and E22 is the only active builder; acknowledgements waived'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class Adapt(ast.NodeTransformer):
+    """Change only result ownership and the already-authorized acknowledgement gate."""
+    def visit_keyword(self, node):
+        self.generic_visit(node)
+        if node.arg == 'owner' and isinstance(node.value, ast.Constant) and node.value.value in ['E20', 'E21']:
+            node.value = ast.copy_location(ast.Constant('E22'), node.value)
+        return node
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == 'ack' and node.func.attr == 'read_text':
+            return ast.copy_location(ast.Constant(WAIVER), node)
+        return node
+
+    def visit_Constant(self, node):
+        if node.value == 'waived: reviewer confirmed E21 finished and idle':
+            return ast.copy_location(ast.Constant(WAIVER), node)
+        return node
+
+    def visit_While(self, node):
+        self.generic_visit(node)
+        condition = node.test
+        if isinstance(condition, ast.UnaryOp) and isinstance(condition.op, ast.Not) and isinstance(condition.operand, ast.Call):
+            call = condition.operand.func
+            if isinstance(call, ast.Attribute) and isinstance(call.value, ast.Name) and call.value.id == 'ack' and call.attr == 'exists':
+                return ast.copy_location(ast.Pass(), node)
+        return node
+
+    def visit_If(self, node):
+        self.generic_visit(node)
+        if isinstance(node.test, ast.BoolOp) and any(isinstance(value, ast.Constant) and value.value == 'quiet state exists' for value in ast.walk(node)):
+            node.test = ast.copy_location(ast.Call(ast.Attribute(ast.Name('request', ast.Load()), 'exists', ast.Load()), [], []), node.test)
+        return node
+
+    def visit_Assign(self,node):
+        self.generic_visit(node)
+        for target in node.targets:
+            if isinstance(target,ast.Subscript) and isinstance(target.value,ast.Name) and target.value.id=='cell' and isinstance(target.slice,ast.Constant) and target.slice.value in ['before','after']:
+                capture=ast.Expr(ast.Call(ast.Name('e22_capture_cache',ast.Load()),
+                    [ast.Name('instance',ast.Load()),ast.Name('cell',ast.Load()),ast.Constant(target.slice.value)],[]))
+                return [node,ast.copy_location(capture,node)]
+        return node
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('mode', choices=['d9', 'contained'])
+    parser.add_argument('--bins', type=Path, required=True)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--no-other-agents', action='store_true', required=True)
+    args = parser.parse_args()
+    validate_snapshot(args.bins)
+    expected = json.loads((ROOT / '.local/bin/meridian-e22/observer-2/manifest.json').read_text())['horizon-client']
+    if sha(args.bins / 'horizon-client') != expected:
+        raise RuntimeError('both arms must use the exact frozen patch-11 engine')
+    os.environ.pop('E22_SHARED_OFF', None)
+    base = ROOT / 'scripts' / ('e20-frontier' if args.mode == 'd9' else 'e21-tile-profile')
+    tree = ast.fix_missing_locations(Adapt().visit(ast.parse(base.read_text())))
+    executed = ast.unparse(tree) + '\n'
+    DATA.mkdir(parents=True, exist_ok=True)
+    source_path = DATA / (args.name + '-fixture.py')
+    if source_path.exists():
+        raise RuntimeError('use a fresh cell name')
+    source_path.write_text(executed)
+    namespace = dict(__name__='e22_adapted_fixture', __file__=str(base))
+    exec(compile(tree, str(base), 'exec'), namespace)
+    namespace['DATA'] = DATA
+    target = DATA / (args.name + '.json')
+    availability=Availability(args.name)
+    namespace['load']=availability.instrument_load(namespace['load'])
+    namespace['ProcessSampler']=availability.sampler(namespace['ProcessSampler'])
+    candidate=json.loads((args.bins/'candidate.json').read_text())
+    telemetry_available=any(record['path'].endswith('meridian-08-cache-source-retention.patch') for record in candidate['projects']['meridian']['patches'])
+    def capture_cache(instance,cell,mark):
+        if not telemetry_available:
+            cell['source_cache_telemetry']=dict(available=False,reason='control has no shared source-cache telemetry')
+            return
+        log=instance.root/'proxy.log'
+        offset=log.stat().st_size
+        instance.proxy.send('e22-views')
+        def reply():
+            with log.open('rb') as stream:
+                stream.seek(offset);raw=stream.read()
+            for line in raw[:raw.rfind(b'\n')+1].decode(errors='replace').splitlines():
+                if 'E22_VIEWS ' in line:return json.loads(line.split('E22_VIEWS ',1)[1])
+        raw=support.wait(reply,5,'shared source-cache telemetry timeout')
+        if set(raw['tiles'])!=set(instance.tiles):
+            raise RuntimeError('source-cache telemetry does not identify all measured tiles')
+        for groups in raw['tiles'].values():
+            if any(group['peak_source_columns']>4096 or group['peak_source_bytes']>80*1024*1024 for group in groups):
+                raise RuntimeError('source-cache telemetry exceeds its declared hard bound')
+        fields=['source_columns','source_bytes','peak_source_columns','peak_source_bytes','refresh_requests','refresh_deferrals','recovery_resets','recovery_restores','recovery_failures']
+        tiles={name:dict(groups=len(groups),**{field:sum(group[field] for group in groups) for field in fields}) for name,groups in raw['tiles'].items()}
+        cell.setdefault('source_cache_telemetry',dict(available=True,scope=raw['scope'],byte_scope=raw['byte_scope'],
+            aggregation='sum of live group high-water marks; exact per-tile peak when one group'))[mark]=dict(tiles=tiles,raw=raw)
+    namespace['e22_capture_cache']=capture_cache
+
+    def save(path, value):
+        if Path(path) == target:
+            value.update(e22_mode=args.mode, quiet_owner='E22', acknowledgement_waiver=WAIVER,
+                e22_adapter_sha256=sha(Path(__file__)), base_fixture_sha256=sha(base),
+                executed_fixture_source=dict(path=str(source_path.relative_to(ROOT)), sha256=sha(source_path)))
+            for cell in value.get('cells', {}).values():
+                cell['acknowledgement_waiver'] = WAIVER
+        support.save(path, value)
+
+    class Support:
+        def __getattr__(self, name):
+            return save if name == 'save' else getattr(support, name)
+
+    namespace['support'] = Support()
+    sys.argv = [str(base), '--name', args.name, '--bins', str(args.bins), '--counts', '650', '--warmup', '30', '--seconds', '60' if args.mode == 'd9' else '30']
+    sys.argv += ['--no-other-agents'] if args.mode == 'd9' else ['--contained-crossers']
+    try:
+        namespace['main']()
+    finally:
+        availability_result=availability.finish(target)
+    if availability_result['lease_expiry_observed']:
+        raise SystemExit('lease expiry observed; stop this plan and report the retained availability evidence')
+    if not availability_result['complete']:
+        raise SystemExit('availability telemetry incomplete; no later cell started')
+
+
+if __name__ == '__main__':
+    main()

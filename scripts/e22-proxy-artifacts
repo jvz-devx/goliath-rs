@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Own patch-08 byte proof, sequential release gates and matched frozen bundles."""
+import argparse
+import difflib
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+import e11_support as support
+from e14_snapshot_support import validate_snapshot
+
+ROOT = support.ROOT
+SOURCE = ROOT / '.local/src/meridian'
+DATA = ROOT / 'docs/experiments/data/E22'
+BASE = ROOT / '.local/bin/meridian-e20/scheduler-2'
+ENGINE = ROOT / '.local/bin/meridian-e22/observer-2'
+PATCH = ROOT / 'patches/meridian-08-shared-views.patch'
+PROOF = DATA / 'proxy-source.json'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def save(path, value):
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def source_proof(write, after=None, patch_name='shared-views'):
+    if not re.fullmatch(r'[a-z0-9][a-z0-9-]*',patch_name):
+        raise RuntimeError('use a simple patch name')
+    patch_file=ROOT/'patches'/('meridian-08-'+patch_name+'.patch')
+    baseline = json.loads(((after or BASE) / 'candidate.json').read_text())['projects']['meridian']
+    paths = subprocess.check_output(['git', 'ls-files', '-co', '--exclude-standard'], cwd=SOURCE, text=True).splitlines()
+    paths = sorted(set(p for p in paths if p.endswith(('.rs', '.toml', '.lock'))))
+    DATA.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='E22-meridian-index-', dir=ROOT / '.local/runs') as scratch:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(scratch) / 'index'))
+
+        def git(*args):
+            return subprocess.check_output(['git', *map(str, args)], cwd=SOURCE, env=env)
+
+        git('read-tree', baseline['pin'])
+        for record in baseline['patches']:
+            if sha(ROOT / record['path']) != record['sha256']:
+                raise RuntimeError('frozen prerequisite patch changed')
+            git('apply', '--cached', ROOT / record['path'])
+        if write:
+            delta = []
+            for path in paths:
+                present = subprocess.run(['git', 'cat-file', '-e', ':' + path], cwd=SOURCE, env=env,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+                before = git('show', ':' + path).decode() if present else ''
+                after = (SOURCE / path).read_text()
+                if before == after:
+                    continue
+                delta.append(f'diff --git a/{path} b/{path}\n')
+                if not present:
+                    delta.append('new file mode 100644\n')
+                delta.extend(difflib.unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True),
+                    fromfile='a/' + path if present else '/dev/null', tofile='b/' + path))
+            if not delta:
+                raise RuntimeError('no patch 08 delta')
+            generated = ''.join(delta)
+            if patch_file.exists() and patch_file.read_text() != generated:
+                for frozen in (ROOT / '.local/bin/meridian-e22').glob('*/candidate.json'):
+                    records = json.loads(frozen.read_text()).get('projects', {}).get('meridian', {}).get('patches', [])
+                    if any(record['path'] == str(patch_file.relative_to(ROOT)) for record in records):
+                        raise RuntimeError('frozen patch 08 is immutable; make a separately numbered follow-up delta')
+            if not patch_file.exists() or patch_file.read_text() != generated:
+                patch_file.write_text(generated)
+        git('apply', '--cached', '--check', patch_file)
+        git('apply', '--cached', patch_file)
+        for path in paths:
+            if git('show', ':' + path) != (SOURCE / path).read_bytes():
+                raise RuntimeError('working source differs: ' + path)
+        proof = dict(pin=baseline['pin'], source_equality='passed', apply_check='passed',
+            patches=baseline['patches'] + [dict(path=str(patch_file.relative_to(ROOT)), sha256=sha(patch_file))],
+            source_files={p: sha(SOURCE / p) for p in paths}, result_tree=git('write-tree').decode().strip())
+        save(PROOF, proof)
+        print(json.dumps(dict(source_equality='passed', files=len(paths), patch=str(patch_file.relative_to(ROOT)),patch08_sha256=sha(patch_file))))
+
+
+def verify(proof):
+    for path, digest in proof['source_files'].items():
+        if sha(SOURCE / path) != digest:
+            raise RuntimeError('source changed after proof: ' + path)
+    for record in proof['patches']:
+        if sha(ROOT / record['path']) != record['sha256']:
+            raise RuntimeError('numbered patch changed: ' + record['path'])
+
+
+def gates(name):
+    proof = json.loads(PROOF.read_text())
+    verify(proof)
+    path = DATA / (name + '-gates.json')
+    if path.exists():
+        raise RuntimeError('use a fresh gate name')
+    selected = [arg for package in ['meridian-config', 'meridian-ghost', 'meridian-handoff', 'meridian-net', 'meridian-proxy', 'meridian-sidecar'] for arg in ['-p', package]]
+    commands = [
+        ['cargo', 'fmt', '--all', '--check'],
+        ['cargo', 'clippy', '--locked', '--release', *selected, '--all-targets', '--', '-D', 'warnings'],
+        ['cargo', 'test', '--locked', '--release', *selected, '--', '--skip', 'serve::tests::the_listener_queues_a_large_burst'],
+        ['cargo', 'build', '--locked', '--release', '-p', 'meridian-proxy', '--bin', 'meridian'],
+    ]
+    env = {k: v for k, v in os.environ.items() if k not in ['CI', 'CARGO_TARGET_DIR'] and not k.startswith('CARGO_PROFILE_')}
+    env.update(CARGO_INCREMENTAL='0', CARGO_BUILD_JOBS='2', CARGO_PROFILE_RELEASE_LTO='thin', CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1')
+    result = dict(status='running', source_proof_sha256=sha(PROOF), profile='release', incremental=False, commands=[])
+    try:
+        for index, command in enumerate(commands):
+            if (ROOT / '.local/quiet-request').exists():
+                raise RuntimeError('quiet request active before gate')
+            log = ROOT / '.local/evidence/E22' / (name + f'-{index}.log')
+            log.parent.mkdir(parents=True, exist_ok=True)
+            print('E22_PROXY_GATE ' + str(index), flush=True)
+            began = time.monotonic()
+            with log.open('w') as stream:
+                run = subprocess.run(command, cwd=SOURCE, env=env, stdout=stream, stderr=subprocess.STDOUT)
+            text = log.read_text(errors='replace')
+            row = dict(command=command, exit=run.returncode, seconds=time.monotonic()-began,
+                test_results=re.findall(r'test result: .*', text))
+            result['commands'].append(row)
+            (DATA / (name + f'-{index}.log.gz')).write_bytes(gzip.compress(support.sanitize(text).encode(), mtime=0))
+            save(path, result)
+            print(json.dumps(row), flush=True)
+            if run.returncode:
+                print('\n'.join(text.splitlines()[-80:]), flush=True)
+                raise RuntimeError('release gate failed')
+        verify(proof)
+        result['status'] = 'complete'
+    except BaseException as error:
+        result.update(status='failed', error=support.sanitize(str(error)))
+        raise
+    finally:
+        save(path, result)
+
+
+def freeze(name, gate_name, current):
+    target = ROOT / '.local/bin/meridian-e22' / name
+    if target.exists():
+        raise RuntimeError('use a fresh freeze name')
+    validate_snapshot(ENGINE)
+    proof = json.loads(PROOF.read_text())
+    if not current:
+        verify(proof)
+        gate_path = DATA / (gate_name + '-gates.json')
+        gate = json.loads(gate_path.read_text())
+        if gate['source_proof_sha256'] != sha(PROOF) or gate['status'] != 'complete' or len(gate['commands']) != 4 or any(row['exit'] for row in gate['commands']):
+            raise RuntimeError('complete matching release gates required')
+    target.mkdir(parents=True)
+    reference = json.loads((ENGINE / 'candidate.json').read_text())
+    for binary, digest in reference['binaries'].items():
+        if sha(ENGINE / binary) != digest:
+            raise RuntimeError('frozen engine prerequisite changed')
+        shutil.copy2(ENGINE / binary, target / binary)
+    source = BASE / 'meridian' if current else SOURCE / 'target/release/meridian'
+    if current and sha(source) != json.loads((BASE / 'candidate.json').read_text())['binaries']['meridian']:
+        raise RuntimeError('scheduler-2 binary changed')
+    shutil.copy2(source, target / 'meridian')
+    for filename in ['LEASES', 'cluster-launcher.py']:
+        shutil.copy2(ENGINE / filename, target / filename)
+    binaries = {binary: sha(target / binary) for binary in reference['binaries']}
+    reference['projects']['meridian'] = json.loads((BASE / 'candidate.json').read_text())['projects']['meridian'] if current else proof
+    reference.update(binaries=binaries, candidate=False, kind='E22-current-patch11-control' if current else 'E22-shared-view-release-M2-pending')
+    if not current:
+        reference['e22_gates'] = dict(path=str(gate_path.relative_to(ROOT)), sha256=sha(gate_path))
+        shutil.copy2(PROOF, target / 'proxy-source.json')
+    save(target / 'candidate.json', reference)
+    canonical = json.loads((ENGINE / 'canonical.json').read_text())
+    canonical.update(binaries=binaries, projects=reference['projects'], kind=reference['kind'])
+    save(target / 'canonical.json', canonical)
+    final = json.loads((ENGINE / 'FINAL.json').read_text())
+    required = list(final['binaries'])
+    final.update(kind=reference['kind'], projects=reference['projects'], candidate_sha256=sha(target / 'candidate.json'),
+        binaries={binary: dict(path=str((target / binary).relative_to(ROOT)), sha256=binaries[binary]) for binary in required},
+        validation=dict(release_gates='passed', native_M2='pending', capacity='unverified'))
+    save(target / 'FINAL.json', final)
+    save(target / 'manifest.json', {binary: binaries[binary] for binary in required})
+    (target / 'READY').write_text('E22 immutable release bundle. Correctness and capacity acceptance are separate.\n')
+    validate_snapshot(target)
+    record = dict(directory=str(target.relative_to(ROOT)), binaries=binaries, current_control=current,
+        source_proof_sha256=None if current else sha(PROOF), patch08_sha256=None if current else proof['patches'][-1]['sha256'])
+    save(DATA / (name + '-freeze.json'), record)
+    print(json.dumps(record, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='action', required=True)
+    patch = sub.add_parser('patch')
+    patch.add_argument('--write', action='store_true')
+    patch.add_argument('--after',type=Path)
+    patch.add_argument('--patch-name',default='shared-views')
+    gate = sub.add_parser('gates')
+    gate.add_argument('--name', required=True)
+    frozen = sub.add_parser('freeze')
+    frozen.add_argument('--name', required=True)
+    frozen.add_argument('--gates')
+    frozen.add_argument('--current', action='store_true')
+    args = parser.parse_args()
+    if args.action == 'patch':
+        source_proof(args.write,args.after,args.patch_name)
+    elif args.action == 'gates':
+        gates(args.name)
+    else:
+        freeze(args.name, args.gates, args.current)
+
+
+if __name__ == '__main__':
+    main()

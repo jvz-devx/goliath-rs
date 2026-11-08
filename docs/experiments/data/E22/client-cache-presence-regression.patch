@@ -1,0 +1,65 @@
+diff --git a/crates/meridian-handoff/src/shared_terrain/tests.rs b/crates/meridian-handoff/src/shared_terrain/tests.rs
+--- a/crates/meridian-handoff/src/shared_terrain/tests.rs
++++ b/crates/meridian-handoff/src/shared_terrain/tests.rs
+@@ -621,3 +621,61 @@
+     assert_eq!(after["peak_source_columns"], 2);
+     assert_eq!(after["peak_source_bytes"], held["peak_source_bytes"]);
+ }
++
++#[test]
++fn identical_column_bytes_are_not_suppressed_after_client_cache_eviction() {
++    let mut client = Client::new();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let _member = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(4, 4));
++    assert_eq!(client.next(), chunk(4, 4));
++    client.handle.terrain_center([-80., 70., 64.]).unwrap();
++    assert_eq!(client.next().id, c::SET_CHUNK_CACHE_CENTER);
++    assert!(!client.handle.0.down().ghost.has_column(4, 4));
++    client.handle.terrain_center([64., 70., 64.]).unwrap();
++    client.next();
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [64., 70., 64.],
++        ..Default::default()
++    });
++    publish(&view, chunk(4, 4));
++    assert_eq!(client.next(), chunk(4, 4));
++}
++
++#[test]
++fn active_owned_cache_restores_a_missing_column_and_its_persistent_updates() {
++    let mut client = Client::new();
++    client.handle.0.down().backend = "a".into();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let member = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    {
++        let mut down = client.handle.0.down();
++        crate::terrain::active(&client.handle.0, &mut down, chunk(4, 4), &mut Vec::new()).unwrap();
++    }
++    client.next();
++    publish(&view, chunk(4, 4));
++    client.empty();
++    let changed = Packet::of(&play::Clientbound::BlockUpdate(play::BlockUpdate {
++        pos: [65, 70, 65],
++        state: 12,
++    }));
++    publish(&view, changed.clone());
++    client.empty();
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [-80., 70., 64.],
++        ..Default::default()
++    });
++    client.handle.terrain_center([-80., 70., 64.]).unwrap();
++    client.next();
++    member.recenter([-80., 70., 64.], 3, false).unwrap();
++    assert!(!client.handle.0.down().ghost.has_column(4, 4));
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [64., 70., 64.],
++        ..Default::default()
++    });
++    client.handle.terrain_center([64., 70., 64.]).unwrap();
++    client.next();
++    member.recenter([64., 70., 64.], 3, false).unwrap();
++    assert_eq!(client.next(), chunk(4, 4));
++    assert_eq!(client.next(), changed);
++}

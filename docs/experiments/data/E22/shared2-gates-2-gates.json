@@ -1,0 +1,101 @@
+{
+  "status": "complete",
+  "source_proof_sha256": "f3a964478ad194d7fa94ba9aa9b1a4f00131c4d5e32e880e84c26cb748e65bd9",
+  "profile": "release",
+  "incremental": false,
+  "commands": [
+    {
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 0.43240108399186283,
+      "test_results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "-p",
+        "meridian-config",
+        "-p",
+        "meridian-ghost",
+        "-p",
+        "meridian-handoff",
+        "-p",
+        "meridian-net",
+        "-p",
+        "meridian-proxy",
+        "-p",
+        "meridian-sidecar",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 1.8298016250191722,
+      "test_results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "meridian-config",
+        "-p",
+        "meridian-ghost",
+        "-p",
+        "meridian-handoff",
+        "-p",
+        "meridian-net",
+        "-p",
+        "meridian-proxy",
+        "-p",
+        "meridian-sidecar",
+        "--",
+        "--skip",
+        "serve::tests::the_listener_queues_a_large_burst"
+      ],
+      "exit": 0,
+      "seconds": 74.85564929200336,
+      "test_results": [
+        "test result: ok. 202 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+        "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 111 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.98s",
+        "test result: ok. 107 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.86s",
+        "test result: ok. 566 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.25s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s",
+        "test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.56s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "meridian-proxy",
+        "--bin",
+        "meridian"
+      ],
+      "exit": 0,
+      "seconds": 0.08310233399970457,
+      "test_results": []
+    }
+  ]
+}

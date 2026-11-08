@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Check harness-only availability capture without changing or rebuilding executables."""
+import contextlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import tempfile
+import threading
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock,patch
+import e11_support as support
+import e22_availability as av
+
+ROOT=support.ROOT
+HEADER='start_us,count,admission_max_ms,queue_max_ms,queue_mean_ms,collect_ms,execute_ms,barrier_ms,dispatch_ms,maintain_ms,background_ms\n'
+ROWS='0,1,0,0,0,0,10,3,0,0,0\n250000,1,0,240,0,0,5,4,0,0,0\n260000,1,0,0,0,0,250,220,0,0,0\n'
+
+
+@contextlib.contextmanager
+def fixture():
+    previous=os.environ.get('GOLIATH_STORE_TRACE');prior_os=support.os
+    with tempfile.TemporaryDirectory(prefix='E22-availability-test-',dir=ROOT/'.local/runs') as folder:
+        root=Path(folder);data=root/'data';data.mkdir()
+        with patch.object(av,'ROOT',root),patch.object(av,'DATA',data):
+            trace=av.Availability('unit')
+            try:
+                trace.store_trace.write_text(HEADER+ROWS)
+                for pid,role in [(10,'store'),(11,'tile-a'),(12,'tile-b'),(13,'tile-c'),(14,'tile-d')]:trace.register(role,pid)
+                raw=data/'raw.json';raw.write_text(json.dumps(dict(cells={'650':{}})))
+                yield trace,raw
+            finally:
+                trace.origin_stop.set();support.os=prior_os
+                if previous is None:os.environ.pop('GOLIATH_STORE_TRACE',None)
+                else:os.environ['GOLIATH_STORE_TRACE']=previous
+
+
+class Availability(unittest.TestCase):
+    def test_batch_gaps_keep_neighboring_fsync_timings_without_calling_idle_a_stall(self):
+        with fixture() as (trace,_):
+            result=av.batches(trace.store_trace)
+            self.assertEqual(result['rows'],3)
+            self.assertEqual(result['maxima_ms']['barrier_ms'],220)
+            self.assertEqual(result['gaps_over_200ms'][0]['start_spacing_ms'],250)
+            self.assertIn('queue_max_ms',result['gaps_over_200ms'][0]['reasons'])
+            self.assertEqual(len(result['gaps_over_200ms'][0]['context']),3)
+            self.assertIn('idle',result['gap_note'])
+
+    def test_only_limiter_thread_signals_for_store_and_tiles_are_recorded(self):
+        with fixture() as (trace,raw):
+            calls=Mock();trace.original_os=type('FakeOs',(),{'kill':staticmethod(calls)})
+            trace.limiters[threading.get_ident()]=4
+            trace.kill(10,signal.SIGSTOP);trace.kill(11,signal.SIGCONT);trace.kill(99,signal.SIGSTOP)
+            trace.limiters.clear();trace.kill(10,signal.SIGCONT)
+            self.assertEqual(calls.call_count,4)
+            self.assertEqual([(row['role'],row['signal']) for row in trace.events],[('store','STOP'),('tile-a','CONT')])
+            self.assertTrue(all(row['monotonic_after_ns']>=row['monotonic_before_ns'] for row in trace.events))
+            result=trace.finish(raw);self.assertTrue(result['complete']);self.assertEqual(result['limiter_signals']['count'],2)
+
+    def test_event_overflow_is_explicit_and_cannot_qualify(self):
+        with fixture() as (trace,raw),patch.object(av,'MAX_EVENTS',1):
+            trace.original_os=type('FakeOs',(),{'kill':staticmethod(lambda *_:None)})
+            trace.limiters[threading.get_ident()]=4
+            trace.kill(10,signal.SIGSTOP);trace.kill(10,signal.SIGCONT)
+            result=trace.finish(raw);self.assertEqual(result['events_dropped'],1);self.assertFalse(result['complete'])
+
+    def test_budget_wrapper_records_its_own_thread_and_final_resume(self):
+        with fixture() as (trace,raw):
+            trace.original_os=type('FakeOs',(),{'kill':staticmethod(lambda *_:None)})
+            class Base:
+                def __init__(self):self.cores=4;self.thread=threading.Thread(target=self.run)
+                def run(self):trace.os_proxy.kill(10,signal.SIGSTOP);trace.os_proxy.kill(10,signal.SIGCONT)
+            budget=trace.budget(Base)();budget.thread.start();budget.thread.join(timeout=1)
+            self.assertFalse(budget.thread.is_alive());self.assertEqual([row['signal'] for row in trace.events],['STOP','CONT'])
+            self.assertFalse(trace.limiters);self.assertTrue(trace.finish(raw)['complete'])
+
+    def test_teardown_expiry_is_retained_as_an_availability_event(self):
+        with fixture() as (trace,raw):
+            trace.expiry_events.append(dict(role='tile-a',scope='teardown',wall_ns=1))
+            result=trace.finish(raw);self.assertTrue(result['lease_expiry_observed'])
+            self.assertTrue(json.loads(raw.read_text())['lease_availability']['lease_expiry_observed'])
+
+    def test_tile_stop_wrapper_preserves_cut_keyword_and_return_value(self):
+        with fixture() as (trace,raw):
+            seen=[]
+            class Tile:
+                label='a'
+                server=SimpleNamespace(stop=Mock())
+                def start(self):pass
+                def stop(self,cut=True):seen.append(cut);return 'stopped'
+            cluster=SimpleNamespace(Tile=Tile,subprocess=SimpleNamespace(Popen=Mock()))
+            adapter=SimpleNamespace(cluster_module=lambda _:cluster)
+            loaded=trace.instrument_load(lambda *_:adapter)('fixture',Path('e17-m4')).cluster_module(Path('fixture'))
+            tile=loaded.Tile()
+            self.assertEqual(tile.stop(cut=False),'stopped');self.assertEqual(tile.stop(),'stopped')
+            self.assertEqual(seen,[False,True]);tile.server.stop.assert_not_called()
+            self.assertTrue(trace.finish(raw)['complete'])
+
+    def test_frozen_store_supports_existing_trace_flag(self):
+        loader=importlib.machinery.SourceFileLoader('e22_store_wire',str(ROOT/'scripts/e5-store.py'))
+        spec=importlib.util.spec_from_loader(loader.name,loader);wire=importlib.util.module_from_spec(spec);loader.exec_module(wire)
+        with tempfile.TemporaryDirectory(prefix='E22-frozen-store-trace-',dir=ROOT/'.local/runs') as folder:
+            root=Path(folder);log=root/'store.log';trace=root/'trace.csv'
+            with log.open('w') as output:
+                process=subprocess.Popen([ROOT/'.local/bin/meridian-e22/current-1/goliath-store','--dir',root/'store','--listen','127.0.0.1:0','--sync','full'],stdout=output,stderr=subprocess.STDOUT,env=dict(os.environ,GOLIATH_STORE_TRACE=str(trace)))
+                try:
+                    def address():
+                        for line in log.read_text().splitlines():
+                            if line.startswith('LISTEN '):
+                                host,port=line.split()[1].split(':');return host,int(port)
+                    target=support.wait(address,5,'frozen store trace startup')
+                    wire.call(target,wire.request(13))
+                    def complete_batch():
+                        if not trace.exists():return False
+                        try:return av.batches(trace)['rows']>=1
+                        except RuntimeError:return False
+                    support.wait(complete_batch,5,'frozen store trace complete batch')
+                    self.assertGreaterEqual(av.batches(trace)['rows'],1)
+                finally:
+                    process.terminate();process.wait(timeout=10)
+
+
+if __name__=='__main__':unittest.main()

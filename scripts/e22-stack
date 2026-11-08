@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Prove patch 11 after the frozen E21 stack without making another checkout."""
+import argparse
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon'
+DATA = ROOT / 'docs/experiments/data/E22'
+PATCH = ROOT / 'patches/horizon-11-shared-observer.patch'
+BASE = ROOT / 'docs/experiments/data/E21/stack-proof.json'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--write', action='store_true', help='generate the numbered delta from the owned source')
+    args = parser.parse_args()
+    base = json.loads(BASE.read_text())
+    if base['source_equality'] != 'passed':
+        raise RuntimeError('E21 source proof required')
+    records = base['patches'] + [dict(path='patches/horizon-10-warm-tick.patch', sha256=base['patch10_sha256'])]
+    for record in records:
+        if sha(ROOT / record['path']) != record['sha256']:
+            raise RuntimeError('frozen patch changed: ' + record['path'])
+    scratch = ROOT / '.local/runs'
+    scratch.mkdir(parents=True, exist_ok=True)
+    DATA.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='E22-index-', dir=scratch) as temporary:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(temporary) / 'index'))
+
+        def git(*args):
+            return subprocess.check_output(['git', *map(str, args)], cwd=SOURCE, env=env)
+
+        git('read-tree', base['pin'])
+        for record in records:
+            git('apply', '--cached', *record.get('apply_options', []), ROOT / record['path'])
+        baseline = git('write-tree').decode().strip()
+        paths = set(git('diff', 'HEAD', '--name-only').decode().splitlines())
+        paths.update(git('ls-files', '--others', '--exclude-standard').decode().splitlines())
+        if args.write:
+            delta = []
+            for path in sorted(paths):
+                if not (path.startswith('crates/') or path == 'Cargo.lock'):
+                    continue
+                exists = subprocess.run(['git', 'cat-file', '-e', ':' + path], cwd=SOURCE, env=env,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+                old = git('show', ':' + path).decode() if exists else ''
+                new = (SOURCE / path).read_text()
+                if old == new:
+                    continue
+                delta.append(f'diff --git a/{path} b/{path}\n')
+                if not exists:
+                    delta.append('new file mode 100644\n')
+                delta.extend(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
+                    fromfile='a/' + path if exists else '/dev/null', tofile='b/' + path))
+            if not delta:
+                raise RuntimeError('no patch 11 delta')
+            generated = ''.join(delta)
+            if PATCH.exists() and PATCH.read_text() != generated:
+                for frozen in (ROOT / '.local/bin/meridian-e22').glob('*/candidate.json'):
+                    records = json.loads(frozen.read_text()).get('projects', {}).get('horizon', {}).get('patches', [])
+                    if any(record['path'] == str(PATCH.relative_to(ROOT)) for record in records):
+                        raise RuntimeError('frozen patch 11 is immutable; make a separately numbered follow-up delta')
+            if not PATCH.exists() or PATCH.read_text() != generated:
+                PATCH.write_text(generated)
+        git('apply', '--cached', '--check', PATCH)
+        git('apply', '--cached', PATCH)
+        paths.update(git('diff', '--cached', '--name-only').decode().splitlines())
+        files = {}
+        for path in sorted(paths):
+            if not (path.startswith('crates/') or path == 'Cargo.lock'):
+                continue
+            if not (SOURCE / path).is_file() or (SOURCE / path).read_bytes() != git('show', ':' + path):
+                raise RuntimeError('working source differs from numbered stack: ' + path)
+            files[path] = sha(SOURCE / path)
+        record = dict(pin=base['pin'], patches=records, patch11_sha256=sha(PATCH),
+            baseline_tree=baseline, result_tree=git('write-tree').decode().strip(),
+            source_equality='passed', files=files, e21_proof_sha256=sha(BASE))
+        (DATA / 'stack-proof.json').write_text(json.dumps(record, indent=2) + '\n')
+        print(json.dumps(dict(source_equality='passed', files=len(files), patch11_sha256=sha(PATCH))))
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,47 @@
+{
+  "status": "failed",
+  "source_proof_sha256": "5fc1794bf631d1e932551cec0688eb91501a75999f32d9fa0950c5467b8e5713",
+  "profile": "release",
+  "incremental": false,
+  "commands": [
+    {
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 0.4308540420024656,
+      "test_results": []
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "-p",
+        "meridian-config",
+        "-p",
+        "meridian-ghost",
+        "-p",
+        "meridian-handoff",
+        "-p",
+        "meridian-net",
+        "-p",
+        "meridian-proxy",
+        "-p",
+        "meridian-sidecar",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 101,
+      "seconds": 1.6821944590192288,
+      "test_results": []
+    }
+  ],
+  "error": "release gate failed"
+}

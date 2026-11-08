@@ -1,0 +1,911 @@
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -188,6 +188,11 @@
+                     value["placed"] = json!(g.placed);
+                     value["held"] = json!(g.held);
+                     value["terrain_reader"] = json!(h.hub.terrain_observers.contains(&g.uuid));
++                    if let Some(view) = h.hub.terrain_observer_views.get(&g.uuid) {
++                        value["observer_revision"] = json!(view.revision());
++                        value["observer_areas"] = json!(view.area_count());
++                        value["observer_columns"] = json!(view.column_count());
++                    }
+                     value["frozen"] = json!(g.handover.is_some());
+                     value["released"] = json!(g.released);
+                     value["tracked_chunks"] = json!(g.sent_chunks.len());
+diff --git a/crates/horizon-client/src/game/dedicated/transfer.rs b/crates/horizon-client/src/game/dedicated/transfer.rs
+--- a/crates/horizon-client/src/game/dedicated/transfer.rs
++++ b/crates/horizon-client/src/game/dedicated/transfer.rs
+@@ -11,19 +11,11 @@
+ //! `[transfer]` is off, and those that bring a player in once the server has begun to stop.
+ use crate::game::{Dim, Game, lan::LanHost};
+ use horizon_client::lan::arrivals;
++use horizon_client::lan::observer::{RefreshRequest, SparseView, ViewRequest};
+ use horizon_protocol::packets::play::{self, Clientbound as C};
+ use serde_json::{Value, json};
+ use std::time::Instant;
+ mod live;
+-#[derive(serde::Deserialize)]
+-#[serde(untagged)]
+-enum ObserverView {
+-    Position([f64; 3]),
+-    Sized {
+-        position: [f64; 3],
+-        radius: Option<u8>,
+-    },
+-}
+ 
+ impl Game<'_> {
+     /// A proxy's `player-*` request; the reply is one JSON line, `{"ok": true, ...}` or
+@@ -81,6 +73,23 @@
+             return json!({ "error": arrivals::OFF });
+         }
+         match verb {
++            "player-observe-refresh" => {
++                let Some((id, text)) = args.split_once(' ') else {
++                    return json!({"error":"observer refresh needs UUID and request"});
++                };
++                let Some(uuid) = arrivals::parse_uuid(id) else {
++                    return json!({"error":"invalid observer UUID"});
++                };
++                let request = match RefreshRequest::parse(text) {
++                    Ok(request) => request,
++                    Err(error) => return json!({"error":error}),
++                };
++                let host = self.lan.as_mut().expect("checked above");
++                match host.hub.refresh_terrain_observer(uuid, &request) {
++                    Ok(queued) => json!({"ok":true,"revision":request.revision,"queued":queued}),
++                    Err(error) => json!({"error":error}),
++                }
++            }
+             "player-observe-reset" => {
+                 let Some(uuid) = arrivals::parse_uuid(args.trim()) else {
+                     return json!({"error":"invalid observer UUID"});
+@@ -112,12 +121,21 @@
+                 let Some(uuid) = arrivals::parse_uuid(id) else {
+                     return json!({"error":"invalid observer UUID"});
+                 };
+-                let Ok(view) = serde_json::from_str::<ObserverView>(position) else {
+-                    return json!({"error":"invalid observer position"});
+-                };
+-                let (position, radius) = match view {
+-                    ObserverView::Position(position) => (position, None),
+-                    ObserverView::Sized { position, radius } => (position, radius),
++                let view = match ViewRequest::parse(position) {
++                    Ok(view) => view,
++                    Err(error) => return json!({"error":error}),
++                };
++                let (position, radius, sparse) = match view {
++                    ViewRequest::Position(position) => (position, None, None),
++                    ViewRequest::Sized { position, radius } => (position, radius, None),
++                    ViewRequest::Sparse {
++                        position,
++                        revision,
++                        areas,
++                    } => match SparseView::new(revision, areas) {
++                        Ok(view) => (position, None, Some(view)),
++                        Err(error) => return json!({"error":error}),
++                    },
+                 };
+                 if radius.is_some_and(|r| !(2..=32).contains(&r)) {
+                     return json!({"error":"observer radius must be 2 through 32"});
+@@ -129,6 +147,15 @@
+                     return json!({"error":"invalid observer position"});
+                 }
+                 let host = self.lan.as_mut().expect("checked above");
++                if let Some(current) = host.hub.terrain_observer_views.get(&uuid) {
++                    let Some(next) = &sparse else {
++                        return json!({"error":"sparse observer needs an interest revision"});
++                    };
++                    if let Err(error) = current.accepts(next) {
++                        return json!({"error":error});
++                    }
++                }
++                let revision = sparse.as_ref().map(SparseView::revision);
+                 if let Some(g) = host.hub.guests.iter_mut().find(|g| g.uuid == uuid) {
+                     if !g.held
+                         || g.placed
+@@ -152,13 +179,22 @@
+                             distance: i32::from(radius),
+                         }));
+                     }
++                    if let Some(view) = sparse {
++                        host.hub.terrain_observer_views.insert(uuid, view);
++                    }
+                     g.held_since = host.hub.ticks;
+-                    return json!({"ok":true,"held":true});
++                    return match revision {
++                        Some(revision) => json!({"ok":true,"held":true,"revision":revision}),
++                        None => json!({"ok":true,"held":true}),
++                    };
+                 }
+                 let reply =
+                     arrivals::expect_request(&mut host.hub, &format!("{id} 10"), Instant::now());
+                 if reply["ok"] == true {
+                     host.hub.terrain_observers.insert(uuid);
++                    if let Some(view) = sparse {
++                        host.hub.terrain_observer_views.insert(uuid, view);
++                    }
+                     if let Some(radius) = radius {
+                         host.hub
+                             .terrain_observer_radii
+@@ -172,7 +208,15 @@
+                         ),
+                     );
+                 }
+-                reply
++                if reply["ok"] == true
++                    && let Some(revision) = revision
++                {
++                    let mut reply = reply;
++                    reply["revision"] = json!(revision);
++                    reply
++                } else {
++                    reply
++                }
+             }
+             "player-expect-at" => {
+                 let mut parts = args.splitn(3, ' ');
+diff --git a/crates/horizon-client/src/game/lan.rs b/crates/horizon-client/src/game/lan.rs
+--- a/crates/horizon-client/src/game/lan.rs
++++ b/crates/horizon-client/src/game/lan.rs
+@@ -3351,7 +3351,11 @@
+             .hub
+             .guests
+             .iter()
+-            .filter(|g| host.hub.watches(g) && super::game_mode::loads_chunks(rule, g.spectator()))
++            .filter(|g| {
++                host.hub.watches(g)
++                    && super::game_mode::loads_chunks(rule, g.spectator())
++                    && !host.hub.terrain_observer_views.contains_key(&g.uuid)
++            })
+             .map(|g| {
+                 (
+                     g.chunk(),
+@@ -3362,6 +3366,16 @@
+                     },
+                 )
+             })
++            .chain(
++                host.hub
++                    .guests
++                    .iter()
++                    .filter(|g| {
++                        host.hub.watches(g) && super::game_mode::loads_chunks(rule, g.spectator())
++                    })
++                    .filter_map(|g| host.hub.terrain_observer_views.get(&g.uuid))
++                    .flat_map(|view| view.loading_areas()),
++            )
+             .chain(
+                 self.arrival_chunks(self.dim)
+                     .into_iter()
+diff --git a/crates/horizon-client/src/lan/hub.rs b/crates/horizon-client/src/lan/hub.rs
+--- a/crates/horizon-client/src/lan/hub.rs
++++ b/crates/horizon-client/src/lan/hub.rs
+@@ -310,6 +310,8 @@
+     pub terrain_observers: std::collections::HashSet<u128>,
+     /// Explicit read-only tracker radii, independent of real-player view caps.
+     pub terrain_observer_radii: HashMap<u128, i32>,
++    /// Sparse coverage is opt-in; legacy observers retain their single-radius path.
++    pub terrain_observer_views: HashMap<u128, super::observer::SparseView>,
+     /// The entities players started and stopped tracking, collected by
+     /// `collect_tracking`, for the game to tell the mods.
+     pub native_tracking: Vec<TrackingBatch>,
+@@ -582,7 +584,7 @@
+ 
+ /// ChunkTrackingView.contains: the chunks a player at (cx, cz) with view
+ /// distance `r` is sent (isWithinDistance with the neighbours' buffer).
+-fn tracked(cx: i32, cz: i32, r: i32, x: i32, z: i32) -> bool {
++pub(super) fn tracked(cx: i32, cz: i32, r: i32, x: i32, z: i32) -> bool {
+     let dx = i64::from(((x - cx).abs() - 2).max(0));
+     let dz = i64::from(((z - cz).abs() - 2).max(0));
+     dx * dx + dz * dz < i64::from(r) * i64::from(r)
+@@ -744,6 +746,7 @@
+             arrival_positions: HashMap::new(),
+             terrain_observers: std::collections::HashSet::new(),
+             terrain_observer_radii: HashMap::new(),
++            terrain_observer_views: HashMap::new(),
+             native_tracking: Vec::new(),
+             attachment_snapshots: Vec::new(),
+             sync_attachments: false,
+@@ -966,9 +969,31 @@
+     pub fn loading_chunks(&self, loads: impl Fn(&Guest) -> bool) -> Vec<(i32, i32)> {
+         self.guests
+             .iter()
+-            .filter(|g| self.watches(g) && loads(g))
++            .filter(|g| {
++                self.watches(g) && loads(g) && !self.terrain_observer_views.contains_key(&g.uuid)
++            })
+             .map(Guest::chunk)
+             .collect()
++    }
++    /// Requeue replacements on the observer's normal ordered stream, without unloading them.
++    pub fn refresh_terrain_observer(
++        &mut self,
++        uuid: u128,
++        request: &super::observer::RefreshRequest,
++    ) -> Result<usize, &'static str> {
++        if !self.terrain_observers.contains(&uuid) {
++            return Err("not a terrain reader");
++        }
++        let Some(g) = self.guests.iter_mut().find(|g| g.uuid == uuid) else {
++            return Err("reader has not joined");
++        };
++        if !g.held || g.placed || g.imported {
++            return Err("observer is not an unimported terrain reader");
++        }
++        let Some(view) = self.terrain_observer_views.get(&uuid) else {
++            return Err("refresh requires a sparse observer");
++        };
++        view.refresh(g, request)
+     }
+     /// `PlayerList.broadcastAll(packet, dimension)`: the players in the
+     /// level in place.
+@@ -1179,6 +1204,8 @@
+                 || self.guests.iter().any(|g| g.uuid == *uuid && g.held)
+         });
+         self.terrain_observer_radii
++            .retain(|uuid, _| self.terrain_observers.contains(uuid));
++        self.terrain_observer_views
+             .retain(|uuid, _| self.terrain_observers.contains(uuid));
+         // Off: nothing to do (and no player can be frozen).
+         let Some(transfers) = &self.transfers else {
+@@ -2570,6 +2597,7 @@
+         let mut g = self.guests.remove(i);
+         self.terrain_observers.remove(&g.uuid);
+         self.terrain_observer_radii.remove(&g.uuid);
++        self.terrain_observer_views.remove(&g.uuid);
+         // A compass target lasts while the player is on, as the world spawn
+         // is sent again when they come back.
+         if !self.guests.iter().any(|o| o.uuid == g.uuid) {
+@@ -2869,6 +2897,10 @@
+     /// the view forgotten and the ones that entered it queued, closest first;
+     /// past the view, the far ring's.
+     fn update_view(&mut self, i: usize) {
++        if let Some(view) = self.terrain_observer_views.get_mut(&self.guests[i].uuid) {
++            view.reconcile(&mut self.guests[i]);
++            return;
++        }
+         let (cx, cz) = self.guests[i].chunk();
+         let r = self.guests[i].view_distance;
+         let reach = self.reach(&self.guests[i]);
+@@ -3053,7 +3085,8 @@
+                     let g = &self.guests[i];
+                     self.watches(g)
+                         && tracked(g, x, z)
+-                        && (-1..=1).any(|dz| (-1..=1).any(|dx| !tracked(g, x + dx, z + dz)))
++                        && (self.terrain_observer_views.contains_key(&g.uuid)
++                            || (-1..=1).any(|dz| (-1..=1).any(|dx| !tracked(g, x + dx, z + dz))))
+                 })
+                 .collect();
+             if viewers.is_empty() {
+@@ -5471,6 +5504,7 @@
+ 
+ #[cfg(test)]
+ mod tests {
++    mod observer_tests;
+     mod sound_tests;
+     use super::*;
+     use crate::fast_hash::FxHashSet;
+diff --git a/crates/horizon-client/src/lan/hub/tests/observer_tests.rs b/crates/horizon-client/src/lan/hub/tests/observer_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client/src/lan/hub/tests/observer_tests.rs
+@@ -0,0 +1,271 @@
++//! Sparse observer wire sequences through the real hub's chunk and update paths.
++use super::*;
++use crate::lan::observer::{Area, RefreshRequest, SparseView};
++
++fn view(revision: u64, centers: &[[i32; 2]]) -> SparseView {
++    SparseView::new(
++        revision,
++        centers
++            .iter()
++            .map(|center| Area {
++                center: *center,
++                radius: 2,
++            })
++            .collect(),
++    )
++    .unwrap()
++}
++
++fn observer() -> (Hub, std::sync::mpsc::Receiver<crate::lan::Out>) {
++    let (mut hub, rx) = hub_with_a_guest();
++    let g = &mut hub.guests[0];
++    g.placed = false;
++    g.held = true;
++    g.chunks_per_tick = 64.0;
++    hub.terrain_observers.insert(g.uuid);
++    hub.ticks = 3;
++    (hub, rx)
++}
++
++fn packets(rx: &std::sync::mpsc::Receiver<crate::lan::Out>) -> Vec<(i32, Vec<u8>)> {
++    let mut result = Vec::new();
++    for out in rx.try_iter() {
++        let bodies = match out {
++            crate::lan::Out::Packet(body) => vec![body],
++            crate::lan::Out::Packets(bodies) => bodies,
++            crate::lan::Out::Disconnect(_) => panic!("observer unexpectedly disconnected"),
++        };
++        for body in bodies {
++            let mut r = horizon_protocol::buf::Reader::new(&body);
++            result.push((r.varint().unwrap(), r.rest().to_vec()));
++        }
++    }
++    result
++}
++
++fn send_chunks(hub: &mut Hub, world: &mut World) {
++    let border = crate::worldborder::WorldBorder::default();
++    let mut next = 10;
++    hub.update_chunks(&TickCtx {
++        world,
++        entities: &[],
++        next_entity: &mut next,
++        spawn: [0., 64., 0.],
++        difficulty: 2,
++        difficulty_locked: false,
++        clock_rate: 1.,
++        tick_rate: 20.,
++        tick_frozen: false,
++        tick_steps: Default::default(),
++        collision: None,
++        border: &border,
++        streaming: None,
++    });
++}
++
++fn add_column(world: &mut World, key: (i32, i32)) {
++    let mut chunk = crate::chunk::Chunk::empty(key.0, key.1);
++    chunk.lit = true;
++    world.chunks.insert(key, Arc::new(chunk));
++}
++
++#[test]
++fn sparse_observer_sends_disconnected_columns_and_forgets_only_removed_interest() {
++    let (mut hub, rx) = observer();
++    hub.terrain_observer_views
++        .insert(1, view(1, &[[-100, 0], [100, 0]]));
++    let mut world = World::new(horizon_world::registry::BlockStateId(0), 0);
++    for key in [(-100, 0), (0, 0), (100, 0)] {
++        add_column(&mut world, key);
++    }
++    send_chunks(&mut hub, &mut world);
++    let sent = packets(&rx);
++    let columns: Vec<_> = sent
++        .iter()
++        .filter(|(id, _)| *id == ids::LEVEL_CHUNK_WITH_LIGHT)
++        .map(|(_, body)| {
++            let mut r = horizon_protocol::buf::Reader::new(body);
++            (r.i32().unwrap(), r.i32().unwrap())
++        })
++        .collect();
++    assert_eq!(columns, vec![(-100, 0), (100, 0)]);
++    assert_eq!(hub.guests[0].sent_chunks.len(), 2);
++    assert!(!hub.guests[0].sent_chunks.contains(&(0, 0)));
++    hub.terrain_observer_views.insert(1, view(2, &[[100, 0]]));
++    send_chunks(&mut hub, &mut world);
++    let sent = packets(&rx);
++    assert_eq!(sent.len(), 1);
++    assert!(matches!(
++        C::decode(sent[0].0, &sent[0].1).unwrap(),
++        C::ForgetLevelChunk(play::ForgetLevelChunk { pos: [-100, 0] })
++    ));
++    assert!(hub.guests[0].sent_chunks.contains(&(100, 0)));
++    hub.terrain_observer_views.insert(1, view(3, &[]));
++    send_chunks(&mut hub, &mut world);
++    assert!(hub.guests[0].sent_chunks.is_empty());
++    assert!(hub.guests[0].chunk_queue.is_empty());
++    assert_eq!(packets(&rx).len(), 1);
++}
++
++#[test]
++fn sparse_refresh_retains_update_membership_and_sends_snapshot_without_forget() {
++    let (mut hub, rx) = observer();
++    hub.terrain_observer_views.insert(1, view(7, &[[0, 0]]));
++    let mut world = World::new(horizon_world::registry::BlockStateId(0), 0);
++    add_column(&mut world, (0, 0));
++    send_chunks(&mut hub, &mut world);
++    packets(&rx);
++    let request = RefreshRequest {
++        revision: 7,
++        columns: vec![[0, 0], [0, 0]],
++    };
++    assert_eq!(hub.refresh_terrain_observer(1, &request), Ok(1));
++    assert_eq!(hub.refresh_terrain_observer(1, &request), Ok(0));
++    assert!(hub.guests[0].sent_chunks.contains(&(0, 0)));
++    // The reader must acknowledge its first batch before another snapshot can leave.
++    send_chunks(&mut hub, &mut world);
++    assert!(packets(&rx).is_empty());
++    assert!(hub.guests[0].chunk_queue.contains(&(0, 0)));
++    hub.guests[0].unacknowledged = 0;
++    world.block_log = Some(vec![(1, 0, 1)]);
++    hub.broadcast_block_changes(&mut world);
++    send_chunks(&mut hub, &mut world);
++    world.block_log = Some(vec![(2, 0, 1)]);
++    hub.broadcast_block_changes(&mut world);
++    let sent = packets(&rx);
++    let ids: Vec<_> = sent.iter().map(|(id, _)| *id).collect();
++    assert_eq!(
++        ids,
++        vec![
++            ids::BLOCK_UPDATE,
++            ids::CHUNK_BATCH_START,
++            ids::LEVEL_CHUNK_WITH_LIGHT,
++            ids::CHUNK_BATCH_FINISHED,
++            ids::BLOCK_UPDATE
++        ]
++    );
++    assert!(hub.guests[0].sent_chunks.contains(&(0, 0)));
++    assert!(!hub.guests[0].chunk_queue.contains(&(0, 0)));
++}
++
++#[test]
++fn sparse_refresh_refuses_stale_untracked_unsent_or_mutable_readers_without_partial_queueing() {
++    let (mut hub, _rx) = observer();
++    hub.terrain_observer_views.insert(1, view(3, &[[0, 0]]));
++    hub.guests[0].sent_chunks.insert((0, 0));
++    for request in [
++        RefreshRequest {
++            revision: 2,
++            columns: vec![[0, 0]],
++        },
++        RefreshRequest {
++            revision: 3,
++            columns: vec![[0, 0], [100, 100]],
++        },
++        RefreshRequest {
++            revision: 3,
++            columns: vec![[0, 0], [1, 0]],
++        },
++        RefreshRequest {
++            revision: 3,
++            columns: vec![[0, 0]; 257],
++        },
++    ] {
++        assert!(hub.refresh_terrain_observer(1, &request).is_err());
++        assert!(hub.guests[0].chunk_queue.is_empty());
++        assert!(hub.guests[0].sent_chunks.contains(&(0, 0)));
++    }
++    let request = RefreshRequest {
++        revision: 3,
++        columns: vec![[0, 0]],
++    };
++    hub.guests[0].placed = true;
++    assert!(hub.refresh_terrain_observer(1, &request).is_err());
++    hub.guests[0].placed = false;
++    hub.guests[0].imported = true;
++    assert!(hub.refresh_terrain_observer(1, &request).is_err());
++    hub.guests[0].imported = false;
++    hub.guests[0].held = false;
++    assert!(hub.refresh_terrain_observer(1, &request).is_err());
++    hub.guests[0].held = true;
++    hub.terrain_observers.remove(&1);
++    assert!(hub.refresh_terrain_observer(1, &request).is_err());
++    assert!(hub.guests[0].chunk_queue.is_empty());
++}
++
++#[test]
++fn sparse_observer_receives_interior_light_updates_for_per_client_edges() {
++    let (mut hub, rx) = observer();
++    hub.terrain_observer_views.insert(1, view(1, &[[0, 0]]));
++    let mut world = World::new(horizon_world::registry::BlockStateId(0), 0);
++    add_column(&mut world, (0, 0));
++    for z in -1..=1 {
++        for x in -1..=1 {
++            hub.guests[0].sent_chunks.insert((x, z));
++        }
++    }
++    world.light_log = Some(Default::default());
++    world
++        .light_log
++        .as_mut()
++        .unwrap()
++        .insert((0, 0), crate::section_mask::SectionMask::default());
++    hub.broadcast_light_changes(&mut world);
++    let sent = packets(&rx);
++    assert_eq!(sent.len(), 1);
++    assert_eq!(sent[0].0, ids::LIGHT_UPDATE);
++    hub.terrain_observer_views.clear();
++    world
++        .light_log
++        .as_mut()
++        .unwrap()
++        .insert((0, 0), crate::section_mask::SectionMask::default());
++    hub.broadcast_light_changes(&mut world);
++    assert!(
++        packets(&rx).is_empty(),
++        "legacy interior lighting behavior is unchanged"
++    );
++}
++
++#[test]
++fn sparse_loading_uses_only_areas_and_cleanup_drops_union_state() {
++    let (mut hub, _rx) = observer();
++    assert_eq!(hub.loading_chunks(|_| true), vec![(0, 0)]);
++    hub.terrain_observer_views
++        .insert(1, view(1, &[[-100, 0], [100, 0]]));
++    assert!(
++        hub.loading_chunks(|_| true).is_empty(),
++        "the anchor must not add a gap loading ticket"
++    );
++    assert_eq!(
++        hub.terrain_observer_views[&1]
++            .loading_areas()
++            .collect::<Vec<_>>(),
++        vec![((-100, 0), 3), ((100, 0), 3)]
++    );
++    hub.remove_guest(0, "test exit");
++    assert!(hub.terrain_observer_views.is_empty());
++    assert!(hub.terrain_observers.is_empty());
++}
++
++#[test]
++fn legacy_observer_recenter_and_sparse_reset_keep_their_distinct_paths() {
++    let (mut hub, rx) = observer();
++    hub.guests[0].view_distance = 2;
++    hub.update_view(0);
++    assert_eq!(hub.guests[0].chunk_queue.len(), 49);
++    assert!(hub.guests[0].chunk_queue.contains(&(-3, -3)));
++    assert_eq!(packets(&rx)[0].0, ids::SET_CHUNK_CACHE_CENTER);
++    hub.guests[0].position[0] = 1600.;
++    hub.update_view(0);
++    assert!(hub.guests[0].chunk_queue.contains(&(100, 0)));
++    assert!(!hub.guests[0].chunk_queue.contains(&(0, 0)));
++    hub.terrain_observer_views.insert(1, view(1, &[[0, 0]]));
++    hub.update_view(0);
++    assert!(hub.guests[0].chunk_queue.contains(&(0, 0)));
++    hub.guests[0].chunk_queue.clear();
++    hub.guests[0].sent_chunks.clear();
++    hub.guests[0].center = None;
++    hub.update_view(0);
++    assert_eq!(hub.guests[0].chunk_queue.len(), 49);
++}
+diff --git a/crates/horizon-client/src/lan/mod.rs b/crates/horizon-client/src/lan/mod.rs
+--- a/crates/horizon-client/src/lan/mod.rs
++++ b/crates/horizon-client/src/lan/mod.rs
+@@ -28,6 +28,7 @@
+ pub mod import;
+ mod io_pool;
+ pub mod menu;
++pub mod observer;
+ pub mod playerdata;
+ pub mod prediction;
+ pub mod recipes;
+diff --git a/crates/horizon-client/src/lan/observer.rs b/crates/horizon-client/src/lan/observer.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client/src/lan/observer.rs
+@@ -0,0 +1,330 @@
++//! Bounded sparse coverage for held terrain observers, with ordered snapshot refresh.
++use super::guest::Guest;
++use crate::fast_hash::FxHashSet;
++use horizon_protocol::packets::play::{self, Clientbound as C};
++
++const MAX_AREAS: usize = 256;
++const MAX_COLUMNS: usize = 4096;
++const MAX_REQUEST_BYTES: usize = 64 * 1024;
++const MAX_REFRESH: usize = 256;
++const CHUNK_LIMIT: i32 = 30_000_000 / 16;
++
++#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct Area {
++    pub center: [i32; 2],
++    pub radius: u8,
++}
++
++/// The old array and radius forms remain distinct from sparse interest requests.
++#[derive(serde::Deserialize)]
++#[serde(untagged, deny_unknown_fields)]
++pub enum ViewRequest {
++    Position([f64; 3]),
++    Sized {
++        position: [f64; 3],
++        radius: Option<u8>,
++    },
++    Sparse {
++        position: [f64; 3],
++        revision: u64,
++        areas: Vec<Area>,
++    },
++}
++
++impl ViewRequest {
++    pub fn parse(text: &str) -> Result<Self, &'static str> {
++        if text.len() > MAX_REQUEST_BYTES {
++            return Err("observer request exceeds 64 KiB");
++        }
++        serde_json::from_str(text).map_err(|_| "invalid observer view")
++    }
++}
++
++#[derive(serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct RefreshRequest {
++    pub revision: u64,
++    pub columns: Vec<[i32; 2]>,
++}
++
++impl RefreshRequest {
++    pub fn parse(text: &str) -> Result<Self, &'static str> {
++        if text.len() > MAX_REQUEST_BYTES {
++            return Err("observer request exceeds 64 KiB");
++        }
++        let request: Self = serde_json::from_str(text).map_err(|_| "invalid observer refresh")?;
++        if request.columns.len() > MAX_REFRESH {
++            return Err("observer refresh exceeds 256 columns");
++        }
++        Ok(request)
++    }
++}
++
++pub struct SparseView {
++    revision: u64,
++    areas: Vec<Area>,
++    columns: FxHashSet<(i32, i32)>,
++    dirty: bool,
++}
++
++impl SparseView {
++    /// Validate both wire coverage and its lighting/loading margin before installation.
++    pub fn new(revision: u64, mut areas: Vec<Area>) -> Result<Self, &'static str> {
++        if areas.len() > MAX_AREAS {
++            return Err("observer view exceeds 256 areas");
++        }
++        areas.sort_unstable();
++        areas.dedup();
++        let mut columns = FxHashSet::default();
++        let mut loading = FxHashSet::default();
++        for area in &areas {
++            let [cx, cz] = area.center;
++            let r = i32::from(area.radius);
++            if !(2..=32).contains(&r)
++                || area
++                    .center
++                    .iter()
++                    .any(|c| c.abs_diff(0) > CHUNK_LIMIT as u32)
++            {
++                return Err("invalid observer area");
++            }
++            // An extra loading area with r+1 finishes to r+2, including light neighbours.
++            for dz in -r - 2..=r + 2 {
++                for dx in -r - 2..=r + 2 {
++                    let key = (cx + dx, cz + dz);
++                    if key.0.abs() > CHUNK_LIMIT || key.1.abs() > CHUNK_LIMIT {
++                        return Err("observer area exceeds world bounds");
++                    }
++                    loading.insert(key);
++                    if super::hub::tracked(cx, cz, r, key.0, key.1) {
++                        columns.insert(key);
++                    }
++                    if loading.len() > MAX_COLUMNS || columns.len() > MAX_COLUMNS {
++                        return Err("observer view exceeds 4096 columns including loading margin");
++                    }
++                }
++            }
++        }
++        Ok(Self {
++            revision,
++            areas,
++            columns,
++            dirty: true,
++        })
++    }
++
++    pub fn revision(&self) -> u64 {
++        self.revision
++    }
++    pub fn area_count(&self) -> usize {
++        self.areas.len()
++    }
++    pub fn column_count(&self) -> usize {
++        self.columns.len()
++    }
++
++    /// Equal revisions are heartbeat retries only. A different union needs a newer revision.
++    pub fn accepts(&self, next: &Self) -> Result<(), &'static str> {
++        if next.revision < self.revision
++            || next.revision == self.revision && next.areas != self.areas
++        {
++            return Err("stale or conflicting observer revision");
++        }
++        Ok(())
++    }
++
++    pub fn loading_areas(&self) -> impl Iterator<Item = ((i32, i32), i32)> + '_ {
++        self.areas
++            .iter()
++            .map(|a| ((a.center[0], a.center[1]), i32::from(a.radius) + 1))
++    }
++
++    pub(crate) fn reconcile(&mut self, g: &mut Guest) {
++        if !self.dirty && g.center == Some(g.chunk()) {
++            return;
++        }
++        self.dirty = false;
++        g.center = Some(g.chunk());
++        let forget: Vec<_> = g
++            .sent_chunks
++            .iter()
++            .copied()
++            .filter(|key| !self.columns.contains(key))
++            .collect();
++        for (x, z) in forget {
++            g.sent_chunks.remove(&(x, z));
++            g.send(&C::ForgetLevelChunk(play::ForgetLevelChunk { pos: [x, z] }));
++        }
++        g.far_queue.clear();
++        g.far_sent_chunks.clear();
++        g.chunk_queue.retain(|key| self.columns.contains(key));
++        let mut queued: FxHashSet<_> = g.chunk_queue.iter().copied().collect();
++        let mut added: Vec<_> = self
++            .columns
++            .iter()
++            .copied()
++            .filter(|key| !g.sent_chunks.contains(key) && queued.insert(*key))
++            .collect();
++        added.sort_unstable();
++        g.chunk_queue.extend(added);
++    }
++
++    /// Keep sent membership while the replacement is pending, so intervening updates still flow.
++    pub(crate) fn refresh(
++        &self,
++        g: &mut Guest,
++        request: &RefreshRequest,
++    ) -> Result<usize, &'static str> {
++        if request.revision != self.revision {
++            return Err("refresh revision is not current");
++        }
++        if request.columns.len() > MAX_REFRESH
++            || request.columns.iter().any(|at| {
++                let key = (at[0], at[1]);
++                !self.columns.contains(&key) || !g.sent_chunks.contains(&key)
++            })
++        {
++            return Err("refresh needs at most 256 requested, already sent columns");
++        }
++        let mut queued: FxHashSet<_> = g.chunk_queue.iter().copied().collect();
++        let mut added = 0;
++        for at in &request.columns {
++            let key = (at[0], at[1]);
++            if queued.insert(key) {
++                g.chunk_queue.push(key);
++                added += 1;
++            }
++        }
++        Ok(added)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn area(x: i32, z: i32) -> Area {
++        Area {
++            center: [x, z],
++            radius: 2,
++        }
++    }
++
++    #[test]
++    fn sparse_union_keeps_disconnected_areas_without_the_gap() {
++        let view = SparseView::new(1, vec![area(-100, 0), area(100, 0), area(-100, 0)]).unwrap();
++        assert_eq!(view.area_count(), 2);
++        assert!(view.columns.contains(&(-100, 0)));
++        assert!(view.columns.contains(&(100, 0)));
++        assert!(!view.columns.contains(&(0, 0)));
++        assert_eq!(view.column_count(), 98);
++        assert_eq!(
++            view.loading_areas().collect::<Vec<_>>(),
++            vec![((-100, 0), 3), ((100, 0), 3)]
++        );
++    }
++
++    #[test]
++    fn overlapping_union_deduplicates_and_revisions_cannot_roll_back() {
++        let view = SparseView::new(5, vec![area(0, 0), area(1, 0)]).unwrap();
++        assert_eq!(view.column_count(), 56);
++        assert!(
++            view.accepts(&SparseView::new(5, vec![area(1, 0), area(0, 0)]).unwrap())
++                .is_ok()
++        );
++        assert!(
++            view.accepts(&SparseView::new(4, vec![area(0, 0)]).unwrap())
++                .is_err()
++        );
++        assert!(
++            view.accepts(&SparseView::new(5, vec![area(0, 0)]).unwrap())
++                .is_err()
++        );
++        assert!(
++            view.accepts(&SparseView::new(6, Vec::new()).unwrap())
++                .is_ok()
++        );
++    }
++
++    #[test]
++    fn admission_bounds_areas_coordinates_radius_and_expanded_loading() {
++        assert!(SparseView::new(0, vec![area(0, 0); 257]).is_err());
++        assert!(SparseView::new(0, vec![area(i32::MIN, 0)]).is_err());
++        assert!(SparseView::new(0, vec![area(CHUNK_LIMIT, 0)]).is_err());
++        assert!(
++            SparseView::new(
++                0,
++                vec![Area {
++                    center: [0, 0],
++                    radius: 33
++                }]
++            )
++            .is_err()
++        );
++        assert!(
++            SparseView::new(
++                0,
++                vec![Area {
++                    center: [0, 0],
++                    radius: 1
++                }]
++            )
++            .is_err()
++        );
++        assert!(
++            SparseView::new(
++                0,
++                vec![Area {
++                    center: [0, 0],
++                    radius: 32
++                }]
++            )
++            .is_err()
++        );
++        assert!(
++            SparseView::new(
++                0,
++                vec![Area {
++                    center: [0, 0],
++                    radius: 29
++                }]
++            )
++            .is_ok()
++        );
++        assert_eq!(SparseView::new(0, Vec::new()).unwrap().column_count(), 0);
++    }
++
++    #[test]
++    fn request_parser_preserves_legacy_forms_and_never_downgrades_bad_sparse_input() {
++        assert!(matches!(
++            ViewRequest::parse("[1,2,3]").unwrap(),
++            ViewRequest::Position([1., 2., 3.])
++        ));
++        assert!(matches!(
++            ViewRequest::parse(r#"{"position":[1,2,3],"radius":8}"#).unwrap(),
++            ViewRequest::Sized {
++                radius: Some(8),
++                ..
++            }
++        ));
++        assert!(matches!(
++            ViewRequest::parse(r#"{"position":[1,2,3]}"#).unwrap(),
++            ViewRequest::Sized { radius: None, .. }
++        ));
++        assert!(matches!(
++            ViewRequest::parse(r#"{"position":[1,2,3],"revision":1,"areas":[]}"#).unwrap(),
++            ViewRequest::Sparse { revision: 1, .. }
++        ));
++        assert!(ViewRequest::parse(r#"{"position":[1,2,3],"areas":[]}"#).is_err());
++        assert!(ViewRequest::parse(r#"{"position":[1,2,3],"revision":1,"areas":[{"center":[0,0],"radius":2,"unknown":0}]}"#).is_err());
++        assert!(ViewRequest::parse(&" ".repeat(MAX_REQUEST_BYTES + 1)).is_err());
++        assert!(RefreshRequest::parse(r#"{"revision":1,"columns":[[0,0]],"unknown":0}"#).is_err());
++        assert!(
++            RefreshRequest::parse(
++                &serde_json::json!({"revision":1,"columns":vec![[0,0];257]}).to_string()
++            )
++            .is_err()
++        );
++    }
++}

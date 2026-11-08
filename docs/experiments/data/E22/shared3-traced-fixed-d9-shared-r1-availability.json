@@ -1,0 +1,191 @@
+{
+  "kind": "frozen-executable-harness-availability",
+  "store_trace_enabled": true,
+  "executables_changed": false,
+  "lease_rules_changed": false,
+  "per_renewal_tile_trace": false,
+  "per_renewal_note": "not exposed by frozen engine; separate investigation if expiry recurs",
+  "origin_bracket": {
+    "store_pid": 4882,
+    "spawn_before_monotonic_ns": 156144769401208,
+    "spawn_before_wall_ns": 1794147091451266000,
+    "popen_return_monotonic_ns": 156144770894708,
+    "listen_observed_monotonic_ns": 156144793847708,
+    "listen_observed_wall_ns": 1794147091475714000,
+    "origin_bracket_width_ms": 24.4465
+  },
+  "events_dropped": 0,
+  "collection_scope": "trace harvest and signal serialization after the CPU span; limiter records were memory-only",
+  "overhead_scope": "existing store tracing enabled identically in both arms; its work remains in measured store CPU",
+  "harness_sha256": "d72826e4fed69ba3cad5ff82e6350d21f3c5623e90df7d1e52abccbabc4eacd7",
+  "store_batches": {
+    "rows": 8970,
+    "time_scope": "store-relative Instant microseconds; startup origin is separately bracketed, not exact",
+    "incomplete_tail_bytes": 0,
+    "gap_threshold_ms": 200,
+    "gap_note": "batch spacing can be idle time; it is not by itself a stall",
+    "maxima_ms": {
+      "admission_max_ms": 3.499459,
+      "queue_max_ms": 17.759375,
+      "execute_ms": 20.239041,
+      "barrier_ms": 20.208584,
+      "maintain_ms": 5.009958,
+      "background_ms": 46.062334
+    },
+    "gaps_over_200ms": [
+      {
+        "index": 7,
+        "reasons": [
+          "batch-start-spacing-ms"
+        ],
+        "start_spacing_ms": 243.217,
+        "context": [
+          {
+            "start_us": 370242.0,
+            "count": 1.0,
+            "admission_max_ms": 0.001917,
+            "queue_max_ms": 0.015166,
+            "queue_mean_ms": 0.015166,
+            "collect_ms": 0.000208,
+            "execute_ms": 0.000292,
+            "barrier_ms": 0.0,
+            "dispatch_ms": 0.000625,
+            "maintain_ms": 0.0,
+            "background_ms": 0.0
+          },
+          {
+            "start_us": 613459.0,
+            "count": 1.0,
+            "admission_max_ms": 0.006417,
+            "queue_max_ms": 0.009125,
+            "queue_mean_ms": 0.009125,
+            "collect_ms": 0.000583,
+            "execute_ms": 4.277792,
+            "barrier_ms": 4.256958,
+            "dispatch_ms": 0.004583,
+            "maintain_ms": 0.000292,
+            "background_ms": 0.0
+          },
+          {
+            "start_us": 877902.0,
+            "count": 1.0,
+            "admission_max_ms": 0.006333,
+            "queue_max_ms": 0.008542,
+            "queue_mean_ms": 0.008542,
+            "collect_ms": 0.000459,
+            "execute_ms": 3.371416,
+            "barrier_ms": 3.343375,
+            "dispatch_ms": 0.002084,
+            "maintain_ms": 0.000167,
+            "background_ms": 0.0
+          }
+        ]
+      },
+      {
+        "index": 8,
+        "reasons": [
+          "batch-start-spacing-ms"
+        ],
+        "start_spacing_ms": 264.443,
+        "context": [
+          {
+            "start_us": 613459.0,
+            "count": 1.0,
+            "admission_max_ms": 0.006417,
+            "queue_max_ms": 0.009125,
+            "queue_mean_ms": 0.009125,
+            "collect_ms": 0.000583,
+            "execute_ms": 4.277792,
+            "barrier_ms": 4.256958,
+            "dispatch_ms": 0.004583,
+            "maintain_ms": 0.000292,
+            "background_ms": 0.0
+          },
+          {
+            "start_us": 877902.0,
+            "count": 1.0,
+            "admission_max_ms": 0.006333,
+            "queue_max_ms": 0.008542,
+            "queue_mean_ms": 0.008542,
+            "collect_ms": 0.000459,
+            "execute_ms": 3.371416,
+            "barrier_ms": 3.343375,
+            "dispatch_ms": 0.002084,
+            "maintain_ms": 0.000167,
+            "background_ms": 0.0
+          },
+          {
+            "start_us": 976089.0,
+            "count": 1.0,
+            "admission_max_ms": 0.040917,
+            "queue_max_ms": 0.009708,
+            "queue_mean_ms": 0.009708,
+            "collect_ms": 0.0005,
+            "execute_ms": 0.003209,
+            "barrier_ms": 0.0,
+            "dispatch_ms": 0.001541,
+            "maintain_ms": 0.000125,
+            "background_ms": 0.0
+          }
+        ]
+      },
+      {
+        "index": 8969,
+        "reasons": [
+          "batch-start-spacing-ms"
+        ],
+        "start_spacing_ms": 261.722,
+        "context": [
+          {
+            "start_us": 134205868.0,
+            "count": 1.0,
+            "admission_max_ms": 0.011416,
+            "queue_max_ms": 0.011459,
+            "queue_mean_ms": 0.011459,
+            "collect_ms": 0.000625,
+            "execute_ms": 3.799541,
+            "barrier_ms": 3.770167,
+            "dispatch_ms": 0.005916,
+            "maintain_ms": 0.000166,
+            "background_ms": 0.0
+          },
+          {
+            "start_us": 134467590.0,
+            "count": 1.0,
+            "admission_max_ms": 0.02675,
+            "queue_max_ms": 0.023958,
+            "queue_mean_ms": 0.023958,
+            "collect_ms": 0.002125,
+            "execute_ms": 5.058834,
+            "barrier_ms": 4.986416,
+            "dispatch_ms": 0.00475,
+            "maintain_ms": 8.3e-05,
+            "background_ms": 0.0
+          }
+        ]
+      }
+    ],
+    "path": "docs/experiments/data/E22/shared3-traced-fixed-d9-shared-r1-store-batches.csv.gz",
+    "sha256": "c8e502e33fab74a1253c1089888de676553a4618c8173597cf3c4717f808f6b7"
+  },
+  "store_connections": {
+    "path": "docs/experiments/data/E22/shared3-traced-fixed-d9-shared-r1-store-connections.csv.gz",
+    "sha256": "978d8f2c97bd570677145332655bce9232a733d93a2bf46c63962424593dee11"
+  },
+  "limiter_signals": {
+    "path": "docs/experiments/data/E22/shared3-traced-fixed-d9-shared-r1-limiter-signals.json.gz",
+    "sha256": "a007d3753364a1a0af0535483fb3532ea9b48294fe4bc3afc902801725433eb5",
+    "count": 1045,
+    "roles": {
+      "4882": "store",
+      "4883": "tile-a",
+      "4984": "tile-b",
+      "5107": "tile-c",
+      "5110": "tile-d"
+    },
+    "scope": "exact successful/failed per-PID kill-call brackets from limiter threads, including final limiter resumes"
+  },
+  "complete": true,
+  "lease_expiry_observed": false,
+  "expiry_events": []
+}

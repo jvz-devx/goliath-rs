@@ -1,0 +1,207 @@
+diff --git a/crates/meridian-handoff/src/session/reactive.rs b/crates/meridian-handoff/src/session/reactive.rs
+--- a/crates/meridian-handoff/src/session/reactive.rs
++++ b/crates/meridian-handoff/src/session/reactive.rs
+@@ -165,7 +165,7 @@
+             &self.session.0,
+             &mut down,
+             self.owner,
+-            true,
++            crate::terrain::Delivery::PassiveReader,
+             meridian_ghost::Packet { id, payload },
+             &mut self.body,
+         )
+diff --git a/crates/meridian-handoff/src/shared_terrain.rs b/crates/meridian-handoff/src/shared_terrain.rs
+--- a/crates/meridian-handoff/src/shared_terrain.rs
++++ b/crates/meridian-handoff/src/shared_terrain.rs
+@@ -467,7 +467,7 @@
+                     &shared,
+                     &mut down,
+                     owner,
+-                    true,
++                    crate::terrain::Delivery::PassiveReader,
+                     (*packet).clone(),
+                     &mut body,
+                 )
+@@ -539,7 +539,7 @@
+                         &shared,
+                         &mut down,
+                         owner,
+-                        true,
++                        crate::terrain::Delivery::PassiveReader,
+                         Packet::of(&play::Clientbound::ForgetLevelChunk(
+                             play::ForgetLevelChunk { pos: [x, z] },
+                         )),
+@@ -590,7 +590,7 @@
+         .wanted
+         .iter()
+         .copied()
+-        .filter(|key| !member.delivered.contains(key))
++        .filter(|key| !member.delivered.contains(key) || !down.ghost.has_column(key.0, key.1))
+         .collect();
+     wanted.sort_by_key(|key| {
+         (
+@@ -603,12 +603,17 @@
+     let result = (|| {
+         for key in wanted {
+             if let Some(packets) = state.cache.snapshot(key) {
++                let delivery = if down.ghost.has_column(key.0, key.1) {
++                    crate::terrain::Delivery::PassiveReader
++                } else {
++                    crate::terrain::Delivery::CacheRestore
++                };
+                 for packet in packets {
+                     crate::terrain::relay(
+                         &shared,
+                         &mut down,
+                         state.owner,
+-                        true,
++                        delivery,
+                         (*packet).clone(),
+                         &mut body,
+                     )
+diff --git a/crates/meridian-handoff/src/shared_terrain/tests.rs b/crates/meridian-handoff/src/shared_terrain/tests.rs
+--- a/crates/meridian-handoff/src/shared_terrain/tests.rs
++++ b/crates/meridian-handoff/src/shared_terrain/tests.rs
+@@ -323,6 +323,11 @@
+     client.handle.0.down().backend = "a".into();
+     let view = client.handle.shared_terrain(0).unwrap();
+     let _a = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    {
++        let mut down = client.handle.0.down();
++        crate::terrain::active(&client.handle.0, &mut down, chunk(0, 0), &mut Vec::new()).unwrap();
++    }
++    client.next();
+     publish(&view, chunk(0, 0));
+     client.empty();
+     assert!(
+@@ -621,3 +626,61 @@
+     assert_eq!(after["peak_source_columns"], 2);
+     assert_eq!(after["peak_source_bytes"], held["peak_source_bytes"]);
+ }
++
++#[test]
++fn identical_column_bytes_are_not_suppressed_after_client_cache_eviction() {
++    let mut client = Client::new();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let _member = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(4, 4));
++    assert_eq!(client.next(), chunk(4, 4));
++    client.handle.terrain_center([-80., 70., 64.]).unwrap();
++    assert_eq!(client.next().id, c::SET_CHUNK_CACHE_CENTER);
++    assert!(!client.handle.0.down().ghost.has_column(4, 4));
++    client.handle.terrain_center([64., 70., 64.]).unwrap();
++    client.next();
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [64., 70., 64.],
++        ..Default::default()
++    });
++    publish(&view, chunk(4, 4));
++    assert_eq!(client.next(), chunk(4, 4));
++}
++
++#[test]
++fn active_owned_cache_restores_a_missing_column_and_its_persistent_updates() {
++    let mut client = Client::new();
++    client.handle.0.down().backend = "a".into();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let member = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    {
++        let mut down = client.handle.0.down();
++        crate::terrain::active(&client.handle.0, &mut down, chunk(4, 4), &mut Vec::new()).unwrap();
++    }
++    client.next();
++    publish(&view, chunk(4, 4));
++    client.empty();
++    let changed = Packet::of(&play::Clientbound::BlockUpdate(play::BlockUpdate {
++        pos: [65, 70, 65],
++        state: 12,
++    }));
++    publish(&view, changed.clone());
++    client.empty();
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [-80., 70., 64.],
++        ..Default::default()
++    });
++    client.handle.terrain_center([-80., 70., 64.]).unwrap();
++    client.next();
++    member.recenter([-80., 70., 64.], 3, false).unwrap();
++    assert!(!client.handle.0.down().ghost.has_column(4, 4));
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [64., 70., 64.],
++        ..Default::default()
++    });
++    client.handle.terrain_center([64., 70., 64.]).unwrap();
++    client.next();
++    member.recenter([64., 70., 64.], 3, false).unwrap();
++    assert_eq!(client.next(), chunk(4, 4));
++    assert_eq!(client.next(), changed);
++}
+diff --git a/crates/meridian-handoff/src/terrain.rs b/crates/meridian-handoff/src/terrain.rs
+--- a/crates/meridian-handoff/src/terrain.rs
++++ b/crates/meridian-handoff/src/terrain.rs
+@@ -407,7 +407,7 @@
+                         &session.0,
+                         &mut down,
+                         owner,
+-                        true,
++                        Delivery::PassiveReader,
+                         Packet { id, payload },
+                         &mut body,
+                     )
+@@ -448,14 +448,21 @@
+     else {
+         return Ok(());
+     };
+-    relay(shared, down, owner, false, packet, body)
++    relay(shared, down, owner, Delivery::ActiveLane, packet, body)
++}
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++pub(crate) enum Delivery {
++    ActiveLane,
++    PassiveReader,
++    CacheRestore,
+ }
+ 
+ pub(crate) fn relay(
+     shared: &Shared,
+     down: &mut Down,
+     owner: usize,
+-    reader: bool,
++    delivery: Delivery,
+     packet: Packet,
+     body: &mut Vec<u8>,
+ ) -> horizon_protocol::Result<()> {
+@@ -496,7 +503,7 @@
+         if terrain.owners.owner(at.0, at.1) != Some(owner) {
+             continue;
+         }
+-        if reader {
++        if delivery != Delivery::ActiveLane {
+             let columns = terrain.reader_columns.entry(owner).or_default();
+             if packet.id == c::LEVEL_CHUNK_WITH_LIGHT {
+                 columns.insert(at);
+@@ -506,7 +513,11 @@
+             }
+             // While active, this reader is only a prewarmed replacement for the
+             // source's terrain stream. Its entities and terrain remain hidden.
+-            if terrain.lazy && terrain.owners.backends.get(owner) == Some(&active) {
++            if delivery == Delivery::PassiveReader
++                && terrain.lazy
++                && terrain.owners.backends.get(owner) == Some(&active)
++                && (packet.id != c::LEVEL_CHUNK_WITH_LIGHT || down.ghost.has_column(at.0, at.1))
++            {
+                 continue;
+             }
+         }
+@@ -524,7 +535,9 @@
+             let mut hash = DefaultHasher::new();
+             packet.payload.hash(&mut hash);
+             let hash = hash.finish();
+-            if terrain.signatures.insert(at, hash) == Some(hash) {
++            if terrain.signatures.insert(at, hash) == Some(hash)
++                && down.ghost.has_column(at.0, at.1)
++            {
+                 continue;
+             }
+             terrain.loaded.insert(at, owner);

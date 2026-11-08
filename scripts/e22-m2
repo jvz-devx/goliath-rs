@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Run the complete E18 M2 command set only after a reproduced 0.10-core D9 saving."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+import time
+import e11_support as support
+from e14_snapshot_support import validate_snapshot
+
+ROOT = support.ROOT
+DATA = ROOT/'docs/experiments/data/E22'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--bins',type=Path,required=True)
+    parser.add_argument('--comparison',type=Path,required=True)
+    parser.add_argument('--prefix',required=True)
+    parser.add_argument('--no-other-agents',action='store_true',required=True)
+    args = parser.parse_args()
+    comparison = json.loads(args.comparison.read_text())
+    if comparison['status'] != 'complete' or not comparison['clearly_cheaper']:
+        raise RuntimeError('two valid D9 pairs saving at least 0.10 core are required')
+    bins = args.bins.resolve()
+    validate_snapshot(bins)
+    identity = {name:sha(bins/name) for name in ['horizon-client','meridian','meridian-sidecar','horizon-bots','goliath-store','e4-client']}
+    if any(identity[name] != comparison['inputs']['shared'][name] for name in identity):
+        raise RuntimeError('M2 bundle differs from measured shared-view bytes')
+    path = DATA/(args.prefix+'-M2.json')
+    if path.exists():
+        raise RuntimeError('use a fresh M2 prefix')
+    harnesses = ['e22-m2','e22-window','e22-check','e22-physics','e22_availability.py','e20-build10-check-v2','e20-physics-v2',
+        'e14-physics','e14-analyse','e14_snapshot_support.py','e18_fixtures.py','e12_fixtures.py','goliath-cluster']
+    record = dict(status='running',binaries=identity,comparison_sha256=sha(args.comparison),
+        harness_sha256={name:sha(ROOT/'scripts'/name) for name in harnesses},commands=[],complete_command_set=False)
+    def save():
+        path.write_text(json.dumps(record,indent=2)+'\n')
+    save()
+    actions = ['proof','terrain','items','borders','live','teleport','lifecycle','physics-off','physics-on','physics-verify']
+    try:
+        for action in actions:
+            name = args.prefix+'-'+action
+            if action in ['proof','terrain','items','borders','live','teleport','lifecycle']:
+                inner = [sys.executable,'-B',str(ROOT/'scripts/e22-check'),action,'--bins',str(bins),'--name',name]
+                if action in ['proof','terrain']:
+                    inner += ['--crossings','1000' if action=='proof' else '100']
+            elif action in ['physics-off','physics-on']:
+                inner = [sys.executable,'-B',str(ROOT/'scripts/e22-physics'),'--snapshot',str(bins),'--variant','e12','--suite','--name',name]
+                if action=='physics-on':inner += ['--particles']
+            else:
+                inner = [sys.executable,'-B',str(ROOT/'scripts/e20-build10-check-v2'),
+                    str(DATA/'physics'/(args.prefix+'-physics-off.json.gz')),str(DATA/'physics'/(args.prefix+'-physics-on.json.gz')),
+                    '--snapshot',str(bins),'--output',str(DATA/'physics'/(args.prefix+'-verification-v2.json'))]
+            command = inner if action=='physics-verify' else [sys.executable,'-B',str(ROOT/'scripts/e22-window'),'--name',name,'--no-other-agents','--',*inner]
+            print('E22_M2_START '+action,flush=True)
+            began = time.monotonic()
+            run = subprocess.run(command,cwd=ROOT,capture_output=True,text=True)
+            output = support.sanitize(run.stdout+'\n'+run.stderr)
+            log = DATA/(name+'-command.log.gz')
+            log.write_bytes(gzip.compress(output.encode(),mtime=0))
+            row = dict(action=action,command=[support.sanitize(part) for part in command],exit=run.returncode,
+                seconds=time.monotonic()-began,log=str(log.relative_to(ROOT)),log_sha256=sha(log))
+            record['commands'].append(row);save()
+            print('E22_M2_END '+json.dumps(row),flush=True)
+            for binary,digest in identity.items():
+                if sha(bins/binary) != digest:raise RuntimeError('frozen executable changed')
+            for harness,digest in record['harness_sha256'].items():
+                if sha(ROOT/'scripts'/harness) != digest:raise RuntimeError('harness changed during M2')
+            if run.returncode:
+                print(output[-6000:],flush=True)
+                raise RuntimeError('M2 action failed: '+action)
+            if action in ['physics-off','physics-on']:
+                native=json.loads(gzip.decompress((DATA/'physics'/(name+'.json.gz')).read_bytes()))
+                available=native.get('lease_availability',{})
+                if available.get('lease_expiry_observed'):
+                    raise RuntimeError('lease expiry observed; stop M2 and report availability evidence')
+                if not available.get('complete'):
+                    raise RuntimeError('physics availability capture incomplete')
+        record.update(status='complete',complete_command_set=True,
+            physics_verification=json.loads((DATA/'physics'/(args.prefix+'-verification-v2.json')).read_text()))
+    except BaseException as error:
+        record.update(status='failed',error=support.sanitize(str(error)))
+        raise
+    finally:
+        save()
+
+
+if __name__ == '__main__':
+    main()

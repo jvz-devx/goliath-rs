@@ -1,0 +1,36 @@
+diff --git a/crates/meridian-handoff/src/shared_terrain/tests.rs b/crates/meridian-handoff/src/shared_terrain/tests.rs
+--- a/crates/meridian-handoff/src/shared_terrain/tests.rs
++++ b/crates/meridian-handoff/src/shared_terrain/tests.rs
+@@ -358,3 +358,32 @@
+     assert_eq!(target.view.counts(), (0, 0));
+     assert!(target.extras.is_empty());
+ }
++
++#[test]
++fn temporary_interest_gap_keeps_source_snapshot_until_ordered_forget() {
++    let mut client = Client::new();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let member = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(0, 0));
++    client.next();
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [1608., 70., 8.],
++        ..Default::default()
++    });
++    member.recenter([1608., 70., 8.], 3, false).unwrap();
++    assert_eq!(client.next().id, c::FORGET_LEVEL_CHUNK);
++    // The source has not ticked its view yet. It still regards (0,0) as sent.
++    publish(&view, block(11));
++    client.empty();
++    assert!(
++        lock(&view.0).cache.snapshot((0, 0)).is_some(),
++        "local interest is not an ordered source Forget"
++    );
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [8., 70., 8.],
++        ..Default::default()
++    });
++    member.recenter([8., 70., 8.], 3, false).unwrap();
++    assert_eq!(client.next(), chunk(0, 0));
++    assert_eq!(client.next(), block(11));
++}

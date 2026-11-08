@@ -1,0 +1,57 @@
+{
+  "status": "failed",
+  "binaries": {
+    "horizon-client": "21805ed6621cf138f0e3d509a91d233bee8f8fe182f625e3fcaa1bad88f87ea6",
+    "meridian": "944ca279d236b1064d296c4adb5bbea31f192d25c2c3ff99f3df5432b594e483",
+    "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+    "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+    "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+    "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025"
+  },
+  "comparison_sha256": "6d96572bf2db7bb319946b99a0f279519a5b1f2d1c53b737eb916a7ba36f2cef",
+  "harness_sha256": {
+    "e22-m2": "984fc007ac7ba5724f46c867d6256fedad345f6e34a1617cd355a2a9f33b3694",
+    "e22-window": "a8e1af7b8c0a090ffcba862af259e565e2fa1f3ccf0cdf3d5ac8e93b3bee72d4",
+    "e22-check": "2797674497e3865f919e4e6536a766563263b65d78ce3ceb03b8b54fd3519a7a",
+    "e22-physics": "f2593e2714adf45f544ff1efeb8293bc3e1360c6a52ebaceaf421cf391680fef",
+    "e22_availability.py": "d72826e4fed69ba3cad5ff82e6350d21f3c5623e90df7d1e52abccbabc4eacd7",
+    "e20-build10-check-v2": "e738ff15d2efc5aee347fd7a96c6518e465fe8110e0d7327435df25d7901b69e",
+    "e20-physics-v2": "1cdae787802b075f45a7eaf3dcaa12d35eafe95882a449b8371a743397b5a387",
+    "e14-physics": "ebd963824f5d986e4d17b48f41a0f045ed942410396b1fa983d6a47f3b9a578e",
+    "e14-analyse": "1fede9ca000943725500f1f0fcc661788fd65d421e1b4fa80010b34d1793cb99",
+    "e14_snapshot_support.py": "b829d5b2f891c6fbd50f3b1dc4f102fb06207863c2c56dd520d16017b0fee85e",
+    "e18_fixtures.py": "b2b43276d03852a94a280238f4fa4b3df5edfac6eb20dd3d7696234ddeec8a23",
+    "e12_fixtures.py": "26a30c2fd4300e5037be1241dd511b00d372c5f43d12fc0bdd1a5ba70f429e65",
+    "goliath-cluster": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5"
+  },
+  "commands": [
+    {
+      "action": "proof",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e22-window",
+        "--name",
+        "shared3-m2-proof",
+        "--no-other-agents",
+        "--",
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e22-check",
+        "proof",
+        "--bins",
+        "$REPO/.local/bin/meridian-e22/shared-3",
+        "--name",
+        "shared3-m2-proof",
+        "--crossings",
+        "1000"
+      ],
+      "exit": 1,
+      "seconds": 526.3999158329971,
+      "log": "docs/experiments/data/E22/shared3-m2-proof-command.log.gz",
+      "log_sha256": "88b2d62d445847c315e4e8f698fea3a0d59bbfbb0e1df9ad90998822b3333d38"
+    }
+  ],
+  "complete_command_set": false,
+  "error": "M2 action failed: proof"
+}

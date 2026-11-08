@@ -1,0 +1,90 @@
+{
+  "status": "complete",
+  "profile": "release",
+  "incremental": false,
+  "source_proof_sha256": "ce4ea6a1744527e11715de76368cccc8404de74f2e90b292858920f019372c8f",
+  "patch11_sha256": "3511c8b2f4d8e0ef4a33d42867c54865259ee39d92f0b5f37fafd07c6fa10873",
+  "source_equality": "passed",
+  "commands": [
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 6.169373458978953,
+      "test_results": []
+    },
+    {
+      "label": "observer-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client-lib",
+        "--lib",
+        "observer"
+      ],
+      "exit": 0,
+      "seconds": 231.40928633298608,
+      "test_results": [
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 2195 filtered out; finished in 0.04s"
+      ]
+    },
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client-lib",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 15.750075250020018,
+      "test_results": []
+    },
+    {
+      "label": "release",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--bin",
+        "horizon-client"
+      ],
+      "exit": 0,
+      "seconds": 237.71278933397844,
+      "test_results": []
+    }
+  ],
+  "directory": ".local/bin/meridian-e22/observer-2",
+  "binaries": {
+    "horizon-client": "21805ed6621cf138f0e3d509a91d233bee8f8fe182f625e3fcaa1bad88f87ea6",
+    "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+    "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+    "meridian": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+    "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+    "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025"
+  },
+  "launcher_sha256": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5",
+  "seconds": 491.1674371249974
+}

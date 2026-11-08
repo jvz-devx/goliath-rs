@@ -1,0 +1,43 @@
+{
+  "status": "failed",
+  "profile": "release",
+  "incremental": false,
+  "source_proof_sha256": "a71e96238c8bbd5a0f3404d6a9df4dbac4ec1a2bd99b0c8c8371a31a94634390",
+  "patch11_sha256": "53b150702bd8e6b0d4e3bdf9808acd8e858c3cd71ff7c080dbee7eef6e445615",
+  "source_equality": "passed",
+  "commands": [
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 5.9904642080073245,
+      "test_results": []
+    },
+    {
+      "label": "observer-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client-lib",
+        "--lib",
+        "observer"
+      ],
+      "exit": 101,
+      "seconds": 289.04316037500394,
+      "test_results": [
+        "test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 2195 filtered out; finished in 0.04s"
+      ]
+    }
+  ],
+  "error": "gate failed: observer-tests",
+  "seconds": 295.03816900000675
+}

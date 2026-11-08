@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Acquire a bounded E22 quiet window and record sanitized outside-process noise."""
+import argparse
+from datetime import datetime, timezone
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import time
+import e11_support as support
+
+ROOT = support.ROOT
+DATA = ROOT / 'docs/experiments/data/E22'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--no-other-agents', action='store_true', help='reviewer confirmed E20 finished and E22 is the only active builder')
+    parser.add_argument('command', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    command = args.command[1:] if args.command[:1] == ['--'] else args.command
+    if not command:
+        parser.error('supply a command after --')
+    DATA.mkdir(parents=True, exist_ok=True)
+    path = DATA / (args.name + '-quiet.json')
+    request = ROOT / '.local/quiet-request'
+    ack = ROOT / '.local/quiet-ack-E20'
+    if path.exists() or request.exists() or not args.no_other_agents and ack.exists():
+        raise RuntimeError('use a fresh name and a fresh request/ack pair')
+    loader = importlib.machinery.SourceFileLoader('e22_noise', str(ROOT / 'scripts/e20-window'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    noise = importlib.util.module_from_spec(spec)
+    loader.exec_module(noise)
+    identity = json.dumps(dict(owner='E22', name=args.name, pid=os.getpid(), time=datetime.now(timezone.utc).isoformat())) + '\n'
+    began = time.monotonic()
+    deadline = began + 1500
+    child = monitor = None
+    result = dict(status='waiting', request=json.loads(identity), command=command, exit=1)
+    with request.open('x') as stream:
+        stream.write(identity)
+    try:
+        while not args.no_other_agents and not ack.exists() or os.getloadavg()[0] > 4:
+            if request.read_text() != identity:
+                raise RuntimeError('quiet request identity changed')
+            if time.monotonic() > deadline - 120:
+                raise TimeoutError('quiet acquisition deadline')
+            time.sleep(1)
+        waiver = 'waived: reviewer confirmed E20 finished and E22 is the only active builder'
+        result.update(status='running', load_start=os.getloadavg(), ack_E20=waiver if args.no_other_agents else ack.read_text(), acknowledgement_waiver=args.no_other_agents)
+        monitor = noise.FixtureSampler(observer=True).start()
+        monitor.capture('steady-first')
+        child = subprocess.Popen(command, cwd=ROOT, env=dict(os.environ, E22_QUIET_IDENTITY=identity,
+            E22_QUIET_WAIVER=waiver if args.no_other_agents else ''), start_new_session=True)
+        monitor.register('regression-driver', child.pid)
+        try:
+            result['exit'] = child.wait(timeout=max(1, deadline - time.monotonic() - 40))
+        except BaseException:
+            # The fixture's finally block owns child cleanup. Give it an interrupt first.
+            child.send_signal(signal.SIGINT)
+            try:
+                child.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGTERM)
+                child.wait(timeout=10)
+            raise
+        result['status'] = 'complete' if result['exit'] == 0 else 'failed'
+    except BaseException as error:
+        result.update(status='failed', error=support.sanitize(str(error)))
+        raise
+    finally:
+        try:
+            if monitor:
+                monitor.capture('steady-last')
+                monitor.stop()
+                report = monitor.report()
+                whole = report['phases']['whole_cell']
+                result['processes'] = report
+                result['noise_valid'] = bool(whole and whole['no_outside_process_above_half_core'] and not report['error'])
+                result['counter_scope'] = 'quiet eligibility only, not capacity CPU'
+                if not result['noise_valid']:
+                    result.update(status='invalid-outside-noise', exit=1)
+        finally:
+            if request.exists() and request.read_text() == identity:
+                request.unlink()
+                ack.unlink(missing_ok=True)
+            result.update(seconds=time.monotonic() - began, load_end=os.getloadavg())
+            support.save(path, result)
+    raise SystemExit(result['exit'])
+
+
+if __name__ == '__main__':
+    main()

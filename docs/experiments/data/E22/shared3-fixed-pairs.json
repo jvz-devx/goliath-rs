@@ -1,0 +1,181 @@
+{
+  "status": "failed",
+  "planned_at": 1794145184207684000,
+  "acknowledgement_waiver": "reviewer confirmed E20 finished and E22 is the only active builder; acknowledgements waived",
+  "inputs": {
+    "current": {
+      "horizon-client": "21805ed6621cf138f0e3d509a91d233bee8f8fe182f625e3fcaa1bad88f87ea6",
+      "meridian": "8716c34f6e799e2ddce31aff153b86cf9c78408bfcd64b4c78551851d2b399ad",
+      "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+      "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+      "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+      "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+      "cluster-launcher.py": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5",
+      "LEASES": "14e155e414ecf409b1691473aa56c568c8f25634152ab0467a0fed739dd9d65f"
+    },
+    "shared": {
+      "horizon-client": "21805ed6621cf138f0e3d509a91d233bee8f8fe182f625e3fcaa1bad88f87ea6",
+      "meridian": "944ca279d236b1064d296c4adb5bbea31f192d25c2c3ff99f3df5432b594e483",
+      "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+      "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+      "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+      "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+      "cluster-launcher.py": "5ddb4358fbac0173f725b2d420645d9b60418345b1c2385c9a21865c98dba9e5",
+      "LEASES": "14e155e414ecf409b1691473aa56c568c8f25634152ab0467a0fed739dd9d65f"
+    }
+  },
+  "runner_sha256": "e3b0fbd23f8ace2689d38af1d6a1e6614c2184659098a77baba561a36f651f85",
+  "adapter_sha256": "66bc4d451c2bbb5605c4a70139206eeb1e9e8a076a18ccc2f9ab0b45f31909fa",
+  "rows": [
+    {
+      "mode": "d9",
+      "repeat": 1,
+      "arm": "current",
+      "name": "shared3-fixed-d9-current-r1",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e22-cell",
+        "d9",
+        "--bins",
+        ".local/bin/meridian-e22/current-1",
+        "--name",
+        "shared3-fixed-d9-current-r1",
+        "--no-other-agents"
+      ],
+      "status": "failed",
+      "exit": 1,
+      "metrics": {
+        "valid": false,
+        "status": "failed"
+      }
+    },
+    {
+      "mode": "d9",
+      "repeat": 1,
+      "arm": "shared",
+      "name": "shared3-fixed-d9-shared-r1",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e22-cell",
+        "d9",
+        "--bins",
+        ".local/bin/meridian-e22/shared-3",
+        "--name",
+        "shared3-fixed-d9-shared-r1",
+        "--no-other-agents"
+      ],
+      "status": "pending"
+    },
+    {
+      "mode": "d9",
+      "repeat": 2,
+      "arm": "current",
+      "name": "shared3-fixed-d9-current-r2",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e22-cell",
+        "d9",
+        "--bins",
+        ".local/bin/meridian-e22/current-1",
+        "--name",
+        "shared3-fixed-d9-current-r2",
+        "--no-other-agents"
+      ],
+      "status": "pending"
+    },
+    {
+      "mode": "d9",
+      "repeat": 2,
+      "arm": "shared",
+      "name": "shared3-fixed-d9-shared-r2",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e22-cell",
+        "d9",
+        "--bins",
+        ".local/bin/meridian-e22/shared-3",
+        "--name",
+        "shared3-fixed-d9-shared-r2",
+        "--no-other-agents"
+      ],
+      "status": "pending"
+    },
+    {
+      "mode": "contained",
+      "repeat": 1,
+      "arm": "current",
+      "name": "shared3-fixed-contained-current-r1",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e22-cell",
+        "contained",
+        "--bins",
+        ".local/bin/meridian-e22/current-1",
+        "--name",
+        "shared3-fixed-contained-current-r1",
+        "--no-other-agents"
+      ],
+      "status": "pending"
+    },
+    {
+      "mode": "contained",
+      "repeat": 1,
+      "arm": "shared",
+      "name": "shared3-fixed-contained-shared-r1",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e22-cell",
+        "contained",
+        "--bins",
+        ".local/bin/meridian-e22/shared-3",
+        "--name",
+        "shared3-fixed-contained-shared-r1",
+        "--no-other-agents"
+      ],
+      "status": "pending"
+    },
+    {
+      "mode": "contained",
+      "repeat": 2,
+      "arm": "current",
+      "name": "shared3-fixed-contained-current-r2",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e22-cell",
+        "contained",
+        "--bins",
+        ".local/bin/meridian-e22/current-1",
+        "--name",
+        "shared3-fixed-contained-current-r2",
+        "--no-other-agents"
+      ],
+      "status": "pending"
+    },
+    {
+      "mode": "contained",
+      "repeat": 2,
+      "arm": "shared",
+      "name": "shared3-fixed-contained-shared-r2",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "-B",
+        "$REPO/scripts/e22-cell",
+        "contained",
+        "--bins",
+        ".local/bin/meridian-e22/shared-3",
+        "--name",
+        "shared3-fixed-contained-shared-r2",
+        "--no-other-agents"
+      ],
+      "status": "pending"
+    }
+  ],
+  "required_reproduced_saving_cores": 0.1
+}

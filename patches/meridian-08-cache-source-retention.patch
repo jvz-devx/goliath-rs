@@ -1,0 +1,592 @@
+diff --git a/crates/meridian-handoff/src/lib.rs b/crates/meridian-handoff/src/lib.rs
+--- a/crates/meridian-handoff/src/lib.rs
++++ b/crates/meridian-handoff/src/lib.rs
+@@ -149,7 +149,7 @@
+ mod shared_terrain;
+ mod switch;
+ mod terrain;
+-pub use shared_terrain::{InterestArea, SharedSubscription, SharedTerrain};
++pub use shared_terrain::{InterestArea, SharedSubscription, SharedTerrain, TerrainRefresh};
+ mod transport;
+ pub use terrain::{TerrainOwners, TerrainReader};
+ 
+diff --git a/crates/meridian-handoff/src/shared_terrain.rs b/crates/meridian-handoff/src/shared_terrain.rs
+--- a/crates/meridian-handoff/src/shared_terrain.rs
++++ b/crates/meridian-handoff/src/shared_terrain.rs
+@@ -22,6 +22,14 @@
+ };
+ 
+ type Column = (i32, i32);
++mod recovery;
++use recovery::{Recovery, Step};
++pub enum TerrainRefresh {
++    Idle,
++    Request(Vec<[i32; 2]>),
++    Reset,
++    Failed,
++}
+ const MAX_COLUMNS: usize = 4096;
+ const MAX_MEMBERS: usize = 4096;
+ const MAX_INTERESTS: usize = 262144;
+@@ -107,6 +115,8 @@
+     updates: usize,
+     refresh: HashSet<Column>,
+     sent_refresh: HashSet<Column>,
++    peak_columns: usize,
++    peak_bytes: usize,
+ }
+ impl Cache {
+     fn remove(&mut self, key: Column) {
+@@ -123,6 +133,9 @@
+             return Ok(());
+         }
+         if packet.id == c::LEVEL_CHUNK_WITH_LIGHT {
++            if !self.columns.contains_key(&key) && self.columns.len() >= MAX_COLUMNS {
++                return Err("shared terrain source cache exceeded 4096 columns".into());
++            }
+             self.remove(key);
+             let bytes = charge(&packet);
+             if bytes > BASE_BYTES.saturating_sub(self.bases) {
+@@ -158,6 +171,8 @@
+                 column.updates.push(packet);
+             }
+         }
++        self.peak_columns = self.peak_columns.max(self.columns.len());
++        self.peak_bytes = self.peak_bytes.max(self.bases + self.updates);
+         Ok(())
+     }
+     fn snapshot(&self, key: Column) -> Option<Vec<Arc<Packet>>> {
+@@ -167,17 +182,6 @@
+                 .chain(column.updates.iter().cloned())
+                 .collect()
+         })
+-    }
+-    fn retain(&mut self, wanted: &HashSet<Column>) {
+-        let old: Vec<_> = self
+-            .columns
+-            .keys()
+-            .copied()
+-            .filter(|key| !wanted.contains(key))
+-            .collect();
+-        for key in old {
+-            self.remove(key);
+-        }
+     }
+ }
+ struct Member {
+@@ -195,6 +199,7 @@
+     cache: Cache,
+     failed: bool,
+     version: u64,
++    recovery: Recovery,
+ }
+ impl State {
+     fn interests(&mut self) {
+@@ -204,7 +209,8 @@
+             .values()
+             .flat_map(|m| m.wanted.iter().copied())
+             .collect();
+-        self.cache.retain(&self.wanted);
++        // Local interest updates can coalesce before the source's next chunk tick.
++        // Only its ordered Forget proves it will send a fresh base on re-entry.
+     }
+     fn admit(&self, id: Option<u64>, next: InterestArea, wanted: usize) -> Result<(), String> {
+         if self.failed {
+@@ -248,6 +254,50 @@
+     }
+ }
+ impl SharedTerrain {
++    pub fn telemetry(&self) -> serde_json::Value {
++        let state = lock(&self.0);
++        let cache = &state.cache;
++        let recovery = &state.recovery;
++        serde_json::json!({"members":state.members.len(),"interest_columns":state.wanted.len(),
++            "source_columns":cache.columns.len(),"source_base_bytes":cache.bases,"source_update_bytes":cache.updates,
++            "source_bytes":cache.bases+cache.updates,"peak_source_columns":cache.peak_columns,"peak_source_bytes":cache.peak_bytes,
++            "refresh_requests":recovery.requests,"refresh_deferrals":recovery.deferrals,"recovery_resets":recovery.resets,"recovery_failures":recovery.failures,
++            "retry_ms":recovery::RETRY.as_millis(),"reset_after_ms":recovery::RESET_AFTER.as_millis(),"reset_wait_ms":recovery::RESET_WAIT.as_millis()})
++    }
++    pub fn refresh_deferred(&self) {
++        lock(&self.0).recovery.deferrals += 1;
++    }
++    pub fn abort_refresh(&self) {
++        lock(&self.0).recovery.abort();
++        self.fail();
++    }
++    pub fn refresh_action(&self, now: Instant) -> TerrainRefresh {
++        let mut state = lock(&self.0);
++        let pending = state
++            .cache
++            .refresh
++            .iter()
++            .any(|key| state.wanted.contains(key));
++        let columns: Vec<_> = state
++            .cache
++            .refresh
++            .iter()
++            .filter(|key| state.wanted.contains(key) && !state.cache.sent_refresh.contains(key))
++            .take(256)
++            .map(|&(x, z)| [x, z])
++            .collect();
++        let action = state.recovery.poll(now, pending, !columns.is_empty());
++        match action {
++            Step::Wait => TerrainRefresh::Idle,
++            Step::Request => TerrainRefresh::Request(columns),
++            Step::Reset => TerrainRefresh::Reset,
++            Step::Failed => {
++                drop(state);
++                self.fail();
++                TerrainRefresh::Failed
++            }
++        }
++    }
+     pub fn areas(&self) -> Vec<InterestArea> {
+         let state = lock(&self.0);
+         let mut areas: Vec<_> = state.members.values().map(|m| m.area).collect();
+@@ -264,7 +314,7 @@
+             .cache
+             .refresh
+             .iter()
+-            .filter(|key| !state.cache.sent_refresh.contains(key))
++            .filter(|key| state.wanted.contains(key) && !state.cache.sent_refresh.contains(key))
+             .take(256)
+             .map(|&(x, z)| [x, z])
+             .collect()
+@@ -349,9 +399,11 @@
+         let mut state = lock(&self.0);
+         let owner = state.owner;
+         for (key, packet) in packets {
+-            if state.owners.owner(key.0, key.1) != Some(owner) || !state.wanted.contains(&key) {
++            if state.owners.owner(key.0, key.1) != Some(owner) {
+                 continue;
+             }
++            // Keep unused source-sent snapshots current until the matching Forget.
++            // Re-entry need not trigger another full snapshot at the backend.
+             state.cache.apply(key, Arc::clone(&packet))?;
+             let ids: Vec<_> = state
+                 .members
+@@ -553,6 +605,7 @@
+             cache: Cache::default(),
+             failed: false,
+             version: 0,
++            recovery: Recovery::default(),
+         }))))
+     }
+     pub fn open_shared_terrain_reader(
+diff --git a/crates/meridian-handoff/src/shared_terrain/recovery.rs b/crates/meridian-handoff/src/shared_terrain/recovery.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/shared_terrain/recovery.rs
+@@ -0,0 +1,61 @@
++//! Monotonic retry pacing and one bounded snapshot-reset recovery per pending episode.
++use std::time::{Duration, Instant};
++
++pub(super) const RETRY: Duration = Duration::from_millis(100);
++pub(super) const RESET_AFTER: Duration = Duration::from_secs(1);
++pub(super) const RESET_WAIT: Duration = Duration::from_secs(5);
++pub(super) enum Step {
++    Wait,
++    Request,
++    Reset,
++    Failed,
++}
++#[derive(Default)]
++pub(super) struct Recovery {
++    began: Option<Instant>,
++    next: Option<Instant>,
++    reset: Option<Instant>,
++    failed: bool,
++    pub(super) requests: u64,
++    pub(super) deferrals: u64,
++    pub(super) resets: u64,
++    pub(super) failures: u64,
++}
++impl Recovery {
++    pub(super) fn abort(&mut self) {
++        if !self.failed {
++            self.failed = true;
++            self.failures += 1;
++        }
++    }
++    pub(super) fn poll(&mut self, now: Instant, pending: bool, requestable: bool) -> Step {
++        if self.failed {
++            return Step::Failed;
++        }
++        if !pending {
++            self.began = None;
++            self.next = None;
++            self.reset = None;
++            return Step::Wait;
++        }
++        let began = *self.began.get_or_insert(now);
++        if let Some(reset) = self.reset {
++            if now.saturating_duration_since(reset) >= RESET_WAIT {
++                self.abort();
++                return Step::Failed;
++            }
++            return Step::Wait;
++        }
++        if now.saturating_duration_since(began) >= RESET_AFTER {
++            self.reset = Some(now);
++            self.resets += 1;
++            return Step::Reset;
++        }
++        if requestable && self.next.is_none_or(|next| now >= next) {
++            self.next = Some(now + RETRY);
++            self.requests += 1;
++            return Step::Request;
++        }
++        Step::Wait
++    }
++}
+diff --git a/crates/meridian-handoff/src/shared_terrain/tests.rs b/crates/meridian-handoff/src/shared_terrain/tests.rs
+--- a/crates/meridian-handoff/src/shared_terrain/tests.rs
++++ b/crates/meridian-handoff/src/shared_terrain/tests.rs
+@@ -117,6 +117,13 @@
+     first.empty();
+     assert_eq!(lock(&view.0).members.len(), 1);
+     drop(b);
++    assert!(lock(&view.0).members.is_empty());
++    publish(
++        &view,
++        Packet::of(&play::Clientbound::ForgetLevelChunk(
++            play::ForgetLevelChunk { pos: [0, 0] },
++        )),
++    );
+     assert!(lock(&view.0).cache.columns.is_empty());
+ }
+ 
+@@ -358,3 +365,191 @@
+     assert_eq!(target.view.counts(), (0, 0));
+     assert!(target.extras.is_empty());
+ }
++
++#[test]
++fn temporary_interest_gap_keeps_source_snapshot_until_ordered_forget() {
++    let mut client = Client::new();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let member = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(0, 0));
++    client.next();
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [1608., 70., 8.],
++        ..Default::default()
++    });
++    member.recenter([1608., 70., 8.], 3, false).unwrap();
++    assert_eq!(client.next().id, c::FORGET_LEVEL_CHUNK);
++    // The source has not ticked its view yet. It still regards (0,0) as sent.
++    publish(&view, block(11));
++    client.empty();
++    assert!(
++        lock(&view.0).cache.snapshot((0, 0)).is_some(),
++        "local interest is not an ordered source Forget"
++    );
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [8., 70., 8.],
++        ..Default::default()
++    });
++    member.recenter([8., 70., 8.], 3, false).unwrap();
++    assert_eq!(client.next(), chunk(0, 0));
++    assert_eq!(client.next(), block(11));
++}
++
++#[test]
++fn a_replacement_subscription_can_reuse_the_still_live_source_stream() {
++    let mut first = Client::new();
++    let mut second = Client::new();
++    let view = first.handle.shared_terrain(0).unwrap();
++    let member = view.subscribe(&first.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(0, 0));
++    first.next();
++    drop(member);
++    publish(&view, block(12));
++    first.empty();
++    let _next = view.subscribe(&second.handle, [8., 70., 8.], 3).unwrap();
++    assert_eq!(second.next(), chunk(0, 0));
++    assert_eq!(second.next(), block(12));
++}
++
++#[test]
++fn source_cache_column_count_is_bounded_even_without_a_forget() {
++    let mut cache = Cache::default();
++    for x in 0..MAX_COLUMNS {
++        cache
++            .apply((x as i32, 0), Arc::new(chunk(x as i32, 0)))
++            .unwrap();
++    }
++    assert!(
++        cache
++            .apply(
++                (MAX_COLUMNS as i32, 0),
++                Arc::new(chunk(MAX_COLUMNS as i32, 0))
++            )
++            .is_err()
++    );
++    assert_eq!(cache.columns.len(), MAX_COLUMNS);
++}
++
++fn invalidate(view: &SharedTerrain) {
++    lock(&view.0)
++        .cache
++        .apply(
++            (0, 0),
++            Arc::new(Packet {
++                id: c::BLOCK_ENTITY_DATA,
++                payload: vec![0; COLUMN_UPDATES],
++            }),
++        )
++        .unwrap();
++}
++
++#[test]
++fn permanently_unsent_refresh_recovers_by_reset_and_delivers_within_the_deadline() {
++    let mut first = Client::new();
++    let mut waiting = Client::new();
++    let view = first.handle.shared_terrain(0).unwrap();
++    let _first = view.subscribe(&first.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(0, 0));
++    first.next();
++    invalidate(&view);
++    let _waiting = view.subscribe(&waiting.handle, [8., 70., 8.], 3).unwrap();
++    waiting.empty();
++    let began = Instant::now();
++    let mut delivered_at = None;
++    for ms in (0..=1000).step_by(100) {
++        let now = began + Duration::from_millis(ms);
++        match view.refresh_action(now) {
++            TerrainRefresh::Request(columns) => {
++                assert_eq!(columns, vec![[0, 0]]);
++                // The control precondition never becomes true, including after retries.
++                let precondition = false;
++                assert!(!precondition);
++                view.refresh_deferred();
++                assert!(
++                    matches!(
++                        view.refresh_action(now + Duration::from_millis(1)),
++                        TerrainRefresh::Idle
++                    ),
++                    "retry pacing is per view, not per client"
++                );
++            }
++            TerrainRefresh::Reset => {
++                // A reset forces the source to stream its full column without that precondition.
++                publish(&view, chunk(0, 0));
++                assert_eq!(waiting.next(), chunk(0, 0));
++                first.empty();
++                delivered_at = Some(now.saturating_duration_since(began));
++            }
++            TerrainRefresh::Idle => {}
++            TerrainRefresh::Failed => panic!("the reset source did deliver"),
++        }
++    }
++    assert_eq!(delivered_at, Some(recovery::RESET_AFTER));
++    assert!(matches!(
++        view.refresh_action(began + Duration::from_secs(2)),
++        TerrainRefresh::Idle
++    ));
++    let stats = view.telemetry();
++    assert_eq!(stats["refresh_deferrals"], 10);
++    assert_eq!(stats["refresh_requests"], 10);
++    assert_eq!(stats["recovery_resets"], 1);
++    assert_eq!(stats["recovery_failures"], 0);
++}
++
++#[test]
++fn an_unresponsive_reset_fails_closed_instead_of_waiting_forever() {
++    let mut client = Client::new();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let _member = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(0, 0));
++    client.next();
++    invalidate(&view);
++    let began = Instant::now();
++    assert!(matches!(
++        view.refresh_action(began),
++        TerrainRefresh::Request(_)
++    ));
++    view.refresh_deferred();
++    assert!(matches!(
++        view.refresh_action(began + recovery::RESET_AFTER),
++        TerrainRefresh::Reset
++    ));
++    assert!(matches!(
++        view.refresh_action(began + recovery::RESET_AFTER + recovery::RESET_WAIT),
++        TerrainRefresh::Failed
++    ));
++    assert!(client.player.recv().unwrap_err().is_end_of_stream());
++    assert!(matches!(
++        view.refresh_action(began + Duration::from_secs(20)),
++        TerrainRefresh::Failed
++    ));
++    assert_eq!(view.telemetry()["recovery_failures"], 1);
++}
++
++#[test]
++fn source_cache_high_water_marks_include_retained_unused_columns() {
++    let client = Client::new();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let member = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(0, 0));
++    publish(&view, chunk(1, 0));
++    client.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [1608., 70., 8.],
++        ..Default::default()
++    });
++    member.recenter([1608., 70., 8.], 3, false).unwrap();
++    let held = view.telemetry();
++    assert_eq!(held["source_columns"], 2);
++    assert_eq!(held["peak_source_columns"], 2);
++    assert_eq!(held["peak_source_bytes"], 2 * charge(&chunk(0, 0)));
++    publish(
++        &view,
++        Packet::of(&play::Clientbound::ForgetLevelChunk(
++            play::ForgetLevelChunk { pos: [0, 0] },
++        )),
++    );
++    let after = view.telemetry();
++    assert_eq!(after["source_columns"], 1);
++    assert_eq!(after["peak_source_columns"], 2);
++    assert_eq!(after["peak_source_bytes"], held["peak_source_bytes"]);
++}
+diff --git a/crates/meridian-proxy/src/console.rs b/crates/meridian-proxy/src/console.rs
+--- a/crates/meridian-proxy/src/console.rs
++++ b/crates/meridian-proxy/src/console.rs
+@@ -43,6 +43,20 @@
+     pub fn builtin() -> Self {
+         let mut commands = Commands { list: Vec::new() };
+         for command in [
++            command(
++                "e22-views",
++                "e22-views",
++                "reads shared terrain cache high-water marks and bounded refresh recovery counters",
++                |proxy, _, args| {
++                    if !args.is_empty() {
++                        return Err("usage: e22-views".into());
++                    }
++                    Ok(vec![format!(
++                        "E22_VIEWS {}",
++                        proxy.sessions.shared_terrain.telemetry()
++                    )])
++                },
++            ),
+             command(
+                 "e18-path",
+                 "e18-path [reset]",
+diff --git a/crates/meridian-proxy/src/terrain/shared.rs b/crates/meridian-proxy/src/terrain/shared.rs
+--- a/crates/meridian-proxy/src/terrain/shared.rs
++++ b/crates/meridian-proxy/src/terrain/shared.rs
+@@ -3,7 +3,7 @@
+ use meridian_config::{Config, TileMap};
+ use meridian_handoff::{
+     Digest, InterestArea, SessionHandle, SharedSubscription, SharedTerrain, TargetBackend,
+-    TerrainOwners, TerrainReader,
++    TerrainOwners, TerrainReader, TerrainRefresh,
+ };
+ use meridian_net::{backend::BackendOptions, io_pool::Affinity};
+ use meridian_sidecar::endpoint::Endpoint;
+@@ -22,6 +22,26 @@
+     slots: Mutex<ViewSlots>,
+ }
+ impl SharedViews {
++    pub(crate) fn telemetry(&self) -> Value {
++        let slots: Vec<_> = self
++            .slots
++            .lock()
++            .expect("shared terrain registry poisoned")
++            .values()
++            .filter_map(Weak::upgrade)
++            .collect();
++        let mut tiles: std::collections::BTreeMap<String, Vec<Value>> =
++            std::collections::BTreeMap::new();
++        for slot in slots {
++            if let Some(live) = slot.lock().expect("shared reader owner poisoned").as_ref() {
++                tiles
++                    .entry(live.backend.clone())
++                    .or_default()
++                    .push(live.view.telemetry());
++            }
++        }
++        json!({"tiles":tiles,"scope":"per live reader high-water marks since creation, including warmup", "byte_scope":"retained packet payload plus 64 bytes per packet; client output queues and map metadata separate", "refresh_control_timeout_ms":2000})
++    }
+     fn slot(&self, key: String, digest: Digest) -> Result<Slot, String> {
+         let mut slots = self.slots.lock().expect("shared terrain registry poisoned");
+         slots.retain(|_, slot| slot.strong_count() != 0);
+@@ -50,6 +70,7 @@
+     version: u64,
+     areas: Vec<InterestArea>,
+     refreshed: Instant,
++    backend: String,
+ }
+ struct Context {
+     config: Config,
+@@ -66,7 +87,10 @@
+         .collect()
+ }
+ fn ask(endpoint: &Endpoint, command: String) -> Result<Value, String> {
+-    let reply = endpoint.ask(&command, TIMEOUT).map_err(|e| e.to_string())?;
++    ask_timeout(endpoint, command, TIMEOUT)
++}
++fn ask_timeout(endpoint: &Endpoint, command: String, timeout: Duration) -> Result<Value, String> {
++    let reply = endpoint.ask(&command, timeout).map_err(|e| e.to_string())?;
+     if reply["ok"] != true {
+         return Err(format!("shared observer refused: {reply}"));
+     }
+@@ -119,6 +143,7 @@
+                 version,
+                 areas,
+                 refreshed: Instant::now(),
++                backend: tile.backend.clone(),
+             },
+             member,
+         ))
+@@ -151,14 +176,42 @@
+             self.refreshed = Instant::now();
+         }
+         self.version = version;
+-        let columns = self.view.refreshes();
+-        if !columns.is_empty() {
+-            let request = json!({"revision":self.revision,"columns":columns});
+-            ask(
+-                endpoint,
+-                format!("player-observe-refresh {} {request}", self.uuid),
+-            )?;
+-            self.view.refreshed(&columns);
++        match self.view.refresh_action(Instant::now()) {
++            TerrainRefresh::Idle => {}
++            TerrainRefresh::Request(columns) => {
++                let request = json!({"revision":self.revision,"columns":columns});
++                match ask_timeout(
++                    endpoint,
++                    format!("player-observe-refresh {} {request}", self.uuid),
++                    Duration::from_secs(2),
++                ) {
++                    Ok(_) => self.view.refreshed(&columns),
++                    Err(error)
++                        if error.contains(
++                            "refresh needs at most 256 requested, already sent columns",
++                        ) =>
++                    {
++                        self.view.refresh_deferred()
++                    }
++                    Err(error) => {
++                        self.view.abort_refresh();
++                        return Err(error);
++                    }
++                }
++            }
++            TerrainRefresh::Reset => {
++                if let Err(error) = ask_timeout(
++                    endpoint,
++                    format!("player-observe-reset {}", self.uuid),
++                    Duration::from_secs(2),
++                ) {
++                    self.view.abort_refresh();
++                    return Err(error);
++                }
++            }
++            TerrainRefresh::Failed => {
++                return Err("shared terrain snapshot recovery deadline exceeded".into());
++            }
+         }
+         Ok(())
+     }

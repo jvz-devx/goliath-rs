@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Derive CPU, cache and availability tables without changing any measured row."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E22'
+
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def signals(path):
+    data=json.loads(gzip.decompress(path.read_bytes()));paused={};roles={}
+    for row in data['events']:
+        role=roles.setdefault(row['role'],dict(stops=0,continues=0,failed_signals=0,maximum_stop_upper_ms=0.0))
+        if row['error']:
+            role['failed_signals']+=1;continue
+        if row['signal']=='STOP':
+            role['stops']+=1;paused[row['pid']]=row
+        else:
+            role['continues']+=1
+            if row['pid'] in paused:
+                start=paused.pop(row['pid'])
+                upper=(row['monotonic_after_ns']-start['monotonic_before_ns'])/1e6
+                role['maximum_stop_upper_ms']=max(role['maximum_stop_upper_ms'],upper)
+    return dict(roles=roles,unclosed_stops=[dict(pid=pid,role=row['role']) for pid,row in paused.items()],dropped=data['dropped'])
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('comparison',type=Path)
+    parser.add_argument('--output',type=Path,required=True)
+    args=parser.parse_args()
+    if args.output.exists():raise RuntimeError('derived output exists; use a fresh name')
+    ledger=json.loads(args.comparison.read_text())
+    if ledger['status']!='complete':raise RuntimeError('complete fixed comparison required')
+    rows=[]
+    for planned in ledger['rows']:
+        path=DATA/(planned['name']+'.json')
+        if sha(path)!=planned['metrics']['raw_sha256']:raise RuntimeError('raw row changed')
+        raw=json.loads(path.read_text());cell=raw['cells']['650'];availability=raw['lease_availability']
+        source_cache=cell['source_cache_telemetry'];cache=source_cache.get('after',{}).get('tiles',{})
+        signal_path=ROOT/availability['limiter_signals']['path']
+        if sha(signal_path)!=availability['limiter_signals']['sha256']:raise RuntimeError('signal evidence changed')
+        row=dict(name=planned['name'],mode=planned['mode'],arm=planned['arm'],repeat=planned['repeat'],valid=planned['metrics']['valid'],
+            raw_sha256=sha(path),proxy_cores=planned['metrics']['proxy_cores'],
+            tile_cores=planned['metrics']['tile_cores'],tile_sum_cores=sum(planned['metrics']['tile_cores'].values()),
+            server_cores=planned['metrics']['total_server_cores'],readers=planned['metrics']['readers'],
+            chunks=planned['metrics']['chunks'],activations=planned['metrics']['activations'],
+            minimum_tps=min(cell['game_time_tps'].values()),maximum_tick_p99_ms=max(value['p99_ms'] for value in cell['tick_summary'].values()),
+            raw_tick_drops=sum(value['dropped'] for value in cell['tick_summary'].values()),
+            cache_peaks={name:dict(columns=value['peak_source_columns'],charged_bytes=value['peak_source_bytes'],groups=value['groups']) for name,value in cache.items()},
+            cache_scope=source_cache.get('scope'),cache_byte_scope=source_cache.get('byte_scope'),
+            recovery={name:{key:value[key] for key in ['refresh_requests','refresh_deferrals','recovery_resets','recovery_restores','recovery_failures']} for name,value in cache.items()},
+            availability_complete=availability['complete'],lease_expiry=availability['lease_expiry_observed'],
+            store_batches=availability['store_batches']['rows'],store_maxima_ms=availability['store_batches']['maxima_ms'],
+            store_gaps_over_200ms=len(availability['store_batches']['gaps_over_200ms']),
+            limiter_signal_summary=signals(signal_path),contained_contract=cell.get('contained_contract'))
+        rows.append(row)
+    result=dict(kind='E22-derived-builder-results-not-independent-acceptance',comparison_sha256=sha(args.comparison),
+        inputs=ledger['inputs'],comparisons=ledger['comparisons'],clearly_cheaper=ledger['clearly_cheaper'],rows=rows,
+        availability_event='docs/experiments/data/E22/lease-availability-event-1.json',
+        prior_event_cause='unresolved',recurrence_in_fresh_comparison=any(row['lease_expiry'] for row in rows))
+    args.output.write_text(json.dumps(result,indent=2)+'\n')
+    print('| Mode | Repeat | Arm | Proxy | Tiles | Total cores | Activations |')
+    print('| --- | ---: | --- | ---: | ---: | ---: | ---: |')
+    for row in rows:print(f'| {row["mode"]} | {row["repeat"]} | {row["arm"]} | {row["proxy_cores"]:.6f} | {row["tile_sum_cores"]:.6f} | {row["server_cores"]:.6f} | {row["activations"]} |')
+    print('\n| Mode | Repeat | Tile | Tile cores | Peak source columns | Peak charged bytes |')
+    print('| --- | ---: | --- | ---: | ---: | ---: |')
+    for row in rows:
+        if row['arm']=='shared':
+            for name,peak in row['cache_peaks'].items():print(f'| {row["mode"]} | {row["repeat"]} | {name} | {row["tile_cores"][name]:.6f} | {peak["columns"]} | {peak["charged_bytes"]} |')
+
+
+if __name__=='__main__':main()

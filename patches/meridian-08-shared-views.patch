@@ -1,0 +1,1844 @@
+diff --git a/crates/meridian-handoff/src/lib.rs b/crates/meridian-handoff/src/lib.rs
+--- a/crates/meridian-handoff/src/lib.rs
++++ b/crates/meridian-handoff/src/lib.rs
+@@ -146,8 +146,10 @@
+ mod prepare;
+ mod reason;
+ mod session;
++mod shared_terrain;
+ mod switch;
+ mod terrain;
++pub use shared_terrain::{InterestArea, SharedSubscription, SharedTerrain};
+ mod transport;
+ pub use terrain::{TerrainOwners, TerrainReader};
+ 
+diff --git a/crates/meridian-handoff/src/shared_terrain.rs b/crates/meridian-handoff/src/shared_terrain.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/shared_terrain.rs
+@@ -0,0 +1,675 @@
++//! Shared read-only terrain cache, ordered subscriptions and one caller-driven reader.
++use crate::{
++    ClientConfiguration, Digest, SessionHandle, TargetBackend, TerrainOwners, TerrainReader,
++};
++use crate::{
++    configure::configure,
++    drain::Writer,
++    prepare::Target,
++    session::{Shared, lock},
++};
++use horizon_protocol::{ids::play::clientbound as c, packets::play};
++use meridian_ghost::Packet;
++use meridian_net::{Profile, backend, io_pool::Handler};
++use std::{
++    collections::{HashMap, HashSet},
++    io,
++    sync::{
++        Arc, Mutex, Weak,
++        atomic::{AtomicBool, AtomicU64, Ordering},
++    },
++    time::{Duration, Instant},
++};
++
++type Column = (i32, i32);
++const MAX_COLUMNS: usize = 4096;
++const MAX_MEMBERS: usize = 4096;
++const MAX_INTERESTS: usize = 262144;
++const BASE_BYTES: usize = 64 * 1024 * 1024;
++const UPDATE_BYTES: usize = 16 * 1024 * 1024;
++const COLUMN_UPDATES: usize = 256 * 1024;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
++pub struct InterestArea {
++    pub center: [i32; 2],
++    pub radius: i32,
++}
++
++fn area(position: [f64; 3], radius: i32) -> Result<InterestArea, String> {
++    if !position
++        .iter()
++        .all(|p| p.is_finite() && p.abs() < 30_000_000.)
++        || !(2..=31).contains(&radius)
++    {
++        return Err("shared terrain interest exceeds coordinate or radius bounds".into());
++    }
++    Ok(InterestArea {
++        center: [
++            (position[0].floor() as i32) >> 4,
++            (position[2].floor() as i32) >> 4,
++        ],
++        radius: radius + 1,
++    })
++}
++fn columns(area: InterestArea, owners: &TerrainOwners, owner: usize) -> HashSet<Column> {
++    (-area.radius..=area.radius)
++        .flat_map(|dz| {
++            (-area.radius..=area.radius).map(move |dx| (area.center[0] + dx, area.center[1] + dz))
++        })
++        .filter(|key| owners.owner(key.0, key.1) == Some(owner))
++        .collect()
++}
++fn coverage(areas: impl Iterator<Item = InterestArea>) -> Result<(), String> {
++    let mut loading = HashSet::new();
++    let mut distinct = HashSet::new();
++    for a in areas {
++        if !distinct.insert((a.center, a.radius)) {
++            continue;
++        }
++        if distinct.len() > 256 {
++            return Err("shared terrain exceeds 256 areas".into());
++        }
++        for z in -a.radius - 2..=a.radius + 2 {
++            for x in -a.radius - 2..=a.radius + 2 {
++                loading.insert((a.center[0] + x, a.center[1] + z));
++                if loading.len() > MAX_COLUMNS {
++                    return Err("shared terrain exceeds 4096 loading columns".into());
++                }
++            }
++        }
++    }
++    Ok(())
++}
++fn charge(packet: &Packet) -> usize {
++    packet.payload.len() + 64
++}
++fn persistent(id: i32) -> bool {
++    matches!(
++        id,
++        c::BLOCK_UPDATE
++            | c::SECTION_BLOCKS_UPDATE
++            | c::LIGHT_UPDATE
++            | c::BLOCK_ENTITY_DATA
++            | c::CHUNKS_BIOMES
++    )
++}
++
++struct Cached {
++    base: Arc<Packet>,
++    updates: Vec<Arc<Packet>>,
++    bytes: usize,
++    valid: bool,
++}
++#[derive(Default)]
++struct Cache {
++    columns: HashMap<Column, Cached>,
++    bases: usize,
++    updates: usize,
++    refresh: HashSet<Column>,
++    sent_refresh: HashSet<Column>,
++}
++impl Cache {
++    fn remove(&mut self, key: Column) {
++        if let Some(old) = self.columns.remove(&key) {
++            self.bases -= charge(&old.base);
++            self.updates -= old.bytes;
++        }
++        self.refresh.remove(&key);
++        self.sent_refresh.remove(&key);
++    }
++    fn apply(&mut self, key: Column, packet: Arc<Packet>) -> Result<(), String> {
++        if packet.id == c::FORGET_LEVEL_CHUNK {
++            self.remove(key);
++            return Ok(());
++        }
++        if packet.id == c::LEVEL_CHUNK_WITH_LIGHT {
++            self.remove(key);
++            let bytes = charge(&packet);
++            if bytes > BASE_BYTES.saturating_sub(self.bases) {
++                return Err("shared terrain base cache exceeded 64 MiB".into());
++            }
++            self.bases += bytes;
++            self.columns.insert(
++                key,
++                Cached {
++                    base: packet,
++                    updates: Vec::new(),
++                    bytes: 0,
++                    valid: true,
++                },
++            );
++        } else if persistent(packet.id)
++            && let Some(column) = self.columns.get_mut(&key)
++            && column.valid
++        {
++            let bytes = charge(&packet);
++            if bytes > COLUMN_UPDATES.saturating_sub(column.bytes)
++                || bytes > UPDATE_BYTES.saturating_sub(self.updates)
++            {
++                self.updates -= column.bytes;
++                column.bytes = 0;
++                column.updates = Vec::new();
++                column.valid = false;
++                self.refresh.insert(key);
++                self.sent_refresh.remove(&key);
++            } else {
++                column.bytes += bytes;
++                self.updates += bytes;
++                column.updates.push(packet);
++            }
++        }
++        Ok(())
++    }
++    fn snapshot(&self, key: Column) -> Option<Vec<Arc<Packet>>> {
++        let column = self.columns.get(&key)?;
++        column.valid.then(|| {
++            std::iter::once(Arc::clone(&column.base))
++                .chain(column.updates.iter().cloned())
++                .collect()
++        })
++    }
++    fn retain(&mut self, wanted: &HashSet<Column>) {
++        let old: Vec<_> = self
++            .columns
++            .keys()
++            .copied()
++            .filter(|key| !wanted.contains(key))
++            .collect();
++        for key in old {
++            self.remove(key);
++        }
++    }
++}
++struct Member {
++    session: Weak<Shared>,
++    area: InterestArea,
++    wanted: HashSet<Column>,
++    delivered: HashSet<Column>,
++}
++struct State {
++    owner: usize,
++    owners: TerrainOwners,
++    digest: Digest,
++    members: HashMap<u64, Member>,
++    wanted: HashSet<Column>,
++    cache: Cache,
++    failed: bool,
++    version: u64,
++}
++impl State {
++    fn interests(&mut self) {
++        self.version = self.version.wrapping_add(1);
++        self.wanted = self
++            .members
++            .values()
++            .flat_map(|m| m.wanted.iter().copied())
++            .collect();
++        self.cache.retain(&self.wanted);
++    }
++    fn admit(&self, id: Option<u64>, next: InterestArea, wanted: usize) -> Result<(), String> {
++        if self.failed {
++            return Err("shared terrain reader ended".into());
++        }
++        if id.is_none() && self.members.len() >= MAX_MEMBERS {
++            return Err("shared terrain subscriber bound exceeded".into());
++        }
++        if self
++            .members
++            .iter()
++            .filter(|(key, _)| Some(**key) != id)
++            .map(|(_, m)| m.wanted.len())
++            .sum::<usize>()
++            + wanted
++            > MAX_INTERESTS
++        {
++            return Err("shared terrain total interests exceeded".into());
++        }
++        coverage(
++            self.members
++                .iter()
++                .filter(|(key, _)| Some(**key) != id)
++                .map(|(_, m)| m.area)
++                .chain(std::iter::once(next)),
++        )
++    }
++}
++
++#[derive(Clone)]
++pub struct SharedTerrain(Arc<Mutex<State>>);
++pub struct SharedSubscription {
++    view: SharedTerrain,
++    id: u64,
++}
++impl Drop for SharedSubscription {
++    fn drop(&mut self) {
++        let mut state = lock(&self.view.0);
++        state.members.remove(&self.id);
++        state.interests();
++    }
++}
++impl SharedTerrain {
++    pub fn areas(&self) -> Vec<InterestArea> {
++        let state = lock(&self.0);
++        let mut areas: Vec<_> = state.members.values().map(|m| m.area).collect();
++        areas.sort_unstable();
++        areas.dedup();
++        areas
++    }
++    pub fn version(&self) -> u64 {
++        lock(&self.0).version
++    }
++    pub fn refreshes(&self) -> Vec<[i32; 2]> {
++        let state = lock(&self.0);
++        state
++            .cache
++            .refresh
++            .iter()
++            .filter(|key| !state.cache.sent_refresh.contains(key))
++            .take(256)
++            .map(|&(x, z)| [x, z])
++            .collect()
++    }
++    pub fn refreshed(&self, columns: &[[i32; 2]]) {
++        let mut state = lock(&self.0);
++        for at in columns {
++            let key = (at[0], at[1]);
++            if state.cache.refresh.contains(&key) {
++                state.cache.sent_refresh.insert(key);
++            }
++        }
++    }
++    pub fn subscribe(
++        &self,
++        session: &SessionHandle,
++        position: [f64; 3],
++        radius: i32,
++    ) -> Result<SharedSubscription, String> {
++        let digest = session
++            .0
++            .down()
++            .config_digest
++            .ok_or("client is still configuring")?;
++        let mut state = lock(&self.0);
++        if state.digest != digest {
++            return Err("shared observer registry digest differs".into());
++        }
++        let area = area(position, radius)?;
++        let wanted = columns(area, &state.owners, state.owner);
++        state.admit(None, area, wanted.len())?;
++        static NEXT: AtomicU64 = AtomicU64::new(1);
++        let id = NEXT.fetch_add(1, Ordering::Relaxed);
++        state.members.insert(
++            id,
++            Member {
++                session: Arc::downgrade(&session.0),
++                area,
++                wanted,
++                delivered: HashSet::new(),
++            },
++        );
++        state.interests();
++        if let Err(error) = replay(&mut state, id) {
++            state.members.remove(&id);
++            state.interests();
++            return Err(error);
++        }
++        Ok(SharedSubscription {
++            view: self.clone(),
++            id,
++        })
++    }
++    fn receive(
++        &self,
++        packet: Packet,
++        touched: &mut HashMap<u64, Arc<Shared>>,
++    ) -> Result<(), String> {
++        let packets = if packet.id == c::CHUNKS_BIOMES {
++            match packet.decode() {
++                Ok(play::Clientbound::ChunksBiomes(p)) => p
++                    .chunks
++                    .into_iter()
++                    .map(|chunk| {
++                        (
++                            (chunk.pos[0], chunk.pos[1]),
++                            Arc::new(Packet::of(&play::Clientbound::ChunksBiomes(
++                                play::ChunksBiomes {
++                                    chunks: vec![chunk],
++                                },
++                            ))),
++                        )
++                    })
++                    .collect(),
++                _ => return Err("invalid shared biome packet".into()),
++            }
++        } else if let Some(key) = crate::terrain::column(packet.id, &packet.payload) {
++            vec![(key, Arc::new(packet))]
++        } else {
++            return Ok(());
++        };
++        let mut state = lock(&self.0);
++        let owner = state.owner;
++        for (key, packet) in packets {
++            if state.owners.owner(key.0, key.1) != Some(owner) || !state.wanted.contains(&key) {
++                continue;
++            }
++            state.cache.apply(key, Arc::clone(&packet))?;
++            let ids: Vec<_> = state
++                .members
++                .iter()
++                .filter_map(|(&id, m)| m.wanted.contains(&key).then_some(id))
++                .collect();
++            for id in ids {
++                let member = state.members.get_mut(&id).expect("live member");
++                let Some(shared) = member.session.upgrade() else {
++                    continue;
++                };
++                if SessionHandle(Arc::clone(&shared)).is_over() {
++                    continue;
++                }
++                if packet.id != c::LEVEL_CHUNK_WITH_LIGHT && !member.delivered.contains(&key) {
++                    continue;
++                }
++                let mut down = shared.down();
++                if let std::collections::hash_map::Entry::Vacant(entry) = touched.entry(id) {
++                    down.writer.begin();
++                    entry.insert(Arc::clone(&shared));
++                }
++                let mut body = Vec::new();
++                if crate::terrain::relay(
++                    &shared,
++                    &mut down,
++                    owner,
++                    true,
++                    (*packet).clone(),
++                    &mut body,
++                )
++                .is_err()
++                {
++                    drop(down);
++                    SessionHandle(shared).close();
++                    continue;
++                }
++                if packet.id == c::LEVEL_CHUNK_WITH_LIGHT {
++                    member.delivered.insert(key);
++                }
++                if packet.id == c::FORGET_LEVEL_CHUNK {
++                    member.delivered.remove(&key);
++                }
++            }
++        }
++        Ok(())
++    }
++    fn fail(&self) {
++        let sessions = {
++            let mut state = lock(&self.0);
++            state.failed = true;
++            state
++                .members
++                .values()
++                .filter_map(|m| m.session.upgrade())
++                .collect::<Vec<_>>()
++        };
++        for shared in sessions {
++            SessionHandle(shared).close();
++        }
++    }
++}
++impl SharedSubscription {
++    pub fn recenter(&self, position: [f64; 3], radius: i32, reset: bool) -> Result<(), String> {
++        let mut state = lock(&self.view.0);
++        let next = area(position, radius)?;
++        let wanted = columns(next, &state.owners, state.owner);
++        state.admit(Some(self.id), next, wanted.len())?;
++        let owner = state.owner;
++        let member = state
++            .members
++            .get_mut(&self.id)
++            .ok_or("shared terrain membership ended")?;
++        if member.area == next && !reset {
++            return Ok(());
++        }
++        if reset {
++            member.delivered = HashSet::new();
++        }
++        let removed: Vec<_> = member
++            .delivered
++            .iter()
++            .copied()
++            .filter(|key| !wanted.contains(key))
++            .collect();
++        if let Some(shared) = member.session.upgrade() {
++            let mut down = shared.down();
++            let mut body = Vec::new();
++            down.writer.begin();
++            let result = (|| {
++                for (x, z) in removed {
++                    member.delivered.remove(&(x, z));
++                    crate::terrain::relay(
++                        &shared,
++                        &mut down,
++                        owner,
++                        true,
++                        Packet::of(&play::Clientbound::ForgetLevelChunk(
++                            play::ForgetLevelChunk { pos: [x, z] },
++                        )),
++                        &mut body,
++                    )
++                    .map_err(|e| e.to_string())?;
++                }
++                Ok::<(), String>(())
++            })();
++            let flushed = down.writer.end().map_err(|e| e.to_string());
++            result.and(flushed)?;
++        }
++        if member.delivered.capacity() > member.delivered.len() * 4 + 64 {
++            member.delivered.shrink_to_fit();
++        }
++        member.area = next;
++        member.wanted = wanted;
++        state.interests();
++        replay(&mut state, self.id)
++    }
++    pub fn retire(&self) -> Result<bool, String> {
++        let mut state = lock(&self.view.0);
++        let Some(member) = state.members.get(&self.id) else {
++            return Ok(true);
++        };
++        if let Some(shared) = member.session.upgrade()
++            && !SessionHandle(shared).retire_shared_terrain(state.owner)?
++        {
++            return Ok(false);
++        }
++        state.members.remove(&self.id);
++        state.interests();
++        Ok(true)
++    }
++}
++fn replay(state: &mut State, id: u64) -> Result<(), String> {
++    let member = state
++        .members
++        .get_mut(&id)
++        .ok_or("shared terrain membership ended")?;
++    let Some(shared) = member.session.upgrade() else {
++        return Ok(());
++    };
++    let mut down = shared.down();
++    let mut body = Vec::new();
++    down.writer.begin();
++    let mut wanted: Vec<_> = member
++        .wanted
++        .iter()
++        .copied()
++        .filter(|key| !member.delivered.contains(key))
++        .collect();
++    wanted.sort_by_key(|key| {
++        (
++            (key.0 - member.area.center[0])
++                .abs()
++                .max((key.1 - member.area.center[1]).abs()),
++            *key,
++        )
++    });
++    let result = (|| {
++        for key in wanted {
++            if let Some(packets) = state.cache.snapshot(key) {
++                for packet in packets {
++                    crate::terrain::relay(
++                        &shared,
++                        &mut down,
++                        state.owner,
++                        true,
++                        (*packet).clone(),
++                        &mut body,
++                    )
++                    .map_err(|e| e.to_string())?;
++                }
++                member.delivered.insert(key);
++            }
++        }
++        Ok(())
++    })();
++    let flushed = down.writer.end().map_err(|e| e.to_string());
++    result.and(flushed)
++}
++
++impl SessionHandle {
++    /// The configured client's registry identity, used to select a compatible shared group.
++    pub fn terrain_digest(&self) -> Option<Digest> {
++        self.0.down().config_digest
++    }
++    pub fn shared_terrain(&self, owner: usize) -> Result<SharedTerrain, String> {
++        let down = self.0.down();
++        Ok(SharedTerrain(Arc::new(Mutex::new(State {
++            owner,
++            owners: down
++                .terrain
++                .as_ref()
++                .ok_or("terrain is not composed")?
++                .owners
++                .clone(),
++            digest: down.config_digest.ok_or("client is still configuring")?,
++            members: HashMap::new(),
++            wanted: HashSet::new(),
++            cache: Cache::default(),
++            failed: false,
++            version: 0,
++        }))))
++    }
++    pub fn open_shared_terrain_reader(
++        &self,
++        target: TargetBackend<'_>,
++        profile: &Profile,
++        view: &SharedTerrain,
++    ) -> Result<TerrainReader, String> {
++        let io = self
++            .0
++            .io
++            .clone()
++            .ok_or("shared terrain needs caller-owned readiness IO")?;
++        let client: ClientConfiguration = self.0.up().client.clone();
++        let mut link =
++            backend::connect(target.address, profile, target.options).map_err(|e| e.to_string())?;
++        link.connection
++            .reader
++            .set_read_timeout(Some(Duration::from_secs(8)))
++            .map_err(|e| e.to_string())?;
++        let (digest, _) = configure(&mut link.connection, &client)?;
++        if lock(&view.0).digest != digest {
++            return Err("shared observer registry digest differs".into());
++        }
++        link.connection
++            .reader
++            .set_read_timeout(None)
++            .map_err(|e| e.to_string())?;
++        let (source, writer, closer) =
++            crate::transport::split(link.connection, true, crate::path_timing::Path::Reader)
++                .map_err(|e| e.to_string())?;
++        let crate::transport::Source::Ready(stream, reader) = source else {
++            return Err("shared reader was not readiness driven".into());
++        };
++        let intentional = Arc::new(AtomicBool::new(false));
++        let handle = TerrainReader(closer, Arc::clone(&intentional));
++        let writer = Mutex::new(writer);
++        let view = view.clone();
++        io.register_with(stream, reader, |output| {
++            lock(&writer).attach(output.clone());
++            Box::new(Reader {
++                view,
++                writer,
++                intentional,
++                target: Target::terrain_reader(0),
++                touched: HashMap::new(),
++                burst: false,
++            })
++        })
++        .map_err(|e| e.to_string())?;
++        Ok(handle)
++    }
++}
++struct Reader {
++    view: SharedTerrain,
++    writer: Mutex<Writer>,
++    intentional: Arc<AtomicBool>,
++    target: Target,
++    touched: HashMap<u64, Arc<Shared>>,
++    burst: bool,
++}
++impl Handler for Reader {
++    fn packet(&mut self, id: i32, payload: Vec<u8>, arrived: Instant) -> io::Result<()> {
++        if self.intentional.load(Ordering::Acquire) {
++            return Err(io::ErrorKind::ConnectionAborted.into());
++        }
++        crate::path_timing::stamp(Some(arrived));
++        if !self.burst {
++            lock(&self.writer).begin();
++            self.burst = true;
++        }
++        // Only lane-local flow control enters Target. Entity, recipe and advancement
++        // histories are not part of this bounded terrain cache.
++        if matches!(
++            id,
++            c::LOGIN
++                | c::PLAYER_POSITION
++                | c::CHUNK_BATCH_FINISHED
++                | c::COOKIE_REQUEST
++                | c::KEEP_ALIVE
++                | c::PING
++        ) {
++            self.target.take(&self.writer, id, &payload);
++            let mut target = self.target.lock();
++            target.answered.clear();
++            if target.ended.is_some() {
++                return Err(io::Error::other("shared reader flow-control state failed"));
++            }
++        }
++        if matches!(id, c::DISCONNECT | c::START_CONFIGURATION | c::TRANSFER) {
++            return Err(io::Error::other("shared reader left its play stream"));
++        }
++        self.view
++            .receive(Packet { id, payload }, &mut self.touched)
++            .map_err(io::Error::other)
++    }
++    fn drained(&mut self) -> io::Result<()> {
++        for (_, shared) in self.touched.drain() {
++            let result = shared.down().writer.end();
++            if result.is_err() {
++                SessionHandle(shared).close();
++            }
++        }
++        if self.burst {
++            self.burst = false;
++            lock(&self.writer).end().map_err(io::Error::other)?;
++        }
++        crate::path_timing::stamp(None);
++        Ok(())
++    }
++    fn closed(&mut self, _: io::Error) {
++        let _ = self.drained();
++        if !self.intentional.load(Ordering::Acquire) {
++            self.view.fail();
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/crates/meridian-handoff/src/shared_terrain/tests.rs b/crates/meridian-handoff/src/shared_terrain/tests.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-handoff/src/shared_terrain/tests.rs
+@@ -0,0 +1,360 @@
++//! Shared cache bounds and per-client packet ordering on real protocol connections.
++use super::*;
++use crate::{DigestBuilder, Session};
++use horizon_protocol::connection::Connection;
++use meridian_net::{
++    backend::BackendLink,
++    client::{AuthKind, ClientSession},
++    relay::Phase,
++};
++use meridian_testkit::{held, pipe};
++
++struct Client {
++    _session: Session,
++    handle: SessionHandle,
++    player: Connection,
++    _source: Connection,
++}
++impl Client {
++    fn new() -> Self {
++        let (client, player) = pipe();
++        let (backend, source) = pipe();
++        player
++            .reader
++            .set_read_timeout(Some(Duration::from_millis(50)))
++            .unwrap();
++        let (session, handle) = Session::new(
++            ClientSession {
++                profile: Profile {
++                    name: "SharedProbe".into(),
++                    uuid: [1; 16],
++                    properties: Vec::new(),
++                },
++                auth: AuthKind::Offline,
++                virtual_host: None,
++                connection: client,
++            },
++            BackendLink {
++                connection: backend,
++            },
++            "source",
++        )
++        .unwrap();
++        handle.compose_terrain(TerrainOwners {
++            origin: [0, 0],
++            edge: 2048,
++            entries: vec![[0, 0], [-1, 0]],
++            backends: vec!["a".into(), "source".into()],
++        });
++        {
++            let mut down = handle.0.down();
++            down.config_digest = Some(DigestBuilder::default().finish());
++            down.phase = Phase::Play;
++            down.ghost
++                .apply(&Packet::of(&held::login(held::CLIENT_ID, held::OVERWORLD)))
++                .unwrap();
++        }
++        handle.0.up().client_pose = Some(crate::prepare::Pose {
++            at: [8., 70., 8.],
++            ..Default::default()
++        });
++        Self {
++            _session: session,
++            handle,
++            player,
++            _source: source,
++        }
++    }
++    fn next(&mut self) -> Packet {
++        let (id, payload) = self.player.recv().unwrap();
++        Packet { id, payload }
++    }
++    fn empty(&mut self) {
++        assert!(
++            self.player.recv().is_err(),
++            "an unrelated client received terrain"
++        );
++    }
++}
++fn chunk(x: i32, z: i32) -> Packet {
++    let (id, payload) = held::chunk(x, z, 1);
++    Packet { id, payload }
++}
++fn block(state: u32) -> Packet {
++    Packet::of(&play::Clientbound::BlockUpdate(play::BlockUpdate {
++        pos: [1, 70, 1],
++        state: state as i32,
++    }))
++}
++fn publish(view: &SharedTerrain, packet: Packet) {
++    let mut touched = HashMap::new();
++    view.receive(packet, &mut touched).unwrap();
++    for (_, shared) in touched {
++        shared.down().writer.end().unwrap();
++    }
++}
++
++#[test]
++fn shared_stream_replays_latest_state_and_unsubscribe_cannot_close_another_client() {
++    let mut first = Client::new();
++    let mut second = Client::new();
++    let view = first.handle.shared_terrain(0).unwrap();
++    let a = view.subscribe(&first.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(0, 0));
++    assert_eq!(first.next(), chunk(0, 0));
++    publish(&view, block(4));
++    assert_eq!(first.next(), block(4));
++    let b = view.subscribe(&second.handle, [8., 70., 8.], 3).unwrap();
++    assert_eq!(second.next(), chunk(0, 0));
++    assert_eq!(second.next(), block(4));
++    first.empty();
++    publish(&view, block(5));
++    assert_eq!(first.next(), block(5));
++    assert_eq!(second.next(), block(5));
++    drop(a);
++    publish(&view, block(6));
++    assert_eq!(second.next(), block(6));
++    first.empty();
++    assert_eq!(lock(&view.0).members.len(), 1);
++    drop(b);
++    assert!(lock(&view.0).cache.columns.is_empty());
++}
++
++#[test]
++fn recenter_forgets_only_the_moving_client_and_reset_replays_only_that_client() {
++    let mut first = Client::new();
++    let mut second = Client::new();
++    let view = first.handle.shared_terrain(0).unwrap();
++    let a = view.subscribe(&first.handle, [8., 70., 8.], 3).unwrap();
++    let _b = view.subscribe(&second.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(0, 0));
++    first.next();
++    second.next();
++    first.handle.0.up().client_pose = Some(crate::prepare::Pose {
++        at: [1608., 70., 8.],
++        ..Default::default()
++    });
++    a.recenter([1608., 70., 8.], 3, false).unwrap();
++    assert_eq!(first.next().id, c::FORGET_LEVEL_CHUNK);
++    second.empty();
++    publish(&view, chunk(100, 0));
++    assert_eq!(first.next(), chunk(100, 0));
++    second.empty();
++    // A real respawn clears the client's composition before its subscription replays.
++    first.handle.compose_terrain(TerrainOwners {
++        origin: [0, 0],
++        edge: 2048,
++        entries: vec![[0, 0], [-1, 0]],
++        backends: vec!["a".into(), "source".into()],
++    });
++    a.recenter([1608., 70., 8.], 3, true).unwrap();
++    assert_eq!(first.next(), chunk(100, 0));
++    second.empty();
++    assert_eq!(view.areas().len(), 2);
++}
++
++#[test]
++fn shared_stream_never_composes_foreign_entities_or_another_tiles_columns() {
++    let mut client = Client::new();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let _a = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, Packet::of(&held::add_entity(77, 77)));
++    publish(&view, chunk(-1, 0));
++    client.empty();
++    assert!(lock(&view.0).cache.columns.is_empty());
++    publish(&view, chunk(0, 0));
++    assert_eq!(client.next(), chunk(0, 0));
++}
++
++#[test]
++fn replay_cache_keeps_persistent_updates_but_never_replays_old_effects() {
++    let mut cache = Cache::default();
++    cache.apply((0, 0), Arc::new(chunk(0, 0))).unwrap();
++    for id in [
++        c::BLOCK_UPDATE,
++        c::SECTION_BLOCKS_UPDATE,
++        c::LIGHT_UPDATE,
++        c::BLOCK_ENTITY_DATA,
++        c::CHUNKS_BIOMES,
++    ] {
++        cache
++            .apply(
++                (0, 0),
++                Arc::new(Packet {
++                    id,
++                    payload: vec![1, 2, 3],
++                }),
++            )
++            .unwrap();
++    }
++    for id in [c::SOUND, c::LEVEL_EVENT, c::BLOCK_EVENT] {
++        cache
++            .apply(
++                (0, 0),
++                Arc::new(Packet {
++                    id,
++                    payload: vec![4, 5],
++                }),
++            )
++            .unwrap();
++    }
++    let ids: Vec<_> = cache
++        .snapshot((0, 0))
++        .unwrap()
++        .iter()
++        .map(|p| p.id)
++        .collect();
++    assert_eq!(
++        ids,
++        vec![
++            c::LEVEL_CHUNK_WITH_LIGHT,
++            c::BLOCK_UPDATE,
++            c::SECTION_BLOCKS_UPDATE,
++            c::LIGHT_UPDATE,
++            c::BLOCK_ENTITY_DATA,
++            c::CHUNKS_BIOMES
++        ]
++    );
++}
++
++#[test]
++fn journal_saturation_waits_for_a_fresh_base_and_refresh_admission_is_bounded() {
++    let client = Client::new();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let _a = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    {
++        let mut state = lock(&view.0);
++        state.cache.apply((0, 0), Arc::new(chunk(0, 0))).unwrap();
++        state
++            .cache
++            .apply(
++                (0, 0),
++                Arc::new(Packet {
++                    id: c::BLOCK_ENTITY_DATA,
++                    payload: vec![0; COLUMN_UPDATES],
++                }),
++            )
++            .unwrap();
++        assert!(state.cache.snapshot((0, 0)).is_none());
++        assert_eq!(state.cache.updates, 0);
++    }
++    assert_eq!(view.refreshes(), vec![[0, 0]]);
++    view.refreshed(&[[0, 0]]);
++    assert!(view.refreshes().is_empty());
++    {
++        let mut state = lock(&view.0);
++        for _ in 0..100 {
++            state.cache.apply((0, 0), Arc::new(block(4))).unwrap();
++        }
++        assert_eq!(state.cache.updates, 0);
++        state.cache.apply((0, 0), Arc::new(chunk(0, 0))).unwrap();
++        assert_eq!(state.cache.snapshot((0, 0)).unwrap().len(), 1);
++        assert!(state.cache.refresh.is_empty());
++        assert!(state.cache.sent_refresh.is_empty());
++    }
++}
++
++#[test]
++fn coverage_and_admission_refuse_excess_before_mutating_existing_members() {
++    let client = Client::new();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let _a = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    let areas = view.areas();
++    assert!(view.subscribe(&client.handle, [8., 70., 8.], 32).is_err());
++    assert_eq!(view.areas(), areas);
++    assert!(
++        coverage(std::iter::once(InterestArea {
++            center: [0, 0],
++            radius: 32
++        }))
++        .is_err()
++    );
++    assert!(
++        coverage(
++            [
++                InterestArea {
++                    center: [-100, 0],
++                    radius: 4
++                },
++                InterestArea {
++                    center: [100, 0],
++                    radius: 4
++                }
++            ]
++            .into_iter()
++        )
++        .is_ok()
++    );
++    let mut cache = Cache {
++        bases: BASE_BYTES,
++        ..Default::default()
++    };
++    assert!(cache.apply((0, 0), Arc::new(chunk(0, 0))).is_err());
++}
++
++#[test]
++fn incompatible_registry_and_lost_reader_fail_closed() {
++    let first = Client::new();
++    let second = Client::new();
++    let view = first.handle.shared_terrain(0).unwrap();
++    let _a = view.subscribe(&first.handle, [8., 70., 8.], 3).unwrap();
++    let mut digest = DigestBuilder::default();
++    digest.add(
++        horizon_protocol::ids::configuration::clientbound::REGISTRY_DATA,
++        b"different",
++    );
++    second.handle.0.down().config_digest = Some(digest.finish());
++    assert!(view.subscribe(&second.handle, [8., 70., 8.], 3).is_err());
++    assert_eq!(lock(&view.0).members.len(), 1);
++    view.fail();
++    assert!(view.subscribe(&first.handle, [8., 70., 8.], 3).is_err());
++}
++
++#[test]
++fn own_tile_cache_proves_source_coverage_without_reloading_the_client() {
++    let mut client = Client::new();
++    client.handle.0.down().backend = "a".into();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let _a = view.subscribe(&client.handle, [8., 70., 8.], 3).unwrap();
++    publish(&view, chunk(0, 0));
++    client.empty();
++    assert!(
++        client
++            .handle
++            .0
++            .down()
++            .terrain
++            .as_ref()
++            .unwrap()
++            .reader_has_column(0, (0, 0))
++    );
++}
++
++#[test]
++fn reader_does_not_accumulate_entity_or_advancement_history() {
++    let client = Client::new();
++    let view = client.handle.shared_terrain(0).unwrap();
++    let (connection, _peer) = pipe();
++    let (_, writer) = connection.split();
++    let mut reader = Reader {
++        view,
++        writer: Mutex::new(Writer::observer(writer)),
++        intentional: Arc::new(AtomicBool::new(false)),
++        target: Target::terrain_reader(0),
++        touched: HashMap::new(),
++        burst: false,
++    };
++    for i in 0..100 {
++        let packet = Packet::of(&held::add_entity(i, i as u128));
++        reader
++            .packet(packet.id, packet.payload, Instant::now())
++            .unwrap();
++        reader
++            .packet(c::UPDATE_ADVANCEMENTS, vec![0; 100], Instant::now())
++            .unwrap();
++    }
++    reader.drained().unwrap();
++    let target = reader.target.lock();
++    assert_eq!(target.view.counts(), (0, 0));
++    assert!(target.extras.is_empty());
++}
+diff --git a/crates/meridian-handoff/src/terrain.rs b/crates/meridian-handoff/src/terrain.rs
+--- a/crates/meridian-handoff/src/terrain.rs
++++ b/crates/meridian-handoff/src/terrain.rs
+@@ -29,7 +29,7 @@
+     pub backends: Vec<String>,
+ }
+ pub(crate) struct Terrain {
+-    owners: TerrainOwners,
++    pub(crate) owners: TerrainOwners,
+     loaded: HashMap<(i32, i32), usize>,
+     signatures: HashMap<(i32, i32), u64>,
+     reset: bool,
+@@ -39,8 +39,15 @@
+     lazy: bool,
+     reader_columns: HashMap<usize, HashSet<(i32, i32)>>,
+ }
++impl Terrain {
++    pub(crate) fn reader_has_column(&self, owner: usize, key: (i32, i32)) -> bool {
++        self.reader_columns
++            .get(&owner)
++            .is_some_and(|columns| columns.contains(&key))
++    }
++}
+ impl TerrainOwners {
+-    fn owner(&self, x: i32, z: i32) -> Option<usize> {
++    pub(crate) fn owner(&self, x: i32, z: i32) -> Option<usize> {
+         let x = (i64::from(x) * 16 - i64::from(self.origin[0])).div_euclid(i64::from(self.edge));
+         let z = (i64::from(z) * 16 - i64::from(self.origin[1])).div_euclid(i64::from(self.edge));
+         self.entries
+@@ -49,7 +56,7 @@
+     }
+ }
+ /// The manager owns the connection, closing it on session exit or setup failure.
+-pub struct TerrainReader(Closer, Arc<AtomicBool>);
++pub struct TerrainReader(pub(crate) Closer, pub(crate) Arc<AtomicBool>);
+ impl Drop for TerrainReader {
+     fn drop(&mut self) {
+         self.1.store(true, Ordering::Release);
+@@ -76,7 +83,7 @@
+             | c::CHUNK_BATCH_FINISHED
+     )
+ }
+-fn column(id: i32, payload: &[u8]) -> Option<(i32, i32)> {
++pub(crate) fn column(id: i32, payload: &[u8]) -> Option<(i32, i32)> {
+     if id == c::LEVEL_CHUNK_WITH_LIGHT {
+         let mut r = Reader::new(payload);
+         return Some((r.i32().ok()?, r.i32().ok()?));
+@@ -124,10 +131,7 @@
+                 for dz in -terrain.radius..=terrain.radius {
+                     let key = (x + dx, z + dz);
+                     if terrain.owners.owner(key.0, key.1) == Some(source)
+-                        && !terrain
+-                            .reader_columns
+-                            .get(&source)
+-                            .is_some_and(|set| set.contains(&key))
++                        && !terrain.reader_has_column(source, key)
+                     {
+                         return false;
+                     }
+@@ -175,6 +179,13 @@
+         owner: usize,
+         reader: &TerrainReader,
+     ) -> Result<bool, String> {
++        self.retire_terrain(owner, Some(reader))
++    }
++    /// A shared subscription retires independently of the shared connection.
++    pub fn retire_shared_terrain(&self, owner: usize) -> Result<bool, String> {
++        self.retire_terrain(owner, None)
++    }
++    fn retire_terrain(&self, owner: usize, reader: Option<&TerrainReader>) -> Result<bool, String> {
+         let mut down = self.0.down();
+         let active = down.backend.clone();
+         let position = {
+@@ -217,8 +228,10 @@
+         }
+         // Stop the old producer while still holding down. It cannot repopulate
+         // columns after the retirement's Forget packets have removed them.
+-        reader.1.store(true, Ordering::Release);
+-        reader.0.close();
++        if let Some(reader) = reader {
++            reader.1.store(true, Ordering::Release);
++            reader.0.close();
++        }
+         terrain.reader_columns.remove(&owner);
+         if terrain.owners.backends.get(owner) == Some(&active) {
+             return Ok(true);
+diff --git a/crates/meridian-proxy/src/session.rs b/crates/meridian-proxy/src/session.rs
+--- a/crates/meridian-proxy/src/session.rs
++++ b/crates/meridian-proxy/src/session.rs
+@@ -54,6 +54,7 @@
+     /// Installed by the executable before accepting logins. Tests and ordinary
+     /// non-cluster relays retain the blocking transport unless explicitly owned.
+     pub io: OnceLock<Arc<meridian_net::io_pool::Pool>>,
++    pub shared_terrain: Arc<crate::terrain::SharedViews>,
+     /// Which backends recently failed to take a player.
+     pub health: Arc<Health>,
+     next: AtomicU64,
+@@ -766,7 +767,9 @@
+     if config.tiles.is_some() && crate::wall_approach::stage() >= 3 {
+         handle.enable_lane_inputs();
+     }
+-    if let Err(error) = crate::terrain::start(config, &handle, peer.ip(), io) {
++    if let Err(error) =
++        crate::terrain::start(config, &handle, peer.ip(), io, &sessions.shared_terrain)
++    {
+         warning!("terrain reader setup refused: {error}");
+         handle.close();
+     }
+diff --git a/crates/meridian-proxy/src/terrain.rs b/crates/meridian-proxy/src/terrain.rs
+--- a/crates/meridian-proxy/src/terrain.rs
++++ b/crates/meridian-proxy/src/terrain.rs
+@@ -11,6 +11,8 @@
+     net::IpAddr,
+     time::{Duration, Instant},
+ };
++mod shared;
++pub(crate) use shared::SharedViews;
+ 
+ struct Live {
+     _reader: TerrainReader,
+@@ -29,6 +31,24 @@
+ }
+ 
+ pub(crate) fn start(
++    config: &Config,
++    handle: &SessionHandle,
++    address: IpAddr,
++    io: Option<Affinity>,
++    views: &Arc<SharedViews>,
++) -> Result<(), String> {
++    if let Some(ready) = io.as_ref()
++        && std::env::var_os("E22_SHARED_OFF").is_none()
++        && std::env::var_os("GOLIATH_CLUSTER").is_some()
++        && std::env::var_os("E12_TERRAIN_OFF").is_none()
++        && config.tiles.is_some()
++    {
++        return shared::start(config, handle, address, ready.clone(), Arc::clone(views));
++    }
++    start_private(config, handle, address, io)
++}
++
++fn start_private(
+     config: &Config,
+     handle: &SessionHandle,
+     address: IpAddr,
+diff --git a/crates/meridian-proxy/src/terrain/shared.rs b/crates/meridian-proxy/src/terrain/shared.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-proxy/src/terrain/shared.rs
+@@ -0,0 +1,365 @@
++//! Proxy-owned shared reader lifetimes and sparse-interest control requests.
++use super::{near, schedule};
++use meridian_config::{Config, TileMap};
++use meridian_handoff::{
++    Digest, InterestArea, SessionHandle, SharedSubscription, SharedTerrain, TargetBackend,
++    TerrainOwners, TerrainReader,
++};
++use meridian_net::{backend::BackendOptions, io_pool::Affinity};
++use meridian_sidecar::endpoint::Endpoint;
++use serde_json::{Value, json};
++use std::{
++    collections::HashMap,
++    net::IpAddr,
++    sync::{Arc, Mutex, Weak},
++    time::{Duration, Instant},
++};
++
++type Slot = Arc<Mutex<Option<Live>>>;
++type ViewSlots = HashMap<(String, Digest), Weak<Mutex<Option<Live>>>>;
++#[derive(Default)]
++pub(crate) struct SharedViews {
++    slots: Mutex<ViewSlots>,
++}
++impl SharedViews {
++    fn slot(&self, key: String, digest: Digest) -> Result<Slot, String> {
++        let mut slots = self.slots.lock().expect("shared terrain registry poisoned");
++        slots.retain(|_, slot| slot.strong_count() != 0);
++        if let Some(slot) = slots.get(&(key.clone(), digest)).and_then(Weak::upgrade) {
++            return Ok(slot);
++        }
++        if slots.keys().filter(|(tile, _)| tile == &key).count() >= 4 {
++            return Err("shared terrain exceeds four configuration groups per tile".into());
++        }
++        let slot = Arc::new(Mutex::new(None));
++        slots.insert((key, digest), Arc::downgrade(&slot));
++        Ok(slot)
++    }
++}
++struct Owned {
++    member: SharedSubscription,
++    live: Slot,
++    center: (i32, i32),
++}
++struct Live {
++    _reader: TerrainReader,
++    view: SharedTerrain,
++    uuid: String,
++    anchor: [f64; 3],
++    revision: u64,
++    version: u64,
++    areas: Vec<InterestArea>,
++    refreshed: Instant,
++}
++struct Context {
++    config: Config,
++    map: TileMap,
++    endpoints: Vec<Endpoint>,
++    options: BackendOptions,
++}
++const TIMEOUT: Duration = Duration::from_secs(8);
++
++fn encoded(areas: &[InterestArea]) -> Vec<Value> {
++    areas
++        .iter()
++        .map(|a| json!({"center":a.center,"radius":a.radius}))
++        .collect()
++}
++fn ask(endpoint: &Endpoint, command: String) -> Result<Value, String> {
++    let reply = endpoint.ask(&command, TIMEOUT).map_err(|e| e.to_string())?;
++    if reply["ok"] != true {
++        return Err(format!("shared observer refused: {reply}"));
++    }
++    Ok(reply)
++}
++impl Context {
++    fn open(
++        &self,
++        handle: &SessionHandle,
++        index: usize,
++        position: [f64; 3],
++        radius: i32,
++    ) -> Result<(Live, SharedSubscription), String> {
++        let view = handle.shared_terrain(index)?;
++        // Install demand before the stream can deliver its first full snapshot.
++        let member = view.subscribe(handle, position, radius)?;
++        let profile = handle.terrain_profile(index);
++        let uuid = horizon_protocol::crypto::uuid_string(u128::from_be_bytes(profile.uuid));
++        let areas = view.areas();
++        let request = json!({"position":position,"revision":1,"areas":encoded(&areas)});
++        let reply = ask(
++            &self.endpoints[index],
++            format!("player-observe {uuid} {request}"),
++        )?;
++        if reply["revision"] != 1 {
++            return Err("shared observer interest revision was not acknowledged".into());
++        }
++        let tile = &self.map.entries[index];
++        let backend = self
++            .config
++            .backend(&tile.backend)
++            .ok_or("missing terrain backend")?;
++        let reader = handle.open_shared_terrain_reader(
++            TargetBackend {
++                name: &tile.backend,
++                address: &backend.address,
++                options: &self.options,
++            },
++            &profile,
++            &view,
++        )?;
++        let version = view.version();
++        Ok((
++            Live {
++                _reader: reader,
++                view,
++                uuid,
++                anchor: position,
++                revision: 1,
++                version,
++                areas,
++                refreshed: Instant::now(),
++            },
++            member,
++        ))
++    }
++}
++impl Live {
++    fn sync(&mut self, endpoint: &Endpoint) -> Result<(), String> {
++        let version = self.view.version();
++        let areas = if version != self.version {
++            self.view.areas()
++        } else {
++            self.areas.clone()
++        };
++        if areas != self.areas || self.refreshed.elapsed() >= Duration::from_secs(5) {
++            let revision = if areas != self.areas {
++                self.revision
++                    .checked_add(1)
++                    .ok_or("shared observer revision exhausted")?
++            } else {
++                self.revision
++            };
++            let request =
++                json!({"position":self.anchor,"revision":revision,"areas":encoded(&areas)});
++            let reply = ask(endpoint, format!("player-observe {} {request}", self.uuid))?;
++            if reply["revision"] != revision {
++                return Err("shared observer interest revision differs".into());
++            }
++            self.revision = revision;
++            self.areas = areas;
++            self.refreshed = Instant::now();
++        }
++        self.version = version;
++        let columns = self.view.refreshes();
++        if !columns.is_empty() {
++            let request = json!({"revision":self.revision,"columns":columns});
++            ask(
++                endpoint,
++                format!("player-observe-refresh {} {request}", self.uuid),
++            )?;
++            self.view.refreshed(&columns);
++        }
++        Ok(())
++    }
++}
++pub(super) fn start(
++    config: &Config,
++    handle: &SessionHandle,
++    address: IpAddr,
++    io: Affinity,
++    views: Arc<SharedViews>,
++) -> Result<(), String> {
++    let map = config.tiles.clone().ok_or("missing tile map")?;
++    let endpoints = map
++        .entries
++        .iter()
++        .map(|t| crate::cluster::terrain_endpoint(&t.backend))
++        .collect::<Result<Vec<_>, _>>()?;
++    handle.compose_terrain(TerrainOwners {
++        origin: map.origin,
++        edge: map.edge,
++        entries: map.entries.iter().map(|t| t.index).collect(),
++        backends: map.entries.iter().map(|t| t.backend.clone()).collect(),
++    });
++    let options = BackendOptions {
++        forwarding_secret: config.forwarding_secret.as_bytes().to_vec(),
++        connect_timeout: Duration::from_millis(config.connect_timeout_ms),
++        player_address: address,
++    };
++    let context = Context {
++        config: config.clone(),
++        map,
++        endpoints,
++        options,
++    };
++    let handle = handle.clone();
++    let over = handle.clone();
++    let failed = handle.clone();
++    let mut members: Vec<Option<Owned>> = (0..context.map.entries.len()).map(|_| None).collect();
++    let mut retry_after = vec![None; context.map.entries.len()];
++    let eager = std::env::var_os("E18_TERRAIN_EAGER").is_some();
++    let mut step = move || -> Result<bool, String> {
++        if handle.is_over() {
++            return Ok(false);
++        }
++        let Some(position) = handle.terrain_position() else {
++            return Ok(true);
++        };
++        let center = (
++            (position[0].floor() as i32) >> 4,
++            (position[2].floor() as i32) >> 4,
++        );
++        let active = handle.backend();
++        let radius = handle.terrain_radius();
++        let reset = handle.terrain_reset_requested();
++        let near_foreign = context.map.entries.iter().any(|t| {
++            t.backend != active
++                && near(
++                    position,
++                    context.map.origin,
++                    context.map.edge,
++                    t.index,
++                    radius + 2,
++                )
++        });
++        handle.terrain_center(position)?;
++        for (index, tile) in context.map.entries.iter().enumerate() {
++            let margin = radius + if members[index].is_some() { 4 } else { 2 };
++            let wanted = eager
++                || if tile.backend == active {
++                    near_foreign
++                        || members[index].is_some()
++                            && context.map.entries.iter().any(|other| {
++                                other.backend != active
++                                    && near(
++                                        position,
++                                        context.map.origin,
++                                        context.map.edge,
++                                        other.index,
++                                        radius + 4,
++                                    )
++                            })
++                } else {
++                    near(
++                        position,
++                        context.map.origin,
++                        context.map.edge,
++                        tile.index,
++                        margin,
++                    )
++                };
++            if !wanted {
++                if let Some(owned) = members[index].as_ref()
++                    && owned.member.retire()?
++                {
++                    drop(members[index].take());
++                }
++                continue;
++            }
++            if members[index].is_none() {
++                if retry_after[index].is_some_and(|at| Instant::now() < at) {
++                    continue;
++                }
++                let key = format!(
++                    "{:?}:{index}:{}",
++                    context.map,
++                    context
++                        .config
++                        .backend(&tile.backend)
++                        .ok_or("missing terrain backend")?
++                        .address
++                );
++                let slot = views.slot(
++                    key,
++                    handle
++                        .terrain_digest()
++                        .ok_or("client is still configuring")?,
++                )?;
++                let mut live = slot.lock().expect("shared observer owner poisoned");
++                let member = if let Some(live) = live.as_mut() {
++                    live.view.subscribe(&handle, position, radius)?
++                } else {
++                    match context.open(&handle, index, position, radius) {
++                        Ok((opened, member)) => {
++                            *live = Some(opened);
++                            member
++                        }
++                        Err(error) if error.contains("too many players are expected at once") => {
++                            retry_after[index] = Some(Instant::now() + Duration::from_secs(1));
++                            continue;
++                        }
++                        Err(error) => return Err(error),
++                    }
++                };
++                live.as_mut()
++                    .expect("open shared reader")
++                    .sync(&context.endpoints[index])?;
++                drop(live);
++                members[index] = Some(Owned {
++                    member,
++                    live: slot,
++                    center,
++                });
++                retry_after[index] = None;
++            }
++            let owned = members[index].as_mut().expect("wanted shared subscription");
++            if reset || owned.center != center {
++                owned.member.recenter(position, radius, reset)?;
++                owned.center = center;
++            }
++            owned
++                .live
++                .lock()
++                .expect("shared observer owner poisoned")
++                .as_mut()
++                .expect("live shared reader")
++                .sync(&context.endpoints[index])?;
++        }
++        Ok(true)
++    };
++    schedule(
++        io,
++        move || over.is_over(),
++        move || match step() {
++            Ok(keep) => keep,
++            Err(error) => {
++                crate::log::warning!("shared terrain composition stopped: {error}");
++                failed.close();
++                false
++            }
++        },
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use meridian_handoff::DigestBuilder;
++    fn digest(value: u8) -> Digest {
++        let mut d = DigestBuilder::default();
++        d.add(
++            horizon_protocol::ids::configuration::clientbound::REGISTRY_DATA,
++            &[value],
++        );
++        d.finish()
++    }
++    #[test]
++    fn compatible_clients_share_one_slot_and_configuration_groups_have_a_fixed_bound() {
++        let views = SharedViews::default();
++        let mut held = Vec::new();
++        let first = views.slot("tile-a".into(), digest(0)).unwrap();
++        assert!(Arc::ptr_eq(
++            &first,
++            &views.slot("tile-a".into(), digest(0)).unwrap()
++        ));
++        held.push(first);
++        for i in 1..4 {
++            held.push(views.slot("tile-a".into(), digest(i)).unwrap());
++        }
++        assert!(views.slot("tile-a".into(), digest(4)).is_err());
++        assert!(views.slot("tile-b".into(), digest(4)).is_ok());
++        held.pop();
++        assert!(views.slot("tile-a".into(), digest(4)).is_ok());
++    }
++}
+diff --git a/crates/meridian-testkit/src/bin/e2-client.rs b/crates/meridian-testkit/src/bin/e2-client.rs
+--- a/crates/meridian-testkit/src/bin/e2-client.rs
++++ b/crates/meridian-testkit/src/bin/e2-client.rs
+@@ -1,30 +1,71 @@
+ //! E2's single offline test player. Commands enter on stdin; only measurements leave on stdout.
+ // Copyright (c) 2026 Akirabane. MIT license, as in this workspace's LICENSE.
+-use horizon_protocol::{connection::Connection, ids, packets::{Empty, configuration as cfg, play}};
++use horizon_protocol::{
++    connection::Connection,
++    ids,
++    packets::{Empty, configuration as cfg, play},
++};
+ use meridian_testkit::{client::FakeClient, trace::Recorder};
+-use std::{collections::HashMap, io::{self, BufRead, Write}, sync::{atomic::Ordering, mpsc}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+ use serde_json::json;
++use std::{
++    collections::HashMap,
++    io::{self, BufRead, Write},
++    sync::{atomic::Ordering, mpsc},
++    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
++};
+ 
+-fn now() -> u128 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() }
+-fn emit(value: serde_json::Value) { println!("{value}"); io::stdout().flush().unwrap(); }
++fn now() -> u128 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap()
++        .as_nanos()
++}
++fn emit(value: serde_json::Value) {
++    println!("{value}");
++    io::stdout().flush().unwrap();
++}
+ 
+ fn main() -> Result<(), Box<dyn std::error::Error>> {
+     let port: u16 = std::env::args().nth(1).ok_or("port required")?.parse()?;
+     let mut connection = Connection::connect("127.0.0.1", port, Duration::from_secs(5))?;
+-    let client = FakeClient { host: "127.0.0.1".into(), port, ..FakeClient::named("E2Probe") };
++    let client = FakeClient {
++        host: "127.0.0.1".into(),
++        port,
++        ..FakeClient::named("E2Probe")
++    };
+     client.run(&mut connection, &Recorder::new())?;
+     let counters = connection.reader.counters.clone();
+-    connection.reader.set_read_timeout(Some(Duration::from_millis(2)))?;
+-    let info = || cfg::Serverbound::ClientInformation(cfg::ClientInformation {
+-        language: "en_us".into(), view_distance: 3, chat_visibility: 0, chat_colors: true,
+-        model_customisation: 127, main_hand: 1, text_filtering: false, allows_listing: true,
+-        particle_status: 0,
+-    }).encode();
++    connection
++        .reader
++        .set_read_timeout(Some(Duration::from_millis(2)))?;
++    let info = || {
++        cfg::Serverbound::ClientInformation(cfg::ClientInformation {
++            language: "en_us".into(),
++            view_distance: 3,
++            chat_visibility: 0,
++            chat_colors: true,
++            model_customisation: 127,
++            main_hand: 1,
++            text_filtering: false,
++            allows_listing: true,
++            particle_status: 0,
++        })
++        .encode()
++    };
+     connection.send(&info())?;
+     let (tx, rx) = mpsc::channel();
+-    std::thread::spawn(move || { for line in io::stdin().lock().lines() {
+-        match line { Ok(line) => if tx.send(line).is_err() { break; }, Err(_) => break }
+-    }});
++    std::thread::spawn(move || {
++        for line in io::stdin().lock().lines() {
++            match line {
++                Ok(line) => {
++                    if tx.send(line).is_err() {
++                        break;
++                    }
++                }
++                Err(_) => break,
++            }
++        }
++    });
+     let mut playing = false;
+     let mut loaded = false;
+     let mut pose = [0.0; 3];
+@@ -32,20 +73,42 @@
+     let mut next = Instant::now();
+     loop {
+         while let Ok(order) = rx.try_recv() {
+-            if order == "quit" { connection.writer.shutdown(); return Ok(()); }
+-            if let Some(value) = order.strip_prefix("speed ") { speed = value.parse()?; }
++            if order == "quit" {
++                connection.writer.shutdown();
++                return Ok(());
++            }
++            if let Some(value) = order.strip_prefix("speed ") {
++                speed = value.parse()?;
++            }
+             if let Some(value) = order.strip_prefix("command ") {
+-                emit(json!({"kind":"command", "ns":now(), "bytes":counters.bytes_in.load(Ordering::Relaxed)}));
+-                connection.send(&play::Serverbound::ChatCommand(play::ChatCommand {command:value.into()}).encode())?;
++                emit(
++                    json!({"kind":"command", "ns":now(), "bytes":counters.bytes_in.load(Ordering::Relaxed)}),
++                );
++                connection.send(
++                    &play::Serverbound::ChatCommand(play::ChatCommand {
++                        command: value.into(),
++                    })
++                    .encode(),
++                )?;
+             }
+             if order == "snapshot" {
+-                emit(json!({"kind":"snapshot", "ns":now(), "pos":pose, "speed":speed, "bytes":counters.bytes_in.load(Ordering::Relaxed)}));
++                emit(
++                    json!({"kind":"snapshot", "ns":now(), "pos":pose, "speed":speed, "bytes":counters.bytes_in.load(Ordering::Relaxed)}),
++                );
+             }
+         }
+         if playing && loaded && Instant::now() >= next {
+             next = Instant::now() + Duration::from_millis(50);
+             pose[0] += speed / 20.0;
+-            connection.send(&play::Serverbound::MovePlayerPos(play::MovePlayerPos {x:pose[0], y:pose[1], z:pose[2], flags:1}).encode())?;
++            connection.send(
++                &play::Serverbound::MovePlayerPos(play::MovePlayerPos {
++                    x: pose[0],
++                    y: pose[1],
++                    z: pose[2],
++                    flags: 1,
++                })
++                .encode(),
++            )?;
+             connection.send(&play::Serverbound::ClientTickEnd(Empty).encode())?;
+         }
+         let (id, payload) = match connection.recv() {
+@@ -55,45 +118,98 @@
+         };
+         if !playing {
+             let reply = match id {
+-                ids::configuration::clientbound::KEEP_ALIVE => match cfg::Clientbound::decode(id, &payload)? {
+-                    cfg::Clientbound::KeepAlive(p) => Some(cfg::Serverbound::KeepAlive(p).encode()), _ => None,
+-                },
+-                ids::configuration::clientbound::PING => match cfg::Clientbound::decode(id, &payload)? {
+-                    cfg::Clientbound::Ping(p) => Some(cfg::Serverbound::Pong(p).encode()), _ => None,
+-                },
+-                ids::configuration::clientbound::SELECT_KNOWN_PACKS => Some(cfg::Serverbound::SelectKnownPacks(cfg::SelectKnownPacks {packs:vec![]}).encode()),
+-                ids::configuration::clientbound::CODE_OF_CONDUCT => Some(cfg::Serverbound::AcceptCodeOfConduct(Empty).encode()),
+-                ids::configuration::clientbound::FINISH_CONFIGURATION => { playing = true; Some(cfg::Serverbound::FinishConfiguration(Empty).encode()) },
++                ids::configuration::clientbound::KEEP_ALIVE => {
++                    match cfg::Clientbound::decode(id, &payload)? {
++                        cfg::Clientbound::KeepAlive(p) => {
++                            Some(cfg::Serverbound::KeepAlive(p).encode())
++                        }
++                        _ => None,
++                    }
++                }
++                ids::configuration::clientbound::PING => {
++                    match cfg::Clientbound::decode(id, &payload)? {
++                        cfg::Clientbound::Ping(p) => Some(cfg::Serverbound::Pong(p).encode()),
++                        _ => None,
++                    }
++                }
++                ids::configuration::clientbound::SELECT_KNOWN_PACKS => Some(
++                    cfg::Serverbound::SelectKnownPacks(cfg::SelectKnownPacks { packs: vec![] })
++                        .encode(),
++                ),
++                ids::configuration::clientbound::CODE_OF_CONDUCT => {
++                    Some(cfg::Serverbound::AcceptCodeOfConduct(Empty).encode())
++                }
++                ids::configuration::clientbound::FINISH_CONFIGURATION => {
++                    playing = true;
++                    Some(cfg::Serverbound::FinishConfiguration(Empty).encode())
++                }
+                 _ => None,
+             };
+-            if let Some(reply) = reply { connection.send(&reply)?; }
++            if let Some(reply) = reply {
++                connection.send(&reply)?;
++            }
+             continue;
+         }
+         match id {
+-            ids::play::clientbound::KEEP_ALIVE => if let play::Clientbound::KeepAlive(p) = play::Clientbound::decode(id, &payload)? {
+-                connection.send(&play::Serverbound::KeepAlive(p).encode())?;
+-            },
+-            ids::play::clientbound::PING => if let play::Clientbound::Ping(p) = play::Clientbound::decode(id, &payload)? {
+-                connection.send(&play::Serverbound::Pong(p).encode())?;
+-            },
++            ids::play::clientbound::KEEP_ALIVE => {
++                if let play::Clientbound::KeepAlive(p) = play::Clientbound::decode(id, &payload)? {
++                    connection.send(&play::Serverbound::KeepAlive(p).encode())?;
++                }
++            }
++            ids::play::clientbound::PING => {
++                if let play::Clientbound::Ping(p) = play::Clientbound::decode(id, &payload)? {
++                    connection.send(&play::Serverbound::Pong(p).encode())?;
++                }
++            }
+             ids::play::clientbound::CHUNK_BATCH_FINISHED => {
+-                connection.send(&play::Serverbound::ChunkBatchReceived(play::ChunkBatchReceived {chunks_per_tick:64.0}).encode())?;
+-            },
+-            ids::play::clientbound::PLAYER_POSITION => if let play::Clientbound::PlayerPosition(p) = play::Clientbound::decode(id, &payload)? {
+-                let before = pose;
+-                if p.relatives != 0 { return Err("relative teleport not supported by E2 client".into()); }
+-                pose = p.position;
+-                emit(json!({"kind":"teleport", "ns":now(), "before":before, "pos":pose, "delta":p.delta, "flags":p.relatives, "bytes":counters.bytes_in.load(Ordering::Relaxed)}));
+-                connection.send(&play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {id:p.teleport, x:pose[0], y:pose[1], z:pose[2], yaw:p.yaw, pitch:p.pitch}).encode())?;
+-                connection.send(&play::Serverbound::PlayerLoaded(Empty).encode())?;
+-                loaded = true;
+-            },
+-            ids::play::clientbound::SYSTEM_CHAT => if let play::Clientbound::SystemChat(p) = play::Clientbound::decode(id, &payload)? {
+-                emit(json!({"kind":"chat", "ns":now(), "text":horizon_protocol::text::plain(&p.content,&HashMap::new()), "bytes":counters.bytes_in.load(Ordering::Relaxed)}));
+-            },
+-            ids::play::clientbound::START_CONFIGURATION => return Err("unexpected reconfiguration".into()),
+-            ids::play::clientbound::DISCONNECT => return Err("server disconnected test player".into()),
+-            _ => {},
++                connection.send(
++                    &play::Serverbound::ChunkBatchReceived(play::ChunkBatchReceived {
++                        chunks_per_tick: 64.0,
++                    })
++                    .encode(),
++                )?;
++            }
++            ids::play::clientbound::PLAYER_POSITION => {
++                if let play::Clientbound::PlayerPosition(p) =
++                    play::Clientbound::decode(id, &payload)?
++                {
++                    let before = pose;
++                    if p.relatives != 0 {
++                        return Err("relative teleport not supported by E2 client".into());
++                    }
++                    pose = p.position;
++                    emit(
++                        json!({"kind":"teleport", "ns":now(), "before":before, "pos":pose, "delta":p.delta, "flags":p.relatives, "bytes":counters.bytes_in.load(Ordering::Relaxed)}),
++                    );
++                    connection.send(
++                        &play::Serverbound::AcceptTeleportation(play::AcceptTeleportation {
++                            id: p.teleport,
++                            x: pose[0],
++                            y: pose[1],
++                            z: pose[2],
++                            yaw: p.yaw,
++                            pitch: p.pitch,
++                        })
++                        .encode(),
++                    )?;
++                    connection.send(&play::Serverbound::PlayerLoaded(Empty).encode())?;
++                    loaded = true;
++                }
++            }
++            ids::play::clientbound::SYSTEM_CHAT => {
++                if let play::Clientbound::SystemChat(p) = play::Clientbound::decode(id, &payload)? {
++                    emit(
++                        json!({"kind":"chat", "ns":now(), "text":horizon_protocol::text::plain(&p.content,&HashMap::new()), "bytes":counters.bytes_in.load(Ordering::Relaxed)}),
++                    );
++                }
++            }
++            ids::play::clientbound::START_CONFIGURATION => {
++                return Err("unexpected reconfiguration".into());
++            }
++            ids::play::clientbound::DISCONNECT => {
++                return Err("server disconnected test player".into());
++            }
++            _ => {}
+         }
+     }
+ }

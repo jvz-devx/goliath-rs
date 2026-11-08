@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Run sequential native release gates and freeze patch 11 with unchanged proxy bytes."""
+import argparse
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import time
+import e11_support as support
+from e14_snapshot_support import validate_snapshot
+
+ROOT = support.ROOT
+SOURCE = ROOT / '.local/src/horizon'
+DATA = ROOT / 'docs/experiments/data/E22'
+REFERENCE = ROOT / '.local/bin/horizon-e21-fc2868b2b/warmtick-2'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--reuse-gates-from', help='freeze identical proved bytes using completed sequential gates')
+    args = parser.parse_args()
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_-]*', args.name):
+        raise RuntimeError('use a simple fresh name')
+    target = ROOT / '.local/bin/meridian-e22' / args.name
+    result_path = DATA / (args.name + '-build.json')
+    if target.exists() or result_path.exists():
+        raise RuntimeError('use a fresh build name')
+    proof_path = DATA / 'stack-proof.json'
+    proof = json.loads(proof_path.read_text())
+    internal = json.loads((ROOT / '.local/bin/meridian-e18/flat09-tiles/canonical.json').read_text())['internal_crates']['files']
+    settings = {k: v for k, v in os.environ.items() if k not in ['CI', 'CARGO_TARGET_DIR'] and not k.startswith('CARGO_PROFILE_')}
+    settings.update(CARGO_INCREMENTAL='0', CARGO_BUILD_JOBS='6', CARGO_PROFILE_RELEASE_LTO='thin', CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1')
+    result = dict(status='running', profile='release', incremental=False, source_proof_sha256=sha(proof_path),
+        patch11_sha256=proof['patch11_sha256'], source_equality=proof['source_equality'], commands=[])
+    DATA.mkdir(parents=True, exist_ok=True)
+
+    def save():
+        result_path.write_text(json.dumps(result, indent=2) + '\n')
+
+    def verify():
+        for path, digest in proof['files'].items():
+            if sha(SOURCE / path) != digest:
+                raise RuntimeError('source changed after proof: ' + path)
+        for path, digest in internal.items():
+            if sha(ROOT / path) != digest:
+                raise RuntimeError('internal dependency changed: ' + path)
+        if sha(ROOT / 'patches/horizon-11-shared-observer.patch') != proof['patch11_sha256']:
+            raise RuntimeError('patch 11 changed after proof')
+
+    began = time.monotonic()
+    try:
+        verify()
+        prior = None
+        if args.reuse_gates_from:
+            prior_path = DATA / (args.reuse_gates_from + '-build.json')
+            prior = json.loads(prior_path.read_text())
+            if prior['source_proof_sha256'] != result['source_proof_sha256'] or prior['profile'] != 'release':
+                raise RuntimeError('gate reuse requires identical proved source and profile')
+            result['reused_gates'] = dict(path=str(prior_path.relative_to(ROOT)), sha256=sha(prior_path))
+        commands = [
+            ('fmt', ['cargo', 'fmt', '--all', '--check']),
+            ('observer-tests', ['cargo', 'test', '--locked', '--release', '--no-default-features', '-p', 'horizon-client-lib', '--lib', 'observer']),
+            ('clippy', ['cargo', 'clippy', '--locked', '--release', '--no-default-features', '-p', 'horizon-client-lib', '-p', 'horizon-client', '--lib', '--', '-D', 'warnings']),
+            ('release', ['cargo', 'build', '--locked', '--release', '--no-default-features', '-p', 'horizon-client', '--bin', 'horizon-client']),
+        ]
+        for label, command in commands:
+            if prior:
+                passed = [row for row in prior['commands'] if row['label'] == label and row['command'] == command and row['exit'] == 0]
+                if len(passed) != 1 or label == 'observer-tests' and not passed[0]['test_results']:
+                    raise RuntimeError('no completed matching gate to reuse: ' + label)
+                result['commands'].append(dict(passed[0], reused_from=args.reuse_gates_from))
+                continue
+            if (ROOT / '.local/quiet-request').exists():
+                raise RuntimeError('quiet request active before ' + label)
+            print('E22_GATE ' + label, flush=True)
+            log = ROOT / '.local/evidence/E22' / (args.name + '-' + label + '.log')
+            log.parent.mkdir(parents=True, exist_ok=True)
+            started = time.monotonic()
+            with log.open('w') as stream:
+                completed = subprocess.run(command, cwd=SOURCE, env=settings, stdout=stream, stderr=subprocess.STDOUT)
+            text = log.read_text(errors='replace')
+            row = dict(label=label, command=command, exit=completed.returncode, seconds=time.monotonic()-started,
+                test_results=re.findall(r'test result: .*', text))
+            result['commands'].append(row)
+            (DATA / (args.name + '-' + label + '.log.gz')).write_bytes(gzip.compress(support.sanitize(text).encode(), mtime=0))
+            save()
+            print(json.dumps(row), flush=True)
+            if completed.returncode or label == 'observer-tests' and not row['test_results']:
+                print('\n'.join(text.splitlines()[-70:]), flush=True)
+                raise RuntimeError('gate failed: ' + label)
+        verify()
+        candidate = json.loads((REFERENCE / 'candidate.json').read_text())
+        for name, digest in candidate['binaries'].items():
+            if sha(REFERENCE / name) != digest:
+                raise RuntimeError('reference binary changed: ' + name)
+        target.mkdir(parents=True)
+        for name in ['meridian', 'meridian-sidecar', 'horizon-bots', 'goliath-store', 'e4-client', 'LEASES', 'cluster-launcher.py']:
+            shutil.copy2(REFERENCE / name, target / name)
+        shutil.copy2(SOURCE / 'target/release/horizon-client', target / 'horizon-client')
+        binaries = {name: sha(target / name) for name in candidate['binaries']}
+        for name in ['canonical.json', 'candidate.json', 'FINAL.json']:
+            record = json.loads((REFERENCE / name).read_text())
+            record['binaries'] = binaries if name != 'FINAL.json' else {
+                binary: dict(path=str((target / binary).relative_to(ROOT)), sha256=binaries[binary])
+                for binary in record['binaries']
+            }
+            record.update(kind='E22-sparse-observer-release-M2-pending', candidate=False,
+                source_equality='passed', e22_source_proof_sha256=sha(proof_path), e22_source_files=proof['files'])
+            project = record.get('projects', {}).get('horizon')
+            if project is not None:
+                project['patches'].append(dict(path='patches/horizon-11-shared-observer.patch', sha256=proof['patch11_sha256']))
+            if name == 'FINAL.json':
+                record['candidate_sha256'] = sha(target / 'candidate.json')
+                record['validation'] = dict(release_gates='passed', native_M2='pending', capacity='unverified')
+            (target / name).write_text(json.dumps(record, indent=2) + '\n')
+        required = ['horizon-client', 'meridian', 'meridian-sidecar', 'e4-client', 'goliath-store']
+        (target / 'manifest.json').write_text(json.dumps({name: binaries[name] for name in required}, indent=2) + '\n')
+        (target / 'READY').write_text('E22 release frozen. Runtime compatibility, shared proxy and capacity are unverified.\n')
+        shutil.copy2(proof_path, target / 'source-proof.json')
+        validate_snapshot(target)
+        result.update(status='complete', directory=str(target.relative_to(ROOT)), binaries=binaries,
+            launcher_sha256=sha(target / 'cluster-launcher.py'))
+    except BaseException as error:
+        result.update(status='failed', error=support.sanitize(str(error)))
+        raise
+    finally:
+        result['seconds'] = time.monotonic() - began
+        save()
+        if result['status'] == 'complete':
+            shutil.copy2(result_path, target / 'build.json')
+
+
+if __name__ == '__main__':
+    main()

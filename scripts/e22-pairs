@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Precommit two matched D9 pairs and two contained reader-control pairs, retaining every row."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+import e11_support as support
+from e14_snapshot_support import validate_snapshot
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E22'
+WAIVER = 'reviewer confirmed E20 finished and E22 is the only active builder; acknowledgements waived'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def metrics(path):
+    result = json.loads(path.read_text())
+    cell = result['cells'].get('650', {})
+    phase = cell.get('processes', {}).get('phases', {}).get('steady')
+    availability=result.get('lease_availability',{})
+    valid = result['status'] == 'complete' and cell.get('status') == 'complete' and cell.get('noise_valid') and cell.get('diagnostic_pass') and availability.get('complete') and not availability.get('lease_expiry_observed')
+    if not phase:
+        return dict(valid=False, status=result['status'])
+    fixture = phase['fixture']
+    return dict(valid=bool(valid), status=cell['status'], failures=cell.get('diagnostic_failures'),
+        proxy_cores=fixture['proxy']['cores'], tile_cores={name[5:]:row['cores'] for name,row in fixture.items() if name.startswith('tile-')},
+        total_server_cores=phase['server_cores'], readers={name:row['readers'] for name,row in cell.get('before', {}).items()},
+        source_cache=cell.get('source_cache_telemetry'),
+        lease_availability=availability,
+        activations=len(cell.get('activations_in_window',[])),chunks={name:row['chunks'] for name,row in cell.get('before',{}).items()},
+        contained_contract=cell.get('contained_contract'), raw_sha256=sha(path))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--current', type=Path, required=True)
+    parser.add_argument('--shared', type=Path, required=True)
+    parser.add_argument('--no-other-agents', action='store_true', required=True)
+    args = parser.parse_args()
+    path = DATA / (args.name + '-pairs.json')
+    if path.exists():
+        raise RuntimeError('use a fresh fixed-plan name')
+    for folder in [args.current, args.shared]:
+        validate_snapshot(folder)
+    inputs = {arm:{name:sha(folder/name) for name in ['horizon-client','meridian','meridian-sidecar','goliath-store','e4-client','horizon-bots','cluster-launcher.py','LEASES']}
+        for arm,folder in [('current',args.current),('shared',args.shared)]}
+    if any(inputs['current'][name] != inputs['shared'][name] for name in inputs['current'] if name != 'meridian'):
+        raise RuntimeError('matched arms differ beyond the proxy executable')
+    if inputs['current']['meridian'] == inputs['shared']['meridian']:
+        raise RuntimeError('comparison requires two different proxy binaries')
+    rows = []
+    for mode in ['d9','contained']:
+        for repeat in [1,2]:
+            for arm,folder in [('current',args.current),('shared',args.shared)]:
+                name = f'{args.name}-{mode}-{arm}-r{repeat}'
+                command = [sys.executable,'-B',str(ROOT/'scripts/e22-cell'),mode,'--bins',str(folder),'--name',name,'--no-other-agents']
+                rows.append(dict(mode=mode,repeat=repeat,arm=arm,name=name,command=command,status='pending'))
+    ledger = dict(status='planned', planned_at=time.time_ns(), acknowledgement_waiver=WAIVER,
+        inputs=inputs, runner_sha256=sha(Path(__file__)), adapter_sha256=sha(ROOT/'scripts/e22-cell'),
+        availability_harness_sha256=sha(ROOT/'scripts/e22_availability.py'),
+        store_trace_enabled_in_both_arms=True,per_pid_limiter_signal_brackets=True,executables_changed_for_telemetry=False,
+        stop_on_any_lease_expiry=True,rows=rows, required_reproduced_saving_cores=.10)
+
+    def save():
+        path.write_text(support.sanitize(json.dumps(ledger,indent=2))+'\n')
+
+    save()
+    for row in rows:
+        row['status']='running';save()
+        log=ROOT/'.local/evidence/E22'/(row['name']+'-cell.log')
+        log.parent.mkdir(parents=True,exist_ok=True)
+        print('E22_CELL_START '+row['name'],flush=True)
+        with log.open('w') as output:
+            process = subprocess.Popen(row['command'],cwd=ROOT,stdout=output,stderr=subprocess.STDOUT)
+            try:
+                code = process.wait(timeout=1650)
+            except BaseException:
+                process.send_signal(signal.SIGINT)
+                try:process.wait(timeout=30)
+                except subprocess.TimeoutExpired:process.terminate();process.wait(timeout=10)
+                row['status']='interrupted';ledger['status']='interrupted';save()
+                raise
+        raw = DATA / (row['name']+'.json')
+        row.update(status='complete' if code==0 else 'failed',exit=code,metrics=metrics(raw) if raw.exists() else None)
+        save()
+        print('E22_CELL_END '+json.dumps(dict(name=row['name'],exit=code,valid=row['metrics'].get('valid') if row['metrics'] else False)),flush=True)
+        if code:
+            ledger['status']='failed';save();raise RuntimeError('cell failed; no failed row is discarded')
+    comparisons = []
+    for mode in ['d9','contained']:
+        for repeat in [1,2]:
+            selected = {row['arm']:row['metrics'] for row in rows if row['mode']==mode and row['repeat']==repeat}
+            before,after = selected['current'],selected['shared']
+            comparisons.append(dict(mode=mode,repeat=repeat,valid=before['valid'] and after['valid'],
+                proxy_saving_cores=before['proxy_cores']-after['proxy_cores'],
+                tile_saving_cores=sum(before['tile_cores'].values())-sum(after['tile_cores'].values()),
+                total_saving_cores=before['total_server_cores']-after['total_server_cores']))
+    ledger.update(status='complete',comparisons=comparisons,
+        clearly_cheaper=all(row['valid'] and row['total_saving_cores']>=.10 for row in comparisons if row['mode']=='d9'))
+    save()
+    print(json.dumps(dict(clearly_cheaper=ledger['clearly_cheaper'],comparisons=comparisons),indent=2))
+
+
+if __name__ == '__main__':
+    main()
