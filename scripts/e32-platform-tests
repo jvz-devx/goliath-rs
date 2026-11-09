@@ -288,14 +288,42 @@ class IdentityTests(unittest.TestCase):
             "final ('final', 'final-r2') None docs/experiments/data/E28/gate-disposition.json")
         self.assertEqual(anchors('workstation'), anchors(None))
         self.assertEqual(anchors('vm'), "vm docs/experiments/data/E32/build-manifest.json .local/bin/goliath-e32 "
-            "final-r2 ('final-r2',) stamped-bots docs/experiments/data/E32/gate-disposition.json")
+            "final-r2 ('final-r2', 'final-r2-e29') stamped-bots docs/experiments/data/E32/gate-disposition.json")
 
     def test_the_vm_host_server_stack_is_its_own_complete_bundle(self):
         identity = dict(bundle='final-r2', binaries={'horizon-client':'tile'})
         with patch.object(bundle, 'BASE_STACK', 'final-r2'), patch.object(bundle, 'SERVER_STACKS', ('final-r2',)), \
+                patch.object(bundle, 'STACK_DIFFERENCES', {}), \
                 patch.object(bundle, 'validate', return_value=identity) as validate:
             self.assertEqual(bundle.validate_server_stack('anywhere'), identity)
             validate.assert_called_once_with('anywhere', {'final-r2'})
+
+    def test_the_store_variant_may_differ_from_final_r2_in_the_store_alone(self):
+        base = {'horizon-client':'tile', 'goliath-store':'store', 'meridian':'proxy'}
+        def validator(changed):
+            return lambda directory, expected=None: dict(bundle=Path(directory).name,
+                binaries=dict(base, **changed) if Path(directory).name == 'final-r2-e29' else base)
+        with patch.object(bundle, 'BASE_STACK', 'final-r2'), patch.object(bundle, 'SERVER_STACKS', ('final-r2', 'final-r2-e29')), \
+                patch.object(bundle, 'STACK_DIFFERENCES', {'final-r2-e29':{'goliath-store'}}):
+            with patch.object(bundle, 'validate', side_effect=validator({'goliath-store':'e29'})):
+                self.assertEqual(bundle.validate_server_stack('final-r2-e29')['bundle'], 'final-r2-e29')
+            for changed in [{}, {'horizon-client':'other'}, {'goliath-store':'e29', 'meridian':'other'}]:
+                with patch.object(bundle, 'validate', side_effect=validator(changed)):
+                    with self.assertRaisesRegex(ValueError, 'final-r2-e29 must differ from final-r2 in goliath-store only'):
+                        bundle.validate_server_stack('final-r2-e29')
+
+    def test_the_workstation_guard_keeps_its_stacks_and_message(self):
+        code = ('import goliath_bundle as b;print(b.SERVER_STACKS,b.STACK_DIFFERENCES)')
+        environment = dict(os.environ); environment.pop('GOLIATH_HOST_PLATFORM', None)
+        self.assertEqual(subprocess.check_output([sys.executable, '-B', '-c', code], cwd=Path(__file__).parent,
+            env=environment, text=True).strip(), "('final', 'final-r2') {'final-r2': {'horizon-client'}}")
+        def validator(directory, expected=None):
+            return dict(bundle=Path(directory).name, binaries={'horizon-client':'a', 'meridian':Path(directory).name})
+        with patch.object(bundle, 'validate', side_effect=validator), patch.object(bundle, 'BASE_STACK', 'final'), \
+                patch.object(bundle, 'SERVER_STACKS', ('final', 'final-r2')), \
+                patch.object(bundle, 'STACK_DIFFERENCES', {'final-r2':{'horizon-client'}}):
+            with self.assertRaisesRegex(ValueError, 'E28 final-r2 must differ from final in horizon-client only'):
+                bundle.validate_server_stack('final-r2')
 
 
 if __name__ == '__main__':

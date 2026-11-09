@@ -24,6 +24,7 @@ DATA = ROOT / 'docs/experiments/data/E32'
 E28 = ROOT / 'docs/experiments/data/E28'
 BUNDLES = ROOT / '.local/bin/goliath-e32'
 STAGE = BUNDLES / '.stage'
+E29_TREE = ROOT / '.local/src/goliath-e29'
 JOBS = '8'
 STAMPS = ['horizon-15-latency-stamps-e25-stamps-lease-r2-b2',
           'horizon-15-latency-stamps-e25-stamps-lease-r2-b2-linux']
@@ -57,12 +58,12 @@ def tree_hash(files):
     return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
 
 
-def internal_sources():
+def internal_sources(root=ROOT):
     """The synced copy has no Git index, so walk the same paths e28-build selects."""
-    paths = [path for prefix in INTERNAL for path in (ROOT / prefix).rglob('*') if path.is_file()]
-    paths += [ROOT / name for name in INTERNAL_FILES if (ROOT / name).is_file()]
-    return {str(path.relative_to(ROOT)): sha(path) for path in sorted(paths)
-            if 'target' not in path.relative_to(ROOT).parts and '__pycache__' not in path.parts}
+    paths = [path for prefix in INTERNAL for path in (root / prefix).rglob('*') if path.is_file()]
+    paths += [root / name for name in INTERNAL_FILES if (root / name).is_file()]
+    return {str(path.relative_to(root)): sha(path) for path in sorted(paths)
+            if 'target' not in path.relative_to(root).parts and '__pycache__' not in path.parts}
 
 
 def done(label):
@@ -332,14 +333,99 @@ def freeze(source):
     source.state('All bundle files hashed in the VM host build-manifest.json')
 
 
+def e29_store(source):
+    """Build the E29 store from its own copy of the internal crates, with the stack's store recipe."""
+    if staged('e29-store'):
+        source.state('Retaining staged E29 store')
+        return
+    origin = json.loads((E29_TREE / 'SOURCE.json').read_text())
+    # The store recipe: release, two jobs, no profile overrides.
+    source.SETTINGS = {'CARGO_INCREMENTAL': '0', 'RUSTC_WRAPPER': '', 'CARGO_BUILD_JOBS': '2'}
+    run(source, 'e29-store-release', str(E29_TREE.relative_to(ROOT)),
+        ['cargo', 'build', '--locked', '--release', '-p', 'goliath-store', '--bin', 'goliath-store'])
+    folder = STAGE / 'e29-store'
+    folder.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(E29_TREE / 'target/release/goliath-store', folder / 'goliath-store')
+    source.write(EVIDENCE / 'compiled-e29-store.json', {
+        'files': internal_sources(E29_TREE), 'origin': origin,
+        'binaries': {'goliath-store': sha(folder / 'goliath-store')}})
+    source.state('Staged the E29 store from ' + origin['commit'])
+
+
+def freeze_e29(source):
+    """Freeze final-r2-e29: final-r2's bundle with the E29 store, every other executable the same file."""
+    label, base_label = 'final-r2-e29', 'final-r2'
+    folder, base_folder = BUNDLES / label, BUNDLES / base_label
+    if folder.exists():
+        raise SystemExit('Bundle already frozen: ' + label)
+    anchor = json.loads((DATA / 'build-manifest.json').read_text())
+    base = anchor['bundles'][base_label]
+    record = json.loads((DATA / ('build-' + base_label + '.json')).read_text())
+    compiled = json.loads((EVIDENCE / 'compiled-e29-store.json').read_text())
+    if internal_sources(E29_TREE) != compiled['files']:
+        raise SystemExit('E29 store sources changed after the build')
+    release = json.loads((EVIDENCE / 'commands/e29-store-release.json').read_text())
+    if release['exit']:
+        raise SystemExit('E29 store release failed')
+    folder.mkdir(parents=True)
+    for name in ['horizon-client', 'horizon-bots', 'meridian', 'meridian-sidecar', 'e4-client', 'cluster-launcher.py']:
+        if sha(base_folder / name) != base['files'][name]:
+            raise SystemExit('Base bundle file changed: ' + name)
+        os.link(base_folder / name, folder / name)
+    shutil.copy2(STAGE / 'e29-store/goliath-store', folder / 'goliath-store')
+    (folder / 'LEASES').touch()
+    binaries = dict(base['binaries'], **{'goliath-store': sha(folder / 'goliath-store')})
+    if binaries['goliath-store'] != compiled['binaries']['goliath-store'] or binaries['goliath-store'] == base['binaries']['goliath-store']:
+        raise SystemExit('Staged E29 store changed or equals the base store')
+    required = ['horizon-client', 'meridian', 'meridian-sidecar', 'goliath-store', 'e4-client']
+    source.write(folder / 'manifest.json', {name: binaries[name] for name in required})
+    source.write(folder / 'FINAL.json', {
+        'schema_version': 1,
+        'binaries': {name: {'path': str((folder / name).relative_to(ROOT)), 'sha256': binaries[name]} for name in required},
+        'launcher': {'leased_marker': True, 'sha256': sha(folder / 'cluster-launcher.py')},
+        'store_binary_sha256': binaries['goliath-store']})
+    before, after = record['internal_crates']['files'], compiled['files']
+    changed = sorted(name for name in set(before) | set(after) if before.get(name) != after.get(name))
+    wire = ['crates/goliath-store/src/client.rs', 'crates/goliath-store/src/codec.rs']
+    variant = dict(record, kind='E32-vm-host-store-variant', bundle=label, directory=str(folder.relative_to(ROOT)),
+                   base_bundle=base_label, base_build_record_sha256=sha(DATA / ('build-' + base_label + '.json')),
+                   settings_scope='The store only, with the store recipe: release, two jobs, no profile overrides. '
+                                  'Every other executable is final-r2\'s file, hard-linked.',
+                   settings=release['settings'], binaries=binaries, commands=[release],
+                   seconds={release['label']: round(release['seconds_including_queue'], 1)},
+                   failed_gates=[], verification_status='passed' if not release['exit'] else 'failed',
+                   gates_not_run_on_this_host='No store gate ran on the VM host. The E29 report records its own gates on boat.',
+                   store_source={'origin': compiled['origin'], 'files': after,
+                                 'changed_against_final_r2_internal_crates': changed,
+                                 'client_wire_files_unchanged': {name: before.get(name) == after.get(name) for name in wire}},
+                   tile_note='The tile was not rebuilt. It compiled the goliath-store and goliath-model libraries from '
+                             'final-r2\'s internal crates; E29 changes store-side code in both and leaves the client and codec files byte-identical.',
+                   caveats=['One test on the E29 branch failed once in nine workspace runs and was being traced when this '
+                            'bundle was frozen. Results with this store are provisional.',
+                            'The E29 worktree had uncommitted edits when the source was taken. The store was built from the commit, not from that working state.'])
+    source.write(DATA / ('build-' + label + '.json'), variant)
+    shutil.copy2(DATA / ('build-' + label + '.json'), folder / 'build.json')
+    canonical = {'schema_version': 1, 'platform': 'linux', 'host': 'vm', 'source_equality': 'passed',
+                 'projects': record['projects'], 'internal_crates': record['internal_crates'],
+                 'store_source': variant['store_source'], 'binaries': binaries,
+                 'review_status': record['review_status']}
+    source.write(folder / 'canonical.json', canonical)
+    source.write(folder / 'candidate.json', canonical)
+    anchor['bundles'][label] = {'path': str(folder.relative_to(ROOT)), 'binaries': binaries,
+                               'files': {path.name: sha(path) for path in sorted(folder.iterdir()) if path.is_file()}}
+    source.write(DATA / 'build-manifest.json', anchor)
+    source.state(f'{label}: bundle frozen, goliath-store {binaries["goliath-store"]}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['all', 'prepare', 'build', 'gates', 'freeze'])
+    parser.add_argument('action', choices=['all', 'prepare', 'build', 'gates', 'freeze', 'e29-store', 'freeze-e29'])
     args = parser.parse_args()
     os.environ.setdefault('E28_WINDOW_NAME', 'E32B')
     source = recipe()
     started = time.monotonic()
     steps = {'prepare': [versions, prepare], 'build': [build], 'gates': [gates], 'freeze': [freeze],
+             'e29-store': [e29_store], 'freeze-e29': [e29_store, freeze_e29],
              'all': [versions, prepare, build, gates, freeze]}[args.action]
     for step in steps:
         step(source)

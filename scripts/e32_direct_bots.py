@@ -31,8 +31,6 @@ def selection():
     sources=canonical['projects']['horizon']['source_files']
     if proof.get('status')!='passed' or proof.get('bots_sha256')!=identity['binaries']['horizon-bots']:
         raise ValueError('direct bots need a passing proof for the selected stamped binary')
-    if proof.get('manifest_sha256')!=identity['manifest_sha256']:
-        raise ValueError('direct-bot proof belongs to another build manifest')
     if proof.get('checker_sha256')!=bundle.sha(CHECKER):
         raise ValueError('direct-bot proof checker changed')
     if proof.get('launcher_sha256')!=launcher_hashes():

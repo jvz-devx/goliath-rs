@@ -123,16 +123,21 @@ def validate(directory, expected=None):
 
 # The measured server stacks. final-r2 is final with the two soak fixes in the
 # tile; every other executable is final's bytes.
-SERVER_STACKS = ('final', 'final-r2') if BASE_STACK == 'final' else (BASE_STACK,)
+# Each derived stack, with the only executables in which it may differ from the
+# base. On the VM host final-r2-e29 is final-r2 with the E29 store.
+STACK_DIFFERENCES = dict(workstation={'final-r2': {'horizon-client'}},
+                         vm={'final-r2-e29': {'goliath-store'}})[HOST]
+SERVER_STACKS = (BASE_STACK, *STACK_DIFFERENCES)
 
 
 def validate_server_stack(directory):
-    """Validate a measured server bundle; final-r2 may differ from final in the tile only."""
+    """Validate a measured server bundle; a derived stack may differ from its base in the named executables only."""
     identity = validate(directory, set(SERVER_STACKS))
-    if identity['bundle'] != BASE_STACK:
-        base = validate(BUNDLES / 'final', {'final'})['binaries']
+    allowed = STACK_DIFFERENCES.get(identity['bundle'])
+    if allowed is not None:
+        base = validate(BUNDLES / BASE_STACK, {BASE_STACK})['binaries']
         changed = {name for name in set(base) | set(identity['binaries'])
                    if base.get(name) != identity['binaries'].get(name)}
-        if changed != {'horizon-client'}:
-            raise ValueError('E28 final-r2 must differ from final in horizon-client only')
+        if changed != allowed:
+            raise ValueError(f"E28 {identity['bundle']} must differ from {BASE_STACK} in {' and '.join(sorted(allowed))} only")
     return identity

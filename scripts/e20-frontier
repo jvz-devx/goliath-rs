@@ -198,7 +198,8 @@ def main():
     if args.direct_bots:
         if not platform.LINUX or not args.capacity_diagnostic:
             raise SystemExit('--direct-bots requires Linux capacity mode')
-        goliath_bundle.validate_server_stack(bins) if bins.name=='final-r2' else goliath_bundle.validate(bins,{'final'})
+        if bins.name in goliath_bundle.STACK_DIFFERENCES:goliath_bundle.validate_server_stack(bins)
+        else:goliath_bundle.validate_server_stack(bins) if bins.name=='final-r2' else goliath_bundle.validate(bins,{'final'})
         bots_bins,bots_identity,bot_proof_hash=direct_bots.selection()
     if len(counts)!=1 or counts[0]<100 or args.warmup!=30 or args.seconds!=60:
         raise SystemExit('one frontier cell per window, at least100 players,30warm/60measure')

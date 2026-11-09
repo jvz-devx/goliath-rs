@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Read a soak's store barriers, lease renewals and authority stops from its private traces.
+
+This is the comparison readback for a soak on any Linux host: the distribution
+of the store's durable barrier, how long each tile waited for renewal replies,
+and every authority stop. It reads the run's evidence folder and writes one
+small JSON file. It judges nothing; the soak's own pass line stays where it is.
+"""
+import argparse
+import csv
+import gzip
+import json
+import math
+from pathlib import Path
+
+import e11_support as support
+import e28_log_integrity as logs
+
+ROOT = support.ROOT
+LIMITS = (50, 100, 200, 400)
+
+
+def opened(path):
+    path = path if path.exists() else path.with_name(path.name+'.gz')
+    return gzip.open(path, 'rt') if path.suffix == '.gz' else path.open()
+
+
+def quantile(values, fraction):
+    return values[max(0, math.ceil(fraction*len(values))-1)] if values else None
+
+
+def barriers(folder, name):
+    path = next((candidate for candidate in [folder/'store-batches.csv', folder/(name+'-store-batches.csv')]
+        if candidate.exists() or candidate.with_name(candidate.name+'.gz').exists()), None)
+    if path is None:
+        return dict(available=False)
+    with opened(path) as stream:
+        rows = [row for row in csv.DictReader(stream) if float(row['barrier_ms']) > 0]
+    values = sorted(float(row['barrier_ms']) for row in rows)
+    start = min((int(row['start_us']) for row in rows), default=0)
+    slow = [dict(store_s=round((int(row['start_us'])-start)/1e6, 3), barrier_ms=float(row['barrier_ms']),
+        queue_max_ms=float(row['queue_max_ms']), commands=int(row['count']))
+        for row in rows if float(row['barrier_ms']) > LIMITS[0]]
+    return dict(available=True, count=len(values), seconds=round((max((int(row['start_us']) for row in rows), default=0)-start)/1e6, 3),
+        p50_ms=quantile(values, .5), p99_ms=quantile(values, .99), p999_ms=quantile(values, .999),
+        max_ms=values[-1] if values else None,
+        over_ms={str(limit):sum(value > limit for value in values) for limit in LIMITS},
+        over_50ms_rows=slow, seconds_origin='the first barrier in the trace')
+
+
+def early_renewals(folder):
+    """Renewals the store answered from memory, which never enter its batch trace."""
+    path = folder/'store-batches.renewals.csv'
+    if not path.exists() and not path.with_name(path.name+'.gz').exists():
+        return dict(available=False, note='this store journals every renewal; they are in the batch trace')
+    with opened(path) as stream:
+        rows = list(csv.DictReader(stream))
+    answer = sorted((int(row['answered_ns'])-int(row['received_ns']))/1e6 for row in rows)
+    wait = sorted((int(row['received_ns'])-int(row['accepted_ns']))/1e6 for row in rows)
+    return dict(available=True, answered=len(rows),
+        answer_ms=dict(p50=quantile(answer, .5), p99=quantile(answer, .99), max=answer[-1] if answer else None,
+            over_50ms=sum(value > 50 for value in answer), over_200ms=sum(value > 200 for value in answer)),
+        accept_to_receive_ms=dict(p50=quantile(wait, .5), p99=quantile(wait, .99), max=wait[-1] if wait else None),
+        columns='answer_ms is answered_ns - received_ns; accept_to_receive_ms is received_ns - accepted_ns')
+
+
+def renewals(folder):
+    tiles = {}; stops = []
+    for path in sorted((folder/'tiles').glob('*-lease.jsonl*')):
+        events, integrity = logs.read_trace(path)
+        start = next((row for row in events if row['event'] == 'trace-start'), None)
+        if start is None:
+            continue
+        label = 'abcd'[start['data']['tile']]+'-'+path.name.split('-')[2]
+        installed = {row['data']['counter'] for row in events if row['event'] == 'renew-installed'}
+        replies = [row['data'] for row in events if row['event'] == 'renew-reply']
+        durations = sorted((row['reply_ns']-row['sent_ns'])/1e6 for row in replies)
+        slow = [dict(counter=row['counter'], reply_ms=(row['reply_ns']-row['sent_ns'])/1e6,
+            trace_s=round((row['sent_ns']-start['at_ns'])/1e9, 3),
+            result='granted' if row['result'].startswith('Ok(Leased') else row['result'],
+            installed=row['counter'] in installed) for row in replies if (row['reply_ns']-row['sent_ns'])/1e6 > 200]
+        tiles[label] = dict(sent=sum(row['event'] == 'renew-send' for row in events), replies=len(replies),
+            installed=len(installed), errors=sum(not row['result'].startswith('Ok(Leased') for row in replies),
+            reply_ms_p50=quantile(durations, .5), reply_ms_p99=quantile(durations, .99),
+            reply_ms_max=durations[-1] if durations else None, over_200ms=len(slow), over_200ms_rows=slow,
+            trace_complete=integrity.get('complete'))
+        for row in events:
+            if row['event'] in {'authority-stop', 'clock-anomaly', 'renew-observe-refused'}:
+                stops.append(dict(tile=label, event=row['event'], cause=row['data'].get('cause'),
+                    trace_s=round((row['at_ns']-start['at_ns'])/1e9, 3),
+                    accepted_counter=row['data'].get('accepted_counter')))
+    return tiles, stops
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--evidence', type=Path, required=True, help='the run folder, such as .local/evidence/E32/soak/NAME')
+    parser.add_argument('--out', type=Path, required=True)
+    args = parser.parse_args()
+    folder = args.evidence.resolve()
+    tiles, stops = renewals(folder)
+    replies = [row for tile in tiles.values() for row in tile['over_200ms_rows']]
+    result = dict(kind='soak-barrier-and-renewal-readback', name=args.name, store_barriers=barriers(folder, args.name),
+        early_renewals=early_renewals(folder),
+        lease_renewals=tiles,
+        renewal_replies=dict(count=sum(tile['replies'] for tile in tiles.values()), over_200ms=len(replies),
+            max_ms=max((tile['reply_ms_max'] for tile in tiles.values() if tile['reply_ms_max'] is not None), default=None)),
+        authority_stops=stops,
+        scope='every lease trace in the run, original and recovery processes; barriers over the whole store trace')
+    if args.out.exists():
+        raise SystemExit('readback already exists')
+    support.save(args.out, result)
+    print(json.dumps({key:result[key] for key in ['renewal_replies', 'early_renewals', 'authority_stops']}
+        | {'store_barriers':{key:value for key, value in result['store_barriers'].items() if key != 'over_50ms_rows'}}, indent=1))
+
+
+if __name__ == '__main__':
+    main()

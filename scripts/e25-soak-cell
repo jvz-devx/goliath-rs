@@ -36,6 +36,9 @@ def main():
     selected = validate_snapshot(bins)
     # final-r2 is final with the fixed tile; validate_server_stack rejects any other difference.
     rebuilt = {'horizon-client'} if goliath_bundle.is_e28(bins) and goliath_bundle.validate_server_stack(bins)['bundle']=='final-r2' else {'meridian'}
+    if goliath_bundle.is_e28(bins):
+        # A derived stack differs from the fixture in exactly the executables its guard allows.
+        rebuilt = goliath_bundle.STACK_DIFFERENCES.get(bins.name, rebuilt)
     if set(selected['binaries']) != set(fixture['binaries']) or any(
         selected['binaries'][name] != digest for name,digest in fixture['binaries'].items() if name not in rebuilt):
         raise ValueError('soak must use unchanged unstamped fixed-r2 fixture binaries')
