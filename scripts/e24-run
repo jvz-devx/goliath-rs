@@ -75,6 +75,7 @@ def main():
     parser.add_argument('--clock-telemetry',action='store_true',help='require fixed-tile raw-clock counters and retain loaded endpoints')
     parser.add_argument('--soak-audit',action='store_true',help='retain E23 cargo, ownership and all-tile checkpoint/recovery audit')
     parser.add_argument('--planning-mutation-rate',type=int)
+    parser.add_argument('--planning-window-seconds',type=int,default=1,choices=[1,27],help='1 checks every second; 27 checks the retry budget the rate stands for')
     parser.add_argument('--bulk-logs-tmpfs',action='store_true',help='diagnostic only, default off: tile stdout/stderr and anticheat logs on tmpfs')
     args = parser.parse_args()
     if not all(c.isalnum() or c in '-_' for c in args.name) or not args.name:
@@ -144,7 +145,7 @@ def main():
     scope['MAX_EVENTS'] = 2_000_000
     trace = scope['Availability'](args.name)
     trace.store_trace = folder/'store-batches.csv'
-    mutation_watch=MutationWatch(trace.store_trace,args.planning_mutation_rate) if args.planning_mutation_rate else None
+    mutation_watch=MutationWatch(trace.store_trace,args.planning_mutation_rate,args.planning_window_seconds) if args.planning_mutation_rate else None
     os.environ['GOLIATH_STORE_TRACE'] = str(trace.store_trace)
     native = ns['counters']
     holder, memories, ticks, cleanup_errors = {},[],{},[]

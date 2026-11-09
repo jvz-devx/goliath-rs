@@ -13,6 +13,7 @@ from unittest.mock import patch
 import goliath_platform as platform
 import goliath_bundle as bundle
 import e28_window as window
+import e24_mutation_watch as watch
 
 RUNS = platform.ROOT/'.local/runs'
 
@@ -324,6 +325,52 @@ class IdentityTests(unittest.TestCase):
                 patch.object(bundle, 'STACK_DIFFERENCES', {'final-r2':{'horizon-client'}}):
             with self.assertRaisesRegex(ValueError, 'E28 final-r2 must differ from final in horizon-client only'):
                 bundle.validate_server_stack('final-r2')
+
+
+class PlanningGuardTests(unittest.TestCase):
+    def trace(self, folder, per_second, seconds):
+        path = Path(folder)/'batches.csv'
+        rows = ['start_us,execute_ms,mutations']
+        rows += [f'{second*1_000_000+index*1000},0.1,1' for second in range(seconds) for index in range(per_second[second % len(per_second)])]
+        path.write_text('\n'.join(rows)+'\n')
+        return path
+
+    def test_the_receipt_cap_covers_85_mutations_a_second_for_the_retry_budget(self):
+        self.assertEqual(watch.covered_rate(9216), 85)
+        self.assertLessEqual(1+4*27*85, 9216); self.assertGreater(1+4*27*86, 9216)
+
+    def test_the_default_guard_still_checks_every_second(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            guard = watch.MutationWatch(self.trace(temporary, [73], 1), 72)
+            with self.assertRaisesRegex(RuntimeError, 'interval upper73/s exceeds planning72/s'):
+                guard.sample()
+            quiet = watch.MutationWatch(self.trace(temporary, [60], 3), 72); quiet.sample()
+            self.assertEqual(quiet.report(), dict(maximum_interval_upper_per_second=quiet.maximum, planning_bound=72,
+                at_window_start_us=quiet.at_us, precision_padding_us=2, within_bound=True))
+
+    def test_the_retry_budget_guard_allows_a_short_burst_and_stops_a_sustained_one(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            burst = watch.MutationWatch(self.trace(temporary, [80]+[10]*29, 60), 85, 27); burst.sample()
+            report = burst.report()
+            self.assertEqual((report['window_seconds'], report['planning_bound'], report['within_bound']), (27, 2295, True))
+            self.assertTrue(80+26*10 <= report['maximum_window_upper'] <= 80+27*10)  # whole boundary batches count
+            sustained = watch.MutationWatch(self.trace(temporary, [86], 28), 85, 27)
+            with self.assertRaisesRegex(RuntimeError, 'rolling27s window upper2296 exceed planning85/s for27s'):
+                sustained.sample()
+
+    def control(self, plan, rate):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            registered = Path(temporary)/'plan.json'; registered.write_text(json.dumps(plan))
+            return subprocess.run([sys.executable, '-B', str(Path(__file__).parent/'e25-soak-control'), '--name', 'e32-guard-test',
+                '--bins', temporary, '--data-dir', str(platform.ROOT/'docs/experiments/data/E32/soak'), '--campaign-plan', str(registered),
+                '--planning-mutation-rate', str(rate), '--planning-window-seconds', '27'], capture_output=True, text=True).stderr
+
+    def test_a_changed_guard_must_be_registered_and_covered_by_the_cap(self):
+        guard = dict(rate_per_second=85, window_seconds=27, receipt_capacity=9216)
+        self.assertIn('must be registered in the campaign plan', self.control({}, 85))
+        self.assertIn('must be registered in the campaign plan', self.control(dict(planning_guard=guard), 80))
+        self.assertIn('exceeds what the receipt cap covers', self.control(dict(planning_guard=dict(guard, rate_per_second=86)), 86))
+        self.assertNotIn('planning', self.control(dict(planning_guard=guard), 85))
 
 
 if __name__ == '__main__':

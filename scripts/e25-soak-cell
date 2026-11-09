@@ -18,6 +18,8 @@ def main():
     parser.add_argument('--data-dir',type=Path,default=harness.DATA)
     parser.add_argument('--direct-bots',action='store_true')
     parser.add_argument('--bulk-logs-tmpfs',action='store_true',help='diagnostic only, default off')
+    parser.add_argument('--planning-mutation-rate',type=int,default=72)
+    parser.add_argument('--planning-window-seconds',type=int,default=1,choices=[1,27])
     parser.add_argument('--name',required=True)
     parser.add_argument('--bins',type=Path,required=True)
     parser.add_argument('--owner',choices=sorted({'E25','reviewer',platform.window_owner('E25')}),default=platform.window_owner('E25'))
@@ -54,7 +56,8 @@ def main():
     executed = None
     try:
         executed = harness.execute('e24-run',['--name',args.name,'--bins',bins,'--host-released',
-            '--players',str(args.players),'--seconds','1800','--clock-telemetry','--soak-audit','--planning-mutation-rate','72',
+            '--players',str(args.players),'--seconds','1800','--clock-telemetry','--soak-audit','--planning-mutation-rate',str(args.planning_mutation_rate),
+            *(['--planning-window-seconds',str(args.planning_window_seconds)] if args.planning_window_seconds!=1 else []),
             '--cpu-mode',args.cpu_mode,*(['--direct-bots'] if args.direct_bots else []),
             *(['--bulk-logs-tmpfs'] if args.bulk_logs_tmpfs else [])],args.name,owner=args.owner)
     except BaseException as caught:

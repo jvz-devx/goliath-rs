@@ -1,0 +1,62 @@
+{
+  "kind": "E32-vm-host-soak-registration",
+  "name": "e32-soak-r2-e29-a1",
+  "registered_before_measurement": true,
+  "retry_of": "e32-soak-r2-e29",
+  "reason": "e32-soak-r2-e29 was stopped after 63 seconds by the harness's planning guard, not by the cluster: 73 accepted mutations in one rolling second against a planning rate of 72/s, during player registration. No tile lost its lease, through barriers of up to 896 ms. That row stays failed. This is the one named retry, with the guard checking the budget it stands for.",
+  "earlier_outcomes_unchanged": true,
+  "planning_guard": {
+    "rate_per_second": 85,
+    "window_seconds": 27,
+    "receipt_capacity": 9216,
+    "what_it_protects": "The store keeps the last 9,216 mutation receipts so a retried command gets its original answer. The longest client retry budget is 27 s (3 attempts of 3 s connect, 3 s write, 3 s read). E24 requires the cap to hold four times the mutations of one retry budget: 1 + 4 * ceil(27 * rate) <= cap.",
+    "arithmetic": {
+      "mutations_allowed_in_27_s_at_4x": 2303,
+      "formula": "floor((9216 - 1) / 4) = 2303",
+      "largest_covered_rate_per_second": 85,
+      "covered_rate_formula": "floor((9216 - 1) / (4 * 27)) = 85; 1 + 4 * 27 * 85 = 9181 <= 9216, and 86 gives 9289",
+      "guard_bound_in_27_s": 2295
+    },
+    "observed_on_this_host": {
+      "run": "e32-soak-r2-e29, store seconds 1 to 63: startup and registration only",
+      "mutations_total": 732,
+      "maximum_in_one_rolling_second": 80,
+      "guard_tripped_at": 73,
+      "maximum_in_27_rolling_seconds": 541,
+      "share_of_the_4x_budget": "541 of 2303, 23%",
+      "loaded_window": "not reached; this retry reports it"
+    },
+    "observed_on_the_workstation": {
+      "run": "e28-soak-r2, standard store with renewals journaled at about 16/s",
+      "loaded_window_seconds": [200, 1300],
+      "loaded_maximum_in_one_rolling_second": 32,
+      "loaded_maximum_in_27_rolling_seconds": 610,
+      "whole_trace_maximum_in_27_rolling_seconds": 990
+    },
+    "why_the_one_second_check_misfires_here": "Registration commits as fast as the store's barrier lets it, about 70 to 100 a second on this disk, and commits bunch behind barrier stalls. The 72/s figure was E24's measured workload rate plus an allowance. It was never the cap's limit. A one-second burst does not fill a window that is sized for 27 seconds.",
+    "conclusion": "The registration burst does not threaten the receipt window on this host. The guard for this retry is the budget itself: at most 27 * 85 = 2295 accepted mutations in any rolling 27 seconds, checked live over the whole store trace. The cap, the retry budget and the 4x margin are unchanged.",
+    "readback_unchanged": "The loaded-window readback still requires at most 72 mutations in any second and cap >= 1 + 4 * max(27 * one-second peak, 27-second peak)."
+  },
+  "host_platform": "vm",
+  "bundle": ".local/bin/goliath-e32/final-r2-e29",
+  "bundle_differs_from_final_r2_in": ["goliath-store"],
+  "store_source": "branch e29-lease-renewal at 76fbd58, default mode --renewals unjournaled",
+  "bots_bundle": ".local/bin/goliath-e32/stamped-bots",
+  "players": 425,
+  "crossers_and_unique_cargo_items": 42,
+  "measurement_seconds": 1800,
+  "warmup_seconds": 30,
+  "cpu_mode": "pin",
+  "direct_bots": true,
+  "fixture_unchanged": "run folders, logs and the store's journal on the ext4 volume, no tmpfs, proxy fallback at its defaults, store --sync full",
+  "pass_line": "crossings every minute, zero duplicated cargo, zero owner violations, no production process growing 10 percent or more from minute 5 to 30",
+  "known_limits": [
+    "Claims, takeovers, releases, player commits and the cluster clock still wait for the barrier. A failure on that path under a slow barrier is a separate result.",
+    "On this host a pilot cell lost all four tiles when a store call timed out during registration (e32-pilot-e29-400-r0). The same can end this run.",
+    "CPU steal reached 1.2 to 1.4% on CPU 4 in two cluster pilots, over the 1% validity line. The whole-window record decides validity here too.",
+    "One test on the E29 branch failed once in nine workspace runs and was being traced. A pass here is provisional."
+  ],
+  "on_failure": "keep the row, diagnose from evidence and report. No further retry.",
+  "silent_retry": false,
+  "acceptance": "pending reviewer reproduction"
+}

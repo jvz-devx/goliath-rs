@@ -27,6 +27,8 @@ def main():
     parser.add_argument('--owner',choices=sorted({'E25','reviewer',platform.window_owner('E25')}),default=platform.window_owner('E25'))
     parser.add_argument('--bulk-logs-tmpfs',action='store_true',help='diagnostic only, default off: tile stdout/stderr and anticheat logs on tmpfs')
     parser.add_argument('--collect-only',action='store_true',help='release the window and leave readback for a separate command')
+    parser.add_argument('--planning-mutation-rate',type=int,default=72)
+    parser.add_argument('--planning-window-seconds',type=int,default=1,choices=[1,27])
     args = parser.parse_args()
     harness.configure(args.data_dir)
     print('E25_SOAK_CONTROL_PROCESS '+str(os.getpid()),flush=True)
@@ -36,6 +38,15 @@ def main():
     result_path = harness.DATA / (args.name+'-run.json')
     if target.exists() or result_path.exists():
         raise RuntimeError('control already exists')
+    planning=(args.planning_mutation_rate,args.planning_window_seconds)
+    if planning!=(72,1):
+        # A different guard needs a registered derivation from the receipt cap, never a looser constant.
+        from e24_mutation_watch import covered_rate
+        registered=json.loads(args.campaign_plan.read_text()).get('planning_guard',{})
+        if (registered.get('rate_per_second'),registered.get('window_seconds'))!=planning or args.planning_window_seconds!=27:
+            raise ValueError('a changed planning guard must be registered in the campaign plan and cover the 27-second retry budget')
+        if args.planning_mutation_rate>covered_rate(registered.get('receipt_capacity',0)):
+            raise ValueError('the registered planning rate exceeds what the receipt cap covers at four times the retry budget')
     bins = args.bins.resolve()
     identity = validate_snapshot(bins)
     if args.bulk_logs_tmpfs and not (goliath_bundle.is_e28(bins) and '-diag-' in args.name):
@@ -67,7 +78,8 @@ def main():
         reference_kind = 'rebuilt80f-control'
     plan = dict(kind='E25-full-soak-reactor-control-plan',reference_kind=reference_kind,name=args.name,queue_owner=args.owner,
         readback_mode='manual' if args.collect_only else 'automatic-after-release',players=args.players,measurement_seconds=1800,
-        cargo_items=65,owner_audits='unchanged E24 soak harness',planning_mutation_rate=72,
+        cargo_items=65,owner_audits='unchanged E24 soak harness',planning_mutation_rate=args.planning_mutation_rate,
+        **({'planning_window_seconds':args.planning_window_seconds} if args.planning_window_seconds!=1 else {}),
         approved_plan=harness.digest(args.campaign_plan.resolve()),
         bundle=dict(path=str(bins.relative_to(harness.ROOT)),final=harness.digest(bins/'FINAL.json'),binaries=identity['binaries'],
             bot_sha256=harness.digest(bins/'horizon-bots')['sha256']),
@@ -96,7 +108,8 @@ def main():
             whole=WholeWindow(observer=True).start()
         subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-soak-cell','--name',args.name,'--bins',bins,
             '--owner',args.owner,'--players',str(args.players),'--data-dir',harness.DATA,'--cpu-mode',args.cpu_mode,
-            *(['--direct-bots'] if args.direct_bots else []),*(['--bulk-logs-tmpfs'] if args.bulk_logs_tmpfs else [])],cwd=harness.ROOT,check=True)
+            *(['--direct-bots'] if args.direct_bots else []),*(['--bulk-logs-tmpfs'] if args.bulk_logs_tmpfs else []),
+            *(['--planning-mutation-rate',str(args.planning_mutation_rate),'--planning-window-seconds',str(args.planning_window_seconds)] if planning!=(72,1) else [])],cwd=harness.ROOT,check=True)
     except BaseException as caught:
         error = str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME').replace(sys.executable,'python3')
     finally:
