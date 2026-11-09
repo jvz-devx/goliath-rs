@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Preregister eight fixed interior witnesses and the no-hop timing estimand."""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import random
+import re
+
+from e18_d9_layout import plan
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+', args.name):
+        raise ValueError('fresh e25- or repro- name required')
+    target = ROOT / 'docs/experiments/data/E25' / (args.name + '.json')
+    if target.exists():
+        raise RuntimeError('preregistration already exists')
+    path = ROOT / 'scripts/capacity-bench'
+    loader = importlib.machinery.SourceFileLoader('e25_latency_anchors', str(path))
+    spec = importlib.util.spec_from_loader('e25_latency_anchors', loader)
+    baseline = importlib.util.module_from_spec(spec)
+    loader.exec_module(baseline)
+    layout = plan(650, baseline.route_anchor)
+    rng = random.Random(25)
+    witnesses = []
+    for group in layout['groups']:
+        if group['kind'] != 'interior':
+            continue
+        for index in sorted(rng.sample(range(group['count']), 2)):
+            name = group['prefix'] + str(index)
+            witnesses.append(dict(name=name, tile=group['backend'], index=index,
+                anchor=group['starts'][name], forced_host=group['host'],
+                cohort_count=group['count'], seed=group['seed']))
+    if len(witnesses) != 8 or len({row['tile'] for row in witnesses}) != 4:
+        raise RuntimeError('witness spread is incomplete')
+    result = dict(kind='E25-latency-preregistration', witness_seed=25, players=650,
+        crossers=layout['crossing_players'], pigs_per_tile=64, server_cores=4, bot_cores=1,
+        warmup_seconds=30, measured_seconds=60, decode_drain_seconds=2,
+        witnesses=witnesses, clock='CLOCK_MONOTONIC_RAW, absolute nanoseconds in both processes',
+        bot_stamp='Bot::flush immediately before socket.write, assigned after return to frames whose first byte was accepted',
+        tile_stamp='lan::io_pool::Conn::read after buffered frame decode, before session.packet and NetEvent main-thread queue',
+        compression='before bot stamp; retain negotiated threshold', encryption='offline fixture, record absence of encryption',
+        primary_estimand='complete via-proxy send-to-tile-frame-decode delay, conservative upper bound on proxy contribution',
+        direct_reference='same eight interior sessions direct, same 650 total gameplay sessions, 642 via proxy and all 65 crossers unchanged',
+        p95='nearest rank over every witness send; unmatched and ambiguous sends are infinity; report overall and each tile',
+        threshold_ms_strictly_less_than=5, quantile_subtraction_is_not_an_estimator=True,
+        authority_closure_voids_pair=True, no_tail_trimming=True, no_limiter_pause_subtraction=True,
+        no_extra_hops=True, coverage='interior movement, not crossing or all protocol types',
+        source_hashes={str(item.relative_to(ROOT)): hashlib.sha256(item.read_bytes()).hexdigest()
+            for item in [Path(__file__), ROOT / 'scripts/e18_d9_layout.py', path]})
+    target.write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)), sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+        witnesses=[dict(name=row['name'], tile=row['tile']) for row in witnesses])), flush=True)
+
+
+if __name__ == '__main__':
+    main()

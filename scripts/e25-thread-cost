@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Read native per-thread CPU endpoints without mistaking blocked occupancy for work."""
+import argparse
+from collections import defaultdict
+import gzip
+import hashlib
+import json
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+
+
+def read(path):
+    raw=path.read_bytes()
+    if path.suffix=='.gz':raw=gzip.decompress(raw)
+    return json.loads(raw),hashlib.sha256(raw).hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    args=parser.parse_args()
+    if not args.name.startswith(('e25-','repro-')) or not all(c.isalnum() or c in '-_' for c in args.name):raise ValueError('fresh name required')
+    target=ROOT/'docs/experiments/data/E25'/(args.name+'.json')
+    if target.exists():raise RuntimeError('analysis exists')
+    result=dict(kind='E25-native-thread-cost',runs=[])
+    for mode in ['via','direct']:
+        path=ROOT/'docs/experiments/data/E25'/f'e25-latency-r1-{mode}-d1-summary.json'
+        summary,digest=read(path)
+        cell_path=ROOT/summary['cell']['path']
+        raw,raw_digest=read(cell_path)
+        cell=raw['cells']['650']
+        groups=defaultdict(lambda:dict(count=0,cores=0.,user_cores=0.,system_cores=0.))
+        for thread in cell['proxy_thread_cpu']['threads']:
+            name=thread['name']
+            group='IO drivers' if name.startswith('proxy-io-') else 'terrain managers' if name=='terrain-manager' else 'player supervisors' if name.startswith('player ') else 'other matched threads'
+            row=groups[group];row['count']+=1
+            for key in ['cores','user_cores','system_cores']:row[key]+=thread[key]
+        total=cell['proxy']['cores']
+        for row in groups.values():row['percent_process_cpu']=100*row['cores']/total
+        matched=cell['proxy_thread_cpu']['matching_thread_cores']
+        result['runs'].append(dict(path=mode,summary=dict(path=str(path.relative_to(ROOT)),sha256=digest),
+            cell_decompressed_sha256=raw_digest,groups=dict(groups),process_cores=total,
+            matched_cores=matched,matched_percent=100*matched/total,residual_cores=total-matched,
+            context_switches_per_second=cell['proxy']['context_switches'],unix_syscalls_per_second=cell['proxy']['unix_syscalls']))
+    result['limits']=['native thread CPU is measured, not sampled blocked time',
+        'system CPU includes real IO and other kernel work, not only wakeups',
+        'thread-count and context-switch counts do not give scheduling CPU seconds',
+        'short-lived unmatched threads and endpoint skew remain in residual']
+    target.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)),sha256=hashlib.sha256(target.read_bytes()).hexdigest(),runs=result['runs']),indent=2))
+
+
+if __name__=='__main__':main()

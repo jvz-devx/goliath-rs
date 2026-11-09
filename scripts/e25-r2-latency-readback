@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Read-only CPU, STOP-span, incomplete-trace and source-provenance comparison."""
+import bisect
+import argparse
+import difflib
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tarfile
+import tempfile
+
+from e25_soak_harness import digest,load,read,ROOT,EVIDENCE,DATA
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def cell(path):
+    return read(path)['cells']['650']
+
+
+def cpu(row):
+    phase = row['processes']['phases']['steady']
+    roles = {name:value['cores'] for name,value in phase['fixture'].items()}
+    return dict(seconds=phase['seconds'],method=row['processes']['method'],roles=roles,
+        bots=sum(value for name,value in roles.items() if name.startswith('bots')),
+        shims=sum(value for name,value in roles.items() if 'shim' in name),
+        proxy=roles.get('proxy'),tiles={name:roles.get('tile-'+name) for name in 'abcd'},
+        server=phase['server_cores'],reported_bot_cores=row.get('bot_cores'),reported_shim_cores=row.get('shim_cores'),
+        bot_drivers=len(row.get('bot_commands',[])),limiter=row.get('limiter_window'),
+        native_proxy=row.get('proxy'),noise_valid=row.get('noise_valid'),start_load=row.get('load_start'))
+
+
+def merged(intervals):
+    result = []
+    for left,right in sorted(intervals):
+        if result and left <= result[-1][1]:
+            result[-1][1] = max(result[-1][1],right)
+        else:
+            result.append([left,right])
+    return result
+
+
+def span_hit(row,intervals):
+    if row['decode_ns'] is None:
+        return None
+    index = bisect.bisect_right([item[0] for item in intervals],row['decode_ns'])-1
+    return index >= 0 and intervals[index][1] >= row['send_ns']
+
+
+def stop_split(summary):
+    helper = load('e25_r2_overlap',ROOT/'scripts/e25-stop-overlap')
+    timing = read(ROOT/summary['latency']['path'])
+    trace = read(ROOT/summary['stop_brackets']['path'])
+    if trace['dropped']:
+        raise ValueError('STOP events dropped')
+    periods,coverage = helper.pauses(trace['events'])
+    server = merged([row['inner'] for row in periods if row['role'] in ['proxy','store'] or row['role'].startswith(('tile-','sidecar-'))])
+    bots = merged([row['inner'] for row in periods if row['role'].startswith('bots')])
+    tail = [row for row in timing['rows'] if row['delay_ns'] is None or row['delay_ns'] >= timing['overall']['p95_ns']]
+    counts = dict(server_only=0,bots_only=0,both=0,neither=0,unknown=0)
+    for row in tail:
+        a,b = span_hit(row,server),span_hit(row,bots)
+        key = 'unknown' if a is None or b is None else 'both' if a and b else 'server_only' if a else 'bots_only' if b else 'neither'
+        counts[key] += 1
+    return dict(tail_sends=len(tail),p95_ns=timing['overall']['p95_ns'],counts=counts,
+        server_any=counts['server_only']+counts['both'],bots_any=counts['bots_only']+counts['both'],coverage=coverage,
+        interpretation='inner signal-call span association, not causal delay attribution')
+
+
+def trace_audit(folder):
+    result = []
+    for path in sorted((folder/'leases').glob('*-lease.jsonl')):
+        records,stops,last = 0,[],None
+        with path.open('rb') as source:
+            for index,line in enumerate(source,1):
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    def field(name):
+                        found = re.search(rb'"'+name.encode()+rb'"\s*:\s*(\d+)',line)
+                        return int(found[1]) if found else None
+                    event = re.search(rb'"event"\s*:\s*"([^"\\]*)"',line)
+                    partial = dict(line=index,bytes=len(line),sha256=sha(line),at_ns=field('at_ns'),wall_ns=field('wall_ns'),
+                        event=event[1].decode() if event else None,last_complete_at_ns=last.get('at_ns') if last else None,
+                        last_complete_wall_ns=last.get('wall_ns') if last else None)
+                    result.append(dict(file=digest(path),complete_records=records,observed_authority_events=stops,partial=partial,
+                        qualification='incomplete authority trace; no qualification inferred from absent complete stop records'))
+                    break
+                records += 1
+                if row.get('event') in ['authority-stop','clock-anomaly']:
+                    stops.append(dict(event=row['event'],at_ns=row.get('at_ns'),wall_ns=row.get('wall_ns')))
+                last = row
+            else:
+                result.append(dict(file=digest(path),complete_records=records,observed_authority_events=stops,partial=None))
+    return result
+
+
+def tar_hashes(path):
+    result = {}
+    with tarfile.open(path) as archive:
+        for member in archive:
+            if member.isfile() or member.islnk() or member.issym():
+                result[member.name] = sha(archive.extractfile(member).read())
+    return result
+
+
+def patch_paths(path):
+    return re.findall(r'^diff --git a/.* b/(.+)$',path.read_text(),re.M)
+
+
+def stamp_sources(record,base):
+    archive = ROOT/record['selected_source_archive']['path']
+    if sha(archive.read_bytes()) != record['selected_source_archive']['sha256']:
+        raise ValueError('selected source archive changed')
+    actual = tar_hashes(archive)
+    identity = read(base/'identity.json')
+    expected = dict(identity['files'])
+    patch = ROOT/record['patch']['path']
+    if sha(patch.read_bytes()) != record['patch']['sha256']:
+        raise ValueError('compiled stamp patch changed')
+    content = {}
+    with tempfile.TemporaryDirectory(prefix='e25-r2-source-check-',dir=EVIDENCE) as folder:
+        index = Path(folder)/'index'
+        shutil.copy2(base/'index',index)
+        env = dict(os.environ,GIT_INDEX_FILE=str(index),GIT_OPTIONAL_LOCKS='0')
+        def git(*args):
+            return subprocess.check_output(['git','--git-dir',str(ROOT/'.local/src/horizon/.git'),*args],cwd=ROOT,env=env)
+        git('apply','--cached',str(patch))
+        for name in set(patch_paths(patch)) | {record['source_path_only_change']['path']}:
+            content[name] = git('show',':'+name)
+            expected[name] = sha(content[name])
+    post_archive = []
+    path_change = record['source_path_only_change']
+    for name,value in record['compiled_files'].items():
+        if actual.get(name) != value:
+            post_archive.append(name)
+        if name == path_change['path']:
+            physical = content[name].replace(path_change['original'].encode(),path_change['relocated'].encode())
+            if sha(physical) != value:
+                raise ValueError('compiled dependency relocation is not the declared path-only change')
+            actual[name] = sha(content[name])
+        else:
+            actual[name] = value
+    mismatches = [name for name in sorted(set(actual)|set(expected)) if actual.get(name) != expected.get(name)]
+    return dict(source_archive=record['selected_source_archive'],base_identity=digest(base/'identity.json'),
+        stamp_patch=record['patch'],files=len(actual),post_archive_changed_files=post_archive,
+        reconstructed_compiled_source_matches=not mismatches,mismatches=mismatches,
+        compiler=record.get('rustc'),settings=record.get('settings'),declared_path_relocation=path_change),actual,identity['files']
+
+
+def differences(left,right):
+    return [name for name in sorted(set(left)|set(right)) if left.get(name) != right.get(name)]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',default='e25-r2-latency-jump-readback-r1')
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+        raise ValueError('fresh simple readback name required')
+    target = DATA/(args.name+'.json')
+    if target.exists():
+        raise RuntimeError('readback exists')
+    paths = {
+        'r1-via-d1':DATA/'e25-latency-r1-via-d1-raw.json.gz',
+        'r1-via-brackets-d2':DATA/'e25-latency-r1-via-brackets-d2-raw.json.gz',
+        'r2-reactor-p1':DATA/'e25-latency-r2-scheduler2-p1-reactor1-raw.json.gz',
+        'r2-scheduler-p1-incomplete':DATA/'e25-latency-r2-scheduler2-p1-candidate-raw.json.gz',
+        'reviewer-r2-frontier-r1':ROOT/'docs/experiments/data/E20/reviewer-r2-650-r1.json.gz',
+        'reviewer-r2-frontier-r2':ROOT/'docs/experiments/data/E20/reviewer-r2-650-r2.json.gz'}
+    result = dict(kind='E25-readonly-r2-latency-jump',runner_sha256=sha(Path(__file__).read_bytes()),
+        inputs={name:digest(path) for name,path in paths.items()},
+        cpu={name:cpu(cell(path)) for name,path in paths.items()},stop_span_split={})
+    for name,file in [('r1-bracketed-d2','e25-latency-r1-via-brackets-d2-summary.json'),
+        ('r2-reactor-p1','e25-latency-r2-scheduler2-p1-reactor1-summary.json')]:
+        result['stop_span_split'][name] = stop_split(read(DATA/file))
+    result['r1_via_d1_stop_spans']='not recoverable: totals retained, no per-signal brackets captured'
+    result['scheduler_trace_audit']=trace_audit(EVIDENCE/'e25-latency-r2-scheduler2-p1-candidate')
+    timing = DATA/'e25-latency-r2-scheduler2-p1-candidate-latency.json.gz'
+    result['scheduler_timing_readback']=dict(input=digest(timing),overall=read(timing)['overall'],tiles=read(timing)['tiles'],
+        qualification='timing readback only; incomplete authority trace prevents qualification and memory entry')
+    old = read(ROOT/'.local/bin/meridian-e25/e25-stamps-r2-release/build.json')
+    new = read(DATA/'e25-stamps-lease-r2-b2-build.json')
+    a,old_map,old_base = stamp_sources(old,EVIDENCE/'horizon-h13-base')
+    b,new_map,new_base = stamp_sources(new,EVIDENCE/'horizon-lease-r2-base')
+    declared = set(patch_paths(ROOT/'patches/horizon-13-lease-raw-clock.patch')) | set(patch_paths(ROOT/'patches/horizon-13-lease-renewal-r2.patch'))
+    base_changed = differences(old_base,new_base)
+    result['stamp_source_diff']=dict(r1=a,r2=b,compiled_changed_files=differences(old_map,new_map),
+        h13_base_changed_files=base_changed,base_changes_outside_declared_h13_files=sorted(set(base_changed)-declared),
+        stamp_patch_revision_diff=list(difflib.unified_diff((ROOT/old['patch']['path']).read_text().splitlines(),
+            (ROOT/new['patch']['path']).read_text().splitlines(),fromfile='r1-compiled-stamps',tofile='r2-compiled-stamps')),
+        compiler_equal=old.get('rustc') == new.get('rustc'),settings_equal=old.get('settings') == new.get('settings'))
+    old_internal = ROOT/old['internal_source_archive']['path']
+    new_internal = ROOT/new['internal_source_archive']['path']
+    result['internal_source_diff']=dict(r1=old['internal_source_archive'],r2=new['internal_source_archive'],
+        changed_files=differences(tar_hashes(old_internal),tar_hashes(new_internal)))
+    result['new_measurements_started']=False
+    target.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)),sha256=sha(target.read_bytes()),
+        cpu={name:{key:row[key] for key in ['bots','shims','proxy','tiles','server']} for name,row in result['cpu'].items()},
+        stop_span_split=result['stop_span_split'],source_diff=result['stamp_source_diff']),indent=2),flush=True)
+
+
+if __name__ == '__main__':
+    main()

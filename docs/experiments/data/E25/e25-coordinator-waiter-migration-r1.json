@@ -1,0 +1,25 @@
+{
+  "kind": "E25-build-waiter-coordinator-migration",
+  "reason": "the reviewer replaced the coordinator and requested old unregistered shell waiters be restarted",
+  "old_waiters": [
+    {
+      "attempt": "e25-stamps-lease-r2-b1",
+      "cargo_started": false,
+      "verified_children": "sleep only",
+      "source_restored_after_cancellation": true,
+      "replacement_attempt": "e25-stamps-lease-r2-b2"
+    },
+    {
+      "attempt": "e25-scheduler2-reference-b1",
+      "cargo_started": false,
+      "verified_children": "sleep only",
+      "source_restored_after_cancellation": true,
+      "replacement_attempt": "e25-scheduler2-reference-b2"
+    }
+  ],
+  "cargo_arguments_unchanged": true,
+  "failed_prestart_build_records_retained": true,
+  "new_attempt_names_avoid_overwriting_evidence": true,
+  "uncapped_quiet_waiter_unchanged": true,
+  "measurement_interrupted": false
+}

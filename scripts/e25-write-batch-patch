@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Generate the small writev64 descriptor delta against frozen scheduler-2, off-checkout."""
+import difflib
+import hashlib
+import os
+from pathlib import Path
+import subprocess
+
+ROOT=Path(__file__).resolve().parent.parent
+PATCH=ROOT/'patches/meridian-11-writev64-r1.patch'
+ENV=dict(os.environ,GIT_INDEX_FILE=str(ROOT/'.local/evidence/E25/meridian-scheduler2-base/index'),GIT_OPTIONAL_LOCKS='0')
+
+
+def git(*args):return subprocess.check_output(['git','--git-dir',str(ROOT/'.local/src/meridian/.git'),*args],cwd=ROOT,env=ENV)
+
+
+def main():
+    if PATCH.exists():raise RuntimeError('write-batch patch exists')
+    io='crates/meridian-net/src/io_pool.rs';tests='crates/meridian-net/src/io_pool/tests.rs'
+    before={name:git('show',':'+name).decode() for name in [io,tests]};after=dict(before)
+    after[io]=after[io].replace('const WAKE: Token = Token(0);',
+        '#[cfg(target_os = "macos")]\nconst WRITE_SLICES: usize = 64;\n#[cfg(not(target_os = "macos"))]\nconst WRITE_SLICES: usize = 16;\nconst WAKE: Token = Token(0);')
+    start=after[io].index('            let mut remaining = TURN_BYTES - bytes;')
+    end=after[io].index('            bytes += count;',start)
+    after[io]=after[io][:start]+'''            let count = {
+                let mut slices: [IoSlice<'_>; WRITE_SLICES] =
+                    std::array::from_fn(|_| IoSlice::new(&[]));
+                let used = write_slices(&queue.chunks, TURN_BYTES - bytes, &mut slices);
+                match self.stream.write_vectored(&slices[..used]) {
+                    Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                    Ok(count) => count,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(true),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
+                }
+            };
+'''+after[io][end:]
+    marker='impl Drop for Entry {'
+    helper='''/// Describe a FIFO byte-limited prefix without allocating a descriptor vector.
+fn write_slices<'a>(
+    chunks: &'a VecDeque<Chunk>,
+    mut remaining: usize,
+    slices: &mut [IoSlice<'a>],
+) -> usize {
+    let mut used = 0;
+    for chunk in chunks.iter().take(slices.len()) {
+        if remaining == 0 {
+            break;
+        }
+        let length = remaining.min(chunk.bytes.len() - chunk.offset);
+        slices[used] = IoSlice::new(&chunk.bytes[chunk.offset..chunk.offset + length]);
+        remaining -= length;
+        used += 1;
+    }
+    used
+}
+
+'''
+    if after[io].count(marker)!=1:raise RuntimeError('entry destructor is not unique')
+    after[io]=after[io].replace(marker,helper+marker)
+    after[tests]+='''
+#[test]
+fn write_batches_keep_fifo_order_across_the_descriptor_cap() {
+    let chunks: VecDeque<_> = (0..80)
+        .map(|index| Chunk { bytes: vec![index as u8; 5], offset: index % 2, completed: None })
+        .collect();
+    let mut slices: [IoSlice<'_>; WRITE_SLICES] = std::array::from_fn(|_| IoSlice::new(&[]));
+    let used = write_slices(&chunks, TURN_BYTES, &mut slices);
+    assert_eq!(used, WRITE_SLICES.min(80));
+    let actual: Vec<_> = slices[..used].iter().flat_map(|slice| slice.iter().copied()).collect();
+    let expected: Vec<_> = chunks.iter().take(used).flat_map(|chunk| chunk.bytes[chunk.offset..].iter().copied()).collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn write_batches_bound_bytes_and_keep_partial_chunk_offsets() {
+    let chunks = VecDeque::from([
+        Chunk { bytes: vec![1, 2, 3, 4], offset: 2, completed: None },
+        Chunk { bytes: vec![5, 6, 7], offset: 1, completed: None },
+    ]);
+    let mut slices: [IoSlice<'_>; WRITE_SLICES] = std::array::from_fn(|_| IoSlice::new(&[]));
+    let used = write_slices(&chunks, 3, &mut slices);
+    assert_eq!(used, 2);
+    let actual: Vec<_> = slices[..used].iter().flat_map(|slice| slice.iter().copied()).collect();
+    assert_eq!(actual, [3, 4, 6]);
+}
+'''
+    parts=[]
+    for name in [io,tests]:
+        # Format generated candidate source through stdin. No workspace file is written.
+        formatted=subprocess.check_output(['rustfmt','--edition','2024','--emit','stdout','--config','skip_children=true'],input=after[name].encode()).decode()
+        parts.append(f'diff --git a/{name} b/{name}\n')
+        parts.extend(difflib.unified_diff(before[name].splitlines(keepends=True),formatted.splitlines(keepends=True),fromfile='a/'+name,tofile='b/'+name))
+    PATCH.write_text(''.join(parts))
+    git('apply','--cached','--check',str(PATCH))
+    print(hashlib.sha256(PATCH.read_bytes()).hexdigest(),str(PATCH.relative_to(ROOT)))
+
+
+if __name__=='__main__':main()

@@ -1,0 +1,133 @@
+{
+  "kind": "E25-approved-memory-first-plan-r3",
+  "status": "approved-control-ready-candidate-entry-to-be-checked",
+  "fixture": ".local/bin/goliath-e24/lease-fixed-r2",
+  "fixture_final_sha256": "4914d701106683002a178cfbbf45248de2e95f44f6f269766853123e31dd5af0",
+  "fixture_engine_sha256": "53b0918027a700d9c2684936beb218c922b229401b7a3344805d65831d0adb9f",
+  "fixture_store_sha256": "9636fa6d8089b071be241437e79eb2942a07dc756039b394e73cc8f705e26d0e",
+  "external_soak_evidence": {
+    "path": "docs/experiments/data/E24/soak-fixed-r2-result.json",
+    "sha256": "786ef62defccc20cd921c5e6093cba7929ae244f3cad47a78d26f9040f084ede",
+    "proxy_sha256": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+    "proxy_m5_mib": 575.703125,
+    "proxy_m30_mib": 670.40625,
+    "proxy_growth_fraction": 0.16449993214818837,
+    "proxy_was_judged_by_e24": false,
+    "not_a_matched_e25_control": true,
+    "store_fill_fragile": true,
+    "store_fill_lead_before_minute5_seconds": 31.889066416
+  },
+  "order": [
+    {
+      "name": "scheduler-2",
+      "delta": "reactor-1 plus the two existing meridian-07 patches only",
+      "reason": "r1 diagnostic reduced proxy cores by about 0.09 and peak threads from 1331 to 682; removes terrain-timer stacks and possible thread-local allocator residency",
+      "limit": "existing r1 overall P95 5.121833 ms is over the strict line and is not qualifying; no RSS improvement inferred from thread count"
+    },
+    {
+      "name": "scheduler-2-writev64",
+      "delta": "scheduler-2 plus patches/meridian-11-writev64-r1.patch",
+      "patch_sha256": "cce1dc040275ddbaa80dee83b0af07360ffc2802508640b895e7eb6ad949382d",
+      "reason": "profile attributes 11.46 percent of Running CPU to allocations/copies and 39.88 percent to socket calls; removes one descriptor Vec per write_vectored attempt and increases macOS descriptor fanout from 16 to 64",
+      "limit": "not all per-packet allocation; payload/frame buffers and the read/write ready-set drain Vec allocations remain"
+    },
+    {
+      "name": "zone16m60-r1",
+      "delta": "one separately named patch on the latency-qualified scheduler base, with or without writev64 as selected before the cell",
+      "reason": "native E24 malloc residency grew with RSS while allocated bytes and stack residency fell; directly tests allocator free-page return if the earlier candidates leave growth",
+      "limit": "synchronous allocator work and allocator locks may hurt the tail; goal bytes are best effort, not a duration or byte-work cap",
+      "call": "malloc_zone_pressure_relief(NULL, 16777216)",
+      "period_seconds": 60,
+      "first_call_seconds_after_waker_start": 60,
+      "existing_thread": "meridian-proxy serve::waker accept-waker loop",
+      "no_new_thread_or_wakeup": true,
+      "catch_up_calls": false,
+      "telemetry": [
+        "call count",
+        "reported released bytes",
+        "elapsed call time",
+        "maximum call time"
+      ],
+      "public_api": "https://github.com/apple-oss-distributions/libmalloc/blob/main/_autodocs/api-reference/zone-creation-registration.md"
+    }
+  ],
+  "latency_screen": {
+    "players": 650,
+    "bundle": "r2-based stamps with every gate passing, including reader ordering",
+    "repeats_per_candidate": 2,
+    "strict_overall_p95_ms_less_than": 5,
+    "report": [
+      "all four tile P95 values",
+      "worst tile P95 beside overall",
+      "proxy CPU",
+      "proxy threads",
+      "STOP brackets",
+      "internal latency histograms",
+      "forwarding counts",
+      "RSS series"
+    ],
+    "unmatched_packet_latency": "infinity",
+    "trim_tails": false,
+    "change_limiter_or_d9_rules": false,
+    "final_qualification_requires_both_repeats_below_strict_line": true,
+    "memory_entry_requires_strict_five_ms_pass": false,
+    "memory_entry_rule": "strict D9 via row within observed reactor-1 range 5.1 to 11.2 ms, proxy CPU no higher than reactor-1",
+    "memory_entry_reference": "reactor-1, not scheduler-2",
+    "zone_variant_must_include_scheduled_calls_in_each_latency_cell": true,
+    "memory_entry_requires_same_session_comparison": false,
+    "observed_reactor_range_ns": [
+      5100000,
+      11200000
+    ],
+    "reference_proxy_cores": 1.1197170604133657,
+    "final_strict_latency_pass_required_for_memory_winner_selection": false,
+    "final_proxy_rows": {
+      "strict_d9_via": 2,
+      "server_uncapped_diagnostic": 1,
+      "report_failures_honestly": true
+    }
+  },
+  "memory_pair": {
+    "control": "fresh provenance-matched reactor-1 build with the same compiler, command targets, internal dependency archive and profile settings as the selected candidate",
+    "control_first": true,
+    "approved_run_order": [
+      "matched rebuilt reactor-1 control",
+      "scheduler-2",
+      "zone pressure relief on the better memory base",
+      "writev only if scheduler-2 and zone relief have not passed"
+    ],
+    "measurement_seconds_per_cell": 1800,
+    "players": 650,
+    "cargo_items": 65,
+    "harness": "unchanged E24 r2 soak harness with identical minute owner audits, sampling, tick drains and endpoint recovery checks",
+    "planning_mutation_rate": 72,
+    "tile_store_and_other_binary_identities_match": true,
+    "proxy_only_binary_delta": true,
+    "timestamp_traces_for_memory": false,
+    "secret_or_derived_signature_in_published_data": false,
+    "strict_rss_growth_m5_to_m30_less_than_fraction": 0.1,
+    "rss_endpoint_selection": "nearest minute-5 sample and actual full-run endpoint, no endpoint-triggered purge",
+    "also_report_rss_cycle_peaks": true,
+    "authority_event_voids_entire_pair": true,
+    "silent_retry": false,
+    "start_load_maximum": 4,
+    "outside_process_average_core_maximum": 0.5,
+    "release_between_cells_for_waiting_e24": true,
+    "hold_window_while_building_or_analysing": false
+  },
+  "final_binary_must_pass_both_memory_and_latency": false,
+  "mimalloc_disqualified": true,
+  "original_growth_full_attribution": "open; a passing fix does not fully attribute the original growth",
+  "reviewer_reproduction_required": true,
+  "supersedes": {
+    "path": "docs/experiments/data/E25/e25-memory-next-plan-r2.json",
+    "sha256": "cb269aecca7bc6f519351be9f60534aae0aeb17ff5afc78e7dd5739f56bc9156"
+  },
+  "latency_tuning": "stopped by the reviewer; M4 latency is not met under D9",
+  "final_selection": "memory winner; strict latency results remain reported independently",
+  "zone_policy_exception": {
+    "patch": "patches/meridian-12-zone-pressure-r2.patch",
+    "sha256": "dd461819b5d1df76a4af718e8bdbfb17bd2842fbb9c3f717c30369a69cfc018b",
+    "reviewer_approved": true
+  }
+}

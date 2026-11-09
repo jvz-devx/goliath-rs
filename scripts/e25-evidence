@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""Recompute E24's bounded native residency attribution from retained inputs."""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def patch_proof(target):
+    source = ROOT / '.local/src/meridian'
+    base = ROOT / '.local/bin/meridian-e18/reactor-1/candidate.json'
+    built = ROOT / 'docs/experiments/data/E25/e25-mimalloc-default-r2-build.json'
+    patch = ROOT / 'patches/meridian-10-mimalloc.patch'
+    manifest = json.loads(built.read_text())
+    index = Path(subprocess.check_output(['git', 'rev-parse', '--path-format=absolute', '--git-path', 'index'], cwd=source, text=True).strip())
+    original_index = index.read_bytes()
+    with tempfile.TemporaryDirectory(prefix='e25-patch-proof-', dir=ROOT / '.local/evidence/E25') as folder:
+        temporary_index = Path(folder) / 'index'
+        shutil.copy2(ROOT / '.local/evidence/E25/e25-preparation-r1-frozen/index', temporary_index)
+        environment = dict(os.environ, GIT_INDEX_FILE=str(temporary_index))
+        subprocess.run(['git', 'apply', '--cached', '--check', str(patch)], cwd=source, env=environment, check=True)
+        subprocess.run(['git', 'apply', '--cached', str(patch)], cwd=source, env=environment, check=True)
+        for name, expected in manifest['compiled_files'].items():
+            data = subprocess.check_output(['git', 'show', ':' + name], cwd=source, env=environment)
+            if name == 'crates/meridian-proxy/Cargo.toml':
+                relocation = manifest['source_path_only_change']
+                data = data.replace(relocation['original'].encode(), relocation['relocated'].encode())
+            if hashlib.sha256(data).hexdigest() != expected:
+                raise RuntimeError('applied patch differs from compiled input: ' + name)
+    if original_index != index.read_bytes():
+        raise RuntimeError('real index changed during proof')
+    result = dict(kind='E25-clean-patch-proof', apply_check='passed', compiled_source_equality='passed',
+        checked_files=len(manifest['compiled_files']), real_index_unchanged=True, checkout_written=False,
+        inputs={str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in [base, built, patch]})
+    target.write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)), sha256=hashlib.sha256(target.read_bytes()).hexdigest(), checked_files=result['checked_files'])), flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--patch', action='store_true')
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+', args.name):
+        raise ValueError('fresh e25- or repro- name required')
+    target = ROOT / 'docs/experiments/data/E25' / (args.name + '.json')
+    if target.exists():
+        raise RuntimeError('readback already exists')
+    if args.patch:
+        patch_proof(target)
+        return
+    path = ROOT / 'scripts/e24-vm-analyse'
+    loader = importlib.machinery.SourceFileLoader('e25_native_parser', str(path))
+    spec = importlib.util.spec_from_loader('e25_native_parser', loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    memory_path = ROOT / 'docs/experiments/data/E24/native-650-r1-native-memory.json'
+    threads_path = ROOT / 'docs/experiments/data/E24/native-650-r1-threads.json'
+    memory = json.loads(memory_path.read_text())
+    observed = [module.parse(ROOT / row['path']) for row in memory['snapshots']]
+    if observed != memory['snapshots']:
+        raise RuntimeError('native inputs differ from published E24 readback')
+    first, last = observed[0], observed[-1]
+    deltas = {group: {key: last[group][key] - first[group][key] for key in first[group]} for group in ['malloc', 'stack']}
+    if deltas != memory['deltas']:
+        raise RuntimeError('native delta arithmetic differs')
+    points = json.loads(threads_path.read_text())['points']
+    result = dict(kind='E25-independent-E24-native-readback', inputs={
+        str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in [memory_path, threads_path, path]}, snapshots=observed, deltas=deltas,
+        rss_delta_mib=points[-1]['rss_mib'] - points[0]['rss_mib'],
+        native_threads=[min(p['native_task_threads'] for p in points), max(p['native_task_threads'] for p in points)],
+        stack_regions=[min(p['stack_regions'] for p in points), max(p['stack_regions'] for p in points)],
+        interpretation='bounded interval supports allocator residency, not growing live allocations or threads',
+        original_thirty_minute_attribution='open; not established by this control or a later fix passing',
+        capacity_qualified=False)
+    target.write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)), sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+        rss_delta_mib=result['rss_delta_mib'], malloc_resident_delta_mib=deltas['malloc']['resident_mib'])), flush=True)
+
+
+if __name__ == '__main__':
+    main()

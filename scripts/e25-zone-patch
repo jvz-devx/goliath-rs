@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Prepare the low-frequency macOS relief patch against a frozen private index."""
+import difflib
+import hashlib
+import os
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+PATCH = ROOT / 'patches/meridian-12-zone-pressure-r1.patch'
+ENV = dict(os.environ, GIT_INDEX_FILE=str(ROOT / '.local/evidence/E25/meridian-scheduler2-base/index'), GIT_OPTIONAL_LOCKS='0')
+
+
+def git(*args):
+    return subprocess.check_output(['git', '--git-dir', str(ROOT / '.local/src/meridian/.git'), *args], cwd=ROOT, env=ENV)
+
+
+def main():
+    if PATCH.exists():
+        raise RuntimeError('relief patch already exists')
+    main_file = 'crates/meridian-proxy/src/main.rs'
+    serve = 'crates/meridian-proxy/src/serve.rs'
+    pressure = 'crates/meridian-proxy/src/pressure.rs'
+    before = {name: git('show', ':' + name).decode() for name in [main_file, serve]}
+    before[pressure] = ''
+    after = dict(before)
+    marker = 'mod permissions;\n'
+    if after[main_file].count(marker) != 1:
+        raise RuntimeError('module anchor differs')
+    after[main_file] = after[main_file].replace(marker, marker + '#[cfg(target_os = "macos")]\nmod pressure;\n')
+    marker = '''        .spawn(move || {
+            while !proxy.stopping() && !ended.load(Ordering::Relaxed) {
+                thread::sleep(POLL);
+            }
+'''
+    replacement = '''        .spawn(move || {
+            #[cfg(target_os = "macos")]
+            let mut pressure = crate::pressure::PressureRelief::new(Instant::now());
+            while !proxy.stopping() && !ended.load(Ordering::Relaxed) {
+                thread::sleep(POLL);
+                #[cfg(target_os = "macos")]
+                if !proxy.stopping() && !ended.load(Ordering::Relaxed) {
+                    pressure.tick();
+                }
+            }
+'''
+    if after[serve].count(marker) != 1:
+        raise RuntimeError('waker loop anchor differs')
+    after[serve] = after[serve].replace(marker, replacement)
+    after[pressure] = '''//! Low-frequency allocator relief driven only by the existing accept-waker thread.
+use std::{ffi::c_void, time::{Duration, Instant}};
+
+const PERIOD: Duration = Duration::from_secs(60);
+const GOAL: usize = 16 * 1024 * 1024;
+
+unsafe extern "C" {
+    fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
+}
+
+pub(crate) struct PressureRelief {
+    next: Instant,
+    calls: u64,
+    released: usize,
+    maximum: Duration,
+}
+
+impl PressureRelief {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self { next: now + PERIOD, calls: 0, released: 0, maximum: Duration::ZERO }
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        now >= self.next
+    }
+
+    fn completed(&mut self, finished: Instant, released: usize, elapsed: Duration) {
+        // Schedule after completion, never replay missed periods in a burst.
+        self.next = finished + PERIOD;
+        self.calls = self.calls.saturating_add(1);
+        self.released = self.released.saturating_add(released);
+        self.maximum = self.maximum.max(elapsed);
+    }
+
+    pub(crate) fn tick(&mut self) {
+        let started = Instant::now();
+        if !self.due(started) {
+            return;
+        }
+        // SAFETY: Apple's API explicitly accepts a null zone to examine all zones.
+        // GOAL is a best-effort byte target, not a memory address or a work bound.
+        let released = unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), GOAL) };
+        let finished = Instant::now();
+        let elapsed = finished.saturating_duration_since(started);
+        self.completed(finished, released, elapsed);
+        crate::log::info!(
+            "allocator-relief calls={} goal_bytes={} released_bytes={} total_released_bytes={} elapsed_us={} maximum_us={}",
+            self.calls, GOAL, released, self.released, elapsed.as_micros(), self.maximum.as_micros()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_call_waits_a_full_period() {
+        let start = Instant::now();
+        let relief = PressureRelief::new(start);
+        assert!(!relief.due(start));
+        assert!(!relief.due(start + PERIOD - Duration::from_nanos(1)));
+        assert!(relief.due(start + PERIOD));
+        assert_eq!(GOAL, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn completion_sets_the_next_deadline_without_catch_up() {
+        let start = Instant::now();
+        let mut relief = PressureRelief::new(start);
+        let finished = start + Duration::from_secs(181);
+        relief.completed(finished, 4096, Duration::from_millis(2));
+        assert_eq!(relief.next, finished + PERIOD);
+        assert!(!relief.due(finished));
+        assert!(!relief.due(finished + PERIOD - Duration::from_nanos(1)));
+        assert!(relief.due(finished + PERIOD));
+        assert_eq!(relief.calls, 1);
+        assert_eq!(relief.released, 4096);
+        assert_eq!(relief.maximum, Duration::from_millis(2));
+        relief.completed(finished + PERIOD, 8192, Duration::from_millis(1));
+        assert_eq!(relief.calls, 2);
+        assert_eq!(relief.released, 12288);
+        assert_eq!(relief.maximum, Duration::from_millis(2));
+    }
+}
+'''
+    parts = []
+    for name in [main_file, serve, pressure]:
+        formatted = subprocess.check_output(['rustfmt', '--edition', '2024', '--emit', 'stdout', '--config', 'skip_children=true'], input=after[name].encode()).decode()
+        parts.append(f'diff --git a/{name} b/{name}\n')
+        if not before[name]:
+            parts.append('new file mode 100644\n')
+        parts.extend(difflib.unified_diff(before[name].splitlines(keepends=True), formatted.splitlines(keepends=True), fromfile='a/' + name if before[name] else '/dev/null', tofile='b/' + name))
+    text = ''.join(parts)
+    subprocess.run(['git', '--git-dir', str(ROOT / '.local/src/meridian/.git'), 'apply', '--cached', '--check', '-'], cwd=ROOT, env=ENV, input=text.encode(), check=True)
+    PATCH.write_text(text)
+    print(hashlib.sha256(PATCH.read_bytes()).hexdigest(), str(PATCH.relative_to(ROOT)))
+
+
+if __name__ == '__main__':
+    main()

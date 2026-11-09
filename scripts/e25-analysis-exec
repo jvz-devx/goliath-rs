@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Limit only an owned read-only analysis child, never a fixture or build."""
+import argparse
+import os
+import subprocess
+
+from e11_support import CpuBudget
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command',nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    if not args.command:
+        raise ValueError('analysis command required')
+    child = subprocess.Popen(args.command)
+    print('E25_ANALYSIS_PROCESS '+str(child.pid),flush=True)
+    budget = CpuBudget([child.pid],.25).start()
+    try:
+        status = child.wait()
+    finally:
+        budget.stop()
+    raise SystemExit(status)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root { --viz-series-1: var(--chart-1); --viz-series-2: var(--chart-2); }
+html, body { margin: 0; background: transparent; color: var(--foreground); font-family: var(--font-sans); }
+#e25-timings { width: 100%; }
+#e25-timings h3 { font-weight: 500; margin: 0 0 12px; }
+#e25-timings .legend { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+#e25-timings .legend span { display: inline-flex; align-items: center; gap: 7px; }
+#e25-timings .swatch { display: inline-block; width: 12px; height: 12px; }
+#e25-timings svg { display: block; width: 100%; height: 342px; }
+#e25-timings svg text { fill: var(--foreground); font-size: 12px; }
+#e25-timings .note { color: var(--muted-foreground); margin: 10px 0 0; }
+</style>
+</head>
+<body>
+<section id="e25-timings" aria-label="Diagnostic movement latency on lease-fixed-r1">
+<h3>No-hop movement P95</h3>
+<div class="legend">
+<span><i class="swatch" style="background:var(--viz-series-1)" aria-hidden="true"></i>Via proxy, 650 sessions</span>
+<span><i class="swatch" style="background:var(--viz-series-2)" aria-hidden="true"></i>Direct reference, 8 witnesses</span>
+</div>
+<svg role="img" aria-label="Per-tile and overall diagnostic P95, with a strict five millisecond reference line"></svg>
+<p class="note">Diagnostic only. Lease-fixed-r1. Reader-order regression did not run. No M4 qualification.</p>
+<p class="note">All 9,616 via and 9,624 direct witness sends matched. Separate distributions, no quantile subtraction.</p>
+</section>
+<script>
+(() => {
+  const root = document.getElementById('e25-timings');
+  const svg = root.querySelector('svg');
+  const ns = 'http://www.w3.org/2000/svg';
+  const rows = [
+    ['a',4.784125,2.645458],
+    ['b',5.002000,2.153750],
+    ['c',5.624708,1.226334],
+    ['d',5.205500,0.815125],
+    ['Overall',5.135417,2.148375]
+  ];
+  function add(tag,attrs,text) {
+    const element = document.createElementNS(ns,tag);
+    Object.entries(attrs).forEach(([key,value]) => element.setAttribute(key,value));
+    if (text !== undefined) element.textContent = text;
+    svg.appendChild(element);
+    return element;
+  }
+  function draw() {
+    const width = Math.max(280,root.clientWidth);
+    const left=64, right=64, top=32, bottom=292;
+    const domain = Math.max(5,...rows.flatMap(row => row.slice(1)))*1.16;
+    const x = value => left+value/domain*(width-left-right);
+    svg.replaceChildren();
+    svg.setAttribute('viewBox',`0 0 ${width} 342`);
+    add('title',{},'Diagnostic P95 by tile and overall');
+    add('desc',{},'Via-proxy overall P95 is 5.135417 milliseconds; direct reference is 2.148375. These r1-based rows do not qualify M4.');
+    add('rect',{'data-chart-frame':'',x:left,y:top,width:width-left-right,height:bottom-top,fill:'none',stroke:'var(--border)'});
+    add('text',{'class':'axis-title','data-axis':'y',x:5,y:21},'Tile');
+    const ticks = width<440 ? [0,2,4,6] : [0,1,2,3,4,5,6];
+    ticks.filter(value => value<=domain).forEach(value => {
+      add('line',{x1:x(value),x2:x(value),y1:bottom,y2:bottom+4,stroke:'var(--border)'});
+      add('text',{x:x(value),y:bottom+19,'text-anchor':'middle'},String(value));
+    });
+    add('line',{x1:x(5),x2:x(5),y1:top,y2:bottom,stroke:'var(--foreground)','stroke-dasharray':'4 4'});
+    add('text',{x:x(5),y:21,'text-anchor':'end'},'Strict <5 ms');
+    rows.forEach(([name,via,direct],index) => {
+      const y=46+index*48;
+      add('text',{x:5,y:y+19},name);
+      [via,direct].forEach((value,series) => {
+        const barY=y+series*17;
+        add('rect',{x:left,y:barY,width:x(value)-left,height:12,fill:`var(--viz-series-${series+1})`,
+          'aria-label':`${name}, ${series?'direct reference':'via proxy'}, ${value.toFixed(6)} milliseconds`});
+        add('text',{x:x(value)+6,y:barY+10},value.toFixed(3));
+      });
+    });
+    add('text',{'class':'axis-title','data-axis':'x',x:left+(width-left-right)/2,y:337,'text-anchor':'middle'},'Send to tile decode, P95 (ms)');
+  }
+  new ResizeObserver(draw).observe(root);
+  draw();
+})();
+</script>
+</body>
+</html>

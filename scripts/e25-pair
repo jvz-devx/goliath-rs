@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Run the matched long memory pair, yielding between cells to a waiting E24."""
+import argparse
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+from e14_snapshot_support import validate_snapshot, sha256
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def build_of(bundle):
+    candidate = json.loads((bundle / 'candidate.json').read_text())
+    return json.loads((ROOT / candidate['e25_proxy_build']['path']).read_text())
+
+
+def paired_inputs(control, candidate):
+    if control['kind'] != 'control' or candidate['kind'] != 'mimalloc':
+        raise RuntimeError('expected a rebuilt control and the default mimalloc candidate')
+    for key in ['rustc', 'cargo', 'build_settings', 'dependencies', 'frozen_stack']:
+        if control[key] != candidate[key]:
+            raise RuntimeError('paired build inputs differ: ' + key)
+    differences = {name for name, digest in control['compiled_files'].items() if candidate['compiled_files'].get(name) != digest}
+    expected = {'Cargo.lock', 'crates/meridian-proxy/Cargo.toml', 'crates/meridian-proxy/src/main.rs'}
+    if differences != expected or control['compiled_files'].keys() != candidate['compiled_files'].keys():
+        raise RuntimeError('build difference is not limited to the allocator delta')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--control', type=Path, required=True)
+    parser.add_argument('--candidate', type=Path, required=True)
+    parser.add_argument('--seconds', type=int, default=900, choices=[900, 1200])
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+', args.name):
+        raise ValueError('fresh e25- or repro- name required')
+    control, candidate = args.control.resolve(), args.candidate.resolve()
+    a, b = validate_snapshot(control)['binaries'], validate_snapshot(candidate)['binaries']
+    if {k: v for k, v in a.items() if k != 'meridian'} != {k: v for k, v in b.items() if k != 'meridian'}:
+        raise RuntimeError('nonproxy fixture executables differ')
+    if (control / 'horizon-bots').read_bytes() != (candidate / 'horizon-bots').read_bytes():
+        raise RuntimeError('bot binaries differ')
+    paired_inputs(build_of(control), build_of(candidate))
+    provenance = ROOT / 'docs/experiments/data/E25' / (args.name + '-plan.json')
+    if provenance.exists():
+        raise RuntimeError('pair plan already exists')
+    provenance.write_text(json.dumps(dict(kind='E25-matched-memory-plan', seconds_per_cell=args.seconds,
+        players=650, authority_closure_voids_pair=True, no_silent_rerun=True,
+        bundles={label: dict(path=str(bundle.relative_to(ROOT)),
+            binaries=validate_snapshot(bundle)['binaries'], bots_sha256=sha256(bundle / 'horizon-bots'),
+            manifests={name: sha256(bundle / name) for name in ['FINAL.json', 'canonical.json', 'candidate.json', 'manifest.json']})
+            for label, bundle in [('control', control), ('candidate', candidate)]}), indent=2) + '\n')
+    host = ROOT / '.local/bin/host-window'
+    try:
+        for label, bundle in [('control', control), ('candidate', candidate)]:
+            command = [sys.executable, '-B', str(ROOT / 'scripts/e25-memory'), '--name', args.name + '-' + label,
+                '--bins', str(bundle), '--seconds', str(args.seconds), '--host-released']
+            if label == 'control':
+                command.append('--keep-window-for-pair')
+            subprocess.run(command, cwd=ROOT, check=True)
+    finally:
+        status = subprocess.check_output([host, 'status'], text=True)
+        if any(line.startswith('window: E25 ') for line in status.splitlines()):
+            subprocess.run([host, 'release', 'E25'], check=True)
+    subprocess.run([sys.executable, '-B', str(ROOT / 'scripts/e25-compare'), '--name', args.name + '-comparison',
+        '--control', str(ROOT / 'docs/experiments/data/E25' / (args.name + '-control-summary.json')),
+        '--candidate', str(ROOT / 'docs/experiments/data/E25' / (args.name + '-candidate-summary.json'))], cwd=ROOT, check=True)
+
+
+if __name__ == '__main__':
+    main()

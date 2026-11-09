@@ -1,0 +1,196 @@
+{
+  "kind": "E25-no-hop-stamps",
+  "status": "complete",
+  "profile": "release",
+  "incremental": false,
+  "commands": [
+    {
+      "label": "release",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--bin",
+        "horizon-client",
+        "-p",
+        "horizon-bots",
+        "--bin",
+        "horizon-bots"
+      ],
+      "exit": 0,
+      "elapsed_with_queue_seconds": 1995.385630542005,
+      "log": ".local/evidence/E25/e25-stamps-lease-r2-b2-release.log",
+      "log_sha256": "26e0b4c65013cbcfb86e6fba7fc91d9da096a73fbd346458d714a841b2374e28",
+      "test_results": []
+    },
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "elapsed_with_queue_seconds": 1220.3079432499944,
+      "log": ".local/evidence/E25/e25-stamps-lease-r2-b2-fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "test_results": []
+    },
+    {
+      "label": "bots-clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-bots",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "elapsed_with_queue_seconds": 194.66252666700166,
+      "log": ".local/evidence/E25/e25-stamps-lease-r2-b2-bots-clippy.log",
+      "log_sha256": "e79ec41769b854f2b7300dca55b5097b936128bf051587ccc98fb9037a4ed5bc",
+      "test_results": []
+    },
+    {
+      "label": "bots-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-bots"
+      ],
+      "exit": 0,
+      "elapsed_with_queue_seconds": 1020.8380197079969,
+      "log": ".local/evidence/E25/e25-stamps-lease-r2-b2-bots-tests.log",
+      "log_sha256": "675982d3d0c05783544a0d2dc3f004b7a3b1f989e095c19662e04021013e9000",
+      "test_results": [
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "tile-clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "-p",
+        "horizon-client-lib",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "elapsed_with_queue_seconds": 77.35765245900257,
+      "log": ".local/evidence/E25/e25-stamps-lease-r2-b2-tile-clippy.log",
+      "log_sha256": "c656124e94a49a3e49a10e96b7a6bd5961fd082f1c73dfaf7b0ea5186f9e11ef",
+      "test_results": []
+    },
+    {
+      "label": "clock-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "game::dedicated::cluster::lease::"
+      ],
+      "exit": 0,
+      "elapsed_with_queue_seconds": 447.35910904099,
+      "log": ".local/evidence/E25/e25-stamps-lease-r2-b2-clock-tests.log",
+      "log_sha256": "1e5421979cc910474cc2f2108a8ee55beca0e77c7a7d7c57494f3112f2cfeac2",
+      "test_results": [
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 1248 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "reader-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client-lib",
+        "--lib",
+        "lan::io_pool::tests::"
+      ],
+      "exit": 0,
+      "elapsed_with_queue_seconds": 651.2716765830119,
+      "log": ".local/evidence/E25/e25-stamps-lease-r2-b2-reader-tests.log",
+      "log_sha256": "11d0aaf73564f611e2252adcc1f8dd3826d9d94f83540ab4a266c9fa7a967551",
+      "test_results": [
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 2188 filtered out; finished in 0.65s"
+      ]
+    }
+  ],
+  "runner_sha256": "18db1d430353a97c4f5d715fce50af369425f259e4d72bdcfcc712e2466fdb62",
+  "base_identity_sha256": "94e0d74ecddc24fe6dcc6139932c8f6d0d4a832494f27586f42cc5aaa77ba0e8",
+  "lease_fixture": ".local/bin/goliath-e24/lease-fixed-r2",
+  "selected_source_archive": {
+    "path": ".local/evidence/E25/e25-stamps-lease-r2-b2-selected-source.tar.gz",
+    "sha256": "5029acf91de5e1564aa4237b8d5b6e4e03cab8cad0026dd99f2e27f622ce4303"
+  },
+  "internal_source_archive": {
+    "path": ".local/evidence/E24/lease-fixed-r2-internal-source.tar.gz",
+    "sha256": "1d7a6e641e1b2def4583abc7acffd3123eb8f3ec51ed02a9d4ad28380fee9df0"
+  },
+  "source_restored": true,
+  "source_path_only_change": {
+    "path": "crates/horizon-client/Cargo.toml",
+    "original": "../../../../../crates/goliath-store",
+    "relocated": "../../../../../.local/evidence/E25/timing-dependencies-lease-r2/crates/goliath-store"
+  },
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "settings": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_BUILD_JOBS": "6",
+    "CARGO_PROFILE_RELEASE_LTO": "thin",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "1"
+  },
+  "directory": ".local/bin/meridian-e25/e25-stamps-lease-r2-b2",
+  "binaries": {
+    "horizon-client": "33a74ea53e3b77f1ff7f40be36c35ad5535215918f5fa4098e7c1f9b0f82f71f",
+    "horizon-bots": "de8f997f86e92171dbd47f75a4f94d1fed98f82e8450ca88572e77d87971e045"
+  },
+  "patch": {
+    "path": "patches/horizon-15-latency-stamps-e25-stamps-lease-r2-b2.patch",
+    "sha256": "cdbc4a388f703007a0b4e7bfe6acf320b0a9fd93f6b947d4f5c590decf7c00a9"
+  },
+  "compiled_files": {
+    "Cargo.lock": "724a1f3cc17a47b96019770f83f3498909530e8bb48e67a9c2cd6c71035f3af1",
+    "crates/horizon-bots/Cargo.toml": "192a9f1b7c2a466017492be76afde8d9b0d3324181bdbaca26f75eead2cb9eb3",
+    "crates/horizon-bots/src/latency_trace.rs": "e299b6c51612cd4755bbe9031930b6dcfb53092c8895aaef8978fbed1da7153a",
+    "crates/horizon-bots/src/main.rs": "fb0f658c12706c80ca452517c0bb8dc07edb4946f461ae48cf083c2454ae30c4",
+    "crates/horizon-bots/src/measured.rs": "0990c83e23a2c0d55a82ba337122fa11a3f85760c64cc222f69b088802044514",
+    "crates/horizon-client-lib/Cargo.toml": "a4ebda2fc508d838ec71c9972f79202c33636e4eec4789b7d4b026f62226b6cb",
+    "crates/horizon-client/Cargo.toml": "b146cf40fc81cd12acd5955e3a5f7748d3d16a173a56aba8de80a529c2413881",
+    "crates/horizon-client/src/game/dedicated/status.rs": "dd0ece77f59aa3881bb1be566fba9e89c62b36f05dd916f14b63c73f5ccc4871",
+    "crates/horizon-client/src/lan/conn.rs": "34934e766a0341065dbf7b36f4548d44cb3ebbfa65bdd91ee0d1bee41d6b3bac",
+    "crates/horizon-client/src/lan/io_pool.rs": "2bca515c38ad87dc121d5353ee18cd77cde3d5e0460a04d9323b19ac0acb275e",
+    "crates/horizon-client/src/lan/latency_trace.rs": "72d5130d82b224947f180e2d3551a9604d4358366dfdd00fbce9d883f159089c",
+    "crates/horizon-client/src/lan/mod.rs": "27c54f1c7b4040fa963e6e85c20ac59f2a25cb712ae72f2ae54a705fbf1b4c16"
+  }
+}

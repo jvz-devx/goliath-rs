@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+"""Build and gate the selected no-hop timestamp overlay without owning a window."""
+import argparse
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tarfile
+import time
+import tomllib
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon'
+EVIDENCE = ROOT / '.local/evidence/E25'
+BASE = EVIDENCE / 'horizon-h13-base'
+DATA = ROOT / 'docs/experiments/data/E25'
+ALLOWED = {'Cargo.lock', 'crates/horizon-client/Cargo.toml', 'crates/horizon-client-lib/Cargo.toml',
+    'crates/horizon-bots/Cargo.toml', 'crates/horizon-bots/src/main.rs', 'crates/horizon-bots/src/measured.rs',
+    'crates/horizon-bots/src/latency_trace.rs', 'crates/horizon-client/src/lan/mod.rs',
+    'crates/horizon-client/src/lan/io_pool.rs', 'crates/horizon-client/src/lan/conn.rs',
+    'crates/horizon-client/src/lan/latency_trace.rs', 'crates/horizon-client/src/game/dedicated/status.rs'}
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--source-round')
+    parser.add_argument('--fixture',type=Path,default=ROOT/'.local/bin/goliath-e24/lease-fixed-r1')
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+        raise ValueError('fresh e25- or repro- name required')
+    output = DATA / (args.name + '-build.json')
+    target = ROOT / '.local/bin/meridian-e25' / args.name
+    patch = ROOT / 'patches' / ('horizon-15-latency-stamps-' + args.name + '.patch')
+    if output.exists() or target.exists() or patch.exists():
+        raise RuntimeError('attempt already exists')
+    base=BASE if not args.source_round else EVIDENCE/('horizon-'+args.source_round+'-base')
+    identity = json.loads((base / 'identity.json').read_text())
+    fixed_inputs = json.loads((ROOT / 'docs/experiments/data/E24'/(args.fixture.name+'-inputs.json')).read_text())
+    archive = ROOT / fixed_inputs['source_archive']['path']
+    if sha(archive) != fixed_inputs['source_archive']['sha256']:
+        raise RuntimeError('fixed internal source archive changed')
+    deps_name='timing-dependencies'+('-'+args.source_round if args.source_round else '')
+    deps = EVIDENCE / deps_name
+    if not deps.exists():
+        deps.mkdir()
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(deps,filter='data')
+    for name,digest in fixed_inputs['files'].items():
+        if sha(deps / name) != digest:
+            raise RuntimeError('fixed dependency source differs: ' + name)
+    env = {k:v for k,v in os.environ.items() if k not in ['CI','CARGO_TARGET_DIR','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS'] and not k.startswith('CARGO_PROFILE_')}
+    env.update(CARGO_INCREMENTAL='0',CARGO_BUILD_JOBS='6',CARGO_PROFILE_RELEASE_LTO='thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',GIT_OPTIONAL_LOCKS='0')
+    index_env = dict(env,GIT_INDEX_FILE=str(base / 'index'))
+    def git(*a):
+        return subprocess.check_output(['git',*a],cwd=SOURCE,env=index_env)
+    paths = set(subprocess.check_output(['git','ls-files','-c','-o','--exclude-standard','-z'],cwd=SOURCE,env=env).decode().split('\0')) - {''}
+    changed = {name for name in paths if (SOURCE/name).is_file() and (name not in identity['files'] or sha(SOURCE/name) != identity['files'][name])}
+    if changed - ALLOWED:
+        raise RuntimeError('unexpected changes outside timing overlay: ' + str(sorted(changed-ALLOWED)))
+    selected_archive = EVIDENCE / (args.name + '-selected-source.tar.gz')
+    with tarfile.open(selected_archive,'x:gz') as bundle:
+        for name in sorted(paths):
+            if (SOURCE/name).is_file():
+                bundle.add(SOURCE/name,arcname=name,recursive=False)
+    result = dict(kind='E25-no-hop-stamps',status='running',profile='release',incremental=False,commands=[],
+        runner_sha256=sha(Path(__file__)),base_identity_sha256=sha(base/'identity.json'),lease_fixture=str(args.fixture.relative_to(ROOT) if args.fixture.is_absolute() else args.fixture),
+        selected_source_archive=dict(path=str(selected_archive.relative_to(ROOT)),sha256=sha(selected_archive)),
+        internal_source_archive=fixed_inputs['source_archive'],source_restored=False)
+    original_path = '../../../../../crates/goliath-store'
+    relocated_path = '../../../../../.local/evidence/E25/'+deps_name+'/crates/goliath-store'
+    result['source_path_only_change'] = dict(path='crates/horizon-client/Cargo.toml',original=original_path,relocated=relocated_path)
+    manifest = SOURCE / 'crates/horizon-client/Cargo.toml'
+    text = manifest.read_text()
+    if text.count(original_path) != 1:
+        raise RuntimeError('unexpected goliath-store source path')
+    manifest.write_text(text.replace(original_path,relocated_path))
+    changed.add('crates/horizon-client/Cargo.toml')
+    before_packages = {(p['name'],p['version'],p.get('source')) for p in tomllib.loads((SOURCE/'Cargo.lock').read_text())['package']}
+    result['rustc'] = subprocess.check_output(['rustc','-Vv'],text=True)
+    result['settings'] = {key:env[key] for key in ['CARGO_INCREMENTAL','CARGO_BUILD_JOBS','CARGO_PROFILE_RELEASE_LTO','CARGO_PROFILE_RELEASE_CODEGEN_UNITS']}
+    commands = [
+        ('release',['cargo','build','--release','--no-default-features','-p','horizon-client','--bin','horizon-client','-p','horizon-bots','--bin','horizon-bots']),
+        ('fmt',['cargo','fmt','--all','--check']),
+        ('bots-clippy',['cargo','clippy','--locked','--release','--no-default-features','-p','horizon-bots','--all-targets','--','-D','warnings']),
+        ('bots-tests',['cargo','test','--locked','--release','--no-default-features','-p','horizon-bots']),
+        ('tile-clippy',['cargo','clippy','--locked','--release','--no-default-features','-p','horizon-client','-p','horizon-client-lib','--lib','--','-D','warnings']),
+        ('clock-tests',['cargo','test','--locked','--release','--no-default-features','-p','horizon-client','--lib','game::dedicated::cluster::lease::']),
+        ('reader-tests',['cargo','test','--locked','--release','--no-default-features','-p','horizon-client-lib','--lib','lan::io_pool::tests::'])]
+    try:
+        for label,command in commands:
+            if (EVIDENCE/'horizon-return-request').exists():
+                raise RuntimeError('Horizon checkout return requested; stop between commands')
+            log = EVIDENCE / (args.name + '-' + label + '.log')
+            print('E25_STAMP_GATE ' + label,flush=True)
+            began = time.monotonic()
+            with log.open('x') as stream:
+                completed = subprocess.run([ROOT/'.local/bin/host-window','build','E25','--',*command],cwd=SOURCE,env=env,stdout=stream,stderr=subprocess.STDOUT)
+            text = log.read_text(errors='replace')
+            row = dict(label=label,command=command,exit=completed.returncode,elapsed_with_queue_seconds=time.monotonic()-began,
+                log=str(log.relative_to(ROOT)),log_sha256=sha(log),test_results=re.findall(r'test result: .*',text))
+            result['commands'].append(row)
+            output.write_text(json.dumps(result,indent=2)+'\n')
+            print(json.dumps(row),flush=True)
+            if completed.returncode:
+                raise RuntimeError('measurement gate failed: ' + label)
+        target.mkdir(parents=True,exist_ok=False)
+        for binary in ['horizon-client','horizon-bots']:
+            shutil.copy2(SOURCE/'target/release'/binary,target/binary)
+        after_packages = {(p['name'],p['version'],p.get('source')) for p in tomllib.loads((SOURCE/'Cargo.lock').read_text())['package']}
+        if after_packages != before_packages:
+            raise RuntimeError('native timestamp hooks unexpectedly changed dependency versions')
+        result.update(status='complete',directory=str(target.relative_to(ROOT)),
+            binaries={name:sha(target/name) for name in ['horizon-client','horizon-bots']})
+    except BaseException as error:
+        result.update(status='failed',error=str(error).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME'))
+        raise
+    finally:
+        try:
+            changed.add('Cargo.lock')
+            parts = []
+            for name in sorted(changed):
+                old = subprocess.run(['git','show',':'+name],cwd=SOURCE,env=index_env,capture_output=True)
+                before = old.stdout.decode() if old.returncode == 0 else ''
+                after = (SOURCE/name).read_text()
+                if name == 'crates/horizon-client/Cargo.toml':
+                    after = after.replace(relocated_path,original_path)
+                if before == after:
+                    continue
+                parts.append(f'diff --git a/{name} b/{name}\n')
+                if old.returncode:
+                    parts.append('new file mode 100644\n')
+                parts.extend(difflib.unified_diff(before.splitlines(keepends=True),after.splitlines(keepends=True),
+                    fromfile='a/'+name if before else '/dev/null',tofile='b/'+name))
+            patch.write_text(''.join(parts))
+            result['patch'] = dict(path=str(patch.relative_to(ROOT)),sha256=sha(patch))
+            result['compiled_files'] = {name:sha(SOURCE/name) for name in sorted(changed)}
+        finally:
+            restore_command=[os.sys.executable,'-B',ROOT/'scripts/e25-horizon-source','restore']
+            if args.source_round:restore_command+=['--round',args.source_round,'--fixture',str(args.fixture)]
+            restored = subprocess.run(restore_command,cwd=ROOT)
+            result['source_restored'] = restored.returncode == 0
+            if not result['source_restored']:
+                result.update(status='failed',restoration_error='source/index restoration failed; inspect the private backup before any new work')
+            output.write_text(json.dumps(result,indent=2)+'\n')
+            if target.exists():
+                shutil.copy2(output,target/'build.json')
+
+
+if __name__ == '__main__':
+    main()

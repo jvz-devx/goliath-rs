@@ -1,0 +1,494 @@
+#!/usr/bin/env python3
+"""Resource-free E25 patch, input and publication contracts."""
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('e25_build_tested', str(ROOT / 'scripts/e25-build'))
+spec = importlib.util.spec_from_loader('e25_build_tested', loader)
+build = importlib.util.module_from_spec(spec)
+loader.exec_module(build)
+memory = build.load('e25_memory_tested', ROOT / 'scripts/e25-memory')
+pair = build.load('e25_pair_tested', ROOT / 'scripts/e25-pair')
+latency = build.load('e25_latency_tested', ROOT / 'scripts/e25-latency-results')
+latency_cell = build.load('e25_latency_cell_tested', ROOT / 'scripts/e25-latency-cell')
+from e18_d9_layout import plan as d9_plan
+from e25_latency_layout import split_witnesses
+from e25_stop_brackets import StopBrackets
+import e25_soak_harness as soak_harness
+stop_overlap = build.load('e25_overlap_tested',ROOT/'scripts/e25-stop-overlap')
+profile_reader = build.load('e25_profile_tested',ROOT/'scripts/e25_proxy_profile.py')
+latency_session = build.load('e25_latency_session_tested',ROOT/'scripts/e25-latency-session')
+latency_collector_r2 = build.load('e25_latency_collector_r2_tested',ROOT/'scripts/e25-latency-cell-r2')
+
+
+class Contracts(unittest.TestCase):
+    @staticmethod
+    def witness_rows(delay=1_000_000):
+        witnesses = [dict(name=tile + str(index), tile=tile) for tile in 'abcd' for index in range(2)]
+        sends = [dict(name=row['name'], tile=row['tile'], uuid=f'{index:032x}', packet='01aa' + str(index),
+            send_index=1, at_ns=10_000_000) for index, row in enumerate(witnesses)]
+        decodes = [dict(uuid=row['uuid'], tile=row['tile'], packet=row['packet'], at_ns=row['at_ns'] + delay) for row in sends]
+        return witnesses, sends, decodes
+
+    def test_equal_inputs_have_no_patch(self):
+        self.assertEqual(build.allocator_delta({'main.rs': b'original\n'}, {'main.rs': b'original\n'}), b'')
+
+    def test_delta_applies_and_changes_only_selected_bytes(self):
+        before = {'main.rs': b'original\n', 'Cargo.lock': b'lock\n', 'kept.rs': b'keep\n'}
+        after = dict(before, **{'main.rs': b'allocator\n', 'Cargo.lock': b'new lock\n'})
+        delta = build.allocator_delta(before, after)
+        self.assertNotIn(b'kept.rs', delta)
+        with tempfile.TemporaryDirectory(prefix='e25-contract-') as folder:
+            path = Path(folder)
+            for name, content in before.items():
+                (path / name).write_bytes(content)
+            subprocess.run(['git', 'apply', '--check', '-'], input=delta, cwd=path, check=True)
+            subprocess.run(['git', 'apply', '-'], input=delta, cwd=path, check=True)
+            self.assertEqual({name: (path / name).read_bytes() for name in before}, after)
+
+    def test_template_contains_exact_allocator_pins(self):
+        template = build.TEMPLATE.read_text()
+        self.assertIn('mimalloc = { version = "=0.1.52", default-features = false }', template)
+        self.assertIn('libmimalloc-sys = { version = "=0.1.49", default-features = false }', template)
+        self.assertEqual(template.count('#[global_allocator]'), 1)
+        self.assertNotIn('MIMALLOC_', template)
+
+    def test_template_applies_to_frozen_reactor_index(self):
+        with tempfile.TemporaryDirectory(prefix='e25-contract-') as folder:
+            environment = dict(__import__('os').environ, GIT_INDEX_FILE=folder + '/index')
+            original = build.EVIDENCE / 'e25-preparation-r1-frozen/index'
+            __import__('shutil').copy2(original, environment['GIT_INDEX_FILE'])
+            subprocess.run(['git', 'apply', '--cached', '--check', str(build.TEMPLATE)],
+                cwd=build.SOURCE, env=environment, check=True)
+
+    def test_publication_rejects_private_paths(self):
+        with tempfile.TemporaryDirectory(prefix='e25-contract-') as folder:
+            path = Path(folder) / 'result.json'
+            with self.assertRaisesRegex(RuntimeError, 'private path'):
+                build.save(path, {'unsafe': str(Path.home()) + '/private'})
+            self.assertFalse(path.exists())
+
+    def test_publication_accepts_relative_paths(self):
+        with tempfile.TemporaryDirectory(prefix='e25-contract-') as folder:
+            path = Path(folder) / 'result.json'
+            build.save(path, {'path': '.local/evidence/E25/e25-result.json'})
+            self.assertIn('.local/evidence/E25/', path.read_text())
+
+    def test_tick_merge_keeps_all_samples_and_drops(self):
+        batches = [dict(ticks=[1, 2], digests=[3], dropped=2)]
+        end = dict(ticks=[4], digests=[5], dropped=7)
+        self.assertEqual(memory.merge_ticks(batches, end), dict(ticks=[1, 2, 4], digests=[3, 5], dropped=9))
+
+    def test_memory_line_is_strict(self):
+        points = [dict(at=t, processes={'proxy': dict(rss_mb=rss)})
+                  for t, rss in [(100, 50), (400, 100), (1000, 110)]]
+        row = memory.memory_growth(points, 900)['proxy']
+        self.assertFalse(row['under_ten_percent'])
+
+    def test_memory_missing_endpoint_cannot_pass(self):
+        points = [dict(at=t, processes={'proxy': dict(rss_mb=100)}) for t in [100, 400, 999]]
+        self.assertRaises(ValueError, memory.memory_growth, points, 1200)
+
+    def test_start_load_waits_without_relaxing_four(self):
+        loads = iter([(9,0,0),(5,0,0),(4,0,0)])
+        elapsed = [0]
+        def pause(seconds):elapsed[0] += seconds
+        row = memory.wait_start_load(getload=lambda:next(loads),now=lambda:elapsed[0],pause=pause)
+        self.assertEqual(row['ready_load'][0],4)
+        self.assertEqual(row['wait_seconds'],2)
+
+    def test_start_load_timeout_starts_no_fixture(self):
+        elapsed = [0]
+        def pause(seconds):elapsed[0] += seconds
+        with self.assertRaises(TimeoutError):
+            memory.wait_start_load(getload=lambda:(5,0,0),now=lambda:elapsed[0],pause=pause,timeout=2)
+
+    def test_native_closure_cannot_hide_behind_a_poll(self):
+        with tempfile.TemporaryDirectory(prefix='e25-contract-', dir=ROOT / '.local/runs') as folder:
+            path = Path(folder) / 'tile-0-1-lease.jsonl'
+            path.write_text(json.dumps(dict(event='authority-stop', cause='action-clock-anomaly')) + '\n')
+            events, files = memory.authority_records(path.parent)
+            self.assertEqual(events[0]['record']['cause'], 'action-clock-anomaly')
+            self.assertEqual(len(files), 1)
+
+    def test_completed_builds_have_allocator_only_differences(self):
+        records = [json.loads((ROOT / 'docs/experiments/data/E25' / name).read_text())
+                   for name in ['e25-control-r1-build.json', 'e25-mimalloc-default-r2-build.json']]
+        pair.paired_inputs(*records)
+        changed = dict(records[1], rustc='a different compiler')
+        with self.assertRaisesRegex(RuntimeError, 'rustc'):
+            pair.paired_inputs(records[0], changed)
+
+    def test_latency_reports_all_four_tiles_and_overall(self):
+        witnesses, sends, decodes = self.witness_rows()
+        result = latency.match(sends, decodes, 0, 100_000_000, 2_100_000_000, witnesses)
+        self.assertEqual(result['overall']['p95_ns'], 1_000_000)
+        self.assertTrue(result['overall']['below_five_ms'])
+        self.assertEqual({tile: row['sends'] for tile, row in result['tiles'].items()}, dict(a=2, b=2, c=2, d=2))
+
+    def test_latency_exactly_five_ms_fails(self):
+        witnesses, sends, decodes = self.witness_rows(5_000_000)
+        result = latency.match(sends, decodes, 0, 100_000_000, 2_100_000_000, witnesses)
+        self.assertFalse(result['overall']['below_five_ms'])
+
+    def test_unmatched_send_is_infinity_not_dropped(self):
+        witnesses, sends, decodes = self.witness_rows()
+        result = latency.match(sends, decodes[:-1], 0, 100_000_000, 2_100_000_000, witnesses)
+        self.assertEqual(result['overall']['sends'], 8)
+        self.assertTrue(result['overall']['p95_is_infinite'])
+
+    def test_ambiguous_duplicate_does_not_get_a_short_match(self):
+        witnesses, sends, decodes = self.witness_rows()
+        decodes.append(dict(decodes[0], at_ns=12_000_000))
+        result = latency.match(sends, decodes, 0, 100_000_000, 2_100_000_000, witnesses)
+        self.assertEqual(result['reasons']['ambiguous'], 1)
+        self.assertIsNone(result['rows'][0]['delay_ns'])
+
+    def test_beyond_match_horizon_remains_an_infinite_tail(self):
+        witnesses, sends, decodes = self.witness_rows(2_000_000_001)
+        result = latency.match(sends, decodes, 0, 100_000_000, 2_100_000_000, witnesses)
+        self.assertEqual(result['overall']['sends'], 8)
+        self.assertEqual(result['overall']['matched'], 0)
+
+    def test_repeated_payload_after_horizon_stays_unambiguous(self):
+        witnesses, sends, decodes = self.witness_rows()
+        sends.append(dict(sends[0], at_ns=4_010_000_000, send_index=2))
+        decodes.append(dict(decodes[0], at_ns=4_011_000_000))
+        result = latency.match(sends, decodes, 0, 5_000_000_000, 7_000_000_000, witnesses)
+        self.assertEqual(result['overall']['matched'], 9)
+
+    @staticmethod
+    def latency_layout(direct):
+        original = d9_plan(650,lambda index,count,seed,spread:[index,count])
+        witnesses = json.loads((ROOT/'docs/experiments/data/E25/e25-latency-plan-r1.json').read_text())['witnesses']
+        return original,split_witnesses(original,witnesses,direct),witnesses
+
+    def test_split_witnesses_preserves_every_original_index_and_route_population(self):
+        original,split,_ = self.latency_layout(True)
+        self.assertEqual(len(split['groups']),9)
+        self.assertEqual(sum(group['count'] for group in split['groups']),650)
+        for old in original['groups']:
+            groups = [group for group in split['groups'] if group['prefix'] == old['prefix']]
+            indices = [index for group in groups for index in group['indices']]
+            self.assertEqual(sorted(indices),list(range(old['count'])))
+            self.assertTrue(all(group['route_bots'] == old['count'] for group in groups))
+            if old['kind'] == 'interior':
+                self.assertTrue(all(group['starts'] == old['starts'] for group in groups))
+            self.assertTrue(all(group['host'] == old['host'] for group in groups))
+
+    def test_both_latency_paths_use_the_same_nine_driver_split(self):
+        _,via,_ = self.latency_layout(False)
+        _,direct,_ = self.latency_layout(True)
+        self.assertEqual([group['indices'] for group in via['groups']],[group['indices'] for group in direct['groups']])
+        self.assertEqual(sum(group['count'] for group in direct['groups'] if group.get('direct_tile')),8)
+        self.assertFalse(any(group.get('direct_tile') for group in via['groups']))
+
+    def test_session_ledger_rejects_signing_a_nonwitness(self):
+        _,layout,witnesses = self.latency_layout(True)
+        players = []
+        commands = []
+        for group in layout['groups']:
+            command = ['horizon-bots','--server','127.0.0.1:1234']
+            if group.get('direct_tile'):command += ['--forwarding-secret-file','private-fixture-file']
+            commands.append(command)
+            for index in group['indices']:
+                players.append(dict(name=group['prefix']+str(index),uuid=f'{len(players):032x}'))
+        cell = dict(layout=layout,bot_commands=commands,before={'a':dict(players=players)},after={'a':dict(players=players)})
+        rows = latency_cell.session_paths(cell,witnesses,True)
+        self.assertEqual(len(rows),650)
+        self.assertEqual(sum(row['signed_initial_profile'] for row in rows),8)
+        commands[0] += ['--forwarding-secret-file','private-fixture-file']
+        with self.assertRaisesRegex(RuntimeError,'unapproved signing'):
+            latency_cell.session_paths(cell,witnesses,True)
+
+    def test_no_hop_adapter_removes_front_shim_process_creation(self):
+        import ast
+        base = build.load('e25_adapter_tested',ROOT/'scripts/e23-cell')
+        tree = ast.fix_missing_locations(latency_cell.no_hop_adapter(base.Adapt)().visit(ast.parse((ROOT/'scripts/e20-frontier').read_text())))
+        compile(tree,'e25-no-hop-contract','exec')
+        for call in [node for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute) and node.func.attr == 'Popen']:
+            self.assertFalse(any(isinstance(node,ast.Constant) and node.value == 'e18-front-shim' for node in ast.walk(call)))
+
+    def test_signal_brackets_call_the_original_signal_once(self):
+        import signal
+        logger=StopBrackets(maximum=1)
+        logger.register('proxy',42)
+        calls=[]
+        logger.original_kill=lambda pid,action:calls.append((pid,action))
+        logger.kill(42,signal.SIGSTOP)
+        logger.kill(42,signal.SIGCONT)
+        self.assertEqual(calls,[(42,signal.SIGSTOP),(42,signal.SIGCONT)])
+        self.assertEqual(logger.report()['dropped'],1)
+        self.assertEqual(logger.report()['events'][0]['role'],'proxy')
+
+    def test_packet_span_overlap_is_not_only_send_point_overlap(self):
+        events=[dict(pid=42,role='proxy',action='STOP',raw_before_ns=20,raw_after_ns=21,error=None),
+            dict(pid=42,role='proxy',action='CONT',raw_before_ns=30,raw_after_ns=31,error=None)]
+        rows=[dict(send_ns=18,decode_ns=23,delay_ns=5,tile='a'),dict(send_ns=25,decode_ns=35,delay_ns=10,tile='a')]
+        result=stop_overlap.analyze(rows,events,5)
+        self.assertEqual(result['groups']['proxy']['point_inner'],1)
+        self.assertEqual(result['groups']['proxy']['span_inner'],2)
+
+    def test_unmatched_tail_keeps_unknown_overlap_instead_of_becoming_no_overlap(self):
+        result=stop_overlap.analyze([dict(send_ns=25,decode_ns=None,delay_ns=None,tile='a')],[],None)
+        self.assertEqual(result['tail_sends'],1)
+        self.assertEqual(result['groups']['server-any']['span_unknown'],1)
+
+    def test_cpu_profile_excludes_waiting_weights(self):
+        import gzip
+        with tempfile.TemporaryDirectory(prefix='e25-profile-contract-') as folder:
+            path=Path(folder)/'profile.xml.gz'
+            path.write_bytes(gzip.compress(b'<root><row><thread-state>Running</thread-state><weight>1000000</weight><thread fmt="proxy-io-0"/><tagged-backtrace><backtrace><frame name="recvfrom"/></backtrace></tagged-backtrace></row><row><thread-state>Waiting</thread-state><weight>1000000000</weight><thread fmt="terrain-manager"/></row></root>'))
+            row=profile_reader.running(path)
+            self.assertEqual(row['total_cpu_seconds'],.001)
+            self.assertEqual(row['categories']['socket syscalls']['percent'],100)
+
+    def test_post_drain_bot_trailer_uses_a_proven_single_writer_bound(self):
+        with tempfile.TemporaryDirectory(prefix='e25-eof-',dir=ROOT/'.local/runs') as folder:
+            path=Path(folder)/'e25-bots-1.jsonl'
+            row=dict(event='bot-write',at_ns=200,packet='1e'+'0'*50)
+            path.write_bytes((json.dumps(dict(schema='E25-latency-v1'))+'\n'+json.dumps(row)+'\n{"at_ns"').encode())
+            proofs=[]
+            rows=latency_cell.trace_rows(path,'bot-write',100,proofs,True)
+            self.assertEqual(len(rows),1)
+            self.assertEqual(proofs[0]['trailer_time_lower_bound_ns'],200)
+            self.assertFalse(proofs[0]['measured_record_removed'])
+            with self.assertRaises(RuntimeError):latency_cell.trace_rows(path,'bot-write',100,[],False)
+
+    def test_a_partial_record_within_the_window_is_never_removed(self):
+        with tempfile.TemporaryDirectory(prefix='e25-eof-',dir=ROOT/'.local/runs') as folder:
+            path=Path(folder)/'e25-bots-1.jsonl'
+            path.write_text(json.dumps(dict(schema='E25-latency-v1'))+'\n{"at_ns":50,"packet":')
+            with self.assertRaises(RuntimeError):latency_cell.trace_rows(path,'bot-write',100,[],True)
+
+    def test_uncapped_server_counterfactual_has_no_signal_or_thread(self):
+        budget=latency_cell.DisabledServerBudget([41,42]).start()
+        self.assertEqual(budget.pids,[41,42])
+        self.assertTrue(budget.report()['disabled'])
+        self.assertEqual(budget.report()['stop_cycles'],0)
+        budget.stop()
+        self.assertTrue(budget.done.is_set())
+
+    def test_valid_json_without_a_final_newline_is_not_a_dropped_row(self):
+        with tempfile.TemporaryDirectory(prefix='e25-eof-',dir=ROOT/'.local/runs') as folder:
+            path=Path(folder)/'e25-bots-1.jsonl'
+            row=dict(event='bot-write',at_ns=50,packet='1e'+'0'*50)
+            path.write_text(json.dumps(dict(schema='E25-latency-v1'))+'\n'+json.dumps(row))
+            self.assertEqual(latency_cell.trace_rows(path,'bot-write',100,[],True),[row])
+
+    def test_zone_patch_is_small_and_applies_to_frozen_scheduler_index(self):
+        patch = ROOT / 'patches/meridian-12-zone-pressure-r1.patch'
+        text = patch.read_text()
+        names = [line.split(' b/', 1)[1] for line in text.splitlines() if line.startswith('diff --git ')]
+        self.assertEqual(set(names), {'crates/meridian-proxy/src/main.rs',
+            'crates/meridian-proxy/src/serve.rs', 'crates/meridian-proxy/src/pressure.rs'})
+        additions = '\n'.join(line[1:] for line in text.splitlines() if line.startswith('+') and not line.startswith('+++'))
+        self.assertIn('Duration::from_secs(60)', additions)
+        self.assertIn('const GOAL: usize = 16 * 1024 * 1024;', additions)
+        self.assertIn('self.next = finished + PERIOD;', additions)
+        self.assertNotIn('thread::spawn', additions)
+        self.assertNotIn('.spawn(', additions)
+        with tempfile.TemporaryDirectory(prefix='e25-zone-contract-') as folder:
+            environment = dict(__import__('os').environ, GIT_INDEX_FILE=folder + '/index')
+            __import__('shutil').copy2(ROOT / '.local/evidence/E25/meridian-scheduler2-base/index', environment['GIT_INDEX_FILE'])
+            subprocess.run(['git', 'apply', '--cached', '--check', str(patch)],
+                cwd=build.SOURCE, env=environment, check=True)
+
+    def test_writev_revision_uses_the_existing_queue_element_type(self):
+        patch = ROOT/'patches/meridian-11-writev64-r2.patch'
+        text = patch.read_text()
+        self.assertIn('VecDeque<WriteChunk>',text)
+        self.assertNotIn('VecDeque<Chunk>',text)
+        with tempfile.TemporaryDirectory(prefix='e25-writev-contract-') as folder:
+            environment = dict(__import__('os').environ,GIT_INDEX_FILE=folder+'/index')
+            __import__('shutil').copy2(ROOT/'.local/evidence/E25/meridian-scheduler2-base/index',environment['GIT_INDEX_FILE'])
+            source = subprocess.check_output(['git','show',':crates/meridian-net/src/io_pool.rs'],
+                cwd=build.SOURCE,env=environment,text=True)
+            self.assertIn('struct WriteChunk {',source)
+            subprocess.run(['git','apply','--cached','--check',str(patch)],cwd=build.SOURCE,env=environment,check=True)
+
+    def test_zone_wrapper_keeps_existing_forbid_and_one_scoped_exception(self):
+        import tomllib
+        patch = ROOT/'patches/meridian-12-zone-pressure-r2.patch'
+        with tempfile.TemporaryDirectory(prefix='e25-zone-wrapper-contract-') as folder:
+            environment = dict(__import__('os').environ,GIT_INDEX_FILE=folder+'/index')
+            __import__('shutil').copy2(ROOT/'.local/evidence/E25/meridian-scheduler2-base/index',environment['GIT_INDEX_FILE'])
+            subprocess.run(['git','apply','--cached',str(patch)],cwd=build.SOURCE,env=environment,check=True)
+            def selected(name):
+                return subprocess.check_output(['git','show',':'+name],cwd=build.SOURCE,env=environment,text=True)
+            workspace = tomllib.loads(selected('Cargo.toml'))
+            self.assertEqual(workspace['workspace']['lints']['rust']['unsafe_code'],'forbid')
+            self.assertTrue(tomllib.loads(selected('crates/meridian-proxy/Cargo.toml'))['lints']['workspace'])
+            manifest = tomllib.loads(selected('crates/meridian-zone/Cargo.toml'))
+            self.assertTrue(manifest['package']['license']['workspace'])
+            self.assertNotIn('dependencies',manifest)
+            self.assertNotIn('build',manifest['package'])
+            source = selected('crates/meridian-zone/src/lib.rs')
+            self.assertIn('#![deny(unsafe_code)]',source)
+            self.assertEqual(source.count('#[allow(unsafe_code)]'),1)
+            self.assertEqual(source.count('pub fn pressure_relief'),1)
+            self.assertIn('// SAFETY:',source)
+            self.assertIn('<malloc/malloc.h>',source)
+            self.assertIn('native_call_returns',source)
+            self.assertIn('other_targets_are_noop_for_every_goal',source)
+            self.assertNotIn('unsafe',selected('crates/meridian-proxy/src/pressure.rs'))
+
+    def test_memory_entry_uses_the_approved_nonregression_rule(self):
+        plan = json.loads((ROOT / 'docs/experiments/data/E25/e25-memory-next-plan-r2.json').read_text())
+        screen = plan['latency_screen']
+        self.assertFalse(screen['memory_entry_requires_strict_five_ms_pass'])
+        self.assertEqual(screen['memory_entry_reference'], 'reactor-1, not scheduler-2')
+        self.assertTrue(screen['final_qualification_requires_both_repeats_below_strict_line'])
+        self.assertEqual(plan['memory_pair']['measurement_seconds_per_cell'], 1800)
+        self.assertTrue(plan['memory_pair']['authority_event_voids_entire_pair'])
+        self.assertTrue(plan['final_binary_must_pass_both_memory_and_latency'])
+
+    @staticmethod
+    def paired_latency_rows():
+        before = dict(measurement_session='e25-test',status='complete',d9_valid=True,binaries_unchanged=True,
+            diagnostic_only=False,verification_limits=[],horizon_lease_base='lease-fixed-r2',direct_reference=False,
+            server_uncapped_diagnostic=False,authority_events=[],cleanup_errors=[],authority_trace_files=['a','b','c','d'],
+            overall=dict(p95_ns=5_200_000,p95_is_infinite=False),plan=dict(sha256='same'),
+            measurement_bundle=dict(binaries={'meridian':'reference','horizon-client':'same','horizon-bots':'same'}),
+            timing_window=dict(start_ns=1,end_ns=2))
+        after = __import__('copy').deepcopy(before)
+        after['overall']['p95_ns'] = 5_100_000
+        after['measurement_bundle']['binaries']['meridian'] = 'candidate'
+        after['timing_window'] = dict(start_ns=3,end_ns=4)
+        return before,after
+
+    def test_paired_memory_entry_does_not_require_a_final_five_ms_pass(self):
+        result = latency_session.compare(*self.paired_latency_rows(),'e25-test')
+        self.assertTrue(result['memory_entry_no_regression'])
+        self.assertFalse(result['strict_five_ms_candidate_pass'])
+        self.assertFalse(result['m4_qualified'])
+
+    def test_paired_memory_entry_rejects_a_real_regression(self):
+        before,after = self.paired_latency_rows()
+        after['overall']['p95_ns'] = before['overall']['p95_ns'] + 1
+        self.assertFalse(latency_session.compare(before,after,'e25-test')['memory_entry_no_regression'])
+
+    def test_paired_memory_entry_refuses_uncapped_or_limited_rows(self):
+        before,after = self.paired_latency_rows()
+        after['server_uncapped_diagnostic'] = True
+        with self.assertRaisesRegex(ValueError,'capped via'):
+            latency_session.compare(before,after,'e25-test')
+        after['server_uncapped_diagnostic'] = False
+        after['verification_limits'] = ['reader test not run']
+        with self.assertRaisesRegex(ValueError,'verification-limited'):
+            latency_session.compare(before,after,'e25-test')
+
+    def test_paired_memory_entry_refuses_fixture_drift_and_infinite_p95(self):
+        before,after = self.paired_latency_rows()
+        after['measurement_bundle']['binaries']['horizon-client'] = 'different'
+        with self.assertRaisesRegex(ValueError,'non-proxy'):
+            latency_session.compare(before,after,'e25-test')
+        after['measurement_bundle']['binaries']['horizon-client'] = 'same'
+        after['overall']['p95_ns'] = None
+        after['overall']['p95_is_infinite'] = True
+        with self.assertRaisesRegex(ValueError,'finite P95'):
+            latency_session.compare(before,after,'e25-test')
+
+    def test_soak_adapter_changes_only_evidence_paths_and_owner(self):
+        import ast
+        for script in ['e24-run','e24-analyse','e24-clock-soak','e24-store-soak','e24-soak-result']:
+            before = ast.parse((ROOT/'scripts'/script).read_text())
+            after = ast.fix_missing_locations(soak_harness.Relocate().visit(__import__('copy').deepcopy(before)))
+            compile(after,'e25-soak-contract','exec')
+            class Undo(ast.NodeTransformer):
+                def visit_Constant(self,node):
+                    if isinstance(node.value,str):
+                        value = node.value.replace('.local/evidence/E25/soak-derived','docs/experiments/data/E24')
+                        value = value.replace('.local/evidence/E25','.local/evidence/E24')
+                        return ast.copy_location(ast.Constant(value),node)
+                    return node
+                def visit_keyword(self,node):
+                    node = self.generic_visit(node)
+                    if node.arg == 'owner' and isinstance(node.value,ast.Constant) and node.value.value == 'E25':
+                        node.value = ast.copy_location(ast.Constant('E24'),node.value)
+                    return node
+            self.assertEqual(ast.dump(before),ast.dump(Undo().visit(after)),script)
+
+    def test_reviewer_owner_changes_only_the_metadata_owner(self):
+        import ast
+        source = (ROOT/'scripts/e24-run').read_text()
+        a = soak_harness.Relocate('E25').visit(ast.parse(source))
+        b = soak_harness.Relocate('reviewer').visit(ast.parse(source))
+        owner_fields = [node for node in ast.walk(b) if isinstance(node,ast.keyword) and node.arg == 'owner'
+            and isinstance(node.value,ast.Constant) and node.value.value == 'reviewer']
+        self.assertEqual(len(owner_fields),1)
+        owner_fields[0].value = ast.Constant('E25')
+        self.assertEqual(ast.dump(a),ast.dump(b))
+
+    def test_soak_hash_refers_to_decompressed_bytes(self):
+        import gzip
+        import hashlib
+        with tempfile.TemporaryDirectory(prefix='e25-soak-hash-',dir=ROOT/'.local/runs') as folder:
+            path = Path(folder)/'e25-raw.json.gz'
+            raw = b'{"sample":1}\n'
+            path.write_bytes(gzip.compress(raw))
+            result = soak_harness.digest(path)
+            self.assertEqual(result['sha256'],hashlib.sha256(raw).hexdigest())
+            self.assertEqual(result['bytes'],len(raw))
+            self.assertEqual(result['hash_scope'],'decompressed bytes')
+
+    def test_soak_publication_rejects_outside_names(self):
+        with self.assertRaisesRegex(ValueError,'not redacted'):
+            soak_harness.publication_check({'outside':[{'name':'not-redacted'}]})
+        soak_harness.publication_check({'outside':[{'name':'outside','cores':.1}]})
+
+    def test_soak_closure_scan_reads_compressed_native_trace(self):
+        import gzip
+        with tempfile.TemporaryDirectory(prefix='e25-soak-close-',dir=ROOT/'.local/runs') as folder:
+            path = Path(folder)/'tiles'
+            path.mkdir()
+            row = dict(event='clock-metrics',data=dict(closures_by_cause={'keeper-deadline':1}))
+            (path/'tile-0-1-lease.jsonl.gz').write_bytes(gzip.compress((json.dumps(row)+'\n').encode()))
+            events = soak_harness.closures(Path(folder))
+            self.assertEqual(len(events),1)
+            self.assertEqual(events[0]['record'],row)
+
+    def test_soak_proxy_line_is_strict_and_does_not_inherit_unjudged_pass(self):
+        native = dict(verdict='passed',memory_endpoint_coverage=True,memory_pass=True,
+            capacity_diagnostic_pass=True,noise_valid=True,memory={'proxy':{'growth_fraction':.1}})
+        result = soak_harness.classify(native,{'qualified':True},[])
+        self.assertEqual(result['native_soak_verdict'],'passed')
+        self.assertFalse(result['proxy_rss_line_pass'])
+        self.assertFalse(result['memory_pass'])
+        self.assertEqual(result['verdict'],'rss-lines-failed')
+
+    def test_soak_rss_pass_does_not_hide_a_failed_d9_tick_gate(self):
+        native = dict(verdict='passed',memory_endpoint_coverage=True,memory_pass=True,
+            capacity_diagnostic_pass=False,noise_valid=True,memory={'proxy':{'growth_fraction':.09}})
+        result = soak_harness.classify(native,{'qualified':True},[])
+        self.assertTrue(result['rss_soak_lines_pass'])
+        self.assertFalse(result['d9_memory_qualified'])
+        self.assertFalse(result['m4_qualified'])
+
+    def test_every_e25_helper_parses_without_running_a_fixture(self):
+        import ast
+        for path in (ROOT/'scripts').glob('e25*'):
+            if path.is_file():
+                compile(ast.parse(path.read_text()),str(path),'exec')
+
+    def test_collector_revision_preserves_unknown_authority_instead_of_accepting_it(self):
+        with tempfile.TemporaryDirectory(prefix='e25-audit-failure-',dir=ROOT/'.local/runs') as folder:
+            path = Path(folder)/'tile-0-1-lease.jsonl'
+            raw = b'{"at_ns":134535215125,"data":{"'
+            path.write_bytes(raw)
+            result = latency_collector_r2.authority_audit(memory,Path(folder))
+            self.assertFalse(result['complete'])
+            self.assertIsNone(result['events'])
+            self.assertEqual(result['error']['type'],'JSONDecodeError')
+            self.assertEqual(path.read_bytes(),raw)
+            self.assertEqual(len(result['files']),1)
+
+
+if __name__ == '__main__':
+    unittest.main()

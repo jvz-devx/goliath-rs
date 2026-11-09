@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Retain the completed release, explicitly preserving the reader-test compile failure."""
+import json
+from pathlib import Path
+import re
+import shutil
+from e14_snapshot_support import sha256
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    source = ROOT/'.local/src/horizon'
+    path = ROOT/'docs/experiments/data/E25/e25-stamps-r2-build.json'
+    result = json.loads(path.read_text())
+    if not result['source_restored']:raise RuntimeError('source/index restoration incomplete')
+    if len(result['commands']) != 7 or any(row['exit'] for row in result['commands'][:-1]):raise RuntimeError('earlier production or scoped gate failed')
+    failed = result['commands'][-1]
+    log = (ROOT/failed['log']).read_text()
+    if failed['label'] != 'reader-tests' or failed['exit'] != 101 or re.findall(r'error\[([^]]+)\]',log) != ['E0061'] or 'argument #2 of type `u16` is missing' not in log:
+        raise RuntimeError('failure is not the isolated new test connection constructor')
+    target = ROOT/'.local/bin/meridian-e25/e25-stamps-r2-release'
+    target.mkdir(parents=True,exist_ok=False)
+    for name in ['horizon-client','horizon-bots']:shutil.copy2(source/'target/release'/name,target/name)
+    result.update(status='release-with-reader-test-compile-limit',directory=str(target.relative_to(ROOT)),
+        binaries={name:sha256(target/name) for name in ['horizon-client','horizon-bots']},
+        build_record=dict(path=str(path.relative_to(ROOT)),sha256=sha256(path)),
+        verification_limits=['new reader-order test did not compile: Connection::connect test call omitted its u16 port; no reader test result claimed'],
+        production_or_capacity_qualified=False)
+    (target/'build.json').write_text(json.dumps(result,indent=2)+'\n')
+    output = ROOT/'docs/experiments/data/E25/e25-stamps-r2-release.json'
+    if output.exists():raise RuntimeError('release record already exists')
+    output.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(directory=str(target.relative_to(ROOT)),binaries=result['binaries'],record_sha256=sha256(output))),flush=True)
+
+
+if __name__=='__main__':main()

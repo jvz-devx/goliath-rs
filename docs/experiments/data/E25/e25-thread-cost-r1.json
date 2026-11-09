@@ -1,0 +1,99 @@
+{
+  "kind": "E25-native-thread-cost",
+  "runs": [
+    {
+      "path": "via",
+      "summary": {
+        "path": "docs/experiments/data/E25/e25-latency-r1-via-d1-summary.json",
+        "sha256": "f032798b787c351a240e8d8da26be4d5e57c6aab8c10733264c0ae5a5af221cf"
+      },
+      "cell_decompressed_sha256": "00b9208b75625a89b8dc6b7dc0fcd3bb688f82a7e8400a1215e9df1b3702cb5e",
+      "groups": {
+        "IO drivers": {
+          "count": 4,
+          "cores": 0.8423700465926948,
+          "user_cores": 0.36024778643424366,
+          "system_cores": 0.48212226015845105,
+          "percent_process_cpu": 75.25413977228243
+        },
+        "terrain managers": {
+          "count": 650,
+          "cores": 0.23374068320908772,
+          "user_cores": 0.037202572270222396,
+          "system_cores": 0.1965381109388652,
+          "percent_process_cpu": 20.88150464969064
+        },
+        "other matched threads": {
+          "count": 13,
+          "cores": 0.0009943674398478239,
+          "user_cores": 0.00015751517982566065,
+          "system_cores": 0.0008368522600221631,
+          "percent_process_cpu": 0.08883300944281668
+        },
+        "player supervisors": {
+          "count": 650,
+          "cores": 9.745685993359098e-05,
+          "user_cores": 3.230870399742215e-05,
+          "system_cores": 6.514815593616882e-05,
+          "percent_process_cpu": 0.008706425624790027
+        }
+      },
+      "process_cores": 1.1193670529510937,
+      "matched_cores": 1.077202554101564,
+      "matched_percent": 96.23318385704069,
+      "residual_cores": 0.042164498849529775,
+      "context_switches_per_second": 36610.63781418926,
+      "unix_syscalls_per_second": 191613.6645473029
+    },
+    {
+      "path": "direct",
+      "summary": {
+        "path": "docs/experiments/data/E25/e25-latency-r1-direct-d1-summary.json",
+        "sha256": "b279a7dc2c6668c0bc9be68f9191db2b25bdcf353f13013f2147d6f322707578"
+      },
+      "cell_decompressed_sha256": "2116d57d2ccd11316a611b22598d276d1ac35b2faa2a1d26846e1dce0d5fb729",
+      "groups": {
+        "IO drivers": {
+          "count": 4,
+          "cores": 0.7742841654322703,
+          "user_cores": 0.3503825649343959,
+          "system_cores": 0.42390160049787445,
+          "percent_process_cpu": 74.77612240258321
+        },
+        "terrain managers": {
+          "count": 642,
+          "cores": 0.21956353196443326,
+          "user_cores": 0.03661108858763605,
+          "system_cores": 0.18295244337679725,
+          "percent_process_cpu": 21.204242930823714
+        },
+        "other matched threads": {
+          "count": 13,
+          "cores": 0.0009456629413704782,
+          "user_cores": 0.00014509532137197453,
+          "system_cores": 0.0008005676199985037,
+          "percent_process_cpu": 0.09132694560016971
+        },
+        "player supervisors": {
+          "count": 642,
+          "cores": 0.00010218037540068715,
+          "user_cores": 3.28892539057316e-05,
+          "system_cores": 6.929112149495552e-05,
+          "percent_process_cpu": 0.00986802081098744
+        }
+      },
+      "process_cores": 1.035469800458016,
+      "matched_cores": 0.9948955407134746,
+      "matched_percent": 96.08156029981808,
+      "residual_cores": 0.04057425974454143,
+      "context_switches_per_second": 38450.82847386948,
+      "unix_syscalls_per_second": 193180.23358287467
+    }
+  ],
+  "limits": [
+    "native thread CPU is measured, not sampled blocked time",
+    "system CPU includes real IO and other kernel work, not only wakeups",
+    "thread-count and context-switch counts do not give scheduling CPU seconds",
+    "short-lived unmatched threads and endpoint skew remain in residual"
+  ]
+}

@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""Read retained soak RSS, crossing markers and minute-spaced reader identities."""
+import argparse
+import base64
+from collections import Counter
+import gzip
+import hashlib
+import json
+import math
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def read(path):
+    raw = path.read_bytes()
+    if path.suffix == '.gz':raw = gzip.decompress(raw)
+    return json.loads(raw),hashlib.sha256(raw).hexdigest()
+
+
+def native_lines(entry,inputs):
+    if 'base64' in entry:
+        raw = base64.b64decode(entry['base64'])
+        if hashlib.sha256(raw).hexdigest() != entry['sha256']:raise RuntimeError('native bytes differ')
+        yield from raw.decode(errors='replace').splitlines()
+        return
+    path = ROOT/entry['archive']
+    native_hash,container_hash = hashlib.sha256(),hashlib.sha256()
+    pending = b''
+    with gzip.open(path,'rb') as stream:
+        header = stream.readline();container_hash.update(header)
+        for line in stream:
+            container_hash.update(line)
+            if line.startswith(b']'):break
+            chunk = base64.b64decode(json.loads(line.lstrip(b',')))
+            native_hash.update(chunk)
+            lines = (pending+chunk).split(b'\n')
+            pending = lines.pop()
+            for row in lines:yield row.decode(errors='replace')
+        tail = stream.read();container_hash.update(tail)
+    if pending:yield pending.decode(errors='replace')
+    if native_hash.hexdigest() != entry['raw_sha256']:raise RuntimeError('native proxy log hash differs')
+    inputs[str(path.relative_to(ROOT))] = dict(decompressed_sha256=container_hash.hexdigest(),native_bytes_sha256=native_hash.hexdigest())
+
+
+def correlation(xs,ys):
+    if len(xs)<3:return None
+    x=sum(xs)/len(xs);y=sum(ys)/len(ys)
+    denominator=math.sqrt(sum((v-x)**2 for v in xs)*sum((v-y)**2 for v in ys))
+    return sum((a-x)*(b-y) for a,b in zip(xs,ys))/denominator if denominator else None
+
+
+def analyze(label,soak,cell,lines):
+    memory = soak['memory']
+    points = [dict(seconds=row['elapsed_seconds'],rss_mib=row['processes']['proxy']['rss_mb'],
+        threads=row['processes']['proxy']['threads']) for row in memory]
+    nearest = lambda stamp:min(points,key=lambda row:abs(row['seconds']-stamp))
+    first5 = nearest(300)
+    endpoints = {str(stamp):nearest(stamp) for stamp in [0,300,600,900,1200,1500,1800]
+        if stamp <= points[-1]['seconds']+2}
+    endpoints['last'] = points[-1]
+    increases = [dict(from_seconds=a['seconds'],to_seconds=b['seconds'],delta_mib=b['rss_mib']-a['rss_mib'])
+        for a,b in zip(points,points[1:]) if a['seconds']>=first5['seconds']]
+    positive = sorted((row for row in increases if row['delta_mib']>0),key=lambda row:row['delta_mib'],reverse=True)
+    markers = set()
+    parse_errors = 0
+    for line in lines:
+        if 'E8_EVENT ' not in line:continue
+        try:row=json.loads(line.split('E8_EVENT ',1)[1])
+        except ValueError:parse_errors+=1;continue
+        if 'ordered inputs before source release' in row.get('step',''):
+            markers.add((int(row['ns']),row['step'],row.get('target')))
+    activity = [(stamp-cell['start_ns'])/1e9 for stamp,_,_ in markers]
+    bins = []
+    for minute in range(1,int(points[-1]['seconds']//60)+1):
+        a,b=nearest((minute-1)*60),nearest(minute*60)
+        bins.append(dict(minute=minute,delta_mib=b['rss_mib']-a['rss_mib'],rss_mib=b['rss_mib'],
+            crossing_markers=sum((minute-1)*60<=stamp<minute*60 for stamp in activity)))
+    audits = []
+    previous_readers,previous_real,previous_gen = None,None,None
+    for audit in soak['ownership_audits']:
+        readers={(tile,player['uuid']) for tile,status in audit['snapshots'].items() for player in status['players'] if player.get('terrain_reader')}
+        real={player['uuid'] for status in audit['snapshots'].values() for player in status['players'] if not player.get('terrain_reader')}
+        generations=sum(row['after'] for row in audit['generations'].values())
+        audits.append(dict(seconds=audit['elapsed_seconds'],rss_mib=nearest(audit['elapsed_seconds'])['rss_mib'],
+            readers=len(readers),real_identities=len(real),
+            sampled_reader_arrivals=None if previous_readers is None else len(readers-previous_readers),
+            sampled_reader_departures=None if previous_readers is None else len(previous_readers-readers),
+            sampled_real_arrivals=None if previous_real is None else len(real-previous_real),
+            sampled_real_departures=None if previous_real is None else len(previous_real-real),
+            committed_generation_advances=None if previous_gen is None else generations-previous_gen))
+        previous_readers,previous_real,previous_gen=readers,real,generations
+    bot_totals=[sum(row['online'] for row in sample['groups'].values()) for sample in cell['bot_samples']]
+    after5bins=[row for row in bins if row['minute']>5]
+    net=points[-1]['rss_mib']-first5['rss_mib']
+    ten=next((row for row in points if row['seconds']>=first5['seconds'] and row['rss_mib']>=first5['rss_mib']*1.1),None)
+    return dict(run=label,points=points,endpoints=endpoints,
+        growth_5_to_15_percent=(nearest(900)['rss_mib']/first5['rss_mib']-1)*100,
+        growth_5_to_last_percent=(points[-1]['rss_mib']/first5['rss_mib']-1)*100,
+        first_observed_ten_percent_crossing=ten,largest_positive_adjacent_changes=positive[:10],
+        largest_adjacent_share_of_net_growth=positive[0]['delta_mib']/net if positive and net>0 else None,
+        minute_bins=bins,minute_delta_crossing_pearson=correlation([row['delta_mib'] for row in after5bins],[row['crossing_markers'] for row in after5bins]),
+        marker_parse_errors=parse_errors,markers_in_memory_span=sum(0<=stamp<=points[-1]['seconds'] for stamp in activity),
+        reader_and_real_audits=audits,bot_online_range=[min(bot_totals),max(bot_totals)],
+        threads_range=[min(row['threads'] for row in points),max(row['threads'] for row in points)],
+        limits=['failed availability run, not soak qualification','no minute-30 endpoint',
+            'crossing markers are replay-before-release events, not an independent completed-owner ledger',
+            'wall marker to elapsed-memory alignment is coarse; use minute bins, not millisecond causal claims',
+            'minute-spaced identity differences are a lower bound on reader/session churn',
+            'correlation is descriptive and does not attribute allocation ownership'])
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    args=parser.parse_args()
+    if not args.name.startswith(('e25-','repro-')) or not all(c.isalnum() or c in '-_' for c in args.name):raise ValueError('fresh simple e25- or repro- name required')
+    target=ROOT/'docs/experiments/data/E25'/(args.name+'.json')
+    if target.exists():raise RuntimeError('analysis already exists')
+    inputs={};results=[]
+    for label,folder,name in [('E23',ROOT/'docs/experiments/data/E23','soak-final-r1'),
+        ('E24',ROOT/'.local/evidence/E24/soak-fixed-r1','soak-fixed-r1')]:
+        soak_path=folder/(name+'-soak.json.gz');cell_path=folder/(name+'.json.gz')
+        soak,soak_sha=read(soak_path);raw,cell_sha=read(cell_path)
+        for path,digest in [(soak_path,soak_sha),(cell_path,cell_sha)]:inputs[str(path.relative_to(ROOT))]=dict(decompressed_sha256=digest)
+        if label=='E23':
+            path=folder/(name+'-650-failure-native.json.gz');failure,digest=read(path)
+            inputs[str(path.relative_to(ROOT))]=dict(decompressed_sha256=digest)
+            lines=iter(failure['lines']['proxy.log'])
+        else:
+            path=folder/'native-logs.json.gz';index,digest=read(path)
+            inputs[str(path.relative_to(ROOT))]=dict(decompressed_sha256=digest)
+            lines=native_lines(index['files']['proxy.log'],inputs)
+        results.append(analyze(label,soak,raw['cells']['650'],lines))
+    result=dict(kind='E25-read-only-soak-RSS-history',inputs=inputs,runs=results,
+        original_inputs_modified=False,allocator_causal_attribution='open')
+    raw=(json.dumps(result,indent=2,allow_nan=False)+'\n').encode()
+    target.write_bytes(raw)
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)),sha256=hashlib.sha256(raw).hexdigest(),
+        runs=[{key:row[key] for key in ['run','growth_5_to_15_percent','growth_5_to_last_percent','first_observed_ten_percent_crossing','largest_positive_adjacent_changes','minute_delta_crossing_pearson','bot_online_range','threads_range']} for row in results]),indent=2),flush=True)
+
+
+if __name__=='__main__':main()

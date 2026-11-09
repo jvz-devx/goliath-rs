@@ -1,0 +1,53 @@
+{
+  "kind": "E25-final-proxy-rows-plan",
+  "name": "e25-final80f-r1",
+  "bundle": ".local/bin/meridian-e25/e25-latency-r2-reactor1",
+  "binaries": {
+    "horizon-client": "33a74ea53e3b77f1ff7f40be36c35ad5535215918f5fa4098e7c1f9b0f82f71f",
+    "meridian": "80f8953a201a51a0cae84341080af0bd70e08586ad608475b3092b2c30d3c378",
+    "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+    "goliath-store": "9636fa6d8089b071be241437e79eb2942a07dc756039b394e73cc8f705e26d0e",
+    "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025"
+  },
+  "final": {
+    "path": ".local/bin/meridian-e25/e25-latency-r2-reactor1/FINAL.json",
+    "sha256": "752573fd9ef9e96234e8ae3c255d9d0f76a9cef77b822775dbcfa872799910f6",
+    "bytes": 41170,
+    "hash_scope": "file bytes"
+  },
+  "packet_plan": {
+    "path": "docs/experiments/data/E25/e25-latency-plan-r1.json",
+    "sha256": "5d941aa29f128d1cc2958995d66556f628c7263f9974e5ac11d65637131ed70d",
+    "bytes": 3651,
+    "hash_scope": "file bytes"
+  },
+  "prior_strict_rows": [
+    {
+      "path": "docs/experiments/data/E25/e25-latency-r2-scheduler2-p1-reactor1-summary.json",
+      "sha256": "2666e052165d7bf53fcd979aafcdb9b078e57e0def6d57ddcf6dc5215200bc5b",
+      "bytes": 941255,
+      "hash_scope": "file bytes"
+    }
+  ],
+  "rows": [
+    {
+      "name": "e25-final80f-r1-via-2",
+      "server_uncapped_diagnostic": false
+    },
+    {
+      "name": "e25-final80f-r1-uncapped",
+      "server_uncapped_diagnostic": true
+    }
+  ],
+  "collector": {
+    "path": "scripts/e25-latency-cell-r2",
+    "sha256": "8606e6f232977c0643461a9e92f2980216e099061ca4e70e005663a49a78e67c",
+    "bytes": 24968,
+    "hash_scope": "file bytes"
+  },
+  "strict_p95_limit_ns": 5000000,
+  "tails_trimmed": false,
+  "unmatched": "infinity",
+  "tuning": false,
+  "report_failures": true
+}

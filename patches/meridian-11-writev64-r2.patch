@@ -1,0 +1,137 @@
+diff --git a/crates/meridian-net/src/io_pool.rs b/crates/meridian-net/src/io_pool.rs
+--- a/crates/meridian-net/src/io_pool.rs
++++ b/crates/meridian-net/src/io_pool.rs
+@@ -18,6 +18,10 @@
+ const OUTPUT_CAP: usize = 8 * 1024 * 1024;
+ const OUTPUT_CHUNKS: usize = 8192;
+ const TURN_BYTES: usize = 256 * 1024;
++#[cfg(target_os = "macos")]
++const WRITE_SLICES: usize = 64;
++#[cfg(not(target_os = "macos"))]
++const WRITE_SLICES: usize = 16;
+ const WAKE: Token = Token(0);
+ mod tasks;
+ mod timers;
+@@ -620,30 +624,18 @@
+             if bytes >= TURN_BYTES {
+                 return Ok(true);
+             }
+-            let mut remaining = TURN_BYTES - bytes;
+-            let slices: Vec<_> = queue
+-                .chunks
+-                .iter()
+-                .take(16)
+-                .map_while(|chunk| {
+-                    if remaining == 0 {
+-                        return None;
+-                    }
+-                    let length = remaining.min(chunk.bytes.len() - chunk.offset);
+-                    remaining -= length;
+-                    Some(IoSlice::new(
+-                        &chunk.bytes[chunk.offset..chunk.offset + length],
+-                    ))
+-                })
+-                .collect();
+-            let count = match self.stream.write_vectored(&slices) {
+-                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+-                Ok(count) => count,
+-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(true),
+-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+-                Err(error) => return Err(error),
++            let count = {
++                let mut slices: [IoSlice<'_>; WRITE_SLICES] =
++                    std::array::from_fn(|_| IoSlice::new(&[]));
++                let used = write_slices(&queue.chunks, TURN_BYTES - bytes, &mut slices);
++                match self.stream.write_vectored(&slices[..used]) {
++                    Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
++                    Ok(count) => count,
++                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(true),
++                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
++                    Err(error) => return Err(error),
++                }
+             };
+-            drop(slices);
+             bytes += count;
+             queue.bytes -= count;
+             let mut left = count;
+@@ -687,6 +679,25 @@
+     }
+ }
+ 
++/// Describe a FIFO byte-limited prefix without allocating a descriptor vector.
++fn write_slices<'a>(
++    chunks: &'a VecDeque<WriteChunk>,
++    mut remaining: usize,
++    slices: &mut [IoSlice<'a>],
++) -> usize {
++    let mut used = 0;
++    for chunk in chunks.iter().take(slices.len()) {
++        if remaining == 0 {
++            break;
++        }
++        let length = remaining.min(chunk.bytes.len() - chunk.offset);
++        slices[used] = IoSlice::new(&chunk.bytes[chunk.offset..chunk.offset + length]);
++        remaining -= length;
++        used += 1;
++    }
++    used
++}
++
+ impl Drop for Entry {
+     fn drop(&mut self) {
+         // Covers admissions racing a stopped receiver and a driver unwinding.
+diff --git a/crates/meridian-net/src/io_pool/tests.rs b/crates/meridian-net/src/io_pool/tests.rs
+--- a/crates/meridian-net/src/io_pool/tests.rs
++++ b/crates/meridian-net/src/io_pool/tests.rs
+@@ -228,3 +228,51 @@
+     pool.stop();
+     runner.join().unwrap();
+ }
++
++#[test]
++fn write_batches_keep_fifo_order_across_the_descriptor_cap() {
++    let chunks: VecDeque<_> = (0..80)
++        .map(|index| WriteChunk {
++            bytes: vec![index as u8; 5],
++            offset: index % 2,
++            completed: None,
++        })
++        .collect();
++    let mut slices: [IoSlice<'_>; WRITE_SLICES] = std::array::from_fn(|_| IoSlice::new(&[]));
++    let used = write_slices(&chunks, TURN_BYTES, &mut slices);
++    assert_eq!(used, WRITE_SLICES.min(80));
++    let actual: Vec<_> = slices[..used]
++        .iter()
++        .flat_map(|slice| slice.iter().copied())
++        .collect();
++    let expected: Vec<_> = chunks
++        .iter()
++        .take(used)
++        .flat_map(|chunk| chunk.bytes[chunk.offset..].iter().copied())
++        .collect();
++    assert_eq!(actual, expected);
++}
++
++#[test]
++fn write_batches_bound_bytes_and_keep_partial_chunk_offsets() {
++    let chunks = VecDeque::from([
++        WriteChunk {
++            bytes: vec![1, 2, 3, 4],
++            offset: 2,
++            completed: None,
++        },
++        WriteChunk {
++            bytes: vec![5, 6, 7],
++            offset: 1,
++            completed: None,
++        },
++    ]);
++    let mut slices: [IoSlice<'_>; WRITE_SLICES] = std::array::from_fn(|_| IoSlice::new(&[]));
++    let used = write_slices(&chunks, 3, &mut slices);
++    assert_eq!(used, 2);
++    let actual: Vec<_> = slices[..used]
++        .iter()
++        .flat_map(|slice| slice.iter().copied())
++        .collect();
++    assert_eq!(actual, [3, 4, 6]);
++}

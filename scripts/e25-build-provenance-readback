@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Compare frozen and rebuilt reactor metadata without building or running either."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import struct
+import subprocess
+import tarfile
+import tomllib
+
+from e25_soak_harness import ROOT,DATA,EVIDENCE,read,digest
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def command(*args):
+    return subprocess.check_output(args,cwd=ROOT,text=True,stderr=subprocess.STDOUT)
+
+
+def artifact(path):
+    raw = path.read_bytes()
+    linked = command('otool','-L',str(path.relative_to(ROOT))).splitlines()[1:]
+    loads = command('otool','-l',str(path.relative_to(ROOT)))
+    sdk = re.search(r'cmd LC_BUILD_VERSION\s+cmdsize \d+\s+platform (\d+)\s+minos ([^\s]+)\s+sdk ([^\s]+)\s+ntools \d+\s+tool \d+\s+version ([^\s]+)',loads)
+    undefined = command('nm','-u',str(path.relative_to(ROOT)))
+    return dict(path=str(path.relative_to(ROOT)),sha256=sha(raw),bytes=len(raw),
+        macho_cpu_type=struct.unpack_from('<Iii',raw)[1],macho_cpu_subtype=struct.unpack_from('<Iii',raw)[2],
+        linked_libraries=[line.strip() for line in linked],
+        build_version=dict(platform=sdk[1],minimum_os=sdk[2],sdk=sdk[3],linker=sdk[4]) if sdk else None,
+        dwarf_segment_present='segname __DWARF' in loads,
+        embedded_rustc_commits=sorted({value.decode() for value in re.findall(rb'/rustc/([0-9a-f]{40})/',raw)}),
+        allocator_imports=sorted({line.strip() for line in undefined.splitlines() if re.search(r'_(?:malloc|calloc|realloc|free|posix_memalign|mi_[a-z_]+|je_[a-z_]+)$',line.strip())}))
+
+
+def main():
+    target = DATA/'e25-reactor-build-provenance-diff-r1.json'
+    if target.exists():
+        raise RuntimeError('provenance readback exists')
+    frozen = ROOT/'.local/bin/meridian-e18/reactor-1'
+    rebuilt = ROOT/'.local/bin/meridian-e25/e25-reactor1-matched-r2'
+    old = read(frozen/'candidate.json')
+    new = read(rebuilt/'build.json')
+    project = old['projects']['meridian']
+    index_env = dict(os.environ,GIT_INDEX_FILE=str(EVIDENCE/'e25-preparation-r1-frozen/index'),GIT_OPTIONAL_LOCKS='0')
+    def source(name):
+        return subprocess.check_output(['git','--git-dir',str(ROOT/'.local/src/meridian/.git'),'show',':'+name],cwd=ROOT,env=index_env)
+    old_lock = source('Cargo.lock')
+    if sha(old_lock) != project['source_files']['Cargo.lock']:
+        raise ValueError('reconstructed original lock differs from frozen provenance')
+    new_lock = (rebuilt/'Cargo.lock').read_bytes()
+    old_packages = tomllib.loads(old_lock.decode())['package']
+    new_packages = tomllib.loads(new_lock.decode())['package']
+    pkey = lambda row:(row['name'],row['version'],row.get('source'))
+    left,right = {pkey(row):row for row in old_packages},{pkey(row):row for row in new_packages}
+    canonical = read(frozen/'canonical.json')['internal_crates']
+    subset = {name:value for name,value in canonical['files'].items() if name in new['dependencies']['files']}
+    internal_differences = [name for name in subset if subset[name] != new['dependencies']['files'][name]]
+    source_differences = [name for name,value in project['source_files'].items() if new['compiled_files'].get(name) != value]
+    allocator_sites = []
+    for name in project['source_files']:
+        if name.endswith('.rs') and re.search(rb'#\s*\[\s*global_allocator\s*\]',source(name)):
+            allocator_sites.append(name)
+    with tarfile.open(ROOT/new['dependencies']['archive']) as archive:
+        for member in archive:
+            if member.isfile() and member.name.endswith('.rs') and re.search(rb'#\s*\[\s*global_allocator\s*\]',archive.extractfile(member).read()):
+                allocator_sites.append(member.name)
+    artifacts = dict(frozen_29f=artifact(frozen/'meridian'),rebuilt_80f=artifact(rebuilt/'meridian'))
+    fingerprints = {key:[] for key in artifacts}
+    by_hash = {row['sha256']:key for key,row in artifacts.items()}
+    for path in (ROOT/'.local/src/meridian/target/release/deps').glob('meridian-*'):
+        if not path.is_file() or path.stat().st_size != artifacts['frozen_29f']['bytes']:
+            continue
+        value = sha(path.read_bytes())
+        if value not in by_hash:
+            continue
+        suffix = path.name.removeprefix('meridian-')
+        pointer = path.parent.parent/'.fingerprint'/('meridian-proxy-'+suffix)/'bin-meridian.json'
+        if pointer.exists():
+            info = read(pointer)
+            fingerprints[by_hash[value]].append(dict(artifact=digest(path),fingerprint=digest(pointer),
+                values={key:info.get(key) for key in ['rustc','features','declared_features','target','profile','rustflags','config','compile_kind']}))
+    workspace = tomllib.loads(source('Cargo.toml').decode())
+    proxy = tomllib.loads(source('crates/meridian-proxy/Cargo.toml').decode())
+    result = dict(kind='E25-readonly-reactor-build-provenance-diff',
+        inputs=[digest(frozen/'candidate.json'),digest(frozen/'canonical.json'),digest(rebuilt/'build.json'),digest(ROOT/'scripts/e18-gates')],
+        artifacts=artifacts,hash_bound_retained_fingerprints=fingerprints,
+        declared_profile='release',workspace_profile_overrides=workspace.get('profile',{}),
+        original_gate_helper_explicit_settings=dict(CARGO_INCREMENTAL='0',CARGO_PROFILE_RELEASE_LTO='thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1'),
+        original_gate_helper_environment_policy='inherits remaining environment; historical effective environment is not recorded in the frozen build record',
+        original_build_record_has_no_toolchain_or_full_flags=True,
+        rebuilt_settings=new['build_settings'],rebuilt_rustc=new['rustc'],rebuilt_cargo=new['cargo'],
+        rebuilt_rustflags_policy='RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS removed by the recorded builder; remaining Cargo profile overrides cleared before fixed settings',
+        profile_fields_not_explicitly_recorded_for_frozen=['opt-level','debug-assertions','panic','RUSTFLAGS','target triple'],
+        release_target_commands=dict(frozen=old['gates']['commands'][-1]['command'],rebuilt=new['commands'][0]['command']),
+        direct_proxy_feature_declarations=proxy.get('features',{}),
+        lock=dict(frozen_reconstructed_sha256=sha(old_lock),rebuilt_sha256=sha(new_lock),byte_equal=old_lock==new_lock,
+            package_count=len(old_packages),added=[right[key] for key in right.keys()-left.keys()],
+            removed=[left[key] for key in left.keys()-right.keys()],changed=[key for key in left.keys()&right.keys() if left[key]!=right[key]]),
+        internal_source=dict(frozen_revision=canonical['goliath_rs_commit'],rebuilt_archive_revision=new['dependencies']['commit'],
+            compared_files=len(subset),byte_differences=internal_differences,rebuilt_archive_sha256=new['dependencies']['archive_sha256']),
+        meridian_source=dict(pin_equal=project['pin']==new['frozen_stack']['pin'],patch_stack_equal=project['patches']==new['frozen_stack']['patches'],
+            files=len(project['source_files']),compiled_hash_differences=source_differences,declared_relocation=new['source_path_only_change']),
+        allocator=dict(global_allocator_declaration_sites=allocator_sites,
+            allocator_packages=[row['name'] for row in old_packages if re.search(r'mimalloc|jemalloc|goliath-alloc|snmalloc',row['name'])],
+            conclusion='no custom global allocator declaration in the verified Meridian/internal source; System allocator is selected by default',
+            historical_runtime_allocator_environment='not captured in these build records'),
+        known_semantic_difference_explaining_rss=None,
+        conclusion='no dependency, allocator, source or linked-library change identified; historical full flags are incomplete. One run of each cannot distinguish a build effect from run-to-run variance.',
+        frozen_repeat='conditional after zone, as authorized; not queued by this readback',new_build_or_measurement=False)
+    target.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)),sha256=sha(target.read_bytes()),result=result),indent=2),flush=True)
+
+
+if __name__=='__main__':
+    main()

@@ -1,0 +1,25 @@
+{
+  "kind": "E25-reviewer-approved-order-r4",
+  "supersedes_order_in": "docs/experiments/data/E25/e25-memory-next-plan-r3.json",
+  "control_m1": "completed, rebuilt80f RSS+1.945676 percent",
+  "scheduler_m1": "completed, rebuiltc9cd RSS+34.038993 percent; dropped as a base",
+  "order": [
+    "finish and freeze the already queued reactor-base zone build",
+    "one frozen29f full30minute repeat in the same soak harness",
+    "zone soak only if frozen29f grows past10percent again or the reviewer reproduction of80f fails"
+  ],
+  "zone_soak_unconditional": false,
+  "frozen_repeat_proxy_sha256": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+  "final_proxy_if_frozen_repeat_under_ten_percent": "rebuilt reactor-1 80f, unchanged source",
+  "existing_final_strict_d9_row": {
+    "path": "docs/experiments/data/E25/e25-latency-r2-scheduler2-p1-reactor1-summary.json",
+    "p95_ns": 11159291,
+    "strict_five_ms_pass": false
+  },
+  "remaining_strict_via_rows_if_final_80f": 1,
+  "final_uncapped_diagnostic_from_prior_approval": 1,
+  "latency_tuning": "stopped; report final rows whether they pass or fail",
+  "authority_event_voids_comparison": true,
+  "silent_retry": false,
+  "reviewer_reproduction_required": true
+}

@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Run an approved memory candidate only after a fully read-back control has exited."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+from e14_snapshot_support import validate_snapshot
+import e25_soak_harness as harness
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--bins',type=Path,required=True)
+    parser.add_argument('--control',required=True)
+    parser.add_argument('--entry',type=Path,required=True)
+    parser.add_argument('--after-pid',type=int)
+    args = parser.parse_args()
+    print('E25_SOAK_CANDIDATE_PROCESS '+str(os.getpid()),flush=True)
+    if not all(re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',name) for name in [args.name,args.control]):
+        raise ValueError('fresh simple names required')
+    if args.after_pid:
+        subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-wait-exit',str(args.after_pid)],check=True)
+    control_run = harness.read(harness.DATA/(args.control+'-run.json'))
+    if control_run['status'] != 'complete':
+        raise RuntimeError('control did not complete; no candidate or silent retry')
+    control_plan = harness.read(harness.DATA/(args.control+'-plan.json'))
+    reference = harness.read(harness.ROOT/control_run['readback']['path'])
+    if reference['native_soak_verdict'] != 'passed' or reference['authority_events']:
+        raise RuntimeError('control authority/soak gates failed; no candidate or silent retry')
+    bins = args.bins.resolve()
+    identity = validate_snapshot(bins)
+    old = control_plan['bundle']['binaries']
+    new = identity['binaries']
+    if set(old) != set(new) or any(new[name] != value for name,value in old.items() if name != 'meridian'):
+        raise ValueError('non-proxy fixture binaries differ')
+    if harness.digest(bins/'horizon-bots')['sha256'] != control_plan['bundle']['bot_sha256']:
+        raise ValueError('bot executable differs')
+    entry = harness.read(args.entry)
+    if not entry.get('approved_for_memory_entry') or new['meridian'] != entry['soak_proxy']['sha256']:
+        raise ValueError('candidate has no exact approved entry')
+    source = entry['source_row']
+    if harness.digest(harness.ROOT/source['path'])['sha256'] != source['sha256']:
+        raise ValueError('entry row changed')
+    if not 5_100_000 <= source['p95_ns'] <= 11_200_000 or source['proxy_cores'] > 1.1197170604133657:
+        raise ValueError('entry is outside the approved band or CPU line')
+    for script,info in control_plan['source_helpers'].items():
+        if harness.digest(harness.ROOT/'scripts'/script) != info:
+            raise RuntimeError('soak helper changed since control')
+    control_adapter = harness.EVIDENCE/(args.control+'-e24-run-executed.py')
+    tree = harness.ast.fix_missing_locations(harness.Relocate().visit(harness.ast.parse((harness.ROOT/'scripts/e24-run').read_text())))
+    expected_adapter = (harness.ast.unparse(tree)+'\n').encode()
+    if harness.digest(control_adapter)['sha256'] != hashlib.sha256(expected_adapter).hexdigest():
+        raise RuntimeError('executed soak adapter differs from control')
+    target = harness.DATA/(args.name+'-plan.json')
+    result_path = harness.DATA/(args.name+'-run.json')
+    if target.exists() or result_path.exists():
+        raise RuntimeError('candidate already exists')
+    plan = dict(kind='E25-full-soak-candidate-plan',name=args.name,players=650,measurement_seconds=1800,cargo_items=65,
+        entry=harness.digest(args.entry.resolve()),control=harness.digest(harness.DATA/(args.control+'-run.json')),
+        control_result=control_run['readback'],bundle=dict(path=str(bins.relative_to(harness.ROOT)),binaries=new,final=harness.digest(bins/'FINAL.json')),
+        executed_adapter_matches_control=True,authority_event_voids_comparison=True,silent_retry=False)
+    target.write_text(json.dumps(plan,indent=2)+'\n')
+    host = harness.ROOT/'.local/bin/host-window'
+    subprocess.run([host,'quiet','E25',args.name+' full30m soak candidate'],check=True)
+    error = None
+    try:
+        subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-soak-cell','--name',args.name,'--bins',bins],cwd=harness.ROOT,check=True)
+    except BaseException as caught:
+        error = str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME')
+    finally:
+        subprocess.run([host,'release','E25'],check=True)
+    result = dict(kind='E25-full-soak-candidate',status='failed' if error else 'collected',error=error,plan=harness.digest(target))
+    if not error:
+        log = harness.EVIDENCE/(args.name+'-readback.log')
+        with log.open('x') as stream:
+            done = subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-analysis-exec',sys.executable,'-B',
+                harness.ROOT/'scripts/e25-soak-readback','--name',args.name],cwd=harness.ROOT,stdout=stream,stderr=subprocess.STDOUT)
+        result['readback_exit'] = done.returncode
+        result['readback_log'] = harness.digest(log)
+        if done.returncode:
+            result['status']='failed-readback'
+        else:
+            path = harness.DATA/(args.name+'-e25-result.json')
+            if not path.exists():
+                path=path.with_suffix(path.suffix+'.gz')
+            result['readback']=harness.digest(path)
+            data = harness.read(path)
+            result.update(status='complete',control_proxy_growth_fraction=reference['memory']['proxy']['growth_fraction'],
+                candidate_proxy_growth_fraction=data['memory']['proxy']['growth_fraction'],
+                rss_soak_lines_pass=data['rss_soak_lines_pass'],d9_capacity_gate=data['d9_valid'],
+                proxy_cpu_delta_cores=data['proxy']['cores']-reference['proxy']['cores'],
+                proxy_cpu_not_worse=data['proxy']['cores'] <= reference['proxy']['cores'])
+    result_path.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2),flush=True)
+    if result['status'] != 'complete':
+        raise SystemExit(1)
+
+
+if __name__=='__main__':
+    main()

@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Run two matched capped via cells in one window; compare only after release."""
+import argparse
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+from e14_snapshot_support import validate_snapshot
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E25'
+GATES = {'release','fmt','bots-clippy','bots-tests','tile-clippy','clock-tests','reader-tests'}
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def read(path):
+    raw = path.read_bytes()
+    if path.suffix == '.gz':
+        raw = gzip.decompress(raw)
+    return json.loads(raw)
+
+
+def stamp_contract(bundle):
+    identity = validate_snapshot(bundle)
+    final = read(bundle / 'FINAL.json')
+    if final.get('e25_diagnostic_only') or final.get('e25_measurement_verification_limits'):
+        raise ValueError('diagnostic stamp bundle cannot enter the r2 comparison')
+    if final.get('horizon_lease_base') != 'lease-fixed-r2':
+        raise ValueError('r2 lease source is required')
+    stamp = final['e25_measurement_stamps']
+    record = ROOT / stamp['path']
+    build = read(record)
+    if sha(record) != stamp['sha256'] or build['status'] != 'complete' or not build['source_restored']:
+        raise ValueError('measurement stamp build provenance is incomplete')
+    if {row['label'] for row in build['commands']} != GATES or any(row['exit'] for row in build['commands']):
+        raise ValueError('all seven timestamp gates must pass')
+    if any(sha(bundle/name) != digest for name,digest in build['binaries'].items()):
+        raise ValueError('stamp executable does not match its gated build')
+    return dict(identity['binaries'], **{'horizon-bots':sha(bundle/'horizon-bots')})
+
+
+def proxy_build(bundle):
+    pointer = read(bundle / 'FINAL.json')['e25_proxy_build']
+    path = ROOT / pointer['path']
+    record = read(path)
+    if sha(path) != pointer['sha256'] or record['status'] != 'complete' or not record['source_restored']:
+        raise ValueError('proxy build provenance is incomplete')
+    if sha(bundle/'meridian') != record['binary_sha256']:
+        raise ValueError('proxy does not match its build record')
+    return record
+
+
+def compare(reference,candidate,session):
+    for row in [reference,candidate]:
+        if row.get('measurement_session') != session:
+            raise ValueError('rows are not from the same paired session')
+        if row.get('status') != 'complete' or not row.get('d9_valid') or not row.get('binaries_unchanged'):
+            raise ValueError('a cell failed the unchanged D9/identity gates')
+        if row.get('diagnostic_only') or row.get('verification_limits') or row.get('horizon_lease_base') != 'lease-fixed-r2':
+            raise ValueError('an r1 or verification-limited row cannot establish entry')
+        if row.get('direct_reference') or row.get('server_uncapped_diagnostic'):
+            raise ValueError('only capped via cells can establish entry')
+        if row.get('authority_events') or row.get('cleanup_errors') or len(row.get('authority_trace_files',[])) != 4:
+            raise ValueError('an authority or collection failure voids the comparison')
+        if row['overall'].get('p95_is_infinite') or row['overall'].get('p95_ns') is None:
+            raise ValueError('a finite P95 comparison was not established')
+    old = reference['measurement_bundle']['binaries']
+    new = candidate['measurement_bundle']['binaries']
+    if set(old) != set(new) or any(new[key] != value for key,value in old.items() if key != 'meridian'):
+        raise ValueError('non-proxy binaries differ')
+    if reference['plan'] != candidate['plan']:
+        raise ValueError('packet plan differs')
+    if reference['timing_window']['end_ns'] >= candidate['timing_window']['start_ns']:
+        raise ValueError('paired cells are not ordered reactor then candidate')
+    before,after = reference['overall']['p95_ns'],candidate['overall']['p95_ns']
+    def metrics(row):
+        tiles = row.get('per_tile',{})
+        worst = max(tiles,key=lambda tile:(tiles[tile].get('p95_is_infinite',False),tiles[tile].get('p95_ns') or 0)) if tiles else None
+        return dict(proxy_cores=row.get('proxy',{}).get('cores'),peak_threads=row.get('proxy',{}).get('threads_max'),
+            overall_p95_ns=row['overall']['p95_ns'],per_tile_p95_ns={tile:value['p95_ns'] for tile,value in tiles.items()},
+            worst_tile=worst,worst_tile_p95_ns=tiles[worst]['p95_ns'] if worst else None,
+            worst_tile_p95_is_infinite=tiles[worst].get('p95_is_infinite',False) if worst else None)
+    return dict(reference_p95_ns=before,candidate_p95_ns=after,reference=metrics(reference),candidate=metrics(candidate),
+        memory_entry_no_regression=after <= before,strict_five_ms_candidate_pass=after < 5_000_000,
+        m4_qualified=False,interpretation='memory entry only; final proxy still needs both strict lines and two qualifying via repeats')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--reference',type=Path,required=True)
+    parser.add_argument('--candidate',type=Path,required=True)
+    parser.add_argument('--scheduler-reference',type=Path,
+        help='optional middle row: report writev against scheduler-2 as well as reactor-1')
+    parser.add_argument('--plan',type=Path,required=True)
+    args = parser.parse_args()
+    print('E25_LATENCY_SESSION_PROCESS '+str(os.getpid()),flush=True)
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+        raise ValueError('fresh simple session name required')
+    target = DATA / (args.name+'-comparison.json')
+    prereg = DATA / (args.name+'-plan.json')
+    if target.exists() or prereg.exists():
+        raise RuntimeError('session already exists')
+    reference,candidate = args.reference.resolve(),args.candidate.resolve()
+    bundles = [reference,candidate]
+    if args.scheduler_reference:
+        bundles.insert(1,args.scheduler_reference.resolve())
+    identities = [stamp_contract(bundle) for bundle in bundles]
+    builds = [proxy_build(bundle) for bundle in bundles]
+    reactor = read(ROOT/'.local/bin/meridian-e18/reactor-1/candidate.json')['projects']['meridian']
+    if builds[0]['kind'] != 'control' or builds[0]['frozen_stack'] != reactor:
+        raise ValueError('reference must be a provenance-matched reactor-1 control')
+    if any(builds[0]['rustc'] != row['rustc'] or builds[0]['commands'][0]['command'] != row['commands'][0]['command'] for row in builds[1:]):
+        raise ValueError('proxy compiler or release target selection differs')
+    if any(builds[0]['build_settings'] != row.get('build_settings',row.get('settings')) for row in builds[1:]):
+        raise ValueError('proxy profile settings differ')
+    if args.scheduler_reference:
+        scheduler = read(ROOT/'.local/bin/meridian-e20/scheduler-2/candidate.json')['projects']['meridian']
+        if builds[1]['frozen_stack'] != scheduler or builds[1].get('patch'):
+            raise ValueError('middle row must be scheduler-2 without the new delta')
+    if any(set(identities[0]) != set(row) or any(identities[0][key] != row[key] for key in identities[0] if key != 'meridian') for row in identities[1:]):
+        raise ValueError('matched session changes more than the proxy')
+    names = [args.name+'-reactor1',args.name+'-candidate']
+    if args.scheduler_reference:
+        names.insert(1,args.name+'-scheduler2')
+    plan = dict(kind='E25-paired-r2-via-session-plan',name=args.name,
+        packet_plan=dict(path=str(args.plan.resolve().relative_to(ROOT)),sha256=sha(args.plan)),
+        rows=[dict(name=name,bundle=str(bundle.relative_to(ROOT)),binaries=identity)
+            for name,bundle,identity in zip(names,bundles,identities,strict=True)],
+        runner_sha256=sha(Path(__file__)),cell_runner_sha256=sha(ROOT/'scripts/e25-latency-cell'),
+        capped_server_cores=4,capped_bot_cores=1,players=650,warmup_seconds=30,measurement_seconds=60,
+        memory_entry='candidate P95 <= reference P95',strict_final_latency='two via P95 values < 5000000 ns',
+        authority_event_voids_session=True,no_silent_retry=True)
+    prereg.write_text(json.dumps(plan,indent=2)+'\n')
+    host = ROOT / '.local/bin/host-window'
+    subprocess.run([host,'quiet','E25',args.name],check=True)
+    error = None
+    try:
+        for name,bundle in zip(names,bundles,strict=True):
+            subprocess.run([sys.executable,'-B',ROOT/'scripts/e25-latency-cell','--name',name,
+                '--bins',bundle,'--plan',args.plan,'--stop-brackets','--window-managed','--session',args.name],cwd=ROOT,check=True)
+    except BaseException as caught:
+        error = str(caught).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME')
+    finally:
+        subprocess.run([host,'release','E25'],check=True)
+    result = dict(kind='E25-paired-r2-via-session',session=args.name,status='failed' if error else 'complete',error=error,
+        plan=dict(path=str(prereg.relative_to(ROOT)),sha256=sha(prereg)),rows=[])
+    for name in names:
+        path = DATA / (name+'-summary.json')
+        if path.exists():
+            result['rows'].append(dict(path=str(path.relative_to(ROOT)),sha256=sha(path)))
+    if not error:
+        try:
+            samples = [read(ROOT/row['path']) for row in result['rows']]
+            result.update(compare(samples[0],samples[-1],args.name))
+            if args.scheduler_reference:
+                result['against_scheduler2'] = compare(samples[1],samples[-1],args.name)
+                result['scheduler2_against_reactor1'] = compare(samples[0],samples[1],args.name)
+        except BaseException as caught:
+            result.update(status='failed-comparison',error=str(caught))
+    target.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2),flush=True)
+    if result['status'] != 'complete':
+        raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    main()

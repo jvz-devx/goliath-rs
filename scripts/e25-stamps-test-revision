@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Correct only the retained reader regression patch, without checkout writes."""
+import hashlib
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    source = ROOT/'patches/horizon-15-latency-stamps-e25-stamps-r2.patch'
+    target = ROOT/'patches/horizon-15-latency-stamps-e25-stamps-r3.patch'
+    if target.exists():raise RuntimeError('patch revision exists')
+    before = source.read_text()
+    old = '+            &listener.local_addr().unwrap().to_string(),\n'
+    new = '+            "127.0.0.1",\n+            listener.local_addr().unwrap().port(),\n'
+    if before.count(old) != 1:raise RuntimeError('test constructor is not unique')
+    lines = before.replace(old,new).splitlines(keepends=True)
+    result = []
+    index = shift = 0
+    header = re.compile(r'@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)')
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith('diff --git '):shift = 0
+        match = header.match(line)
+        if not match:
+            result.append(line);index += 1;continue
+        end = index+1
+        while end<len(lines) and not lines[end].startswith(('@@ ','diff --git ')):end += 1
+        body = lines[index+1:end]
+        old_count = sum(row.startswith((' ','-')) for row in body)
+        new_count = sum(row.startswith((' ','+')) for row in body)
+        result.append(f'@@ -{match[1]},{old_count} +{int(match[3])+shift},{new_count} @@{match[5]}\n')
+        result.extend(body)
+        shift += new_count-int(match[4] or 1)
+        index = end
+    target.write_text(''.join(result))
+    with tempfile.TemporaryDirectory(prefix='e25-r3-patch-',dir=ROOT/'.local/evidence/E25') as folder:
+        private = Path(folder)/'index'
+        shutil.copy2(ROOT/'.local/evidence/E25/horizon-h13-base/index',private)
+        env = dict(os.environ,GIT_INDEX_FILE=str(private),GIT_OPTIONAL_LOCKS='0')
+        subprocess.run(['git','--git-dir',str(ROOT/'.local/src/horizon/.git'),'apply','--cached','--check',str(target)],cwd=ROOT,env=env,check=True)
+    print('r3 patch applies to the retained H13 r1 index; no checkout or real-index write.')
+    print(hashlib.sha256(target.read_bytes()).hexdigest(),str(target.relative_to(ROOT)))
+
+
+if __name__=='__main__':main()

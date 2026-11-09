@@ -1,0 +1,228 @@
+{
+  "kind": "E25-readonly-latency-variance-and-trace-classification",
+  "classification": {
+    "input": {
+      "path": ".local/evidence/E25/e25-latency-r2-scheduler2-p1-candidate/leases/tile-3-84024-lease.jsonl",
+      "sha256": "58a88df9fa357870bda1378686ab92d7e06c39d1e39ca8ffd3284e4e8468a5dc",
+      "bytes": 613882,
+      "hash_scope": "file bytes"
+    },
+    "original_collector": {
+      "path": "scripts/e25-memory",
+      "sha256": "37f38010847d66573b86906d13790d6342056ca5dde88690b63359766c3f3af1",
+      "bytes": 14468,
+      "hash_scope": "file bytes"
+    },
+    "original_collector_readback": {
+      "type": "JSONDecodeError",
+      "message": "Unterminated string starting at: line 1 column 31 (char 30)",
+      "line": 1,
+      "column": 31
+    },
+    "independent_complete_records": 2641,
+    "final_record_bytes": 31,
+    "final_record_literal": "{\"at_ns\":134535215125,\"data\":{\"",
+    "final_record_is_complete_json": false,
+    "event_name_present": false,
+    "event_name": null,
+    "known_new_r2_event": false,
+    "collector_uses_event_whitelist": false,
+    "event_table_fix_applicable": false,
+    "observed_complete_stop_or_anomaly": 0,
+    "raw_bytes_unchanged": true,
+    "row_qualification": "unproven",
+    "interpretation": "the record ends inside a data-key string before any event field; JSON parsing fails before event classification"
+  },
+  "rows": [
+    {
+      "name": "r1 reactor d1",
+      "summary": {
+        "path": "docs/experiments/data/E25/e25-latency-r1-via-d1-summary.json",
+        "sha256": "f032798b787c351a240e8d8da26be4d5e57c6aab8c10733264c0ae5a5af221cf",
+        "bytes": 931049,
+        "hash_scope": "file bytes"
+      },
+      "p95_ns": 5135417,
+      "server_stop": {
+        "stop_cycles": 292,
+        "process_stop_signals": 2920,
+        "stop_wall_s": 2.543497079372173,
+        "sum_process_pause_s": 24.476538097544108
+      },
+      "bot_stop": {
+        "stop_cycles": 19,
+        "process_stop_signals": 171,
+        "stop_wall_s": 0.14434841691399924,
+        "sum_process_pause_s": 1.2929040839953814
+      },
+      "tail_sends": null,
+      "server_tail_span": null,
+      "bot_tail_span": null,
+      "overlap_input": null,
+      "qualification": "reader-test diagnostic"
+    },
+    {
+      "name": "r1 reactor bracketed d2",
+      "summary": {
+        "path": "docs/experiments/data/E25/e25-latency-r1-via-brackets-d2-summary.json",
+        "sha256": "0eca4129bcc06c56202969216e3db93494663ce726a4e72eddc293c717890f02",
+        "bytes": 925415,
+        "hash_scope": "file bytes"
+      },
+      "p95_ns": 5138417,
+      "server_stop": {
+        "stop_cycles": 140,
+        "process_stop_signals": 1400,
+        "stop_wall_s": 1.2381177528004628,
+        "sum_process_pause_s": 11.846374898595968
+      },
+      "bot_stop": {
+        "stop_cycles": 0,
+        "process_stop_signals": 0,
+        "stop_wall_s": 0.0,
+        "sum_process_pause_s": 0.0
+      },
+      "tail_sends": 481,
+      "server_tail_span": 311,
+      "bot_tail_span": 0,
+      "overlap_input": {
+        "path": "docs/experiments/data/E25/e25-via-stop-overlap-d2.json",
+        "sha256": "9d3519875d1a90ccc2fc48b62ba4d558927145125c420fef6095e69da406a26f",
+        "bytes": 1881,
+        "hash_scope": "file bytes"
+      },
+      "qualification": "reader-test diagnostic"
+    },
+    {
+      "name": "r1 scheduler-2 d1",
+      "summary": {
+        "path": "docs/experiments/data/E25/e25-latency-r1-scheduler2-d1-readback-summary.json",
+        "sha256": "f73ed127b856e85e9572174dfbbe8b7e31c9df8081f42438a69ecb44c4681183",
+        "bytes": 4827,
+        "hash_scope": "file bytes"
+      },
+      "p95_ns": 5121833,
+      "server_stop": {
+        "stop_cycles": 974,
+        "process_stop_signals": 9740,
+        "stop_wall_s": 7.798412862524856,
+        "sum_process_pause_s": 76.50228986458387
+      },
+      "bot_stop": {
+        "stop_cycles": 54,
+        "process_stop_signals": 486,
+        "stop_wall_s": 0.3818656719813589,
+        "sum_process_pause_s": 3.4113216989208013
+      },
+      "tail_sends": 481,
+      "server_tail_span": 117,
+      "bot_tail_span": 33,
+      "overlap_input": {
+        "path": "docs/experiments/data/E25/e25-scheduler2-stop-overlap-d1.json",
+        "sha256": "7b205a560d42dd6939a45af3e1233a53f0752102efd0d4192c716aa83a5ead3b",
+        "bytes": 1932,
+        "hash_scope": "file bytes"
+      },
+      "qualification": "reader-test diagnostic"
+    },
+    {
+      "name": "r2 reactor p1",
+      "summary": {
+        "path": "docs/experiments/data/E25/e25-latency-r2-scheduler2-p1-reactor1-summary.json",
+        "sha256": "2666e052165d7bf53fcd979aafcdb9b078e57e0def6d57ddcf6dc5215200bc5b",
+        "bytes": 941255,
+        "hash_scope": "file bytes"
+      },
+      "p95_ns": 11159291,
+      "server_stop": {
+        "stop_cycles": 391,
+        "process_stop_signals": 3910,
+        "stop_wall_s": 3.3659297768608667,
+        "sum_process_pause_s": 32.31229908615933
+      },
+      "bot_stop": {
+        "stop_cycles": 60,
+        "process_stop_signals": 540,
+        "stop_wall_s": 0.4473282109829597,
+        "sum_process_pause_s": 3.991622348141391
+      },
+      "tail_sends": 481,
+      "server_tail_span": 424,
+      "bot_tail_span": 39,
+      "overlap_input": {
+        "path": "docs/experiments/data/E25/e25-r2-reactor1-stop-overlap-p1.json",
+        "sha256": "922a7ef5b54c58faf864e342663a4d053d6de93185901c49d3fec315e2001895",
+        "bytes": 1927,
+        "hash_scope": "file bytes"
+      },
+      "qualification": "D9-valid, strict latency line failed"
+    },
+    {
+      "name": "r2 scheduler-2 p1",
+      "timing": {
+        "path": "docs/experiments/data/E25/e25-latency-r2-scheduler2-p1-candidate-latency.json.gz",
+        "sha256": "99397a78ea0f7f8ec17a51cc75acbb872654b97069e98f28a300445679f535af",
+        "bytes": 2477214,
+        "hash_scope": "decompressed bytes"
+      },
+      "p95_ns": 6512042,
+      "server_stop": {
+        "stop_cycles": 236,
+        "process_stop_signals": 2360,
+        "stop_wall_s": 1.8916957178735174,
+        "sum_process_pause_s": 18.549984658980975
+      },
+      "bot_stop": {
+        "stop_cycles": 0,
+        "process_stop_signals": 0,
+        "stop_wall_s": 0.0,
+        "sum_process_pause_s": 0.0
+      },
+      "tail_sends": null,
+      "server_tail_span": null,
+      "bot_tail_span": null,
+      "qualification": "unproven authority trace; STOP-span ledger was not saved after collector abort"
+    },
+    {
+      "name": "r1 scheduler-2 uncapped",
+      "summary": {
+        "path": "docs/experiments/data/E25/e25-latency-r1-scheduler2-server-uncapped-d1-summary.json",
+        "sha256": "77f458f9a92c047e5852bb3e23f6b537dd39620035b59d0f1c78b59ab4486281",
+        "bytes": 896201,
+        "hash_scope": "file bytes"
+      },
+      "p95_ns": 3288625,
+      "server_stop": {
+        "stop_cycles": 0,
+        "process_stop_signals": 0,
+        "stop_wall_s": 0.0,
+        "sum_process_pause_s": 0.0
+      },
+      "bot_stop": {
+        "stop_cycles": 3,
+        "process_stop_signals": 27,
+        "stop_wall_s": 0.023136291973059997,
+        "sum_process_pause_s": 0.20581741599016823
+      },
+      "tail_sends": 481,
+      "server_tail_span": 0,
+      "bot_tail_span": 0,
+      "overlap_input": {
+        "path": "docs/experiments/data/E25/e25-scheduler2-uncapped-stop-overlap-d1.json",
+        "sha256": "458175758e2bbdb28c0260498cc16c8b39bb7de3ac35de66d39d9089bde06d37",
+        "bytes": 1803,
+        "hash_scope": "file bytes"
+      },
+      "qualification": "not D9 or M4"
+    }
+  ],
+  "process_and_source_readback": {
+    "path": "docs/experiments/data/E25/e25-r2-latency-jump-readback-r2.json",
+    "sha256": "ad071eb2fd44454319407028d1a78bfa7356fc5aa5d2c60d20a603097808aae6",
+    "bytes": 27154,
+    "hash_scope": "file bytes"
+  },
+  "conclusion": "STOP wall totals alone do not order P95. Reactor tail spans predominantly overlap server pauses; bot-only overlap is zero in the r2 reactor tail. The exact source of burst-placement variation remains unproven.",
+  "latency_tuning": "stopped by the reviewer; M4 strict latency not met under D9",
+  "new_latency_load": false
+}

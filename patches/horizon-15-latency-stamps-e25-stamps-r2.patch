@@ -1,0 +1,851 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1419,7 +1419,9 @@
+ dependencies = [
+  "horizon-protocol",
+  "mio",
++ "nix",
+  "serde_json",
++ "sha2",
+ ]
+ 
+ [[package]]
+@@ -1559,6 +1561,7 @@
+  "miniz_oxide 0.8.9",
+  "mio",
+  "naga",
++ "nix",
+  "objc2 0.6.5",
+  "objc2-app-kit 0.3.2",
+  "objc2-foundation 0.3.2",
+diff --git a/crates/horizon-bots/Cargo.toml b/crates/horizon-bots/Cargo.toml
+--- a/crates/horizon-bots/Cargo.toml
++++ b/crates/horizon-bots/Cargo.toml
+@@ -9,7 +9,11 @@
+ [dependencies]
+ horizon-protocol = { path = "../horizon-protocol" }
+ serde_json = "1.0.151"
++sha2 = "=0.10.9"
+ mio = { version = "1", features = ["net", "os-poll"] }
++
++[target.'cfg(target_os = "macos")'.dependencies]
++nix = { version = "=0.31.3", default-features = false, features = ["time"] }
+ 
+ [lints]
+ workspace = true
+diff --git a/crates/horizon-bots/src/latency_trace.rs b/crates/horizon-bots/src/latency_trace.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-bots/src/latency_trace.rs
+@@ -0,0 +1,188 @@
++//! Owns opt-in witness frame ranges and actual first-byte syscall timestamps.
++use serde_json::json;
++use std::{
++    collections::VecDeque,
++    fs::{File, OpenOptions},
++    io::Write,
++    sync::{Arc, Mutex, OnceLock},
++};
++
++type Result<T> = std::result::Result<T, String>;
++static OUTPUT: OnceLock<std::result::Result<Arc<Mutex<File>>, String>> = OnceLock::new();
++const MAX_PENDING: usize = 4096;
++
++struct Pending {
++    start: usize,
++    end: usize,
++    packet: String,
++    sequence: u64,
++    stamped: bool,
++    compression: Option<usize>,
++}
++
++pub(super) struct Trace {
++    name: String,
++    uuid: u128,
++    tile: String,
++    output: Arc<Mutex<File>>,
++    pending: VecDeque<Pending>,
++    sequence: u64,
++}
++
++impl Trace {
++    pub(super) fn bind(name: &str, uuid: u128) -> Result<Option<Self>> {
++        let Some(directory) = std::env::var_os("E25_LATENCY_DIR") else {
++            return Ok(None);
++        };
++        let names = std::env::var("E25_LATENCY_NAMES").map_err(|error| error.to_string())?;
++        if !names.split(',').any(|candidate| candidate == name) {
++            return Ok(None);
++        }
++        let tile = std::env::var("E25_LATENCY_TILE").map_err(|error| error.to_string())?;
++        let output = OUTPUT.get_or_init(|| {
++            let path = std::path::Path::new(&directory).join(format!("e25-bots-{}.jsonl",std::process::id()));
++            let mut file = OpenOptions::new().write(true).create_new(true).open(path).map_err(|error|error.to_string())?;
++            writeln!(file,"{}",json!({"event":"trace-start","schema":"E25-latency-v1","clock":"CLOCK_MONOTONIC_RAW","encryption":false})).map_err(|error|error.to_string())?;
++            Ok(Arc::new(Mutex::new(file)))
++        }).as_ref().map_err(Clone::clone)?;
++        Ok(Some(Self {
++            name: name.to_owned(),
++            uuid,
++            tile,
++            output: Arc::clone(output),
++            pending: VecDeque::new(),
++            sequence: 0,
++        }))
++    }
++
++    pub(super) fn queued(
++        &mut self,
++        packet: &[u8],
++        start: usize,
++        end: usize,
++        compression: Option<usize>,
++    ) -> Result<()> {
++        if packet.first().copied()
++            != Some(horizon_protocol::ids::play::serverbound::MOVE_PLAYER_POS as u8)
++        {
++            return Ok(());
++        }
++        if self.pending.len() >= MAX_PENDING {
++            return Err("E25 witness frame queue exceeded its cap".into());
++        }
++        self.sequence = self
++            .sequence
++            .checked_add(1)
++            .ok_or("E25 witness sequence overflow")?;
++        let mut encoded = String::with_capacity(packet.len() * 2);
++        for byte in packet {
++            use std::fmt::Write;
++            let _ = write!(encoded, "{byte:02x}");
++        }
++        self.pending.push_back(Pending {
++            start,
++            end,
++            packet: encoded,
++            sequence: self.sequence,
++            stamped: false,
++            compression,
++        });
++        Ok(())
++    }
++
++    pub(super) fn needs_clock(&self) -> bool {
++        self.pending.iter().any(|frame| !frame.stamped)
++    }
++
++    pub(super) fn accepted(
++        &mut self,
++        start: usize,
++        count: usize,
++        at_ns: Option<u64>,
++    ) -> Result<()> {
++        let end = start.checked_add(count).ok_or("E25 write range overflow")?;
++        for frame in &mut self.pending {
++            if !frame.stamped && start <= frame.start && frame.start < end {
++                let at_ns = at_ns.ok_or("E25 movement write lacks its syscall timestamp")?;
++                let row = json!({"event":"bot-write","name":self.name,"uuid":format!("{:032x}",self.uuid),
++                    "tile":self.tile,"packet":frame.packet,"send_index":frame.sequence,"at_ns":at_ns,
++                    "compression_threshold":frame.compression,"encryption":false});
++                let mut file = self
++                    .output
++                    .lock()
++                    .map_err(|_| "E25 trace writer poisoned")?;
++                writeln!(file, "{row}").map_err(|error| error.to_string())?;
++                frame.stamped = true;
++            }
++        }
++        while self.pending.front().is_some_and(|frame| frame.end <= end) {
++            self.pending.pop_front();
++        }
++        Ok(())
++    }
++
++    pub(super) fn pending(&self) -> usize {
++        self.pending.len()
++    }
++}
++
++#[cfg(target_os = "macos")]
++pub(super) fn now_ns() -> Result<u64> {
++    let value =
++        nix::time::clock_gettime(nix::time::ClockId::from_raw(nix::libc::CLOCK_MONOTONIC_RAW))
++            .map_err(|error| error.to_string())?;
++    u64::try_from(value.tv_sec())
++        .ok()
++        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
++        .and_then(|base| {
++            u64::try_from(value.tv_nsec())
++                .ok()
++                .and_then(|nanos| base.checked_add(nanos))
++        })
++        .ok_or_else(|| "E25 raw clock cannot be represented".into())
++}
++
++#[cfg(not(target_os = "macos"))]
++pub(super) fn now_ns() -> Result<u64> {
++    Err("E25 latency trace requires macOS".into())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn the_first_accepted_byte_owns_the_stamp_across_partial_writes() {
++        let path =
++            std::env::temp_dir().join(format!("horizon-e25-partial-{}.jsonl", std::process::id()));
++        let file = OpenOptions::new()
++            .write(true)
++            .create_new(true)
++            .open(&path)
++            .unwrap();
++        let mut trace = Trace {
++            name: "Witness".into(),
++            uuid: 7,
++            tile: "a".into(),
++            output: Arc::new(Mutex::new(file)),
++            pending: VecDeque::new(),
++            sequence: 0,
++        };
++        trace.queued(&[30, 1, 2], 10, 20, Some(256)).unwrap();
++        trace.accepted(0, 5, Some(100)).unwrap();
++        assert!(trace.needs_clock());
++        assert!(std::fs::read_to_string(&path).unwrap().is_empty());
++        trace.accepted(5, 6, Some(200)).unwrap();
++        assert!(!trace.needs_clock());
++        assert_eq!(trace.pending(), 1);
++        trace.accepted(11, 9, None).unwrap();
++        assert_eq!(trace.pending(), 0);
++        let rows = std::fs::read_to_string(&path).unwrap();
++        assert_eq!(rows.lines().count(), 1);
++        let row: serde_json::Value = serde_json::from_str(rows.trim()).unwrap();
++        assert_eq!(row["at_ns"], 200);
++        assert_eq!(row["packet"], "1e0102");
++        assert_eq!(row["compression_threshold"], 256);
++        drop(trace);
++        std::fs::remove_file(path).unwrap();
++    }
++}
+diff --git a/crates/horizon-bots/src/main.rs b/crates/horizon-bots/src/main.rs
+--- a/crates/horizon-bots/src/main.rs
++++ b/crates/horizon-bots/src/main.rs
+@@ -25,6 +25,7 @@
+ //! The report also has wire bytes in and out (`bytes_in`, `bytes_out`, per bot and in total, after
+ //! compression) and join-time percentiles (`join_time`: p50, p99 and max in milliseconds).
+ 
++mod latency_trace;
+ mod measured;
+ 
+ use horizon_protocol::{
+diff --git a/crates/horizon-bots/src/measured.rs b/crates/horizon-bots/src/measured.rs
+--- a/crates/horizon-bots/src/measured.rs
++++ b/crates/horizon-bots/src/measured.rs
+@@ -1,7 +1,7 @@
+ //! Owns the single-threaded measurement client's protocol lifecycle and routed movement.
+ use horizon_protocol::{
+     PROTOCOL_VERSION,
+-    buf::Reader,
++    buf::{Reader, Writer},
+     crypto::offline_uuid,
+     frame, ids,
+     packets::{
+@@ -13,6 +13,7 @@
+ };
+ use mio::{Events, Interest, Poll, Token, net::TcpStream};
+ use serde_json::{Value, json};
++use sha2::{Digest, Sha256};
+ use std::{
+     collections::HashSet,
+     io::{Read, Write},
+@@ -40,6 +41,10 @@
+     path: Vec<[f64; 2]>,
+     name: String,
+     report: Option<String>,
++    handshake_host: Option<String>,
++    indices: Vec<usize>,
++    route_bots: Option<usize>,
++    forwarding_secret: Option<Vec<u8>>,
+ }
+ impl Settings {
+     fn read() -> Result<Self> {
+@@ -58,6 +63,10 @@
+             path: vec![],
+             name: "E11Bot".into(),
+             report: None,
++            handshake_host: None,
++            indices: vec![],
++            route_bots: None,
++            forwarding_secret: None,
+         };
+         let mut args = std::env::args().skip(1);
+         while let Some(key) = args.next() {
+@@ -93,6 +102,27 @@
+                 "--behaviour" if v == "stand" || v == "route" => s.stand = v == "stand",
+                 "--name" => s.name = v,
+                 "--report" => s.report = Some(v),
++                "--handshake-host" => s.handshake_host = Some(v),
++                "--forwarding-secret-file" => {
++                    let mut secret = std::fs::read(v).map_err(err)?;
++                    while secret
++                        .last()
++                        .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
++                    {
++                        secret.pop();
++                    }
++                    if secret.is_empty() {
++                        return Err("forwarding secret file is empty".into());
++                    }
++                    s.forwarding_secret = Some(secret);
++                }
++                "--indices" => {
++                    s.indices = v
++                        .split(',')
++                        .map(|value| value.parse().map_err(err))
++                        .collect::<Result<_>>()?
++                }
++                "--route-bots" => s.route_bots = Some(v.parse().map_err(err)?),
+                 _ => return Err(format!("unsupported event-loop option {key} {v}")),
+             }
+         }
+@@ -112,13 +142,26 @@
+         {
+             return Err("invalid measurement settings".into());
+         }
++        if !s.indices.is_empty()
++            && (s.indices.len() != s.bots
++                || s.indices.iter().copied().collect::<HashSet<_>>().len() != s.bots)
++        {
++            return Err("measurement indices must identify every bot exactly once".into());
++        }
++        let route_bots = s.route_bots.unwrap_or(s.bots);
++        if route_bots == 0 || (0..s.bots).any(|index| s.actor(index) >= route_bots) {
++            return Err("measurement route population does not contain its indices".into());
++        }
+         Ok(s)
++    }
++    fn actor(&self, index: usize) -> usize {
++        self.indices.get(index).copied().unwrap_or(index)
+     }
+     fn route(&self, index: usize) -> Vec<[f64; 2]> {
+         if !self.path.is_empty() {
+             return self.path.clone();
+         }
+-        let side = (self.bots as f64).sqrt().ceil() as usize;
++        let side = (self.route_bots.unwrap_or(self.bots) as f64).sqrt().ceil() as usize;
+         let mut random =
+             super::Random(self.seed ^ (index as u64).wrapping_mul(0x2545_F491_4F6C_DD1D));
+         let mut at = [0.; 2];
+@@ -196,6 +239,8 @@
+     batch: super::BatchSize,
+     reconnect: Option<(String, u16)>,
+     cookies: std::collections::HashMap<String, Vec<u8>>,
++    latency_trace: Option<super::latency_trace::Trace>,
++    profile_name: String,
+ }
+ impl Bot {
+     fn new(
+@@ -205,6 +250,9 @@
+         address: SocketAddr,
+         transfer: bool,
+     ) -> Result<Self> {
++        let actor = s.actor(index);
++        let name = format!("{}{actor}", s.name);
++        let uuid = offline_uuid(&name);
+         let mut socket = TcpStream::connect(address).map_err(err)?;
+         socket.set_nodelay(true).map_err(err)?;
+         poll.registry()
+@@ -224,8 +272,8 @@
+             output: vec![],
+             sent: 0,
+             held: HashSet::new(),
+-            route: s.route(index),
+-            waypoint: index % 4,
++            route: s.route(actor),
++            waypoint: actor % 4,
+             position: None,
+             target_y: None,
+             started: Instant::now(),
+@@ -243,33 +291,35 @@
+             batch: super::BatchSize::new(),
+             reconnect: None,
+             cookies: Default::default(),
++            latency_trace: super::latency_trace::Trace::bind(&name, uuid)?,
++            profile_name: name.clone(),
+         };
+         b.waypoint %= b.route.len();
+         b.send(
+             handshake::Serverbound::Intention(Intention {
+                 protocol: PROTOCOL_VERSION,
+-                host: address.ip().to_string(),
++                host: s
++                    .handshake_host
++                    .clone()
++                    .unwrap_or_else(|| address.ip().to_string()),
+                 port: address.port(),
+                 intent: if transfer { 3 } else { handshake::LOGIN },
+             })
+             .encode(),
+         )?;
+-        let name = format!("{}{index}", s.name);
+-        b.send(
+-            login::Serverbound::Hello(ServerHello {
+-                uuid: offline_uuid(&name),
+-                name,
+-            })
+-            .encode(),
+-        )?;
++        b.send(login::Serverbound::Hello(ServerHello { uuid, name }).encode())?;
+         Ok(b)
+     }
+     fn send(&mut self, packet: Vec<u8>) -> Result<()> {
+         if self.output.len() - self.sent > 1_048_576 {
+             return Err("bot output backlog exceeds 1 MiB".into());
+         }
++        let start = self.output.len();
+         self.output
+             .extend(frame::encode(&packet, self.threshold).map_err(err)?);
++        if let Some(trace) = &mut self.latency_trace {
++            trace.queued(&packet, start, self.output.len(), self.threshold)?;
++        }
+         Ok(())
+     }
+     fn clear_world(&mut self) {
+@@ -298,13 +348,24 @@
+                     self.send(login::Serverbound::LoginAcknowledged(Empty).encode())?;
+                     self.configure(s)?;
+                 }
+-                login::Clientbound::CustomQuery(p) => self.send(
+-                    login::Serverbound::CustomQueryAnswer(login::CustomQueryAnswer {
+-                        transaction: p.transaction,
+-                        payload: None,
+-                    })
+-                    .encode(),
+-                )?,
++                login::Clientbound::CustomQuery(p) => {
++                    let payload = if p.channel == "velocity:player_info"
++                        && p.data.first().copied().is_some_and(|version| version >= 1)
++                    {
++                        s.forwarding_secret
++                            .as_ref()
++                            .map(|secret| forwarded_profile(secret, &self.profile_name))
++                    } else {
++                        None
++                    };
++                    self.send(
++                        login::Serverbound::CustomQueryAnswer(login::CustomQueryAnswer {
++                            transaction: p.transaction,
++                            payload,
++                        })
++                        .encode(),
++                    )?;
++                }
+                 login::Clientbound::CookieRequest(p) => self.send(
+                     login::Serverbound::CookieResponse(login::CookieResponse {
+                         payload: self.cookies.get(&p.key).cloned(),
+@@ -536,9 +597,21 @@
+             return Ok(());
+         }
+         while self.sent < self.output.len() {
++            let at_ns = if self
++                .latency_trace
++                .as_ref()
++                .is_some_and(super::latency_trace::Trace::needs_clock)
++            {
++                Some(super::latency_trace::now_ns()?)
++            } else {
++                None
++            };
+             match self.socket.write(&self.output[self.sent..]) {
+                 Ok(0) => return Err("zero-length socket write".into()),
+                 Ok(n) => {
++                    if let Some(trace) = &mut self.latency_trace {
++                        trace.accepted(self.sent, n, at_ns)?;
++                    }
+                     self.sent += n;
+                     self.bytes_out += n as u64;
+                 }
+@@ -623,6 +696,15 @@
+         }
+         out["distance"] = json!(out["distance"].as_f64().unwrap_or(0.) + b.distance);
+     }
++    if bots.iter().flatten().any(|bot| bot.latency_trace.is_some()) {
++        out["e25_pending_frames"] = json!(
++            bots.iter()
++                .flatten()
++                .filter_map(|bot| bot.latency_trace.as_ref())
++                .map(super::latency_trace::Trace::pending)
++                .sum::<usize>()
++        );
++    }
+     out["errors"] = json!(
+         bots.iter()
+             .enumerate()
+@@ -636,6 +718,33 @@
+     out
+ }
+ 
++/// Native direct-fixture login, with the same authenticated v1 profile a proxy sends.
++fn forwarded_profile(secret: &[u8], name: &str) -> Vec<u8> {
++    let mut data = Writer::new();
++    data.varint(1);
++    data.string("127.0.0.1");
++    data.uuid(offline_uuid(name));
++    data.string(name);
++    data.varint(0);
++    let mut key = [0u8; 64];
++    if secret.len() > key.len() {
++        key[..32].copy_from_slice(&Sha256::digest(secret));
++    } else {
++        key[..secret.len()].copy_from_slice(secret);
++    }
++    let inner = Sha256::new()
++        .chain_update(key.map(|byte| byte ^ 0x36))
++        .chain_update(&data.data)
++        .finalize();
++    let mut signed = Sha256::new()
++        .chain_update(key.map(|byte| byte ^ 0x5c))
++        .chain_update(inner)
++        .finalize()
++        .to_vec();
++    signed.extend_from_slice(&data.data);
++    signed
++}
++
+ pub(super) fn run() -> Result<()> {
+     let s = Settings::read()?;
+     let mut poll = Poll::new().map_err(err)?;
+@@ -647,7 +756,7 @@
+     let (mut launched, mut rounds, mut late, mut max_late) = (0, 0, 0, 0f64);
+     println!(
+         "{}",
+-        json!({"routes":(0..s.bots).map(|i| json!({"name":format!("{}{i}",s.name),"server":i%s.servers.len(),"start":s.route(i)[0]})).collect::<Vec<_>>()})
++        json!({"routes":(0..s.bots).map(|i| json!({"name":format!("{}{}",s.name,s.actor(i)),"server":i%s.servers.len(),"start":s.route(s.actor(i))[0]})).collect::<Vec<_>>()})
+     );
+     while start.elapsed().as_secs_f64() < s.seconds {
+         while launched < s.bots && start.elapsed().as_secs_f64() >= launched as f64 * s.join_every {
+@@ -810,7 +919,42 @@
+             path: vec![],
+             name: "Test".into(),
+             report: None,
+-        }
++            handshake_host: None,
++            indices: vec![],
++            route_bots: None,
++            forwarding_secret: None,
++        }
++    }
++    #[test]
++    fn selected_indices_keep_the_original_route_population() {
++        let original = settings();
++        let mut selected = settings();
++        selected.route_bots = Some(original.bots);
++        selected.bots = 2;
++        selected.indices = vec![7, 251];
++        assert_eq!(selected.actor(0), 7);
++        assert_eq!(selected.actor(1), 251);
++        assert_eq!(selected.route(selected.actor(0)), original.route(7));
++        assert_eq!(selected.route(selected.actor(1)), original.route(251));
++    }
++    #[test]
++    fn a_forwarded_profile_has_an_independently_calculated_signature() {
++        let signed = forwarded_profile(b"fixture-only", "E25Witness");
++        let signature: String = signed[..32]
++            .iter()
++            .map(|byte| format!("{byte:02x}"))
++            .collect();
++        assert_eq!(
++            signature,
++            "1aa829d35a37e54e1c3b58a3833679afe0d2a5113d540ca2e6e54b56ca3440d4"
++        );
++        let mut data = Reader::new(&signed[32..]);
++        assert_eq!(data.varint().unwrap(), 1);
++        assert_eq!(data.string(64).unwrap(), "127.0.0.1");
++        assert_eq!(data.uuid().unwrap(), offline_uuid("E25Witness"));
++        assert_eq!(data.string(16).unwrap(), "E25Witness");
++        assert_eq!(data.varint().unwrap(), 0);
++        assert_eq!(data.remaining(), 0);
+     }
+     fn feed(bot: &mut Bot, settings: &Settings, packet: Vec<u8>) {
+         let mut reader = Reader::new(&packet);
+diff --git a/crates/horizon-client-lib/Cargo.toml b/crates/horizon-client-lib/Cargo.toml
+--- a/crates/horizon-client-lib/Cargo.toml
++++ b/crates/horizon-client-lib/Cargo.toml
+@@ -102,6 +102,7 @@
+ wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
+ 
+ [target.'cfg(target_os = "macos")'.dependencies]
++nix = { version = "=0.31.3", default-features = false, features = ["time"] }
+ # Splitscreen: a window filling a monitor goes over its menu bar (game/split/windows.rs
+ # `above_menu_bar`); all already in the tree through winit and wgpu.
+ objc2 = "0.6"
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -74,6 +74,9 @@
+                 _ if request.line.trim() == "server-status" => self.server_status(state),
+                 Some(("e11-digest", rest)) => self.e11_digest_request(rest),
+                 _ if request.line.trim() == "e11-samples" => self.e11_samples(),
++                _ if request.line.trim() == "e25-latency-status" => {
++                    horizon_client::lan::latency_trace_status()
++                }
+                 _ if request.line.trim() == "cluster-authority" => {
+                     super::cluster::authority_status()
+                 }
+diff --git a/crates/horizon-client/src/lan/conn.rs b/crates/horizon-client/src/lan/conn.rs
+--- a/crates/horizon-client/src/lan/conn.rs
++++ b/crates/horizon-client/src/lan/conn.rs
+@@ -1593,6 +1593,7 @@
+         .is_some_and(|p| p.required);
+     let session = PlayConn {
+         conn,
++        latency_trace: super::latency_trace::selected(&parts.name),
+         shared: shared.clone(),
+         uuid: parts.uuid,
+         name: parts.name.clone(),
+@@ -1634,6 +1635,7 @@
+ /// A player's play state on its network thread.
+ struct PlayConn {
+     conn: u32,
++    latency_trace: bool,
+     shared: Arc<Shared>,
+     uuid: u128,
+     name: String,
+@@ -1649,6 +1651,12 @@
+     counted: Option<super::Counted>,
+ }
+ impl io_pool::Session for PlayConn {
++    fn latency_selected(&self, id: i32) -> bool {
++        self.latency_trace && id == horizon_protocol::ids::play::serverbound::MOVE_PLAYER_POS
++    }
++    fn latency_decoded(&mut self, id: i32, payload: &[u8], at_ns: u64) {
++        super::latency_trace::decoded(self.uuid, &self.name, id, payload, at_ns);
++    }
+     /// Forward the player's packet, or say why it ends the connection: a
+     /// required resource pack declined, a rate-limit excess, a malformed packet.
+     fn packet(&mut self, id: i32, payload: Vec<u8>) -> io_pool::Verdict {
+diff --git a/crates/horizon-client/src/lan/io_pool.rs b/crates/horizon-client/src/lan/io_pool.rs
+--- a/crates/horizon-client/src/lan/io_pool.rs
++++ b/crates/horizon-client/src/lan/io_pool.rs
+@@ -72,6 +72,10 @@
+ 
+ /// The play state's side of a connection (conn.rs's `PlayConn`).
+ pub(super) trait Session: Send {
++    fn latency_selected(&self, _id: i32) -> bool {
++        false
++    }
++    fn latency_decoded(&mut self, _id: i32, _payload: &[u8], _at_ns: u64) {}
+     /// A packet arrived.
+     fn packet(&mut self, id: i32, payload: Vec<u8>) -> Verdict;
+     /// A packet to send of its own accord now (a keep-alive).
+@@ -529,6 +533,13 @@
+         loop {
+             match self.reader.buffered() {
+                 Ok(Some((id, payload))) => {
++                    if self.session.latency_selected(id) {
++                        if let Some(at_ns) = super::latency_trace::now_ns() {
++                            self.session.latency_decoded(id, &payload, at_ns);
++                        } else {
++                            super::latency_trace::clock_failed();
++                        }
++                    }
+                     if !self.left {
+                         if counting_packets() {
+                             self.outbox.tally(1, [(id, id_len(id) + payload.len())]);
+@@ -790,6 +801,68 @@
+             kick_on: None,
+             unprompted: None,
+         }
++    }
++
++    #[cfg(target_os = "macos")]
++    #[test]
++    fn a_decode_stamp_precedes_session_packet_dispatch() {
++        struct Stamped {
++            events: Sender<&'static str>,
++            stamped: bool,
++        }
++        impl Session for Stamped {
++            fn latency_selected(&self, id: i32) -> bool {
++                id == 30
++            }
++            fn latency_decoded(&mut self, id: i32, payload: &[u8], at_ns: u64) {
++                assert_eq!(id, 30);
++                assert_eq!(payload, [7, 9]);
++                assert!(at_ns > 0);
++                self.stamped = true;
++                self.events.send("decoded").unwrap();
++            }
++            fn packet(&mut self, _id: i32, _payload: Vec<u8>) -> Verdict {
++                assert!(self.stamped);
++                self.events.send("packet").unwrap();
++                Verdict::Go
++            }
++            fn tick(&mut self, _now: Instant) -> Option<Vec<u8>> {
++                None
++            }
++            fn left(&mut self, _reason: String) {}
++            fn closed(&mut self) {}
++        }
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let mut client = Connection::connect(
++            &listener.local_addr().unwrap().to_string(),
++            Duration::from_secs(10),
++        )
++        .unwrap();
++        let server = Connection::from_stream(listener.accept().unwrap().0).unwrap();
++        let pending = Arc::new(AtomicUsize::new(0));
++        let outbox = Outbox::new(pending).unwrap();
++        let (events, seen) = channel();
++        let (socket, reader, writer) = server.detach();
++        adopt(
++            socket,
++            (reader, writer),
++            outbox.clone(),
++            Box::new(Stamped {
++                events,
++                stamped: false,
++            }),
++            Duration::from_secs(30),
++        );
++        client.send(&[30, 7, 9]).unwrap();
++        assert_eq!(
++            seen.recv_timeout(Duration::from_secs(10)).unwrap(),
++            "decoded"
++        );
++        assert_eq!(
++            seen.recv_timeout(Duration::from_secs(10)).unwrap(),
++            "packet"
++        );
++        outbox.send(Vec::new(), Some(End::Close));
+     }
+ 
+     /// A body's VarInt id reads back, a truncated one doesn't, and the sizes match.
+diff --git a/crates/horizon-client/src/lan/latency_trace.rs b/crates/horizon-client/src/lan/latency_trace.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client/src/lan/latency_trace.rs
+@@ -0,0 +1,104 @@
++//! Opt-in, bounded movement decode evidence on the connection reader, never the tick.
++use serde_json::{Value, json};
++use std::{
++    collections::HashSet,
++    fs::{File, OpenOptions},
++    io::Write,
++    sync::{
++        Mutex, OnceLock,
++        atomic::{AtomicU64, Ordering},
++    },
++};
++
++const MAX_EVENTS: u64 = 100_000;
++static TRACE: OnceLock<Option<Trace>> = OnceLock::new();
++static ERRORS: AtomicU64 = AtomicU64::new(0);
++
++struct Trace {
++    names: HashSet<String>,
++    tile: String,
++    output: Mutex<File>,
++    events: AtomicU64,
++    dropped: AtomicU64,
++}
++
++fn failed() {
++    if ERRORS.fetch_add(1, Ordering::Relaxed) == 0 {
++        eprintln!("E25_TRACE_ERROR tile latency evidence is incomplete");
++    }
++}
++
++fn trace() -> Option<&'static Trace> {
++    TRACE.get_or_init(|| {
++        let directory = std::env::var_os("E25_LATENCY_DIR")?;
++        let names = std::env::var("E25_LATENCY_NAMES").ok()?;
++        let tile = std::env::var("E25_LATENCY_TILE").ok()?;
++        let path = std::path::Path::new(&directory).join(format!("e25-tile-{}.jsonl", std::process::id()));
++        let file = OpenOptions::new().write(true).create_new(true).open(path);
++        let mut output = match file {
++            Ok(output) => output,
++            Err(_) => { failed(); return None; }
++        };
++        if writeln!(output, "{}", json!({"event":"trace-start","schema":"E25-latency-v1","clock":"CLOCK_MONOTONIC_RAW","tile":tile})).is_err() {
++            failed(); return None;
++        }
++        Some(Trace { names:names.split(',').map(str::to_owned).collect(), tile,
++            output:Mutex::new(output), events:AtomicU64::new(0), dropped:AtomicU64::new(0) })
++    }).as_ref()
++}
++
++pub(super) fn selected(name: &str) -> bool {
++    trace().is_some_and(|trace| trace.names.contains(name))
++}
++
++#[cfg(target_os = "macos")]
++pub(super) fn now_ns() -> Option<u64> {
++    let value =
++        nix::time::clock_gettime(nix::time::ClockId::from_raw(nix::libc::CLOCK_MONOTONIC_RAW))
++            .ok()?;
++    u64::try_from(value.tv_sec())
++        .ok()?
++        .checked_mul(1_000_000_000)?
++        .checked_add(u64::try_from(value.tv_nsec()).ok()?)
++}
++
++#[cfg(not(target_os = "macos"))]
++pub(super) fn now_ns() -> Option<u64> {
++    None
++}
++
++pub(super) fn clock_failed() {
++    failed();
++}
++
++pub(super) fn decoded(uuid: u128, name: &str, id: i32, payload: &[u8], at_ns: u64) {
++    let Some(trace) = trace() else {
++        return;
++    };
++    if trace.events.fetch_add(1, Ordering::Relaxed) >= MAX_EVENTS {
++        trace.dropped.fetch_add(1, Ordering::Relaxed);
++        return;
++    }
++    let mut packet = format!("{id:02x}");
++    for byte in payload {
++        use std::fmt::Write;
++        let _ = write!(packet, "{byte:02x}");
++    }
++    let row = json!({"event":"tile-decode","uuid":format!("{uuid:032x}"),"name":name,
++        "tile":trace.tile,"packet":packet,"at_ns":at_ns});
++    match trace.output.lock() {
++        Ok(mut output) => {
++            if writeln!(output, "{row}").is_err() {
++                failed();
++            }
++        }
++        Err(_) => failed(),
++    }
++}
++
++pub fn status() -> Value {
++    let trace = trace();
++    json!({"schema":"E25-latency-v1","enabled":trace.is_some(),"errors":ERRORS.load(Ordering::Relaxed),
++        "events":trace.map_or(0,|trace|trace.events.load(Ordering::Relaxed)),
++        "dropped":trace.map_or(0,|trace|trace.dropped.load(Ordering::Relaxed))})
++}
+diff --git a/crates/horizon-client/src/lan/mod.rs b/crates/horizon-client/src/lan/mod.rs
+--- a/crates/horizon-client/src/lan/mod.rs
++++ b/crates/horizon-client/src/lan/mod.rs
+@@ -27,6 +27,7 @@
+ pub mod hub;
+ pub mod import;
+ mod io_pool;
++mod latency_trace;
+ pub mod menu;
+ pub mod playerdata;
+ pub mod prediction;
+@@ -42,6 +43,7 @@
+     GAME_VERSION, PROTOCOL_VERSION, crypto::uuid_string, packets::configuration::ClientInformation,
+     text::translatable,
+ };
++pub use latency_trace::status as latency_trace_status;
+ use std::{
+     collections::HashMap,
+     io,

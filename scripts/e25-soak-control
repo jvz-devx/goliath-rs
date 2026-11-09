@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Collect the explicitly authorized full reactor control before choosing a candidate."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+from e14_snapshot_support import validate_snapshot
+import e25_soak_harness as harness
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--bins',type=Path,required=True)
+    parser.add_argument('--frozen-reference',action='store_true',help='approved exact 29f repeat, not a rebuilt control')
+    parser.add_argument('--campaign-plan',type=Path,default=harness.DATA/'e25-memory-next-plan-r3.json')
+    parser.add_argument('--owner',choices=['E25','reviewer'],default='E25')
+    parser.add_argument('--collect-only',action='store_true',help='release the window and leave readback for a separate command')
+    args = parser.parse_args()
+    print('E25_SOAK_CONTROL_PROCESS '+str(os.getpid()),flush=True)
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+        raise ValueError('fresh simple control name required')
+    target = harness.DATA / (args.name+'-plan.json')
+    result_path = harness.DATA / (args.name+'-run.json')
+    if target.exists() or result_path.exists():
+        raise RuntimeError('control already exists')
+    bins = args.bins.resolve()
+    identity = validate_snapshot(bins)
+    if args.frozen_reference:
+        frozen = harness.ROOT/'.local/bin/meridian-e18/reactor-1'
+        expected = '29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b'
+        if harness.digest(bins/'meridian')['sha256'] != expected or harness.digest(frozen/'meridian')['sha256'] != expected:
+            raise ValueError('frozen repeat must run the exact 29f executable')
+        reference_kind = 'frozen29f-repeat'
+    else:
+        build_pointer = harness.read(bins/'FINAL.json')['e25_proxy_build']
+        build_path = harness.ROOT/build_pointer['path']
+        build = harness.read(build_path)
+        if build['kind'] != 'control' or build['status'] != 'complete' or not build['source_restored']:
+            raise ValueError('a restored, gated reactor control is required')
+        if harness.digest(build_path)['sha256'] != build_pointer['sha256'] or harness.digest(bins/'meridian')['sha256'] != build['binary_sha256']:
+            raise ValueError('control provenance changed')
+        reference_kind = 'rebuilt80f-control'
+    plan = dict(kind='E25-full-soak-reactor-control-plan',reference_kind=reference_kind,name=args.name,queue_owner=args.owner,
+        readback_mode='manual' if args.collect_only else 'automatic-after-release',players=650,measurement_seconds=1800,
+        cargo_items=65,owner_audits='unchanged E24 soak harness',planning_mutation_rate=72,
+        approved_plan=harness.digest(args.campaign_plan.resolve()),
+        bundle=dict(path=str(bins.relative_to(harness.ROOT)),final=harness.digest(bins/'FINAL.json'),binaries=identity['binaries'],
+            bot_sha256=harness.digest(bins/'horizon-bots')['sha256']),
+        authority_event_voids_comparison=True,silent_retry=False,candidate_not_started_by_this_command=True,
+        source_helpers={name:harness.digest(harness.ROOT/'scripts'/name) for name in
+            ['e24-run','e23-cell','e20-frontier','e23_observe.py','e22_availability.py','e24_mutation_watch.py']})
+    target.write_text(json.dumps(plan,indent=2)+'\n')
+    host = harness.ROOT/'.local/bin/host-window'
+    subprocess.run([host,'quiet',args.owner,args.name+' full30m soak control'],check=True)
+    error = None
+    try:
+        subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-soak-cell','--name',args.name,'--bins',bins,'--owner',args.owner],cwd=harness.ROOT,check=True)
+    except BaseException as caught:
+        error = str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME')
+    finally:
+        subprocess.run([host,'release',args.owner],check=True)
+    result = dict(kind='E25-full-soak-reactor-control',status='failed' if error else 'collected',error=error,plan=harness.digest(target))
+    if not error and not args.collect_only:
+        log = harness.EVIDENCE/(args.name+'-readback.log')
+        with log.open('x') as stream:
+            completed = subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-analysis-exec',sys.executable,'-B',
+                harness.ROOT/'scripts/e25-soak-readback','--name',args.name,'--owner',args.owner],cwd=harness.ROOT,stdout=stream,stderr=subprocess.STDOUT)
+        result['readback_exit'] = completed.returncode
+        result['readback_log'] = harness.digest(log)
+        if completed.returncode:
+            result['status']='failed-readback'
+        else:
+            path = harness.DATA/(args.name+'-e25-result.json')
+            if not path.exists():
+                path=path.with_suffix(path.suffix+'.gz')
+            result['readback']=harness.digest(path)
+            result['status']='complete'
+    result_path.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2),flush=True)
+    if result['status'] != 'complete' and not (args.collect_only and result['status'] == 'collected'):
+        raise SystemExit(1)
+
+
+if __name__=='__main__':
+    main()

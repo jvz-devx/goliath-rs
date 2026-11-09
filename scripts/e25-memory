@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""One tap-free 650-player E25 memory cell with the unchanged D9 limiter."""
+import argparse
+import ast
+import ctypes
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+
+import e11_support as support
+from e14_snapshot_support import validate_snapshot
+
+ROOT = support.ROOT
+DATA = ROOT / 'docs/experiments/data/E25'
+EVIDENCE = ROOT / '.local/evidence/E25'
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def save(path, value):
+    raw = (support.sanitize(json.dumps(value, indent=2, allow_nan=False)) + '\n').encode()
+    target = path.with_suffix(path.suffix + '.gz') if len(raw) > 1_000_000 else path
+    target.write_bytes(gzip.compress(raw, mtime=0) if target.suffix == '.gz' else raw)
+    if target.suffix == '.gz' and gzip.decompress(target.read_bytes()) != raw:
+        raise RuntimeError('lossless compression check failed')
+    return dict(path=str(target.relative_to(ROOT)), sha256=hashlib.sha256(raw).hexdigest(), bytes=len(raw))
+
+
+def merge_ticks(previous, current):
+    batches = [*previous, current]
+    return dict(current, ticks=[tick for batch in batches for tick in batch['ticks']],
+        digests=[digest for batch in batches for digest in batch['digests']],
+        dropped=sum(batch['dropped'] for batch in batches))
+
+
+def authority_records(folder):
+    events, files = [], {}
+    for path in sorted(folder.glob('*-lease.jsonl')):
+        raw = path.read_bytes()
+        files[str(path.relative_to(ROOT))] = hashlib.sha256(raw).hexdigest()
+        for line in raw.splitlines():
+            row = json.loads(line)
+            if row.get('event') in ['authority-stop', 'clock-anomaly']:
+                events.append(dict(path=str(path.relative_to(ROOT)), record=row))
+    return events, files
+
+
+def memory_growth(samples, seconds):
+    if not samples:
+        raise ValueError('no memory samples')
+    origin = samples[0]['at']
+    first = min(samples, key=lambda row: abs(row['at'] - origin - 300))
+    last = samples[-1]
+    if abs(first['at'] - origin - 300) > 2 or last['at'] - origin < seconds - 2:
+        raise ValueError('minute-five or final endpoint missing')
+    result = {}
+    for role, row in first['processes'].items():
+        end = last['processes'][role]
+        growth = (end['rss_mb'] / row['rss_mb'] - 1) * 100
+        result[role] = dict(first_seconds=first['at'] - origin, last_seconds=last['at'] - origin,
+            first_mib=row['rss_mb'], last_mib=end['rss_mb'], growth_percent=growth, under_ten_percent=growth < 10)
+    return result
+
+
+def wait_start_load(getload=os.getloadavg, now=time.monotonic, pause=time.sleep, timeout=180):
+    began = now()
+    first = getload()
+    current = first
+    while current[0] > 4:
+        if now()-began >= timeout:
+            raise TimeoutError('load did not settle to at most four before fixture startup')
+        pause(min(1,timeout-(now()-began)))
+        current = getload()
+    return dict(first_load=list(first),ready_load=list(current),wait_seconds=now()-began)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--bins', type=Path, required=True)
+    parser.add_argument('--host-released', action='store_true', required=True)
+    parser.add_argument('--seconds', type=int, default=900, choices=[900, 1200])
+    parser.add_argument('--keep-window-for-pair', action='store_true')
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+', args.name):
+        raise ValueError('fresh e25- or repro- name required')
+    DATA.mkdir(parents=True, exist_ok=True)
+    evidence = EVIDENCE / args.name
+    evidence.mkdir(parents=True, exist_ok=False)
+    target = DATA / (args.name + '-summary.json')
+    if target.exists():
+        raise RuntimeError('attempt already exists')
+    bins = args.bins.resolve()
+    before = validate_snapshot(bins)
+    bot_hash = hashlib.sha256((bins / 'horizon-bots').read_bytes()).hexdigest()
+    if any(key.startswith(('MIMALLOC_', 'MI_')) for key in os.environ):
+        raise RuntimeError('allocator environment overrides are not allowed in default cells')
+    host = ROOT / '.local/bin/host-window'
+    subprocess.run([host, 'quiet', 'E25', args.name], check=True)
+    request = ROOT / '.local/quiet-request'
+    identity = json.dumps(dict(owner='E25', name=args.name, pid=os.getpid(), wall_ns=time.time_ns())) + '\n'
+    owned_request = False
+    retained_window = False
+    memories, ticks, cleanup_errors, authorities = [], {}, [], []
+    traces = evidence / 'tiles'
+    traces.mkdir()
+    summary = dict(status='preparing', name=args.name, seconds=args.seconds, players=650,
+        server_core_cap=4, bot_core_cap=1, proxy_inside_server_cap=True, errors=[])
+    try:
+        if request.exists():
+            raise RuntimeError('another legacy quiet request remains')
+        summary['load_settle'] = wait_start_load()
+        with request.open('x') as stream:
+            stream.write(identity)
+        owned_request = True
+        os.environ['E23_QUIET_IDENTITY'] = identity
+        e23 = load('e25_ast_adapter', ROOT / 'scripts/e23-cell')
+        tree = ast.fix_missing_locations(e23.Adapt().visit(ast.parse((ROOT / 'scripts/e20-frontier').read_text())))
+        executed = ast.unparse(tree) + '\n'
+        executed_path = DATA / (args.name + '-executed.py')
+        if executed_path.exists():
+            raise RuntimeError('executed fixture exists')
+        executed_path.write_text(executed)
+        ns = dict(__name__='e25_d9_cell', __file__=str(ROOT / 'scripts/e20-frontier'), E23_WINDOW_SECONDS=1500)
+        exec(compile(tree, str(executed_path), 'exec'), ns)
+        ns['DATA'] = evidence
+        native, original_load = ns['counters'], ns['load']
+        holder = {}
+        final_draining = [False]
+        last_drain = [0.0]
+        calls = [0]
+
+        def loaded(name, path):
+            module = original_load(name, path)
+            if Path(path).name == 'e17-m4':
+                factory = module.cluster_module
+                def cluster(selected):
+                    result = factory(selected)
+                    init, ask, stop = result.Cluster.__init__, result.Tile.ask, result.Tile.stop
+                    def initialize(instance, *a, **kw):
+                        holder['instance'] = instance
+                        kw['tile_env'] = dict(kw.get('tile_env') or {}, GOLIATH_LEASE_TRACE_DIR=str(traces))
+                        value = init(instance, *a, **kw)
+                        for tile in instance.tiles.values():
+                            path = traces / f'tile-{tile.index}-{tile.server.process.pid}-lease.jsonl'
+                            if not path.is_file() or b'"trace-start"' not in path.read_bytes():
+                                raise RuntimeError('required native authority trace is absent')
+                        return value
+                    def asked(tile, command):
+                        reply = ask(tile, command)
+                        if command == 'cluster-authority' and reply.get('authorized') is False:
+                            raise RuntimeError('tile authority latch on ' + tile.label)
+                        if command == 'cluster-authority':
+                            authorities.append(dict(at=time.monotonic(), tile=tile.label, reply=reply))
+                            clocks = reply.get('clock', {})
+                            if any(clocks.get('closures_by_cause', {}).values()):
+                                raise RuntimeError('tile clock detector recorded an authority closure')
+                        if command == 'e11-samples' and final_draining[0]:
+                            return merge_ticks(ticks.pop(tile.label, []), reply)
+                        return reply
+                    def stopped(tile, *a, **kw):
+                        try:
+                            return stop(tile, *a, **kw)
+                        except BaseException as error:
+                            cleanup_errors.append(dict(tile=tile.label, error=str(error)))
+                        finally:
+                            if hasattr(tile, 'server'):
+                                tile.server.stop()
+                    result.Cluster.__init__, result.Tile.ask, result.Tile.stop = initialize, asked, stopped
+                    return result
+                module.cluster_module = cluster
+            return module
+        ns['load'] = loaded
+
+        def counter(pid):
+            value = native(pid)
+            calls[0] += 1
+            instance = holder.get('instance')
+            if calls[0] >= 2 and instance:
+                roles = dict(proxy=instance.proxy.process.pid, store=instance.store_process.pid,
+                    **{'tile-' + label: tile.server.process.pid for label, tile in instance.tiles.items()},
+                    **{'sidecar-' + str(index): child.process.pid for index, child in enumerate(instance.sidecars)})
+                point = dict(at=time.monotonic(), processes={role: native(other) for role, other in roles.items()})
+                info = support.TaskInfo()
+                if support.LIBPROC.proc_pidinfo(pid, 4, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+                    raise ProcessLookupError(pid)
+                point['proxy_faults'] = dict(faults=info.faults, pageins=info.pageins, cow=info.cow)
+                memories.append(point)
+                if point['at'] - last_drain[0] >= 60:
+                    for label, tile in instance.tiles.items():
+                        tile.ask('cluster-authority')
+                        ticks.setdefault(label, []).append(tile.ask('e11-samples'))
+                    last_drain[0] = point['at']
+            return value
+        ns['counters'] = counter
+        original_times = ns['game_times']
+        time_calls = [0]
+        def times(instance):
+            time_calls[0] += 1
+            if time_calls[0] >= 2:
+                final_draining[0] = True
+            return original_times(instance)
+        ns['game_times'] = times
+        sys.argv = ['e25-memory-cell', '--name', args.name, '--counts', '650', '--bins', str(bins),
+            '--no-other-agents', '--warmup', '30', '--seconds', str(args.seconds)]
+        try:
+            ns['main']()
+            summary['status'] = 'complete'
+        except BaseException as error:
+            summary.update(status='failed', error=str(error))
+        raw_path = evidence / (args.name + '.json')
+        if raw_path.exists():
+            raw = json.loads(raw_path.read_text())
+            summary['cell'] = save(DATA / (args.name + '-raw.json'), raw)
+            cell = raw.get('cells', {}).get('650', {})
+            summary.update(diagnostic_pass=cell.get('diagnostic_pass', False),
+                diagnostic_failures=cell.get('diagnostic_failures'), proxy=cell.get('proxy'),
+                histogram=cell.get('histogram'), tick_summary=cell.get('tick_summary'),
+                game_time_tps=cell.get('game_time_tps'), limiter=cell.get('limiter_window'))
+        summary['executed_fixture'] = dict(path=str(executed_path.relative_to(ROOT)), sha256=hashlib.sha256(executed_path.read_bytes()).hexdigest())
+        try:
+            summary['memory_growth'] = memory_growth(memories, args.seconds)
+        except ValueError as error:
+            summary['errors'].append(str(error))
+    except BaseException as error:
+        summary.update(status='failed', error=str(error))
+    finally:
+        try:
+            summary['process_memory'] = save(DATA / (args.name + '-memory.json'), memories)
+            summary['partial_ticks'] = save(DATA / (args.name + '-partial-ticks.json'), ticks)
+            summary['cleanup_errors'] = cleanup_errors
+            try:
+                events, trace_files = authority_records(traces)
+            except (ValueError, OSError) as error:
+                events, trace_files = [], {}
+                summary['errors'].append('native authority trace audit failed: ' + str(error))
+                summary['status'] = 'failed-authority-evidence'
+            summary['authority_events'] = events
+            summary['authority_trace_files'] = trace_files
+            if summary['status'] == 'complete' and len(trace_files) != 4:
+                summary['errors'].append('not all four native authority traces survived')
+                summary['status'] = 'failed-authority-evidence'
+            summary['authority_observations'] = save(DATA / (args.name + '-authority.json'), authorities)
+            summary['observed_authority_closure'] = bool(events)
+            if events:
+                summary['status'] = 'void-authority-closure'
+            summary['binaries_unchanged'] = validate_snapshot(bins) == before and hashlib.sha256((bins / 'horizon-bots').read_bytes()).hexdigest() == bot_hash
+            summary['qualified_memory_pass'] = bool(summary['status'] == 'complete' and summary.get('diagnostic_pass')
+                and summary['binaries_unchanged'] and not cleanup_errors and not summary['errors'] and not events
+                and summary.get('memory_growth', {}).get('proxy', {}).get('under_ten_percent'))
+            status = subprocess.check_output([host, 'status'], text=True)
+            waiting = next((line.split(':', 1)[1].split() for line in status.splitlines() if line.startswith('waiting:')), [])
+            retained_window = bool(args.keep_window_for_pair and summary['status'] == 'complete' and not cleanup_errors and 'E24' not in waiting)
+            summary['host_window_retained_for_pair'] = retained_window
+            save(target, summary)
+        except BaseException:
+            retained_window = False
+            raise
+        finally:
+            if owned_request and request.exists() and request.read_text() == identity:
+                request.unlink()
+            if not retained_window:
+                subprocess.run([host, 'release', 'E25'], check=True)
+    print(json.dumps(dict(status=summary['status'], qualified_memory_pass=summary.get('qualified_memory_pass'), result=str(target.relative_to(ROOT)))), flush=True)
+    if summary['status'] != 'complete':
+        raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,393 @@
+#!/usr/bin/env python3
+"""Run the preregistered no-hop witness cell without changing the D9 limiter."""
+import argparse
+import ast
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import threading
+import time
+
+import e11_support as support
+from e14_snapshot_support import validate_snapshot, sha256
+from e25_latency_layout import split_witnesses
+from e25_stop_brackets import StopBrackets
+
+ROOT = support.ROOT
+DATA = ROOT / 'docs/experiments/data/E25'
+EVIDENCE = ROOT / '.local/evidence/E25'
+
+
+def load(name,path):
+    loader = importlib.machinery.SourceFileLoader(name,str(path))
+    spec = importlib.util.spec_from_loader(name,loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def no_hop_adapter(base):
+    class NoHops(base):
+        def visit_If(self,node):
+            if any(isinstance(item,ast.Name) and isinstance(item.ctx,ast.Store) and item.id == 'shim_path' for item in ast.walk(node)) and isinstance(node.test,ast.Attribute):
+                return ast.copy_location(ast.parse("port = instance.tiles[group['direct_tile']].port if group.get('direct_tile') else instance.port").body[0],node)
+            return super().visit_If(node)
+
+        def visit_Assign(self,node):
+            if any(ast.unparse(target)=="budgets['servers']" for target in node.targets):
+                node.value=ast.parse('e25_server_budget(cap_pids,4,proxy)',mode='eval').body
+            bot_command = any(isinstance(target,ast.Name) and target.id == 'command' for target in node.targets) and any(isinstance(item,ast.Constant) and item.value == 'horizon-bots' for item in ast.walk(node.value))
+            result = super().visit_Assign(node)
+            if bot_command:
+                return [result,ast.copy_location(ast.parse('command += e25_bot_args(group, folder, instance)').body[0],node)]
+            if any(ast.unparse(target)=="cell['status']" for target in node.targets) and isinstance(node.value,ast.Constant) and node.value.value=='complete':
+                return [result,ast.copy_location(ast.parse('e25_after_window(instance, cell, monitor, folder, processes)').body[0],node)]
+            return result
+
+        def visit_For(self,node):
+            if isinstance(node.target,ast.Name) and node.target.id == 'group' and ast.unparse(node.iter) == "layout['groups']" and any(isinstance(item,ast.Constant) and isinstance(item.value,str) and '[[forced-host]]' in item.value for item in ast.walk(node)):
+                node.iter = ast.parse("list({group['host']:group for group in layout['groups']}.values())",mode='eval').body
+            if isinstance(node.target,ast.Name) and node.target.id == 'group' and ast.unparse(node.iter) == "layout['groups'][:4]":
+                node.iter = ast.parse("[group for group in layout['groups'] if group['kind'] == 'interior']",mode='eval').body
+            pig_loop = isinstance(node.target,ast.Name) and node.target.id == 'j' and any(isinstance(item,ast.Constant) and isinstance(item.value,str) and 'console summon minecraft:pig' in item.value for item in ast.walk(node))
+            result = self.generic_visit(node)
+            if pig_loop:
+                return ast.copy_location(ast.If(test=ast.parse("not group.get('witness_group')",mode='eval').body,body=[result],orelse=[]),node)
+            return result
+    return NoHops
+
+
+class DisabledServerBudget:
+    """Explicitly authorized counterfactual; sends no signal and cannot qualify D9."""
+    def __init__(self,pids):self.pids,self.done=list(pids),threading.Event()
+    def start(self):return self
+    def stop(self):self.done.set()
+    def report(self):
+        return dict(cores=None,disabled=True,stops=0,max_debt_cpu_s=0.,error=None,
+            stop_cycles=0,process_stop_signals=0,stop_wall_s=0.,sum_process_pause_s=0.)
+
+
+def trace_rows(path,event,cutoff_ns=None,proofs=None,single_thread_bot=False):
+    raw = path.read_bytes()
+    lines=raw.splitlines()
+    if raw and not raw.endswith(b'\n'):
+        try:json.loads(lines[-1])
+        except ValueError:
+            prior=[json.loads(line) for line in lines[:-1]]
+            stamps=[row['at_ns'] for row in prior if row.get('event')==event]
+            found=re.search(rb'"at_ns"\s*:\s*(\d+)',lines[-1])
+            lower=int(found[1]) if found else stamps[-1] if single_thread_bot and stamps and all(a<=b for a,b in zip(stamps,stamps[1:])) else None
+            if cutoff_ns is None or lower is None or lower<=cutoff_ns:
+                raise RuntimeError('partial native trace record lacks proven post-drain time')
+            if proofs is not None:proofs.append(dict(path=str(path.relative_to(ROOT)),raw_sha256=__import__('hashlib').sha256(raw).hexdigest(),
+                drain_end_ns=cutoff_ns,trailer_time_lower_bound_ns=lower,timestamp_present=bool(found),
+                single_threaded_monotonic_bot_bound=not bool(found),partial_bytes=len(lines[-1]),
+                measured_record_removed=False))
+            lines=lines[:-1]
+    rows = [json.loads(line) for line in lines]
+    if not rows or rows[0].get('schema') != 'E25-latency-v1':
+        raise RuntimeError('native trace header missing')
+    selected = [row for row in rows if row.get('event') == event]
+    if any(not re.fullmatch('1e[0-9a-f]{50}',row.get('packet','')) for row in selected):
+        raise RuntimeError('only complete movement payloads may enter published trace rows')
+    return selected
+
+
+def session_paths(cell,witnesses,direct):
+    expected_direct = {row['name'] for row in witnesses} if direct else set()
+    observed = {}
+    for phase in ['before','after']:
+        for tile in cell[phase].values():
+            for player in tile['players']:
+                observed.setdefault(player['name'],set()).add(player['uuid'].replace('-','').lower())
+    rows = []
+    for group,command in zip(cell['layout']['groups'],cell['bot_commands'],strict=True):
+        signing = '--forwarding-secret-file' in command
+        destination = command[command.index('--server')+1]
+        for index in group['indices']:
+            name = group['prefix'] + str(index)
+            if signing != (name in expected_direct) or bool(group.get('direct_tile')) != signing:
+                raise RuntimeError('a session used an unapproved signing path')
+            uuids = observed.get(name,set())
+            if len(uuids) != 1:
+                raise RuntimeError('a session lacks one stable placed identity: ' + name)
+            rows.append(dict(name=name,uuid=next(iter(uuids)),cohort=group['label'],
+                path='direct-reference' if signing else 'via-proxy',destination=destination,
+                signed_initial_profile=signing,signature_or_secret_recorded=False,
+                evidence='actual bot command and before/after live player UUID'))
+    if len(rows) != 650 or len({row['name'] for row in rows}) != 650:
+        raise RuntimeError('per-session path ledger does not cover all 650 players')
+    if {row['name'] for row in rows if row['signed_initial_profile']} != expected_direct:
+        raise RuntimeError('signed sessions differ from the eight preregistered witnesses')
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--bins',type=Path,required=True)
+    parser.add_argument('--plan',type=Path,required=True)
+    parser.add_argument('--direct-reference',action='store_true')
+    parser.add_argument('--stop-brackets',action='store_true')
+    parser.add_argument('--profile-after-window',action='store_true')
+    parser.add_argument('--server-uncapped-diagnostic',action='store_true')
+    parser.add_argument('--window-managed',action='store_true',help='use an E25 window held by the paired-session runner')
+    parser.add_argument('--session')
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+        raise ValueError('fresh e25- or repro- name required')
+    evidence = EVIDENCE / args.name
+    evidence.mkdir(parents=True,exist_ok=False)
+    stamps = evidence / 'stamps'
+    leases = evidence / 'leases'
+    stamps.mkdir(); leases.mkdir()
+    target = DATA / (args.name+'-summary.json')
+    if target.exists():
+        raise RuntimeError('attempt already exists')
+    memory = load('e25_latency_storage',ROOT/'scripts/e25-memory')
+    plan = json.loads(args.plan.read_text())
+    bins = args.bins.resolve()
+    identity = validate_snapshot(bins)
+    contract = json.loads((bins/'FINAL.json').read_text())
+    bot_hash = sha256(bins/'horizon-bots')
+    host = ROOT/'.local/bin/host-window'
+    if args.window_managed:
+        owner = ROOT / '.local/host/quiet/owner'
+        if not owner.exists() or owner.read_text().splitlines()[0] != 'E25':
+            raise RuntimeError('paired session does not hold the E25 window')
+        if not args.session or not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.session):
+            raise ValueError('managed window needs a named paired session')
+    else:
+        subprocess.run([host,'quiet','E25',args.name],check=True)
+    request = ROOT/'.local/quiet-request'
+    quiet_identity = json.dumps(dict(owner='E25',name=args.name,pid=os.getpid(),wall_ns=time.time_ns()))+'\n'
+    owned = False
+    summary = dict(name=args.name,status='preparing',direct_reference=args.direct_reference,
+        plan=dict(path=str(args.plan.resolve().relative_to(ROOT)),sha256=sha256(args.plan)),errors=[])
+    summary.update(diagnostic_only=contract.get('e25_diagnostic_only',False),
+        verification_limits=contract.get('e25_measurement_verification_limits',[]),
+        horizon_lease_base=contract.get('horizon_lease_base'),m4_latency_qualified=False)
+    summary.update(server_uncapped_diagnostic=args.server_uncapped_diagnostic,
+        d9_valid=not args.server_uncapped_diagnostic,bot_limit_retained_cores=1)
+    summary.update(measurement_session=args.session,measurement_bundle=dict(
+        path=str(bins.relative_to(ROOT)),final_sha256=sha256(bins/'FINAL.json'),
+        binaries=dict(identity['binaries'],**{'horizon-bots':bot_hash})))
+    statuses,cleanup_errors,authorities,census = {},[],[],[]
+    times = []
+    brackets=StopBrackets() if args.stop_brackets else None
+    previous_support_os=support.os
+    if brackets:support.os=brackets.os_proxy
+    profile_capture=[]
+    try:
+        if request.exists():
+            raise RuntimeError('legacy quiet ownership remains')
+        summary['load_settle'] = memory.wait_start_load()
+        with request.open('x') as stream:
+            stream.write(quiet_identity)
+        owned = True
+        os.environ.update(E23_QUIET_IDENTITY=quiet_identity,E25_LATENCY_DIR=str(stamps),
+            E25_LATENCY_NAMES=','.join(row['name'] for row in plan['witnesses']))
+        e23 = load('e25_latency_ast_base',ROOT/'scripts/e23-cell')
+        tree = ast.fix_missing_locations(no_hop_adapter(e23.Adapt)().visit(ast.parse((ROOT/'scripts/e20-frontier').read_text())))
+        executed = DATA/(args.name+'-executed.py')
+        executed.write_text(ast.unparse(tree)+'\n')
+        ns = dict(__name__='e25_latency_base',__file__=str(ROOT/'scripts/e20-frontier'),E23_WINDOW_SECONDS=1500)
+        exec(compile(tree,str(executed),'exec'),ns)
+        ns['DATA'] = evidence
+        if brackets:
+            sampler_base=ns['ProcessSampler']
+            class Sampler(sampler_base):
+                def register(self,role,pid):
+                    brackets.register(role,pid)
+                    return super().register(role,pid)
+            ns['ProcessSampler']=Sampler
+        original_plan = ns['plan']
+        ns['plan'] = lambda count,anchor:split_witnesses(original_plan(count,anchor),plan['witnesses'],args.direct_reference)
+        def bot_args(group,folder,instance):
+            result = ['--handshake-host',group['host'],'--indices',','.join(map(str,group['indices'])),
+                '--route-bots',str(group['route_bots'])]
+            if group.get('direct_tile'):
+                result += ['--forwarding-secret-file',str(instance.tiles[group['direct_tile']].folder/'forwarding.secret')]
+            return result
+        ns['e25_bot_args'] = bot_args
+        ns['e25_server_budget']=lambda pids,cores,proxy:DisabledServerBudget(pids).start() if args.server_uncapped_diagnostic else proxy.TrackedBudget(pids,cores).start()
+        original_load = ns['load']
+        holder = {}
+
+        class Proxy:
+            def __init__(self,original,**overrides):
+                self.original,self.overrides = original,overrides
+            def __getattr__(self,name):
+                return self.overrides[name] if name in self.overrides else getattr(self.original,name)
+
+        def loaded(name,path):
+            module = original_load(name,path)
+            if brackets and Path(path).name=='e18-proxy':module.os=brackets.os_proxy
+            if Path(path).name == 'e17-m4':
+                factory = module.cluster_module
+                def cluster(selected):
+                    result = factory(selected)
+                    start,stop,initialize = result.Tile.start,result.Tile.stop,result.Cluster.__init__
+                    def tile_start(tile):
+                        previous = tile.cluster.tile_env
+                        tile.cluster.tile_env = dict(previous,E25_LATENCY_DIR=str(stamps),
+                            E25_LATENCY_NAMES=os.environ['E25_LATENCY_NAMES'],E25_LATENCY_TILE=tile.label,
+                            GOLIATH_LEASE_TRACE_DIR=str(leases))
+                        try:return start(tile)
+                        finally:tile.cluster.tile_env = previous
+                    def tile_stop(tile,*a,**kw):
+                        try:return stop(tile,*a,**kw)
+                        except BaseException as error:cleanup_errors.append(dict(tile=tile.label,error=str(error)))
+                        finally:
+                            if hasattr(tile,'server'):tile.server.stop()
+                    def init(instance,*a,**kw):
+                        holder['instance'] = instance
+                        return initialize(instance,*a,**kw)
+                    result.Tile.start,result.Tile.stop,result.Cluster.__init__ = tile_start,tile_stop,init
+                    return result
+                module.cluster_module = cluster
+            return module
+        ns['load'] = loaded
+        original_popen = ns['subprocess'].Popen
+        def popen(command,*a,**kw):
+            if Path(str(command[0])).name == 'horizon-bots':
+                prefix = command[command.index('--name')+1]
+                tile = prefix.removeprefix('E17Bot').lower()
+                kw['env'] = dict(kw.get('env',os.environ),E25_LATENCY_TILE=tile)
+            return original_popen(command,*a,**kw)
+        ns['subprocess'] = Proxy(ns['subprocess'],Popen=popen)
+        original_counters = ns['counters']
+        calls = [0]
+        def counters(pid):
+            value = original_counters(pid)
+            calls[0] += 1
+            if calls[0] >= 2:
+                times.append(time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW))
+                population = {label:ns['population'](tile) for label,tile in holder['instance'].tiles.items()}
+                witness_positions = {}
+                for label,tile in population.items():
+                    for player in tile['players']:
+                        if player['name'] in {row['name'] for row in plan['witnesses']}:
+                            if player['name'] in witness_positions or not player.get('placed') or player.get('held'):
+                                raise RuntimeError('witness placement is ambiguous or held')
+                            expected = next(row['tile'] for row in plan['witnesses'] if row['name'] == player['name'])
+                            if label != expected:
+                                raise RuntimeError('witness left its preregistered tile')
+                            witness_positions[player['name']] = dict(tile=label,position=player['position'])
+                if len(witness_positions) != 8:
+                    raise RuntimeError('not all eight witnesses are placed during timing')
+                census.append(dict(at_ns=times[-1],tiles={label:{key:value for key,value in tile.items() if key != 'players'}
+                    for label,tile in population.items()},witnesses=witness_positions))
+            return value
+        ns['counters'] = counters
+        def after_window(instance,cell,monitor,folder,processes):
+            if not args.profile_after_window:return
+            profiler=load('e25_proxy_profile_capture',ROOT/'scripts/e25_proxy_profile.py')
+            captured=profiler.capture(instance,evidence,monitor,original_counters,ns['native_threads'])
+            profile_capture.append(captured)
+            for group,process in processes:
+                row=ns['last_bot'](folder/(group['label']+'.jsonl'))
+                if process.poll() is not None or row.get('failed') or row.get('online')!=group['count']:
+                    raise RuntimeError('profile period did not retain the 650-player population')
+        ns['e25_after_window']=after_window
+        original_times = ns['game_times']
+        time_calls = [0]
+        def game_times(instance):
+            time_calls[0] += 1
+            if time_calls[0] >= 2:
+                drain_end = times[-1] + 2_000_000_000
+                while (remaining := drain_end-time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)) > 0:
+                    time.sleep(min(.1,remaining/1e9))
+                for label,tile in instance.tiles.items():
+                    statuses[label] = tile.ask('e25-latency-status')
+                    authority = tile.ask('cluster-authority')
+                    authorities.append(dict(tile=label,reply=authority))
+                    if not authority.get('authorized') or any(authority.get('clock',{}).get('closures_by_cause',{}).values()):
+                        raise RuntimeError('authority closed during latency cell')
+            return original_times(instance)
+        ns['game_times'] = game_times
+        sys.argv = ['e25-latency-base','--name',args.name,'--counts','650','--bins',str(bins),
+            '--no-other-agents','--warmup','30','--seconds','60']
+        try:
+            ns['main']()
+            summary['status'] = 'complete'
+        except BaseException as error:
+            summary.update(status='failed',error=str(error))
+        raw_path = evidence/(args.name+'.json')
+        if raw_path.exists():
+            raw = json.loads(raw_path.read_text())
+            cell = raw.get('cells',{}).get('650',{})
+            if args.server_uncapped_diagnostic:
+                raw.update(kind='E25-server-uncapped-diagnostic-NOT-D9-NOT-M4',server_core_cap=None,acceptance=False,proxy_inside_server_cap=None)
+                cell.update(d9_valid=False,server_limit_disabled=True,proxy_inside_server_cap=None)
+                cell['diagnostic_pass']=False
+                cell.setdefault('diagnostic_failures',[]).append('authorized server-uncapped counterfactual: not D9-valid and not M4 evidence')
+            if summary['status'] == 'complete':
+                cell['e25_session_paths'] = session_paths(cell,plan['witnesses'],args.direct_reference)
+                summary['sessions'] = memory.save(DATA/(args.name+'-sessions.json'),cell['e25_session_paths'])
+                for command in cell['bot_commands']:
+                    if '--forwarding-secret-file' in command:
+                        command[command.index('--forwarding-secret-file')+1] = '<private-fixture-file>'
+            summary['cell'] = memory.save(DATA/(args.name+'-raw.json'),raw)
+            summary.update(diagnostic_pass=cell.get('diagnostic_pass',False),proxy=cell.get('proxy'),
+                histogram=cell.get('histogram'),game_time_tps=cell.get('game_time_tps'),ticks=cell.get('tick_summary'),
+                limiter=cell.get('limiter_window'),population_before=cell.get('before'),population_after=cell.get('after'))
+        if summary['status'] == 'complete':
+            if len(statuses) != 4 or any(not row.get('enabled') or row.get('errors') or row.get('dropped') for row in statuses.values()):
+                raise RuntimeError('native tile trace reported errors, drops or missing enablement')
+            eof_proofs=[]
+            sends = [row for path in sorted(stamps.glob('e25-bots-*.jsonl')) for row in trace_rows(path,'bot-write',times[-1]+2_000_000_000,eof_proofs,True)]
+            decodes = [row for path in sorted(stamps.glob('e25-tile-*.jsonl')) for row in trace_rows(path,'tile-decode',times[-1]+2_000_000_000,eof_proofs)]
+            summary['post_drain_trailer_proofs']=eof_proofs
+            sends_file = memory.save(DATA/(args.name+'-sends.json'),dict(schema='E25-latency-v1',dropped=0,events=sends))
+            decodes_file = memory.save(DATA/(args.name+'-decodes.json'),dict(schema='E25-latency-v1',dropped=0,events=decodes))
+            analysis = load('e25_latency_matcher',ROOT/'scripts/e25-latency-results')
+            summary['timing_window'] = dict(start_ns=times[0],end_ns=times[-1],drain_end_ns=times[-1]+2_000_000_000)
+            matched = analysis.match(sends,decodes,times[0],times[-1],times[-1]+2_000_000_000,plan['witnesses'])
+            summary['latency'] = memory.save(DATA/(args.name+'-latency.json'),matched)
+            summary['overall'] = matched['overall']
+            summary['per_tile'] = matched['tiles']
+            summary['sends'],summary['decodes'] = sends_file,decodes_file
+    except BaseException as error:
+        summary.update(status='failed',error=str(error))
+    finally:
+        try:
+            events,trace_files = memory.authority_records(leases)
+            summary.update(authority_events=events,authority_trace_files=trace_files,
+                authority_observations=authorities,native_trace_status=statuses,cleanup_errors=cleanup_errors)
+            summary['per_tile_census'] = memory.save(DATA/(args.name+'-census.json'),census)
+            if brackets:summary['stop_brackets']=memory.save(DATA/(args.name+'-stop-brackets.json'),brackets.report())
+            if events or cleanup_errors:
+                summary['status'] = 'void-authority-or-cleanup-event'
+            summary['binaries_unchanged'] = validate_snapshot(bins) == identity and sha256(bins/'horizon-bots') == bot_hash
+            summary['qualified_conservative_bound_pass'] = bool(summary['status'] == 'complete' and summary.get('diagnostic_pass')
+                and summary['binaries_unchanged'] and len(trace_files) == 4 and summary.get('overall',{}).get('below_five_ms')
+                and not summary['diagnostic_only'] and not summary['verification_limits'])
+            if args.server_uncapped_diagnostic:summary['qualified_conservative_bound_pass']=False
+            summary['d9_valid']=bool(not args.server_uncapped_diagnostic and summary['status']=='complete' and summary.get('diagnostic_pass') and not events)
+            memory.save(target,summary)
+        finally:
+            support.os=previous_support_os
+            if owned and request.exists() and request.read_text() == quiet_identity:
+                request.unlink()
+            if not args.window_managed:
+                subprocess.run([host,'release','E25'],check=True)
+    if args.profile_after_window:
+        try:
+            profiler=load('e25_proxy_profile_export',ROOT/'scripts/e25_proxy_profile.py')
+            result=profiler.export(evidence,ROOT)
+            summary['proxy_profile']=memory.save(DATA/(args.name+'-proxy-profile.json'),result)
+        except BaseException as error:
+            summary['profile_export_error']=str(error)
+        memory.save(target,summary)
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)),status=summary['status'],overall=summary.get('overall'))),flush=True)
+    if summary['status'] != 'complete':raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,133 @@
+diff --git a/crates/meridian-proxy/src/main.rs b/crates/meridian-proxy/src/main.rs
+--- a/crates/meridian-proxy/src/main.rs
++++ b/crates/meridian-proxy/src/main.rs
+@@ -14,6 +14,8 @@
+ mod operators;
+ mod permissions;
+ mod placing;
++#[cfg(target_os = "macos")]
++mod pressure;
+ mod queue;
+ mod restart;
+ // Used by the session once routing is wired in; until then only its tests call it.
+diff --git a/crates/meridian-proxy/src/serve.rs b/crates/meridian-proxy/src/serve.rs
+--- a/crates/meridian-proxy/src/serve.rs
++++ b/crates/meridian-proxy/src/serve.rs
+@@ -133,8 +133,14 @@
+     let spawned = thread::Builder::new()
+         .name("accept waker".into())
+         .spawn(move || {
++            #[cfg(target_os = "macos")]
++            let mut pressure = crate::pressure::PressureRelief::new(Instant::now());
+             while !proxy.stopping() && !ended.load(Ordering::Relaxed) {
+                 thread::sleep(POLL);
++                #[cfg(target_os = "macos")]
++                if !proxy.stopping() && !ended.load(Ordering::Relaxed) {
++                    pressure.tick();
++                }
+             }
+             let mut warned = false;
+             while !ended.load(Ordering::Relaxed) {
+diff --git a/crates/meridian-proxy/src/pressure.rs b/crates/meridian-proxy/src/pressure.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-proxy/src/pressure.rs
+@@ -0,0 +1,98 @@
++//! Low-frequency allocator relief driven only by the existing accept-waker thread.
++use std::{
++    ffi::c_void,
++    time::{Duration, Instant},
++};
++
++const PERIOD: Duration = Duration::from_secs(60);
++const GOAL: usize = 16 * 1024 * 1024;
++
++unsafe extern "C" {
++    fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
++}
++
++pub(crate) struct PressureRelief {
++    next: Instant,
++    calls: u64,
++    released: usize,
++    maximum: Duration,
++}
++
++impl PressureRelief {
++    pub(crate) fn new(now: Instant) -> Self {
++        Self {
++            next: now + PERIOD,
++            calls: 0,
++            released: 0,
++            maximum: Duration::ZERO,
++        }
++    }
++
++    fn due(&self, now: Instant) -> bool {
++        now >= self.next
++    }
++
++    fn completed(&mut self, finished: Instant, released: usize, elapsed: Duration) {
++        // Schedule after completion, never replay missed periods in a burst.
++        self.next = finished + PERIOD;
++        self.calls = self.calls.saturating_add(1);
++        self.released = self.released.saturating_add(released);
++        self.maximum = self.maximum.max(elapsed);
++    }
++
++    pub(crate) fn tick(&mut self) {
++        let started = Instant::now();
++        if !self.due(started) {
++            return;
++        }
++        // SAFETY: Apple's API explicitly accepts a null zone to examine all zones.
++        // GOAL is a best-effort byte target, not a memory address or a work bound.
++        let released = unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), GOAL) };
++        let finished = Instant::now();
++        let elapsed = finished.saturating_duration_since(started);
++        self.completed(finished, released, elapsed);
++        crate::log::info!(
++            "allocator-relief calls={} goal_bytes={} released_bytes={} total_released_bytes={} elapsed_us={} maximum_us={}",
++            self.calls,
++            GOAL,
++            released,
++            self.released,
++            elapsed.as_micros(),
++            self.maximum.as_micros()
++        );
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn first_call_waits_a_full_period() {
++        let start = Instant::now();
++        let relief = PressureRelief::new(start);
++        assert!(!relief.due(start));
++        assert!(!relief.due(start + PERIOD - Duration::from_nanos(1)));
++        assert!(relief.due(start + PERIOD));
++        assert_eq!(GOAL, 16 * 1024 * 1024);
++    }
++
++    #[test]
++    fn completion_sets_the_next_deadline_without_catch_up() {
++        let start = Instant::now();
++        let mut relief = PressureRelief::new(start);
++        let finished = start + Duration::from_secs(181);
++        relief.completed(finished, 4096, Duration::from_millis(2));
++        assert_eq!(relief.next, finished + PERIOD);
++        assert!(!relief.due(finished));
++        assert!(!relief.due(finished + PERIOD - Duration::from_nanos(1)));
++        assert!(relief.due(finished + PERIOD));
++        assert_eq!(relief.calls, 1);
++        assert_eq!(relief.released, 4096);
++        assert_eq!(relief.maximum, Duration::from_millis(2));
++        relief.completed(finished + PERIOD, 8192, Duration::from_millis(1));
++        assert_eq!(relief.calls, 2);
++        assert_eq!(relief.released, 12288);
++        assert_eq!(relief.maximum, Duration::from_millis(2));
++    }
++}

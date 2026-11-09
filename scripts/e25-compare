@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Compare the preregistered E25 memory pair without trimming or allowances."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def read(path):
+    raw = path.read_bytes()
+    if path.suffix == '.gz':
+        raw = gzip.decompress(raw)
+    return json.loads(raw), hashlib.sha256(raw).hexdigest()
+
+
+def histograms(control, candidate, control_seconds, candidate_seconds):
+    result = {}
+    for name, first in control['paths'].items():
+        last = candidate['paths'][name]
+        quantiles = {}
+        for key in ['p50_us_upper', 'p95_us_upper', 'p99_us_upper', 'maximum_us']:
+            a, b = first[key], last[key]
+            quantiles[key] = dict(control=a, candidate=b, observed_not_worse=a is not None and b is not None and b <= a)
+        a, b = first['count'] / control_seconds, last['count'] / candidate_seconds
+        result[name] = dict(quantiles=quantiles, counts=dict(control=first['count'], candidate=last['count']),
+            writes_per_second=dict(control=a, candidate=b, ratio=b / a if a else None, observed_not_lower=b >= a),
+            overflow=dict(control=first['overflow_at_100ms'], candidate=last['overflow_at_100ms']),
+            unstamped=dict(control=first['unstamped_writes'], candidate=last['unstamped_writes']))
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--control', type=Path, required=True)
+    parser.add_argument('--candidate', type=Path, required=True)
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+', args.name):
+        raise ValueError('fresh e25- or repro- name required')
+    target = ROOT / 'docs/experiments/data/E25' / (args.name + '.json')
+    if target.exists():
+        raise RuntimeError('comparison already exists')
+    summaries, raws, inputs = [], [], {}
+    for path in [args.control, args.candidate]:
+        summary, digest = read(path)
+        inputs[str(path.relative_to(ROOT) if path.is_absolute() else path)] = digest
+        raw_path = ROOT / summary['cell']['path']
+        raw, raw_digest = read(raw_path)
+        if raw_digest != summary['cell']['sha256']:
+            raise RuntimeError('raw cell hash differs from summary')
+        summaries.append(summary)
+        raws.append(raw)
+    first, last = [raw['cells']['650'] for raw in raws]
+    seconds = [cell['samples'][-1]['at'] - cell['samples'][0]['at'] for cell in [first, last]]
+    binaries = [{key: value for key, value in raw['binaries'].items() if key != 'meridian'} for raw in raws]
+    equal = binaries[0] == binaries[1] and first['layout'] == last['layout'] and raws[0]['measurement_seconds'] == raws[1]['measurement_seconds']
+    hist = histograms(first['histogram'], last['histogram'], *seconds)
+    cpu = dict(control=first['proxy']['cores'], candidate=last['proxy']['cores'],
+        observed_not_worse=last['proxy']['cores'] <= first['proxy']['cores'])
+    result = dict(kind='E25-memory-pair', inputs=inputs, matched_work_and_nonproxy_binaries=equal,
+        control_valid=bool(summaries[0].get('diagnostic_pass') and summaries[0]['binaries_unchanged'] and not summaries[0]['cleanup_errors']),
+        candidate_valid=bool(summaries[1].get('diagnostic_pass') and summaries[1]['binaries_unchanged'] and not summaries[1]['cleanup_errors']),
+        candidate_memory_pass=summaries[1].get('qualified_memory_pass', False), cpu=cpu,
+        threads=dict(control=first['proxy']['threads_max'], candidate=last['proxy']['threads_max']),
+        memory=dict(control=summaries[0].get('memory_growth'), candidate=summaries[1].get('memory_growth')),
+        histograms=hist, no_regression_allowance_applied=True,
+        original_growth_attribution='open; a passing mitigation does not fully attribute the original growth')
+    target.write_text(json.dumps(result, indent=2, allow_nan=False) + '\n')
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)), sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+        matched=equal, candidate_memory_pass=result['candidate_memory_pass'], cpu=cpu)), flush=True)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,23 @@
+diff --git a/crates/meridian-proxy/Cargo.toml b/crates/meridian-proxy/Cargo.toml
+--- a/crates/meridian-proxy/Cargo.toml
++++ b/crates/meridian-proxy/Cargo.toml
+@@ -14,5 +14,7 @@
+ [dependencies]
+ goliath-store = { path = "../../../../../crates/goliath-store" }
++mimalloc = { version = "=0.1.52", default-features = false }
++libmimalloc-sys = { version = "=0.1.49", default-features = false }
+ ctrlc = "3.4"
+ horizon-protocol.workspace = true
+ meridian-config.workspace = true
+diff --git a/crates/meridian-proxy/src/main.rs b/crates/meridian-proxy/src/main.rs
+--- a/crates/meridian-proxy/src/main.rs
++++ b/crates/meridian-proxy/src/main.rs
+@@ -1,4 +1,8 @@
+ //! The Meridian proxy.
++
++#[global_allocator]
++static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
++
+ mod access;
+ mod args;
+ mod balance;

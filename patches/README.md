@@ -358,9 +358,48 @@ do not replace the accepted measurement stack or qualify an availability fix.
   with the bounded store as `lease-fixed-r2`, which passes the 30-minute soak
   (proxy memory excepted) and the full M3 campaign.
 
+- `meridian-11-writev64-r2.patch` and its byte-equal frozen-build copy
+  `meridian-11-write-batch-e25-scheduler2-writev64-r2.patch`: E25 on reactor-1
+  plus the two patch-07 scheduler files. Replace the descriptor Vec with a
+  fixed stack array, using 64 descriptors on macOS and the original 16 on
+  other targets. FIFO order, partial offsets, the 256 KiB turn and queue caps
+  stay unchanged. Scoped release gates pass; no latency or RSS pass is claimed.
+  Revision 1 is retained as a failed build, not a selectable patch.
+
+- `meridian-12-zone-pressure-r2.patch`: E25's build-gated, unmeasured zone-relief candidate.
+  It calls the macOS allocator once per 60 seconds on the existing accept-waker
+  thread, requesting 16 MiB without catch-up. A new MIT `meridian-zone` 0.1.0
+  crate has no registry dependencies, build script, threads or runtime. It
+  exports one safe pressure-relief API and returns zero off macOS. This is an
+  approved local OS-boundary exception: crate-level `deny(unsafe_code)` and
+  exactly one documented `allow(unsafe_code)` block. The proxy and all existing
+  crates retain `forbid`. The exception is not selected if the candidate fails
+  entry or memory qualification. Revision 1 is an incompatible direct-FFI draft.
+  See [E25](../docs/experiments/E25-proxy.md) for provenance, gates and results.
+
 - `goliath-store-e24-memory-r1.patch`: a record of E24's store change in this
   repository's own crates, already applied in `crates/goliath-store`. It bounds
   retry receipts to 9,216 FIFO entries, reuses the snapshot buffer and writes the
   snapshot frame without a second full copy, in the same on-disk format. A
   snapshot holding more receipts than the cap is refused at startup and needs an
   explicit migration.
+
+- `meridian-10-mimalloc.patch`: E25 after frozen reactor-1's complete patch-06
+  stack on `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`. Selects the global
+  Rust allocator only, with pinned MIT `mimalloc` 0.1.52 and
+  `libmimalloc-sys` 0.1.49, bundling native mimalloc 3.3.2. Optional features
+  and runtime tuning stay off. It changes no routing, IO policy, thread count
+  or authority rule. Both proxy builds pass scoped release gates, and clean
+  application reproduces every recorded source input. Memory and latency
+  qualification remain separate. See [E25](../docs/experiments/E25-proxy.md).
+
+- `horizon-15-latency-stamps-e25-stamps-lease-r2-b2.patch`: E25's measurement-only
+  timestamps on Horizon `fc2868b2b26d56ec76e17414909fe58a3b87bb92`, after
+  FINAL-09 and `horizon-13-lease-renewal-r2.patch`. The bot stamps a movement
+  packet immediately before its write; the tile stamps it in the connection
+  reader right after decode, before the main-thread queue. Both use
+  CLOCK_MONOTONIC_RAW. Direct-reference bots can sign their own backend login
+  with the fixture's throwaway secret, which is never recorded. All gates pass,
+  including the decode-before-dispatch test. Earlier `horizon-15-latency-stamps-*`
+  revisions are retained as diagnostic or failed builds; b1 differs only in its
+  test constructor. Not part of any production stack.

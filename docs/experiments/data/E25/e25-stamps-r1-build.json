@@ -1,0 +1,73 @@
+{
+  "kind": "E25-no-hop-stamps",
+  "status": "failed",
+  "profile": "release",
+  "incremental": false,
+  "commands": [
+    {
+      "label": "release",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--bin",
+        "horizon-client",
+        "-p",
+        "horizon-bots",
+        "--bin",
+        "horizon-bots"
+      ],
+      "exit": -9,
+      "elapsed_with_queue_seconds": 309.40382495801896,
+      "log": ".local/evidence/E25/e25-stamps-r1-release.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "test_results": []
+    }
+  ],
+  "runner_sha256": "f4665b9fad49946e1d6937d84c05d26f9d669535a1ee97b83da9bcf37b7f0c64",
+  "base_identity_sha256": "935de2b8e16b1bcf330f651f8e9456e828d6d05eae47c82ea36211120a44ac28",
+  "selected_source_archive": {
+    "path": ".local/evidence/E25/e25-stamps-r1-selected-source.tar.gz",
+    "sha256": "005d30713935d2ff5aa79080ba3444775fddb200171bc2f9d0d83b47bd2e6b0a"
+  },
+  "internal_source_archive": {
+    "path": ".local/evidence/E24/lease-fixed-r1-internal-source.tar.gz",
+    "sha256": "800f951224aa2e1bd9163bdb522da2d1af5d22e1850872af86b52a08d24ab8ad"
+  },
+  "source_restored": false,
+  "source_path_only_change": {
+    "path": "crates/horizon-client/Cargo.toml",
+    "original": "../../../../../crates/goliath-store",
+    "relocated": "../../../../../.local/evidence/E25/timing-dependencies/crates/goliath-store"
+  },
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "settings": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_BUILD_JOBS": "6",
+    "CARGO_PROFILE_RELEASE_LTO": "thin",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "1"
+  },
+  "error": "measurement gate failed: release",
+  "patch": {
+    "path": "patches/horizon-15-latency-stamps-e25-stamps-r1.patch",
+    "sha256": "0cd74dc6fc9a2ba5d1bde68314acd4e51020e51454cf1096bd693f2b634350da"
+  },
+  "compiled_files": {
+    "Cargo.lock": "ca8b60c2a1862cecfa7f3c2c82746360e508690dae711cf2e3d1a1b6123c4173",
+    "crates/horizon-bots/Cargo.toml": "c6c1cef5642ff1b96cd3fc593520701a224b923e3296b3597aaf7c644cf87fee",
+    "crates/horizon-bots/src/latency_trace.rs": "e299b6c51612cd4755bbe9031930b6dcfb53092c8895aaef8978fbed1da7153a",
+    "crates/horizon-bots/src/main.rs": "fb0f658c12706c80ca452517c0bb8dc07edb4946f461ae48cf083c2454ae30c4",
+    "crates/horizon-bots/src/measured.rs": "2591342b5dd7fe037529c116ff381658a3a3931f94fc45d3b91260cfe29d3917",
+    "crates/horizon-client-lib/Cargo.toml": "a4ebda2fc508d838ec71c9972f79202c33636e4eec4789b7d4b026f62226b6cb",
+    "crates/horizon-client/Cargo.toml": "0ee2e9b44f624df74e80bc0a5093d01ebe71d0b1bdc334cfa3192be8bf4af97c",
+    "crates/horizon-client/src/game/dedicated/status.rs": "dd0ece77f59aa3881bb1be566fba9e89c62b36f05dd916f14b63c73f5ccc4871",
+    "crates/horizon-client/src/lan/conn.rs": "34934e766a0341065dbf7b36f4548d44cb3ebbfa65bdd91ee0d1bee41d6b3bac",
+    "crates/horizon-client/src/lan/io_pool.rs": "2e8612e544861e6c0b95fec5a09caa6d0f91fc27c8bd06cdd78bb1e4c10b333e",
+    "crates/horizon-client/src/lan/latency_trace.rs": "72d5130d82b224947f180e2d3551a9604d4358366dfdd00fbce9d883f159089c",
+    "crates/horizon-client/src/lan/mod.rs": "27c54f1c7b4040fa963e6e85c20ac59f2a25cb712ae72f2ae54a705fbf1b4c16"
+  },
+  "restoration_error": "source/index restoration failed; inspect the private backup before any new work"
+}

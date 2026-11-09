@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Collect only the selected final proxy's remaining strict via and uncapped rows."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+from e14_snapshot_support import validate_snapshot
+from e25_soak_harness import ROOT,DATA,read,digest,load
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--bins',type=Path,required=True)
+    parser.add_argument('--plan',type=Path,required=True)
+    parser.add_argument('--prior-strict',type=Path)
+    args = parser.parse_args()
+    print('E25_FINAL_ROWS_PROCESS '+str(os.getpid()),flush=True)
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+        raise ValueError('fresh simple final-session name required')
+    bins = args.bins.resolve()
+    identity = validate_snapshot(bins)
+    verifier = load('e25_final_stamp_contract',ROOT/'scripts/e25-latency-session')
+    current_binaries = verifier.stamp_contract(bins)
+    contract = read(bins/'FINAL.json')
+    if contract.get('e25_diagnostic_only') or contract.get('e25_measurement_verification_limits'):
+        raise ValueError('final rows need the all-gated r2 stamps')
+    prior = []
+    if args.prior_strict:
+        record = read(args.prior_strict)
+        if not record.get('d9_valid') or record.get('status') != 'complete' or record.get('server_uncapped_diagnostic') or record.get('direct_reference'):
+            raise ValueError('prior row is not a complete strict D9 via row')
+        if record.get('diagnostic_only') or record.get('verification_limits') or record['measurement_bundle']['binaries'] != current_binaries:
+            raise ValueError('prior strict row used a limited or different measurement bundle')
+        if record['plan']['sha256'] != digest(args.plan.resolve())['sha256']:
+            raise ValueError('prior strict row used a different packet plan')
+        prior = [digest(args.prior_strict.resolve())]
+    plan_path = DATA/(args.name+'-plan.json')
+    result_path = DATA/(args.name+'-result.json')
+    if plan_path.exists() or result_path.exists():
+        raise RuntimeError('final session exists')
+    strict_names = [args.name+'-via-'+str(index+len(prior)+1) for index in range(2-len(prior))]
+    rows = [(name,False) for name in strict_names]+[(args.name+'-uncapped',True)]
+    plan = dict(kind='E25-final-proxy-rows-plan',name=args.name,bundle=str(bins.relative_to(ROOT)),
+        binaries=identity['binaries'],final=digest(bins/'FINAL.json'),packet_plan=digest(args.plan.resolve()),
+        prior_strict_rows=prior,rows=[dict(name=name,server_uncapped_diagnostic=uncapped) for name,uncapped in rows],
+        collector=digest(ROOT/'scripts/e25-latency-cell-r2'),strict_p95_limit_ns=5_000_000,
+        tails_trimmed=False,unmatched='infinity',tuning=False,report_failures=True)
+    plan_path.write_text(json.dumps(plan,indent=2)+'\n')
+    host = ROOT/'.local/bin/host-window'
+    subprocess.run([host,'quiet','E25',args.name+' final selected proxy rows'],check=True)
+    error = None
+    try:
+        for name,uncapped in rows:
+            command = [sys.executable,'-B',ROOT/'scripts/e25-latency-cell-r2','--name',name,
+                '--bins',bins,'--plan',args.plan,'--stop-brackets','--window-managed','--session',args.name]
+            if uncapped:
+                command.append('--server-uncapped-diagnostic')
+            subprocess.run(command,cwd=ROOT,check=True)
+    except BaseException as caught:
+        error = str(caught).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME')
+    finally:
+        subprocess.run([host,'release','E25'],check=True)
+    result = dict(kind='E25-final-proxy-rows',name=args.name,status='failed' if error else 'complete',error=error,
+        plan=digest(plan_path),strict_rows=prior,uncapped_row=None,reviewer_reproduction_required=True)
+    for name,uncapped in rows:
+        path = DATA/(name+'-summary.json')
+        if not path.exists():
+            continue
+        pointer = digest(path)
+        if uncapped:
+            result['uncapped_row'] = pointer
+        else:
+            result['strict_rows'].append(pointer)
+    strict = [read(ROOT/row['path']) for row in result['strict_rows']]
+    result['strict_p95_ns'] = [row.get('overall',{}).get('p95_ns') for row in strict]
+    result['two_strict_rows_below_five_ms'] = bool(len(strict)==2 and all(row.get('qualified_conservative_bound_pass') for row in strict))
+    result['m4_qualified_by_builder'] = False
+    result_path.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2),flush=True)
+    if error:
+        raise SystemExit(1)
+
+
+if __name__=='__main__':
+    main()

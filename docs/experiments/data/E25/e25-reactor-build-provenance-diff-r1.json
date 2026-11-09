@@ -1,0 +1,199 @@
+{
+  "kind": "E25-readonly-reactor-build-provenance-diff",
+  "inputs": [
+    {
+      "path": ".local/bin/meridian-e18/reactor-1/candidate.json",
+      "sha256": "2bfd2e26c0c9ef61f3549b8a3c33faf96938875fd6063323e359c1910611d7b9",
+      "bytes": 38897,
+      "hash_scope": "file bytes"
+    },
+    {
+      "path": ".local/bin/meridian-e18/reactor-1/canonical.json",
+      "sha256": "33a2322d27331f0b6f6310d06a8be5e4cff9adda9e98dbf1a13baf219d5c9cf9",
+      "bytes": 6783,
+      "hash_scope": "file bytes"
+    },
+    {
+      "path": ".local/bin/meridian-e25/e25-reactor1-matched-r2/build.json",
+      "sha256": "fe72bacba1c70c813a1ac95dcb32f02c18965663bffbd2d946c68f5027ada1b9",
+      "bytes": 67361,
+      "hash_scope": "file bytes"
+    },
+    {
+      "path": "scripts/e18-gates",
+      "sha256": "d6b744835107b4fc47a36b1e8d243ca06ad5f9084ea836f38920abd527d161ff",
+      "bytes": 2995,
+      "hash_scope": "file bytes"
+    }
+  ],
+  "artifacts": {
+    "frozen_29f": {
+      "path": ".local/bin/meridian-e18/reactor-1/meridian",
+      "sha256": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+      "bytes": 6572016,
+      "macho_cpu_type": 16777228,
+      "macho_cpu_subtype": 0,
+      "linked_libraries": [
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)",
+        "/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)",
+        "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (compatibility version 300.0.0, current version 5026.5.4)",
+        "/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)"
+      ],
+      "build_version": {
+        "platform": "1",
+        "minimum_os": "11.0",
+        "sdk": "26.5",
+        "linker": "1267.0"
+      },
+      "dwarf_segment_present": false,
+      "embedded_rustc_commits": [
+        "48a229ceaefd4985c50990b14116b6d856af0985"
+      ],
+      "allocator_imports": [
+        "_calloc",
+        "_free",
+        "_malloc",
+        "_posix_memalign",
+        "_realloc"
+      ]
+    },
+    "rebuilt_80f": {
+      "path": ".local/bin/meridian-e25/e25-reactor1-matched-r2/meridian",
+      "sha256": "80f8953a201a51a0cae84341080af0bd70e08586ad608475b3092b2c30d3c378",
+      "bytes": 6572016,
+      "macho_cpu_type": 16777228,
+      "macho_cpu_subtype": 0,
+      "linked_libraries": [
+        "/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)",
+        "/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)",
+        "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation (compatibility version 300.0.0, current version 5026.5.4)",
+        "/usr/lib/libiconv.2.dylib (compatibility version 7.0.0, current version 7.0.0)"
+      ],
+      "build_version": {
+        "platform": "1",
+        "minimum_os": "11.0",
+        "sdk": "26.5",
+        "linker": "1267.0"
+      },
+      "dwarf_segment_present": false,
+      "embedded_rustc_commits": [
+        "48a229ceaefd4985c50990b14116b6d856af0985"
+      ],
+      "allocator_imports": [
+        "_calloc",
+        "_free",
+        "_malloc",
+        "_posix_memalign",
+        "_realloc"
+      ]
+    }
+  },
+  "hash_bound_retained_fingerprints": {
+    "frozen_29f": [],
+    "rebuilt_80f": []
+  },
+  "declared_profile": "release",
+  "workspace_profile_overrides": {},
+  "original_gate_helper_explicit_settings": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_RELEASE_LTO": "thin",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "1"
+  },
+  "original_gate_helper_environment_policy": "inherits remaining environment; historical effective environment is not recorded in the frozen build record",
+  "original_build_record_has_no_toolchain_or_full_flags": true,
+  "rebuilt_settings": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_BUILD_JOBS": "6",
+    "CARGO_PROFILE_RELEASE_LTO": "thin",
+    "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "1",
+    "CARGO_PROFILE_RELEASE_DEBUG": "0"
+  },
+  "rebuilt_rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "rebuilt_cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+  "rebuilt_rustflags_policy": "RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS removed by the recorded builder; remaining Cargo profile overrides cleared before fixed settings",
+  "profile_fields_not_explicitly_recorded_for_frozen": [
+    "opt-level",
+    "debug-assertions",
+    "panic",
+    "RUSTFLAGS",
+    "target triple"
+  ],
+  "release_target_commands": {
+    "frozen": [
+      "cargo",
+      "build",
+      "--locked",
+      "--release",
+      "-p",
+      "meridian-proxy",
+      "--bin",
+      "meridian",
+      "-p",
+      "meridian-sidecar",
+      "--bin",
+      "meridian-sidecar",
+      "-p",
+      "meridian-testkit",
+      "--bin",
+      "e4-client"
+    ],
+    "rebuilt": [
+      "cargo",
+      "build",
+      "--locked",
+      "--release",
+      "-p",
+      "meridian-proxy",
+      "--bin",
+      "meridian",
+      "-p",
+      "meridian-sidecar",
+      "--bin",
+      "meridian-sidecar",
+      "-p",
+      "meridian-testkit",
+      "--bin",
+      "e4-client"
+    ]
+  },
+  "direct_proxy_feature_declarations": {},
+  "lock": {
+    "frozen_reconstructed_sha256": "fbdcf24e84e611791abbd164ea31e4156424b65aea52f747bcdf209ccefee7d6",
+    "rebuilt_sha256": "fbdcf24e84e611791abbd164ea31e4156424b65aea52f747bcdf209ccefee7d6",
+    "byte_equal": true,
+    "package_count": 164,
+    "added": [],
+    "removed": [],
+    "changed": []
+  },
+  "internal_source": {
+    "frozen_revision": "b4dc5af04b41a70c68d0e5d8608c4d7dd983b3ec",
+    "rebuilt_archive_revision": "a7988a42591a9be48ebab63dbcdcde875598c615",
+    "compared_files": 24,
+    "byte_differences": [],
+    "rebuilt_archive_sha256": "d77a2bfe517ee29f64ba5bf7c44ad507a0527196d2ca41a5de41cb0b208bb911"
+  },
+  "meridian_source": {
+    "pin_equal": true,
+    "patch_stack_equal": true,
+    "files": 248,
+    "compiled_hash_differences": [
+      "crates/meridian-proxy/Cargo.toml"
+    ],
+    "declared_relocation": {
+      "path": "crates/meridian-proxy/Cargo.toml",
+      "original": "../../../../../crates/goliath-store",
+      "relocated": "../../../../../.local/evidence/E25/reactor-dependencies/crates/goliath-store"
+    }
+  },
+  "allocator": {
+    "global_allocator_declaration_sites": [],
+    "allocator_packages": [],
+    "conclusion": "no custom global allocator declaration in the verified Meridian/internal source; System allocator is selected by default",
+    "historical_runtime_allocator_environment": "not captured in these build records"
+  },
+  "known_semantic_difference_explaining_rss": null,
+  "conclusion": "no dependency, allocator, source or linked-library change identified; historical full flags are incomplete. One run of each cannot distinguish a build effect from run-to-run variance.",
+  "frozen_repeat": "conditional after zone, as authorized; not queued by this readback",
+  "new_build_or_measurement": false
+}

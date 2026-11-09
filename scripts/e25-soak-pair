@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Collect matched full soak cells, yielding between them when E24 is waiting."""
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+from e14_snapshot_support import validate_snapshot
+import e25_soak_harness as harness
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--reference',type=Path,required=True)
+    parser.add_argument('--candidate',type=Path,required=True)
+    parser.add_argument('--entry',type=Path,required=True)
+    args = parser.parse_args()
+    print('E25_SOAK_PAIR_PROCESS '+str(os.getpid()),flush=True)
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+        raise ValueError('fresh simple pair name required')
+    plan_path = harness.DATA / (args.name+'-plan.json')
+    result_path = harness.DATA / (args.name+'-comparison.json')
+    if plan_path.exists() or result_path.exists():
+        raise RuntimeError('pair already exists')
+    reference,candidate = args.reference.resolve(),args.candidate.resolve()
+    identities = [validate_snapshot(bundle) for bundle in [reference,candidate]]
+    if set(identities[0]['binaries']) != set(identities[1]['binaries']) or any(
+        identities[1]['binaries'][name] != digest for name,digest in identities[0]['binaries'].items() if name != 'meridian'):
+        raise ValueError('non-proxy binaries differ')
+    entry = harness.read(args.entry)
+    if entry.get('status') != 'complete' or not entry.get('memory_entry_no_regression'):
+        raise ValueError('approved same-session latency no-regression entry is absent')
+    all_latency_rows = [harness.read(harness.ROOT/row['path']) for row in entry['rows']]
+    if len(all_latency_rows) not in [2,3]:
+        raise ValueError('entry must contain the matched pair or the reactor/scheduler/writev session')
+    latency_rows = [all_latency_rows[0],all_latency_rows[-1]]
+    if any(
+        row['measurement_bundle']['binaries']['meridian'] != identity['binaries']['meridian']
+        for row,identity in zip(latency_rows,identities,strict=True)):
+        raise ValueError('memory proxy executable differs from the latency entry row')
+    names = [args.name+'-reactor1',args.name+'-candidate']
+    sources = ['e24-run','e23-cell','e20-frontier','e23_observe.py','e22_availability.py',
+        'e24_mutation_watch.py','e24-mutation-budget','e24-analyse','e24-clock-soak','e24-store-soak','e24-soak-result']
+    inputs = {script:harness.digest(harness.ROOT/'scripts'/script) for script in sources}
+    plan = dict(kind='E25-full-soak-pair-plan',name=args.name,players=650,seconds_per_cell=1800,cargo_items=65,
+        planning_mutation_rate=72,entry=harness.digest(args.entry.resolve()),helpers=inputs,
+        rows=[dict(name=name,bundle=str(bundle.relative_to(harness.ROOT)),binaries=identity['binaries'],
+            bot_sha256=harness.digest(bundle/'horizon-bots')['sha256'])
+            for name,bundle,identity in zip(names,[reference,candidate],identities,strict=True)],
+        authority_event_voids_pair=True,silent_retry=False,proxy_rss_growth_strict_limit=.1,
+        release_between_cells_if_e24_waiting=True,analysis_after_release=True,reviewer_reproduction_required=True)
+    plan_path.write_text(json.dumps(plan,indent=2)+'\n')
+    host = harness.ROOT / '.local/bin/host-window'
+    held = False
+    error = None
+    collections = []
+    try:
+        subprocess.run([host,'quiet','E25',args.name],check=True)
+        held = True
+        for index,(name,bundle) in enumerate(zip(names,[reference,candidate],strict=True)):
+            if any(harness.digest(harness.ROOT/'scripts'/script) != digest for script,digest in inputs.items()):
+                raise RuntimeError('soak helper changed after preregistration')
+            subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-soak-cell',
+                '--name',name,'--bins',bundle],cwd=harness.ROOT,check=True)
+            collections.append(name)
+            if index == 0 and (harness.ROOT/'.local/host/wait.E24').exists():
+                subprocess.run([host,'release','E25'],check=True)
+                held = False
+                subprocess.run([host,'quiet','E25',args.name+' candidate after E24'],check=True)
+                held = True
+    except BaseException as caught:
+        error = str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME')
+    finally:
+        if held:
+            subprocess.run([host,'release','E25'],check=True)
+    result = dict(kind='E25-full-soak-pair',name=args.name,status='failed' if error else 'complete',error=error,
+        plan=harness.digest(plan_path),results=[],m4_qualified=False)
+    for name in collections:
+        try:
+            result['results'].append(harness.readback(name))
+        except BaseException as caught:
+            result.update(status='failed-readback',error=str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME'))
+    if result['status'] == 'complete':
+        rows = [harness.read(harness.ROOT/record['path']) for record in result['results']]
+        result.update(control_proxy_growth_fraction=rows[0]['memory']['proxy']['growth_fraction'],
+            candidate_proxy_growth_fraction=rows[1]['memory']['proxy']['growth_fraction'],
+            candidate_rss_soak_lines_pass=rows[1]['rss_soak_lines_pass'],
+            candidate_d9_memory_qualified=rows[1]['d9_memory_qualified'],
+            proxy_cpu_delta_cores=rows[1]['proxy']['cores']-rows[0]['proxy']['cores'],
+            proxy_cpu_not_worse=rows[1]['proxy']['cores'] <= rows[0]['proxy']['cores'],
+            internal_p95_deltas_us={path:after['p95_us_upper']-rows[0]['histogram']['paths'][path]['p95_us_upper']
+                for path,after in rows[1]['histogram']['paths'].items()
+                if path in rows[0]['histogram']['paths'] and after.get('p95_us_upper') is not None
+                and rows[0]['histogram']['paths'][path].get('p95_us_upper') is not None},
+            forwarding_counts=[{path:value['count'] for path,value in row['histogram']['paths'].items()}
+                for row in rows],
+            authority_pair_void=any(row['authority_events'] for row in rows))
+    if not error and any(harness.digest(harness.ROOT/'scripts'/script) != digest for script,digest in inputs.items()):
+        result.update(status='invalid-helper-drift',error='soak helper source changed during pair')
+    result_path.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2),flush=True)
+    if result['status'] != 'complete':
+        raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    main()

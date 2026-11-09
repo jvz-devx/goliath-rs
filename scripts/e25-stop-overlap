@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Compare P95-tail packet spans with retained STOP-to-CONT signal-call brackets."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+
+
+def read(path):
+    raw=path.read_bytes()
+    if path.suffix=='.gz':raw=gzip.decompress(raw)
+    return json.loads(raw),hashlib.sha256(raw).hexdigest()
+
+
+def pauses(events):
+    pending,result={},[]
+    orphan_cont=0
+    for row in sorted(events,key=lambda item:item['raw_before_ns']):
+        if row['error']:raise ValueError('signal-call error prevents overlap attribution')
+        if row['raw_after_ns']<row['raw_before_ns']:raise ValueError('signal clock reversed')
+        if row['action']=='STOP':
+            if row['pid'] in pending:raise ValueError('nested stop without resume')
+            pending[row['pid']]=row
+        elif row['pid'] in pending:
+            old=pending.pop(row['pid'])
+            result.append(dict(pid=row['pid'],role=row['role'],
+                inner=[old['raw_after_ns'],row['raw_before_ns']],outer=[old['raw_before_ns'],row['raw_after_ns']]))
+        else:orphan_cont+=1
+    return result,dict(open_stops=len(pending),unpaired_continues=orphan_cont)
+
+
+def overlaps(start,end,interval):return interval[0]<=end and start<=interval[1]
+
+
+def analyze(rows,events,p95,tail_kind='observed P95'):
+    periods,coverage=pauses(events)
+    tail=[row for row in rows if row['delay_ns'] is None or p95 is not None and row['delay_ns']>=p95]
+    groups={}
+    for group in ['server-any','proxy','target-tile','bots']:
+        counts={key:0 for key in ['point_inner','point_outer','span_inner','span_outer','span_unknown']}
+        for row in tail:
+            selected=[period for period in periods if (
+                group=='server-any' and (period['role'] in ['proxy','store'] or period['role'].startswith(('tile-','sidecar-')))
+                or group=='proxy' and period['role']=='proxy'
+                or group=='target-tile' and period['role']=='tile-'+row['tile']
+                or group=='bots' and period['role'].startswith('bots-'))]
+            for kind in ['inner','outer']:
+                counts['point_'+kind]+=any(overlaps(row['send_ns'],row['send_ns'],period[kind]) for period in selected)
+                if row['decode_ns'] is not None:
+                    counts['span_'+kind]+=any(overlaps(row['send_ns'],row['decode_ns'],period[kind]) for period in selected)
+            if row['decode_ns'] is None:counts['span_unknown']+=1
+        groups[group]=dict(counts,tail_sends=len(tail),
+            span_inner_fraction=counts['span_inner']/len(tail) if tail else None,
+            point_inner_fraction=counts['point_inner']/len(tail) if tail else None)
+    return dict(p95_threshold_ns=p95 if tail_kind=='observed P95' else None,threshold_ns=p95,
+        tail_definition='all sends at or above '+tail_kind+', unmatched at infinity',
+        tail_sends=len(tail),matched_tail=sum(row['decode_ns'] is not None for row in tail),
+        groups=groups,coverage=coverage,signal_brackets=len(periods),
+        interpretation='signal-call bracket association only; overlap is not proof of causation or precise kernel run state')
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--summary',type=Path,required=True)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--threshold-ns',type=int)
+    args=parser.parse_args()
+    if not args.name.startswith(('e25-','repro-')) or not all(c.isalnum() or c in '-_' for c in args.name):raise ValueError('fresh simple name required')
+    target=ROOT/'docs/experiments/data/E25'/(args.name+'.json')
+    if target.exists():raise RuntimeError('overlap result exists')
+    summary,summary_sha=read(args.summary)
+    if 'stop_brackets' not in summary:raise ValueError('row has totals only; STOP overlap cannot be reconstructed')
+    trace,trace_sha=read(ROOT/summary['stop_brackets']['path'])
+    if trace['dropped']:raise ValueError('signal events dropped')
+    timing,timing_sha=read(ROOT/summary['latency']['path'])
+    result=analyze(timing['rows'],trace['events'],timing['overall']['p95_ns'] if args.threshold_ns is None else args.threshold_ns,
+        'observed P95' if args.threshold_ns is None else str(args.threshold_ns)+' ns fixed threshold')
+    result.update(kind='E25-P95-stop-overlap',summary=dict(path=str(args.summary.resolve().relative_to(ROOT)),sha256=summary_sha),
+        signal_decompressed_sha256=trace_sha,timing_decompressed_sha256=timing_sha)
+    target.write_text(json.dumps(result,indent=2,allow_nan=False)+'\n')
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)),sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
+        tail_sends=result['tail_sends'],groups=result['groups']),indent=2),flush=True)
+
+
+if __name__=='__main__':main()

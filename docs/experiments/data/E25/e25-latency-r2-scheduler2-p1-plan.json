@@ -1,0 +1,45 @@
+{
+  "kind": "E25-paired-r2-via-session-plan",
+  "name": "e25-latency-r2-scheduler2-p1",
+  "packet_plan": {
+    "path": "docs/experiments/data/E25/e25-latency-plan-r1.json",
+    "sha256": "5d941aa29f128d1cc2958995d66556f628c7263f9974e5ac11d65637131ed70d"
+  },
+  "rows": [
+    {
+      "name": "e25-latency-r2-scheduler2-p1-reactor1",
+      "bundle": ".local/bin/meridian-e25/e25-latency-r2-reactor1",
+      "binaries": {
+        "horizon-client": "33a74ea53e3b77f1ff7f40be36c35ad5535215918f5fa4098e7c1f9b0f82f71f",
+        "meridian": "80f8953a201a51a0cae84341080af0bd70e08586ad608475b3092b2c30d3c378",
+        "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+        "goliath-store": "9636fa6d8089b071be241437e79eb2942a07dc756039b394e73cc8f705e26d0e",
+        "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+        "horizon-bots": "de8f997f86e92171dbd47f75a4f94d1fed98f82e8450ca88572e77d87971e045"
+      }
+    },
+    {
+      "name": "e25-latency-r2-scheduler2-p1-candidate",
+      "bundle": ".local/bin/meridian-e25/e25-latency-r2-scheduler2",
+      "binaries": {
+        "horizon-client": "33a74ea53e3b77f1ff7f40be36c35ad5535215918f5fa4098e7c1f9b0f82f71f",
+        "meridian": "c9cd5891186693a598b22f70bd5ba0f927f68dd7244cc3530cea848039c108ba",
+        "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+        "goliath-store": "9636fa6d8089b071be241437e79eb2942a07dc756039b394e73cc8f705e26d0e",
+        "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+        "horizon-bots": "de8f997f86e92171dbd47f75a4f94d1fed98f82e8450ca88572e77d87971e045"
+      }
+    }
+  ],
+  "runner_sha256": "55fa32a22ac6ef906bec3a173ed13354856dc5a5056af31fba8bfd738da26c23",
+  "cell_runner_sha256": "2cda1c0d2e7389a0c9b7d3a08ba422a57f91d04a694796ccdece95f27bb66cdb",
+  "capped_server_cores": 4,
+  "capped_bot_cores": 1,
+  "players": 650,
+  "warmup_seconds": 30,
+  "measurement_seconds": 60,
+  "memory_entry": "candidate P95 <= reference P95",
+  "strict_final_latency": "two via P95 values < 5000000 ns",
+  "authority_event_voids_session": true,
+  "no_silent_retry": true
+}

@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Collect one unchanged fixed-r2 30-minute soak under an already held E25 window."""
+import argparse
+import json
+from pathlib import Path
+import re
+
+from e14_snapshot_support import validate_snapshot
+import e25_soak_harness as harness
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--bins',type=Path,required=True)
+    parser.add_argument('--owner',choices=['E25','reviewer'],default='E25')
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+        raise ValueError('fresh simple cell name required')
+    owner = harness.ROOT / '.local/host/quiet/owner'
+    if not owner.exists() or owner.read_text().splitlines()[0] != args.owner:
+        raise RuntimeError('the requested owner does not hold its measurement window')
+    bins = args.bins.resolve()
+    validate_snapshot(bins)
+    fixture = validate_snapshot(harness.ROOT/'.local/bin/goliath-e24/lease-fixed-r2')
+    selected = validate_snapshot(bins)
+    if set(selected['binaries']) != set(fixture['binaries']) or any(
+        selected['binaries'][name] != digest for name,digest in fixture['binaries'].items() if name != 'meridian'):
+        raise ValueError('soak must use unchanged unstamped fixed-r2 fixture binaries')
+    if harness.digest(bins/'horizon-bots')['sha256'] != harness.digest(harness.ROOT/'.local/bin/goliath-e24/lease-fixed-r2/horizon-bots')['sha256']:
+        raise ValueError('soak bot executable differs from fixed-r2 fixture')
+    harness.EVIDENCE.mkdir(exist_ok=True)
+    harness.DERIVED.mkdir(exist_ok=True)
+    target = harness.EVIDENCE / (args.name+'-collection.json')
+    if target.exists():
+        raise RuntimeError('collection already exists')
+    error = None
+    executed = None
+    try:
+        executed = harness.execute('e24-run',['--name',args.name,'--bins',bins,'--host-released',
+            '--players','650','--seconds','1800','--clock-telemetry','--soak-audit','--planning-mutation-rate','72'],args.name,owner=args.owner)
+    except BaseException as caught:
+        error = dict(type=type(caught).__name__,message=str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME'))
+    native_path = harness.DERIVED / (args.name+'-summary.json')
+    native = harness.read(native_path) if native_path.exists() else {}
+    events = harness.closures(harness.EVIDENCE/args.name)
+    failed = bool(error or native.get('error') or not native.get('binaries_unchanged') or native.get('cleanup_errors') or events or native.get('observed_authority_latch'))
+    record = dict(kind='E25-full-soak-collection',name=args.name,status='failed' if failed else 'complete',
+        error=error,native_error=native.get('error'),authority_events=events,executed=executed,
+        native_summary=harness.digest(native_path) if native_path.exists() else None,
+        binaries_unchanged=native.get('binaries_unchanged',False))
+    target.write_text(json.dumps(record,indent=2)+'\n')
+    print(json.dumps(record,indent=2),flush=True)
+    if failed:
+        raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    main()

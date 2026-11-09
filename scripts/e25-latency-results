@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Keep every witness send in a strict no-hop, per-tile latency denominator."""
+import argparse
+from collections import Counter, defaultdict
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parent.parent
+MATCH_NS = 2_000_000_000
+
+
+def read(path):
+    raw = path.read_bytes()
+    if path.suffix == '.gz':
+        raw = gzip.decompress(raw)
+    return json.loads(raw), hashlib.sha256(raw).hexdigest()
+
+
+def percentile(rows):
+    if not rows:
+        return dict(sends=0, p95_ns=None, p95_is_infinite=True, below_five_ms=False)
+    rank = (len(rows) * 95 + 99) // 100
+    finite = sorted(row['delay_ns'] for row in rows if row['delay_ns'] is not None)
+    value = finite[rank - 1] if rank <= len(finite) else None
+    return dict(sends=len(rows), matched=len(finite), unmatched_or_ambiguous=len(rows) - len(finite),
+        p95_rank=rank, p95_ns=value, p95_is_infinite=value is None,
+        below_five_ms=value is not None and value < 5_000_000,
+        finite_maximum_ns=max(finite) if finite else None)
+
+
+def match(sends, decodes, start_ns, end_ns, drain_end_ns, witnesses):
+    if end_ns <= start_ns or drain_end_ns != end_ns + MATCH_NS:
+        raise ValueError('fixed window and exactly two seconds of decode drain required')
+    names = {row['name']: row['tile'] for row in witnesses}
+    if len(names) != 8 or Counter(names.values()) != dict(a=2, b=2, c=2, d=2):
+        raise ValueError('exactly two preregistered witnesses per tile required')
+    selected = [row for row in sends if row['name'] in names and start_ns <= row['at_ns'] < end_ns]
+    if {row['name'] for row in selected} != set(names):
+        raise ValueError('a preregistered witness has no sends in the window')
+    uuid_names, send_keys, decode_keys = {}, defaultdict(list), defaultdict(list)
+    for index, row in enumerate(selected):
+        if row['tile'] != names[row['name']]:
+            raise ValueError('a witness left its preregistered tile')
+        if not re.fullmatch('[0-9a-f]{32}', row['uuid']):
+            raise ValueError('full canonical witness UUID required')
+        previous = uuid_names.setdefault(row['uuid'], row['name'])
+        if previous != row['name']:
+            raise ValueError('two witness names share a UUID')
+        send_keys[row['uuid'], row['packet']].append(index)
+    if len(uuid_names) != 8:
+        raise ValueError('witness UUID identity changed during the cell')
+    for name in names:
+        ordered = sorted((row for row in selected if row['name'] == name), key=lambda row: row['at_ns'])
+        if any(b['send_index'] <= a['send_index'] for a, b in zip(ordered, ordered[1:])):
+            raise ValueError('witness send order is not unique and increasing')
+    for index, row in enumerate(decodes):
+        if row['uuid'] in uuid_names and row['at_ns'] <= drain_end_ns:
+            decode_keys[row['uuid'], row['packet']].append(index)
+    result, used = [], set()
+    for index, row in enumerate(selected):
+        key = row['uuid'], row['packet']
+        compatible = [i for i in decode_keys[key] if row['at_ns'] <= decodes[i]['at_ns'] <= min(row['at_ns'] + MATCH_NS, drain_end_ns)]
+        reason, decoded = 'unmatched', None
+        if len(compatible) == 1:
+            i = compatible[0]
+            competing = [j for j in send_keys[key] if selected[j]['at_ns'] <= decodes[i]['at_ns'] <= selected[j]['at_ns'] + MATCH_NS]
+            if len(competing) == 1 and decodes[i]['tile'] == row['tile']:
+                if i in used:
+                    raise RuntimeError('a decode was reused')
+                used.add(i)
+                reason, decoded = 'matched', decodes[i]
+            else:
+                reason = 'ambiguous' if len(competing) != 1 else 'wrong-tile'
+        elif len(compatible) > 1:
+            reason = 'ambiguous'
+        result.append(dict(name=row['name'], uuid=row['uuid'], tile=row['tile'], send_index=row['send_index'],
+            send_ns=row['at_ns'], decode_ns=decoded['at_ns'] if decoded else None,
+            delay_ns=decoded['at_ns'] - row['at_ns'] if decoded else None, reason=reason))
+    return dict(overall=percentile(result), tiles={tile: percentile([row for row in result if row['tile'] == tile]) for tile in ['a', 'b', 'c', 'd']},
+        reasons=dict(Counter(row['reason'] for row in result)), rows=result,
+        unused_witness_decodes=sum(row['uuid'] in uuid_names for row in decodes) - len(used),
+        match_horizon_ns=MATCH_NS, beyond_horizon_is_infinity_not_trimmed=True,
+        interpretation='conservative interior movement send-to-tile-frame-decode bound, not a difference of quantiles')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--plan', type=Path, required=True)
+    parser.add_argument('--sends', type=Path, nargs='+', required=True)
+    parser.add_argument('--decodes', type=Path, nargs='+', required=True)
+    parser.add_argument('--start-ns', type=int, required=True)
+    parser.add_argument('--end-ns', type=int, required=True)
+    args = parser.parse_args()
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+', args.name):
+        raise ValueError('fresh e25- or repro- name required')
+    target = ROOT / 'docs/experiments/data/E25' / (args.name + '.json')
+    if target.exists() or target.with_suffix('.json.gz').exists():
+        raise RuntimeError('result already exists')
+    plan, plan_hash = read(args.plan)
+    inputs = {str(args.plan.resolve().relative_to(ROOT)): plan_hash}
+    sends, decodes = [], []
+    for paths, rows in [(args.sends, sends), (args.decodes, decodes)]:
+        for path in paths:
+            data, digest = read(path)
+            if data.get('schema') != 'E25-latency-v1' or data.get('dropped') != 0 or data.get('incomplete_frames', 0) != 0:
+                raise RuntimeError('missing trace schema or dropped trace events')
+            inputs[str(path.resolve().relative_to(ROOT))] = digest
+            rows.extend(data['events'])
+    result = match(sends, decodes, args.start_ns, args.end_ns, args.end_ns + MATCH_NS, plan['witnesses'])
+    result.update(kind='E25-no-hop-latency', inputs=inputs, all_protocol_or_crossing_latency_proven=False)
+    raw = (json.dumps(result, indent=2, allow_nan=False) + '\n').encode()
+    if len(raw) > 1_000_000:
+        target = target.with_suffix('.json.gz')
+        target.write_bytes(gzip.compress(raw, mtime=0))
+    else:
+        target.write_bytes(raw)
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)), sha256=hashlib.sha256(raw).hexdigest(),
+        overall=result['overall'], tiles=result['tiles'])), flush=True)
+
+
+if __name__ == '__main__':
+    main()

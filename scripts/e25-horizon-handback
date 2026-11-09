@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Prove restored source and return the exact E24 index image after logical checks."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT/'.local/src/horizon'
+SAVED = ROOT/'.local/evidence/E25/horizon-source-backup'
+CANONICAL = ROOT/'.local/evidence/E24/source-backup/original-index'
+EXPECTED = '020d12c787932d58d659444ed9d50e98c2f182393757605b3d0312030a275b25'
+TARGET = ROOT/'docs/experiments/data/E25/e25-horizon-handback-r1.json'
+
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    if TARGET.exists():raise RuntimeError('handback proof exists')
+    record = json.loads((SAVED/'identity.json').read_text())
+    for name,digest in record['all_files'].items():
+        if sha(SOURCE/name) != digest:raise RuntimeError('source is not restored: '+name)
+    env = dict(os.environ,GIT_OPTIONAL_LOCKS='0')
+    def git(*args,**kwargs):return subprocess.check_output(['git',*args],cwd=SOURCE,env=dict(env,**kwargs))
+    if git('status','--porcelain=v1','-z') != (SAVED/'status.bin').read_bytes():raise RuntimeError('dirty status differs')
+    if sha(CANONICAL) != EXPECTED:raise RuntimeError('canonical index image differs')
+    logical = {}
+    for args in [('ls-files','--stage','-z'),('ls-files','-v','-z'),('ls-files','--resolve-undo','-z')]:
+        current = git(*args)
+        if current != git(*args,GIT_INDEX_FILE=str(CANONICAL)):raise RuntimeError('staged entries or flags differ')
+        logical[' '.join(args)] = hashlib.sha256(current).hexdigest()
+    index = SOURCE/'.git/index'
+    image = SAVED/('pre-canonical-handback-'+sha(index))
+    if not image.exists():shutil.copy2(index,image)
+    shutil.copy2(CANONICAL,index)
+    if sha(index) != EXPECTED:raise RuntimeError('exact index restoration failed')
+    result = dict(kind='E25-Horizon-handback',source_files_checked=len(record['all_files']),
+        source_bytes_restored=True,dirty_status_restored=True,logical_index_equal=logical,
+        exact_index_sha256=sha(index),source_head=git('rev-parse','HEAD').decode().strip(),
+        snapshot_index_sha256=record['index_sha256'],cache_images_retained=True,
+        source_owned_by='E24 after direct handoff',timestamp_patch_retained='patches/horizon-15-latency-stamps-e25-stamps-r2.patch')
+    TARGET.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(path=str(TARGET.relative_to(ROOT)),sha256=sha(TARGET),index_sha256=result['exact_index_sha256'],files=result['source_files_checked'])),flush=True)
+
+
+if __name__=='__main__':main()

@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Build the approved isolated zone interface on a selected frozen memory base."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tarfile
+import time
+import tomllib
+
+from e25_soak_harness import ROOT,EVIDENCE,DATA,load
+
+SOURCE = ROOT/'.local/src/meridian'
+PATCH = ROOT/'patches/meridian-12-zone-pressure-r2.patch'
+PATCH_SHA = 'dd461819b5d1df76a4af718e8bdbfb17bd2842fbb9c3f717c30369a69cfc018b'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--base',type=Path,required=True)
+    args = parser.parse_args()
+    print('E25_ZONE_BUILD_PROCESS '+str(os.getpid()),flush=True)
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+        raise ValueError('fresh simple build name required')
+    target = ROOT/'.local/bin/meridian-e25'/args.name
+    output = DATA/(args.name+'-build.json')
+    if target.exists() or output.exists():
+        raise RuntimeError('build already exists')
+    base = args.base.resolve()
+    prior = json.loads((base/'build.json').read_text())
+    if prior['kind'] not in ['control','E25-meridian11-reference'] or prior.get('patch'):
+        raise ValueError('base must be plain rebuilt reactor-1 or scheduler-2')
+    if prior['status'] != 'complete' or not prior['source_restored'] or sha(base/'meridian') != prior['binary_sha256']:
+        raise ValueError('base build is not complete and immutable')
+    if sha(PATCH) != PATCH_SHA:
+        raise ValueError('approved zone patch changed')
+    builder = load('e25_zone_reactor_kernel',ROOT/'scripts/e25-build')
+    files,differences = builder.private_stack(args.name,prior['frozen_stack'])
+    dependencies = builder.archive_dependencies()
+    helper = builder.load('e25_zone_source_restore',ROOT/'scripts/e24-proxy-build')
+    saved = EVIDENCE/(args.name+'-source-backup')
+    original = helper.backup(saved)
+    record = dict(kind='E25-zone16m60-r1',status='running',profile='release',commands=[],source_restored=False,
+        runner_sha256=sha(Path(__file__)),base=dict(path=str(base.relative_to(ROOT)),build_sha256=sha(base/'build.json'),binary_sha256=prior['binary_sha256']),
+        frozen_stack=prior['frozen_stack'],dependencies=dependencies,patch=dict(path=str(PATCH.relative_to(ROOT)),sha256=PATCH_SHA),
+        deliberate_policy_exception='new MIT meridian-zone crate only: deny unsafe with one scoped allow; all existing crates retain forbid',
+        optional_non_macos_test='conditional no-op unit is present; not executed on this macOS host',
+        checkout_differences_before_selection=differences)
+    env = {key:value for key,value in os.environ.items() if key not in ['CI','CARGO_TARGET_DIR','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS']
+        and not key.startswith(('CARGO_PROFILE_','MIMALLOC_','MI_'))}
+    env.update(CARGO_INCREMENTAL='0',CARGO_BUILD_JOBS='6',CARGO_PROFILE_RELEASE_LTO='thin',
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',CARGO_PROFILE_RELEASE_DEBUG='0',GIT_OPTIONAL_LOCKS='0')
+    record['settings'] = {key:env[key] for key in ['CARGO_INCREMENTAL','CARGO_BUILD_JOBS','CARGO_PROFILE_RELEASE_LTO','CARGO_PROFILE_RELEASE_CODEGEN_UNITS','CARGO_PROFILE_RELEASE_DEBUG']}
+    record['rustc'] = subprocess.check_output(['rustc','-Vv'],text=True)
+    if record['rustc'] != prior['rustc'] or record['settings'] != prior.get('settings',prior.get('build_settings')):
+        raise ValueError('compiler or release settings differ from the selected base')
+    changed = set(re.findall(r'^diff --git a/.* b/(.+)$',PATCH.read_text(),re.M))
+    selected = {}
+    try:
+        for name,content in files.items():
+            path = SOURCE/name
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes(content)
+        subprocess.run(['git','apply','--check',PATCH],cwd=SOURCE,check=True)
+        subprocess.run(['git','apply',PATCH],cwd=SOURCE,check=True)
+        manifest = SOURCE/'crates/meridian-proxy/Cargo.toml'
+        old = '../../../../../crates/goliath-store'
+        new = '../../../../../.local/evidence/E25/reactor-dependencies/crates/goliath-store'
+        text = manifest.read_text()
+        if text.count(old) != 1:
+            raise ValueError('dependency relocation anchor differs')
+        manifest.write_text(text.replace(old,new))
+        record['source_path_only_change'] = dict(path='crates/meridian-proxy/Cargo.toml',original=old,relocated=new)
+        selected = {name:sha(SOURCE/name) for name in set(files)|changed}
+        packages = tomllib.loads((SOURCE/'Cargo.lock').read_text())['package']
+        before = {(row['name'],row['version'],row.get('source')) for row in tomllib.loads(files['Cargo.lock'].decode())['package']}
+        added = [row for row in packages if (row['name'],row['version'],row.get('source')) not in before]
+        if added != [dict(name='meridian-zone',version='0.1.0')]:
+            raise ValueError('zone wrapper unexpectedly adds registry dependencies')
+        record['added_packages'] = added
+        archive = EVIDENCE/(args.name+'-selected-source.tar.gz')
+        with tarfile.open(archive,'x:gz') as bundle:
+            for name in sorted(selected):
+                bundle.add(SOURCE/name,arcname=name,recursive=False)
+        record['selected_source_archive'] = dict(path=str(archive.relative_to(ROOT)),sha256=sha(archive))
+        commands = [
+            ('release',['cargo','build','--locked','--release','-p','meridian-proxy','--bin','meridian','-p','meridian-sidecar','--bin','meridian-sidecar','-p','meridian-testkit','--bin','e4-client']),
+            ('fmt',['rustfmt','--edition','2024','--check','--config','skip_children=true',*[name for name in sorted(changed) if name.endswith('.rs')]]),
+            ('clippy',['cargo','clippy','--locked','--release','-p','meridian-net','-p','meridian-handoff','-p','meridian-proxy','-p','meridian-sidecar','-p','meridian-zone','--all-targets','--','-D','warnings']),
+            ('tests',['cargo','test','--locked','--release','-p','meridian-config','-p','meridian-ghost','-p','meridian-net','-p','meridian-handoff','-p','meridian-proxy','-p','meridian-sidecar','-p','meridian-zone','--','--skip','serve::tests::the_listener_queues_a_large_burst'])]
+        for label,command in commands:
+            log = EVIDENCE/(args.name+'-'+label+'.log')
+            print('E25_ZONE_GATE '+label,flush=True)
+            began = time.monotonic()
+            actual = [ROOT/'.local/bin/host-window','build','E25','--',*command] if command[0] == 'cargo' else command
+            with log.open('x') as stream:
+                done = subprocess.run(actual,cwd=SOURCE,env=env,stdout=stream,stderr=subprocess.STDOUT)
+            text = log.read_text(errors='replace')
+            record['commands'].append(dict(label=label,command=command,exit=done.returncode,
+                elapsed_with_queue_seconds=time.monotonic()-began,log=str(log.relative_to(ROOT)),log_sha256=sha(log),
+                test_results=re.findall(r'test result: .*',text)))
+            output.write_text(json.dumps(record,indent=2)+'\n')
+            if done.returncode:
+                raise RuntimeError('zone gate failed: '+label)
+        if tomllib.loads((SOURCE/'Cargo.lock').read_text())['package'] != packages:
+            raise ValueError('dependency resolution changed during the gates')
+        if any(sha(SOURCE/name) != expected for name,expected in selected.items()):
+            raise RuntimeError('selected zone source changed during the gates')
+        record['compiled_files'] = dict(selected)
+        target.mkdir(parents=True,exist_ok=False)
+        shutil.copy2(SOURCE/'target/release/meridian',target/'meridian')
+        shutil.copy2(SOURCE/'Cargo.lock',target/'Cargo.lock')
+        record.update(status='complete',directory=str(target.relative_to(ROOT)),binary_sha256=sha(target/'meridian'))
+    except BaseException as error:
+        record.update(status='failed',error=str(error).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME'))
+        raise
+    finally:
+        if not selected:
+            selected = {name:sha(SOURCE/name) for name in set(files)|changed if (SOURCE/name).is_file()}
+        saved_env = dict(os.environ,GIT_INDEX_FILE=str(saved/'index'),GIT_OPTIONAL_LOCKS='0')
+        for args_ in [('ls-files','--stage','-z'),('ls-files','-v','-z'),('ls-files','--resolve-undo','-z')]:
+            if subprocess.check_output(['git',*args_],cwd=SOURCE) != subprocess.check_output(['git',*args_],cwd=SOURCE,env=saved_env):
+                raise RuntimeError('logical index changed; refuse automatic restoration')
+        helper.restore(saved,original,selected)
+        record['source_restored'] = True
+        output.write_text(json.dumps(record,indent=2)+'\n')
+        if target.exists():
+            shutil.copy2(output,target/'build.json')
+
+
+if __name__=='__main__':
+    main()

@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Index published E25 evidence with decompressed hashes and publication checks."""
+import gzip
+import hashlib
+import json
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT/'docs/experiments/data/E25'
+
+
+def main():
+    target = DATA/'e25-evidence-index-final-r1.json'
+    if target.exists():
+        raise RuntimeError('evidence index already exists')
+    rows = []
+    violations = []
+    for path in sorted(DATA.iterdir()):
+        if not path.is_file() or path == target:
+            continue
+        if not path.name.startswith(('e25-','repro-')):
+            violations.append(dict(path=path.name,rule='file name prefix'))
+        if path.stat().st_size > 1_000_000 and path.suffix != '.gz':
+            violations.append(dict(path=path.name,rule='large raw file not compressed'))
+        opener = gzip.open if path.suffix == '.gz' else open
+        digest = hashlib.sha256()
+        length = 0
+        previous = b''
+        with opener(path,'rb') as stream:
+            for chunk in iter(lambda:stream.read(1024*1024),b''):
+                digest.update(chunk)
+                length += len(chunk)
+                if re.search(rb'/Users/|/home/|jens@',previous+chunk):
+                    violations.append(dict(path=path.name,rule='private path or identity'))
+                previous = chunk[-32:]
+        rows.append(dict(path=str(path.relative_to(ROOT)),sha256=digest.hexdigest(),bytes=length,
+            stored_bytes=path.stat().st_size,hash_scope='decompressed bytes' if path.suffix == '.gz' else 'file bytes'))
+    result = dict(kind='E25-final-evidence-index',files=len(rows),artifacts=rows,violations=violations,
+        interpretation='all gzip hashes cover decompressed bytes; individual records retain their own provenance')
+    target.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)),sha256=hashlib.sha256(target.read_bytes()).hexdigest(),files=len(rows),violations=violations)),flush=True)
+    if violations:
+        raise SystemExit(1)
+
+
+if __name__=='__main__':
+    main()

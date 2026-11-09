@@ -28,6 +28,7 @@ The reports retain failed attempts and superseded results. [Progress](../progres
 | [E22. Shared views](E22-shared-views.md) | Can shared terrain readers save CPU without breaking delivery? | Shared-4 is held as unqualified; its saving does not pass both repeats. |
 | [E23. Final-stack closeout](E23-closeout.md) | Which M2/M4 checks pass on the selected bytes? | Vehicles, physics and equal-work checks pass; latency misses, tick cost is unproven, soak fails. |
 | [E24. Lease availability](E24-lease-availability.md) | Why do authority latches and memory growth interrupt the soak? | Clock-check latch fixed with a raw clock pair, renewal cadence fixed after a limiter pause, store memory bounded. `lease-fixed-r2` passes the 30-minute soak except the proxy (+16.45%) and the full M3 campaign. |
+| [E25. Proxy memory and latency](E25-proxy.md) | Can the proxy pass the 30-minute memory line and add under 5 ms P95? | Rebuilt reactor-1 `80f` passes memory (+1.95%, reproduced +2.59%); the frozen build of the same source fails twice, cause open. Latency fails under D9 (11.16 and 5.72 ms), with the tail tied to limiter pauses. |
 | [E27. Bots on set paths](E27-bots.md) | Do `horizon-bots` follow a set route through backend switches without reconnecting? | 40/40 routes and 435/435 switches confirmed with zero reconnects; reproduced. |
 
 ## Evidence conventions

@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Build a matched scheduler-2 reference or bounded write-batch delta, then restore."""
+import argparse
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import time
+import tomllib
+
+ROOT=Path(__file__).resolve().parent.parent
+SOURCE=ROOT/'.local/src/meridian'
+EVIDENCE=ROOT/'.local/evidence/E25'
+BASE=EVIDENCE/'meridian-scheduler2-base'
+DATA=ROOT/'docs/experiments/data/E25'
+
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True);parser.add_argument('--kind',choices=['reference','batch'],required=True)
+    args=parser.parse_args()
+    print('E25_M11_PROCESS '+str(os.getpid()),flush=True)
+    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):raise ValueError('fresh simple name required')
+    target=ROOT/'.local/bin/meridian-e25'/args.name;output=DATA/(args.name+'-build.json')
+    patch=ROOT/'patches'/('meridian-11-write-batch-'+args.name+'.patch')
+    if target.exists() or output.exists() or patch.exists():raise RuntimeError('build name exists')
+    base=json.loads((BASE/'identity.json').read_text())['project']
+    allowed={'crates/meridian-net/src/io_pool.rs','crates/meridian-net/src/io_pool/tests.rs'}
+    differences={name for name,digest in base['source_files'].items() if sha(SOURCE/name)!=digest}
+    if differences-(allowed if args.kind=='batch' else set()):raise RuntimeError('source differs outside selected delta')
+    env={k:v for k,v in os.environ.items() if k not in ['CI','CARGO_TARGET_DIR','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS'] and not k.startswith('CARGO_PROFILE_')}
+    env.update(CARGO_INCREMENTAL='0',CARGO_BUILD_JOBS='6',CARGO_PROFILE_RELEASE_LTO='thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',CARGO_PROFILE_RELEASE_DEBUG='0',GIT_OPTIONAL_LOCKS='0')
+    idxenv=dict(env,GIT_INDEX_FILE=str(BASE/'index'))
+    def git(*a):return subprocess.check_output(['git',*a],cwd=SOURCE,env=idxenv)
+    original='../../../../../crates/goliath-store';relocated='../../../../../.local/evidence/E25/reactor-dependencies/crates/goliath-store'
+    manifest=SOURCE/'crates/meridian-proxy/Cargo.toml';text=manifest.read_text()
+    if text.count(original)!=1:raise RuntimeError('unexpected store dependency path')
+    manifest.write_text(text.replace(original,relocated))
+    selected={name:sha(SOURCE/name) for name in base['source_files']}
+    packages_before=tomllib.loads((SOURCE/'Cargo.lock').read_text())['package']
+    record=dict(kind='E25-meridian11-'+args.kind,status='running',profile='release',commands=[],source_restored=False,
+        frozen_stack=base,runner_sha256=sha(Path(__file__)),source_path_only_change=dict(path='crates/meridian-proxy/Cargo.toml',original=original,relocated=relocated),
+        rustc=subprocess.check_output(['rustc','-Vv'],text=True),cargo=subprocess.check_output(['cargo','-V'],text=True).strip(),
+        settings={key:env[key] for key in ['CARGO_INCREMENTAL','CARGO_BUILD_JOBS','CARGO_PROFILE_RELEASE_LTO','CARGO_PROFILE_RELEASE_CODEGEN_UNITS','CARGO_PROFILE_RELEASE_DEBUG']})
+    commands=[
+        ('release',['cargo','build','--locked','--release','-p','meridian-proxy','--bin','meridian','-p','meridian-sidecar','--bin','meridian-sidecar','-p','meridian-testkit','--bin','e4-client']),
+        ('fmt',['rustfmt','--edition','2024','--check','--config','skip_children=true',*sorted(allowed)]),
+        ('clippy',['cargo','clippy','--locked','--release','-p','meridian-net','-p','meridian-handoff','-p','meridian-proxy','-p','meridian-sidecar','--all-targets','--','-D','warnings']),
+        ('tests',['cargo','test','--locked','--release','-p','meridian-config','-p','meridian-ghost','-p','meridian-net','-p','meridian-handoff','-p','meridian-proxy','-p','meridian-sidecar','--','--skip','serve::tests::the_listener_queues_a_large_burst'])]
+    try:
+        for label,command in commands:
+            log=EVIDENCE/(args.name+'-'+label+'.log');began=time.monotonic()
+            print('E25_M11_GATE '+label,flush=True)
+            actual=[ROOT/'.local/bin/host-window','build','E25','--',*command] if command[0]=='cargo' else command
+            with log.open('x') as stream:completed=subprocess.run(actual,cwd=SOURCE,env=env,stdout=stream,stderr=subprocess.STDOUT)
+            text=log.read_text(errors='replace');row=dict(label=label,command=command,exit=completed.returncode,
+                elapsed_with_queue_seconds=time.monotonic()-began,log=str(log.relative_to(ROOT)),log_sha256=sha(log),test_results=re.findall(r'test result: .*',text))
+            record['commands'].append(row);output.write_text(json.dumps(record,indent=2)+'\n');print(json.dumps(row),flush=True)
+            if completed.returncode:raise RuntimeError('gate failed: '+label)
+        if tomllib.loads((SOURCE/'Cargo.lock').read_text())['package']!=packages_before:raise RuntimeError('dependency resolution changed')
+        for name,expected in selected.items():
+            if sha(SOURCE/name)!=expected:raise RuntimeError('compiled input drift: '+name)
+        record['compiled_files']={name:sha(SOURCE/name) for name in base['source_files']}
+        if args.kind=='batch':
+            parts=[]
+            for name in sorted(allowed):
+                before=git('show',':'+name).decode();after=(SOURCE/name).read_text()
+                if before==after:continue
+                parts.append(f'diff --git a/{name} b/{name}\n')
+                parts.extend(difflib.unified_diff(before.splitlines(keepends=True),after.splitlines(keepends=True),fromfile='a/'+name,tofile='b/'+name))
+            patch.write_text(''.join(parts));record['patch']=dict(path=str(patch.relative_to(ROOT)),sha256=sha(patch))
+        target.mkdir(parents=True,exist_ok=False);shutil.copy2(SOURCE/'target/release/meridian',target/'meridian')
+        shutil.copy2(SOURCE/'Cargo.lock',target/'Cargo.lock')
+        record.update(status='complete',directory=str(target.relative_to(ROOT)),binary_sha256=sha(target/'meridian'))
+    except BaseException as error:
+        record.update(status='failed',error=str(error).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME'))
+        raise
+    finally:
+        result=subprocess.run([os.sys.executable,'-B',ROOT/'scripts/e25-meridian-source','restore'],cwd=ROOT)
+        record['source_restored']=result.returncode==0
+        if not record['source_restored']:record['status']='failed-restoration'
+        output.write_text(json.dumps(record,indent=2)+'\n')
+        if target.exists():shutil.copy2(output,target/'build.json')
+
+
+if __name__=='__main__':main()

@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Classify retained trace bytes and assemble the requested latency variance view."""
+import json
+from pathlib import Path
+import re
+
+from e25_soak_harness import ROOT,DATA,EVIDENCE,read,digest,load
+
+
+def main():
+    target = DATA/'e25-latency-variance-readback-r1.json'
+    if target.exists():
+        raise RuntimeError('variance readback exists')
+    folder = EVIDENCE/'e25-latency-r2-scheduler2-p1-candidate/leases'
+    path = folder/'tile-3-84024-lease.jsonl'
+    before = digest(path)
+    lines = path.read_bytes().splitlines()
+    partial = lines[-1]
+    original = load('e25_original_authority_reader',ROOT/'scripts/e25-memory')
+    error = None
+    try:
+        original.authority_records(folder)
+    except json.JSONDecodeError as caught:
+        error = dict(type=type(caught).__name__,message=str(caught),line=caught.lineno,column=caught.colno)
+    complete = [json.loads(line) for line in lines[:-1]]
+    try:
+        json.loads(partial)
+        parses = True
+    except json.JSONDecodeError:
+        parses = False
+    after = digest(path)
+    if before != after:
+        raise RuntimeError('retained raw trace changed')
+    classification = dict(input=before,original_collector=digest(ROOT/'scripts/e25-memory'),
+        original_collector_readback=error,independent_complete_records=len(complete),
+        final_record_bytes=len(partial),final_record_literal=partial.decode('ascii'),
+        final_record_is_complete_json=parses,event_name_present=False,event_name=None,
+        known_new_r2_event=False,collector_uses_event_whitelist=False,event_table_fix_applicable=False,
+        observed_complete_stop_or_anomaly=sum(row.get('event') in ['authority-stop','clock-anomaly'] for row in complete),
+        raw_bytes_unchanged=True,row_qualification='unproven',
+        interpretation='the record ends inside a data-key string before any event field; JSON parsing fails before event classification')
+    names = [
+        ('r1 reactor d1','e25-latency-r1-via-d1-summary.json',None),
+        ('r1 reactor bracketed d2','e25-latency-r1-via-brackets-d2-summary.json','e25-via-stop-overlap-d2.json'),
+        ('r1 scheduler-2 d1','e25-latency-r1-scheduler2-d1-readback-summary.json','e25-scheduler2-stop-overlap-d1.json'),
+        ('r2 reactor p1','e25-latency-r2-scheduler2-p1-reactor1-summary.json','e25-r2-reactor1-stop-overlap-p1.json'),
+        ('r1 scheduler-2 uncapped','e25-latency-r1-scheduler2-server-uncapped-d1-summary.json','e25-scheduler2-uncapped-stop-overlap-d1.json')]
+    rows = []
+    for name,filename,overlap in names:
+        summary = read(DATA/filename)
+        spans = read(DATA/overlap) if overlap else None
+        rows.append(dict(name=name,summary=digest(DATA/filename),p95_ns=summary['overall']['p95_ns'],
+            server_stop=summary['limiter']['servers'],bot_stop=summary['limiter']['bots'],
+            tail_sends=spans['tail_sends'] if spans else None,
+            server_tail_span=spans['groups']['server-any']['span_inner'] if spans else None,
+            bot_tail_span=spans['groups']['bots']['span_inner'] if spans else None,
+            overlap_input=digest(DATA/overlap) if overlap else None,
+            qualification='not D9 or M4' if summary.get('server_uncapped_diagnostic') else 'reader-test diagnostic' if summary.get('diagnostic_only') else 'D9-valid, strict latency line failed'))
+    source = read(DATA/'e25-r2-latency-jump-readback-r2.json')
+    metric = source['cpu']['r2-scheduler-p1-incomplete']
+    rows.insert(4,dict(name='r2 scheduler-2 p1',timing=source['scheduler_timing_readback']['input'],
+        p95_ns=source['scheduler_timing_readback']['overall']['p95_ns'],
+        server_stop=metric['limiter']['servers'],bot_stop=metric['limiter']['bots'],
+        tail_sends=None,server_tail_span=None,bot_tail_span=None,
+        qualification='unproven authority trace; STOP-span ledger was not saved after collector abort'))
+    result = dict(kind='E25-readonly-latency-variance-and-trace-classification',classification=classification,rows=rows,
+        process_and_source_readback=digest(DATA/'e25-r2-latency-jump-readback-r2.json'),
+        conclusion='STOP wall totals alone do not order P95. Reactor tail spans predominantly overlap server pauses; bot-only overlap is zero in the r2 reactor tail. The exact source of burst-placement variation remains unproven.',
+        latency_tuning='stopped by the reviewer; M4 strict latency not met under D9',
+        new_latency_load=False)
+    target.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(path=str(target.relative_to(ROOT)),sha256=digest(target)['sha256'],classification=classification,rows=rows),indent=2),flush=True)
+
+
+if __name__=='__main__':
+    main()

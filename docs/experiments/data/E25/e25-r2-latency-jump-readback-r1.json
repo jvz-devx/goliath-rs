@@ -1,0 +1,780 @@
+{
+  "kind": "E25-readonly-r2-latency-jump",
+  "inputs": {
+    "r1-via-d1": {
+      "path": "docs/experiments/data/E25/e25-latency-r1-via-d1-raw.json.gz",
+      "sha256": "00b9208b75625a89b8dc6b7dc0fcd3bb688f82a7e8400a1215e9df1b3702cb5e",
+      "bytes": 5177027,
+      "hash_scope": "decompressed bytes"
+    },
+    "r1-via-brackets-d2": {
+      "path": "docs/experiments/data/E25/e25-latency-r1-via-brackets-d2-raw.json.gz",
+      "sha256": "74005efd6ae75f621144256094e9e7a04ebbf597a9f7be3c0e8b1b5f3cf4cc29",
+      "bytes": 5237554,
+      "hash_scope": "decompressed bytes"
+    },
+    "r2-reactor-p1": {
+      "path": "docs/experiments/data/E25/e25-latency-r2-scheduler2-p1-reactor1-raw.json.gz",
+      "sha256": "fbd3a655d9109a83722b6d3e78f9e5c6fe8c07e9651023012d03237b7defaf46",
+      "bytes": 5208578,
+      "hash_scope": "decompressed bytes"
+    },
+    "r2-scheduler-p1-incomplete": {
+      "path": "docs/experiments/data/E25/e25-latency-r2-scheduler2-p1-candidate-raw.json.gz",
+      "sha256": "e7c6e2dd7d3ed7879898ec24c28fd395b8f6dbfc0078cadde23d60b8a759dd9a",
+      "bytes": 4725940,
+      "hash_scope": "decompressed bytes"
+    },
+    "reviewer-r2-frontier-r1": {
+      "path": "docs/experiments/data/E20/reviewer-r2-650-r1.json.gz",
+      "sha256": "a88012d23d6040b6c4aa741e076c788c184cbbcd6dc33a74eb6fa91af5aead03",
+      "bytes": 4648433,
+      "hash_scope": "decompressed bytes"
+    },
+    "reviewer-r2-frontier-r2": {
+      "path": "docs/experiments/data/E20/reviewer-r2-650-r2.json.gz",
+      "sha256": "b4cf4ec74244788b2356b38f27f41bb3e37befaa565c96b68a2706c6e0e28218",
+      "bytes": 4626239,
+      "hash_scope": "decompressed bytes"
+    }
+  },
+  "cpu": {
+    "r1-via-d1": {
+      "seconds": 60.16658064548392,
+      "method": "ps cumulative process CPU time, one-second samples plus exact phase-boundary samples",
+      "roles": {
+        "observer-and-driver": 0.22454325732094027,
+        "tile-a": 0.5617736563617898,
+        "tile-b": 0.541662824284933,
+        "tile-c": 0.5709149436694523,
+        "tile-d": 0.5803886414246657,
+        "proxy": 1.1193921821291877,
+        "store": 0.006648208951027099,
+        "sidecar-0": 0.0009972313426540647,
+        "sidecar-1": 0.0009972313426540647,
+        "sidecar-2": 0.0009972313426540647,
+        "sidecar-3": 0.0009972313426540647,
+        "bots-a": 0.07911368651722248,
+        "bots-b": 0.07994471263610085,
+        "bots-c": 0.08077573875497926,
+        "bots-d": 0.08326881711161442,
+        "bots-cross": 0.0538504925033195,
+        "bots-witness-a": 0.016952932825119102,
+        "bots-witness-b": 0.017119138048894776,
+        "bots-witness-c": 0.016952932825119102,
+        "bots-witness-d": 0.016786727601343424
+      },
+      "bots": 0.4447651788237129,
+      "shims": 0,
+      "proxy": 1.1193921821291877,
+      "tiles": {
+        "a": 0.5617736563617898,
+        "b": 0.541662824284933,
+        "c": 0.5709149436694523,
+        "d": 0.5803886414246657
+      },
+      "server": 3.3847693821916716,
+      "reported_bot_cores": 0.4447651788237129,
+      "reported_shim_cores": {},
+      "bot_drivers": 9,
+      "limiter": {
+        "servers": {
+          "stop_cycles": 292,
+          "process_stop_signals": 2920,
+          "stop_wall_s": 2.543497079372173,
+          "sum_process_pause_s": 24.476538097544108
+        },
+        "bots": {
+          "stop_cycles": 19,
+          "process_stop_signals": 171,
+          "stop_wall_s": 0.14434841691399924,
+          "sum_process_pause_s": 1.2929040839953814
+        }
+      },
+      "native_proxy": {
+        "cpu_s": 1.1193670529510937,
+        "user_s": 0.41129296605342464,
+        "system_s": 0.7080740868976688,
+        "unix_syscalls": 191613.6645473029,
+        "context_switches": 36610.63781418926,
+        "cores": 1.1193670529510937,
+        "cores_per_player": 0.001722103158386298,
+        "threads_min": 1324,
+        "threads_max": 1329,
+        "threads_increment_per_player": 2.0184615384615383,
+        "rss_mb_max": 545.984375
+      },
+      "noise_valid": true,
+      "start_load": [
+        1.5830078125,
+        3.01904296875,
+        5.38232421875
+      ]
+    },
+    "r1-via-brackets-d2": {
+      "seconds": 60.224208437488414,
+      "method": "ps cumulative process CPU time, one-second samples plus exact phase-boundary samples",
+      "roles": {
+        "observer-and-driver": 0.22333211758126878,
+        "tile-a": 0.56156819454264,
+        "tile-b": 0.5384877749561745,
+        "tile-c": 0.5469561303440142,
+        "tile-d": 0.5487826383688424,
+        "proxy": 1.0565518692710878,
+        "store": 0.00664184736301171,
+        "sidecar-0": 0.0009962771044517565,
+        "sidecar-1": 0.0009962771044517565,
+        "sidecar-2": 0.0009962771044517565,
+        "sidecar-3": 0.0009962771044517565,
+        "bots-a": 0.0733924133612794,
+        "bots-b": 0.0687431202071712,
+        "bots-c": 0.06691661218234297,
+        "bots-d": 0.06575428889381593,
+        "bots-cross": 0.050311993774813706,
+        "bots-witness-a": 0.00830230920376464,
+        "bots-witness-b": 0.009464632492291685,
+        "bots-witness-c": 0.010626955780818738,
+        "bots-witness-d": 0.010294863412668153
+      },
+      "bots": 0.36380718930896644,
+      "shims": 0,
+      "proxy": 1.0565518692710878,
+      "tiles": {
+        "a": 0.56156819454264,
+        "b": 0.5384877749561745,
+        "c": 0.5469561303440142,
+        "d": 0.5487826383688424
+      },
+      "server": 3.2629735632635777,
+      "reported_bot_cores": 0.36380718930896644,
+      "reported_shim_cores": {},
+      "bot_drivers": 9,
+      "limiter": {
+        "servers": {
+          "stop_cycles": 140,
+          "process_stop_signals": 1400,
+          "stop_wall_s": 1.2381177528004628,
+          "sum_process_pause_s": 11.846374898595968
+        },
+        "bots": {
+          "stop_cycles": 0,
+          "process_stop_signals": 0,
+          "stop_wall_s": 0.0,
+          "sum_process_pause_s": 0.0
+        }
+      },
+      "native_proxy": {
+        "cpu_s": 1.0562817296602105,
+        "user_s": 0.4080927012044521,
+        "system_s": 0.6481890284557584,
+        "unix_syscalls": 192786.53923714918,
+        "context_switches": 38013.53579938527,
+        "cores": 1.0562817296602105,
+        "cores_per_player": 0.0016250488148618623,
+        "threads_min": 1324,
+        "threads_max": 1331,
+        "threads_increment_per_player": 2.0215384615384617,
+        "rss_mb_max": 546.25
+      },
+      "noise_valid": true,
+      "start_load": [
+        3.9970703125,
+        5.34765625,
+        5.650390625
+      ]
+    },
+    "r2-reactor-p1": {
+      "seconds": 60.18431989598321,
+      "method": "ps cumulative process CPU time, one-second samples plus exact phase-boundary samples",
+      "roles": {
+        "observer-and-driver": 0.22198472996106197,
+        "tile-a": 0.5655958239427058,
+        "tile-b": 0.5552941373726564,
+        "tile-c": 0.5577864808976685,
+        "tile-d": 0.5617742305376873,
+        "proxy": 1.1198930239053575,
+        "store": 0.00681240563503259,
+        "sidecar-0": 0.000996937410004769,
+        "sidecar-1": 0.000996937410004769,
+        "sidecar-2": 0.000996937410004769,
+        "sidecar-3": 0.0011630936450055642,
+        "bots-a": 0.07709649304036881,
+        "bots-b": 0.0810842426803879,
+        "bots-c": 0.08440736738040377,
+        "bots-d": 0.08291196126539663,
+        "bots-cross": 0.05732390107527423,
+        "bots-witness-a": 0.016283311030077893,
+        "bots-witness-b": 0.013957123740066768,
+        "bots-witness-c": 0.0161171547950771,
+        "bots-witness-d": 0.016117154795077103
+      },
+      "bots": 0.4452987098021302,
+      "shims": 0,
+      "proxy": 1.1198930239053575,
+      "tiles": {
+        "a": 0.5655958239427058,
+        "b": 0.5552941373726564,
+        "c": 0.5577864808976685,
+        "d": 0.5617742305376873
+      },
+      "server": 3.371310008166128,
+      "reported_bot_cores": 0.4452987098021302,
+      "reported_shim_cores": {},
+      "bot_drivers": 9,
+      "limiter": {
+        "servers": {
+          "stop_cycles": 391,
+          "process_stop_signals": 3910,
+          "stop_wall_s": 3.3659297768608667,
+          "sum_process_pause_s": 32.31229908615933
+        },
+        "bots": {
+          "stop_cycles": 60,
+          "process_stop_signals": 540,
+          "stop_wall_s": 0.4473282109829597,
+          "sum_process_pause_s": 3.991622348141391
+        }
+      },
+      "native_proxy": {
+        "cpu_s": 1.1197170604133657,
+        "user_s": 0.4112076337427103,
+        "system_s": 0.7085094266706551,
+        "unix_syscalls": 190212.93751511234,
+        "context_switches": 36340.62431094692,
+        "cores": 1.1197170604133657,
+        "cores_per_player": 0.001722641631405178,
+        "threads_min": 1324,
+        "threads_max": 1330,
+        "threads_increment_per_player": 2.02,
+        "rss_mb_max": 547.140625
+      },
+      "noise_valid": true,
+      "start_load": [
+        3.943359375,
+        5.5849609375,
+        5.81591796875
+      ]
+    },
+    "r2-scheduler-p1-incomplete": {
+      "seconds": 60.1736679165042,
+      "method": "ps cumulative process CPU time, one-second samples plus exact phase-boundary samples",
+      "roles": {
+        "observer-and-driver": 0.20075226287953676,
+        "tile-a": 0.5617074905073133,
+        "tile-b": 0.5297998460761286,
+        "tile-c": 0.5542291363437541,
+        "tile-d": 0.5512377946783308,
+        "proxy": 0.9352928273891004,
+        "store": 0.006979797219321644,
+        "sidecar-0": 0.0009971138884745205,
+        "sidecar-1": 0.0009971138884745205,
+        "sidecar-2": 0.0009971138884745205,
+        "sidecar-3": 0.0009971138884745205,
+        "bots-a": 0.07345405645095635,
+        "bots-b": 0.06813611571242556,
+        "bots-c": 0.07661158376445898,
+        "bots-d": 0.07827344024524988,
+        "bots-cross": 0.052847036089149584,
+        "bots-witness-a": 0.007810725459717076,
+        "bots-witness-b": 0.007312168515479816,
+        "bots-witness-c": 0.009804953236666117,
+        "bots-witness-d": 0.009971138884745207
+      },
+      "bots": 0.38422121835884854,
+      "shims": 0,
+      "proxy": 0.9352928273891004,
+      "tiles": {
+        "a": 0.5617074905073133,
+        "b": 0.5297998460761286,
+        "c": 0.5542291363437541,
+        "d": 0.5512377946783308
+      },
+      "server": 3.1432353477678467,
+      "reported_bot_cores": 0.38422121835884854,
+      "reported_shim_cores": {},
+      "bot_drivers": 9,
+      "limiter": {
+        "servers": {
+          "stop_cycles": 236,
+          "process_stop_signals": 2360,
+          "stop_wall_s": 1.8916957178735174,
+          "sum_process_pause_s": 18.549984658980975
+        },
+        "bots": {
+          "stop_cycles": 0,
+          "process_stop_signals": 0,
+          "stop_wall_s": 0.0,
+          "sum_process_pause_s": 0.0
+        }
+      },
+      "native_proxy": {
+        "cpu_s": 0.9348719423736785,
+        "user_s": 0.41311938974942913,
+        "system_s": 0.5217525526242495,
+        "unix_syscalls": 179703.8957403352,
+        "context_switches": 14471.415780296791,
+        "cores": 0.9348719423736785,
+        "cores_per_player": 0.0014382645267287362,
+        "threads_min": 675,
+        "threads_max": 680,
+        "threads_increment_per_player": 1.0184615384615385,
+        "rss_mb_max": 536.28125
+      },
+      "noise_valid": true,
+      "start_load": [
+        3.806640625,
+        5.03857421875,
+        5.54833984375
+      ]
+    },
+    "reviewer-r2-frontier-r1": {
+      "seconds": 60.12790639602463,
+      "method": "ps cumulative process CPU time, one-second samples plus exact phase-boundary samples",
+      "roles": {
+        "observer-and-driver": 0.22884548664261736,
+        "tile-a": 0.5781009531756816,
+        "tile-b": 0.5524888856299236,
+        "tile-c": 0.5734442136219075,
+        "tile-d": 0.5732779014949869,
+        "proxy": 1.0788667673333276,
+        "store": 0.007151421457581793,
+        "sidecar-0": 0.0011641848884435476,
+        "sidecar-1": 0.0009978727615230407,
+        "sidecar-2": 0.0011641848884435476,
+        "sidecar-3": 0.0011641848884435476,
+        "shim-a": 0.1362096319478951,
+        "bots-a": 0.08997486066399418,
+        "shim-b": 0.12190678903273147,
+        "bots-b": 0.07783407539879718,
+        "shim-c": 0.12988977112491581,
+        "bots-c": 0.08498549685637898,
+        "shim-d": 0.1388706259786232,
+        "bots-d": 0.09047379704475568,
+        "shim-cross": 0.07949719666800224,
+        "bots-cross": 0.04989363807615205
+      },
+      "bots": 0.3931618680400781,
+      "shims": 0.6063740147521678,
+      "proxy": 1.0788667673333276,
+      "tiles": {
+        "a": 0.5781009531756816,
+        "b": 0.5524888856299236,
+        "c": 0.5734442136219075,
+        "d": 0.5732779014949869
+      },
+      "server": 3.3678205701402626,
+      "reported_bot_cores": 0.3931618680400781,
+      "reported_shim_cores": {
+        "shim-a": 0.1362096319478951,
+        "shim-b": 0.12190678903273147,
+        "shim-c": 0.12988977112491581,
+        "shim-d": 0.1388706259786232,
+        "shim-cross": 0.07949719666800224
+      },
+      "bot_drivers": 5,
+      "limiter": {
+        "servers": {
+          "stop_cycles": 288,
+          "process_stop_signals": 2880,
+          "stop_wall_s": 2.495052787766326,
+          "sum_process_pause_s": 23.831036537594628
+        },
+        "bots": {
+          "stop_cycles": 1,
+          "process_stop_signals": 5,
+          "stop_wall_s": 0.0062423339986708015,
+          "sum_process_pause_s": 0.03098833397962153
+        }
+      },
+      "native_proxy": {
+        "cpu_s": 1.0789221709886188,
+        "user_s": 0.4209553082543494,
+        "system_s": 0.6579668627342692,
+        "unix_syscalls": 189271.74337147127,
+        "context_switches": 39551.070853834535,
+        "cores": 1.0789221709886188,
+        "cores_per_player": 0.0016598802630594135,
+        "threads_min": 1323,
+        "threads_max": 1330,
+        "threads_increment_per_player": 2.02,
+        "rss_mb_max": 558.5625
+      },
+      "noise_valid": true,
+      "start_load": [
+        3.9296875,
+        4.7060546875,
+        5.7119140625
+      ]
+    },
+    "reviewer-r2-frontier-r2": {
+      "seconds": 60.1275386045163,
+      "method": "ps cumulative process CPU time, one-second samples plus exact phase-boundary samples",
+      "roles": {
+        "observer-and-driver": 0.2318405230536568,
+        "tile-a": 0.5978957534992081,
+        "tile-b": 0.5599763566152528,
+        "tile-c": 0.5769402973264959,
+        "tile-d": 0.5787697419130026,
+        "proxy": 1.1051508433942245,
+        "store": 0.007151465201798596,
+        "sidecar-0": 0.0011641920095951201,
+        "sidecar-1": 0.0009978788653672457,
+        "sidecar-2": 0.0011641920095951201,
+        "sidecar-3": 0.0011641920095951201,
+        "shim-a": 0.13122107079579282,
+        "bots-a": 0.08498601670044377,
+        "shim-b": 0.1438608697571113,
+        "bots-b": 0.09346798705606535,
+        "shim-c": 0.12157490843057613,
+        "bots-c": 0.07999662237360755,
+        "shim-d": 0.14103354630523743,
+        "bots-d": 0.09296904762338173,
+        "shim-cross": 0.08249131953702565,
+        "bots-cross": 0.051557074710641033
+      },
+      "bots": 0.40297674846413944,
+      "shims": 0.6201817148257434,
+      "proxy": 1.1051508433942245,
+      "tiles": {
+        "a": 0.5978957534992081,
+        "b": 0.5599763566152528,
+        "c": 0.5769402973264959,
+        "d": 0.5787697419130026
+      },
+      "server": 3.430374912844135,
+      "reported_bot_cores": 0.40297674846413944,
+      "reported_shim_cores": {
+        "shim-a": 0.13122107079579282,
+        "shim-b": 0.1438608697571113,
+        "shim-c": 0.12157490843057613,
+        "shim-d": 0.14103354630523743,
+        "shim-cross": 0.08249131953702565
+      },
+      "bot_drivers": 5,
+      "limiter": {
+        "servers": {
+          "stop_cycles": 231,
+          "process_stop_signals": 2310,
+          "stop_wall_s": 1.9870685020869132,
+          "sum_process_pause_s": 18.964069509820547
+        },
+        "bots": {
+          "stop_cycles": 2,
+          "process_stop_signals": 10,
+          "stop_wall_s": 0.015064583014464006,
+          "sum_process_pause_s": 0.07467016598093323
+        }
+      },
+      "native_proxy": {
+        "cpu_s": 1.1052242317022447,
+        "user_s": 0.42916590979812347,
+        "system_s": 0.6760583219041212,
+        "unix_syscalls": 190008.3066350679,
+        "context_switches": 39023.996448722646,
+        "cores": 1.1052242317022447,
+        "cores_per_player": 0.0017003449718496072,
+        "threads_min": 1325,
+        "threads_max": 1331,
+        "threads_increment_per_player": 2.0215384615384617,
+        "rss_mb_max": 558.828125
+      },
+      "noise_valid": true,
+      "start_load": [
+        3.88720703125,
+        5.525390625,
+        5.943359375
+      ]
+    }
+  },
+  "stop_span_split": {
+    "r1-bracketed-d2": {
+      "tail_sends": 481,
+      "p95_ns": 5138417,
+      "counts": {
+        "server_only": 311,
+        "bots_only": 0,
+        "both": 0,
+        "neither": 170,
+        "unknown": 0
+      },
+      "server_any": 311,
+      "bots_any": 0,
+      "coverage": {
+        "open_stops": 0,
+        "unpaired_continues": 19
+      },
+      "interpretation": "inner signal-call span association, not causal delay attribution"
+    },
+    "r2-reactor-p1": {
+      "tail_sends": 481,
+      "p95_ns": 11159291,
+      "counts": {
+        "server_only": 385,
+        "bots_only": 0,
+        "both": 39,
+        "neither": 57,
+        "unknown": 0
+      },
+      "server_any": 424,
+      "bots_any": 39,
+      "coverage": {
+        "open_stops": 0,
+        "unpaired_continues": 9
+      },
+      "interpretation": "inner signal-call span association, not causal delay attribution"
+    }
+  },
+  "r1_via_d1_stop_spans": "not recoverable: totals retained, no per-signal brackets captured",
+  "scheduler_trace_audit": [
+    {
+      "file": {
+        "path": ".local/evidence/E25/e25-latency-r2-scheduler2-p1-candidate/leases/tile-0-83809-lease.jsonl",
+        "sha256": "b527f08d08c46289c377bed80d91aea166e8022434134cc246ee100a747b9ba1",
+        "bytes": 618130,
+        "hash_scope": "file bytes"
+      },
+      "complete_records": 2657,
+      "observed_authority_events": [],
+      "partial": null
+    },
+    {
+      "file": {
+        "path": ".local/evidence/E25/e25-latency-r2-scheduler2-p1-candidate/leases/tile-1-83941-lease.jsonl",
+        "sha256": "ab07e3d5b53fe0a37ed9775e5e6290453d1033827b121a0072db2cecf581fd9f",
+        "bytes": 616560,
+        "hash_scope": "file bytes"
+      },
+      "complete_records": 2647,
+      "observed_authority_events": [],
+      "partial": null
+    },
+    {
+      "file": {
+        "path": ".local/evidence/E25/e25-latency-r2-scheduler2-p1-candidate/leases/tile-2-83972-lease.jsonl",
+        "sha256": "741b1dba15716a2af6d4587311d52002db1b868fea50c5dfa50521816352611a",
+        "bytes": 616275,
+        "hash_scope": "file bytes"
+      },
+      "complete_records": 2652,
+      "observed_authority_events": [],
+      "partial": null
+    },
+    {
+      "file": {
+        "path": ".local/evidence/E25/e25-latency-r2-scheduler2-p1-candidate/leases/tile-3-84024-lease.jsonl",
+        "sha256": "58a88df9fa357870bda1378686ab92d7e06c39d1e39ca8ffd3284e4e8468a5dc",
+        "bytes": 613882,
+        "hash_scope": "file bytes"
+      },
+      "complete_records": 2641,
+      "observed_authority_events": [],
+      "partial": {
+        "line": 2642,
+        "bytes": 31,
+        "sha256": "5f809bfc05847c1ab9ba4a28e70806d5d1bc16ce51d4591fc5c34dbf8fb732bd",
+        "at_ns": 134535215125,
+        "wall_ns": null,
+        "event": null,
+        "last_complete_at_ns": 134534930333,
+        "last_complete_wall_ns": 1794188163242980000
+      },
+      "qualification": "incomplete authority trace; no qualification inferred from absent complete stop records"
+    }
+  ],
+  "scheduler_timing_readback": {
+    "input": {
+      "path": "docs/experiments/data/E25/e25-latency-r2-scheduler2-p1-candidate-latency.json.gz",
+      "sha256": "99397a78ea0f7f8ec17a51cc75acbb872654b97069e98f28a300445679f535af",
+      "bytes": 2477214,
+      "hash_scope": "decompressed bytes"
+    },
+    "overall": {
+      "sends": 9616,
+      "matched": 9616,
+      "unmatched_or_ambiguous": 0,
+      "p95_rank": 9136,
+      "p95_ns": 6512042,
+      "p95_is_infinite": false,
+      "below_five_ms": false,
+      "finite_maximum_ns": 25441500
+    },
+    "tiles": {
+      "a": {
+        "sends": 2404,
+        "matched": 2404,
+        "unmatched_or_ambiguous": 0,
+        "p95_rank": 2284,
+        "p95_ns": 8209958,
+        "p95_is_infinite": false,
+        "below_five_ms": false,
+        "finite_maximum_ns": 25441500
+      },
+      "b": {
+        "sends": 2404,
+        "matched": 2404,
+        "unmatched_or_ambiguous": 0,
+        "p95_rank": 2284,
+        "p95_ns": 9257666,
+        "p95_is_infinite": false,
+        "below_five_ms": false,
+        "finite_maximum_ns": 23875791
+      },
+      "c": {
+        "sends": 2404,
+        "matched": 2404,
+        "unmatched_or_ambiguous": 0,
+        "p95_rank": 2284,
+        "p95_ns": 3138750,
+        "p95_is_infinite": false,
+        "below_five_ms": true,
+        "finite_maximum_ns": 13548084
+      },
+      "d": {
+        "sends": 2404,
+        "matched": 2404,
+        "unmatched_or_ambiguous": 0,
+        "p95_rank": 2284,
+        "p95_ns": 3117250,
+        "p95_is_infinite": false,
+        "below_five_ms": true,
+        "finite_maximum_ns": 13640000
+      }
+    },
+    "qualification": "timing readback only; incomplete authority trace prevents qualification and memory entry"
+  },
+  "stamp_source_diff": {
+    "r1": {
+      "source_archive": {
+        "path": ".local/evidence/E25/e25-stamps-r2-selected-source.tar.gz",
+        "sha256": "d337a87b5021693bc1f898c24e4d1915cc6886a688d110bded53380a8c1b027b"
+      },
+      "base_identity": {
+        "path": ".local/evidence/E25/horizon-h13-base/identity.json",
+        "sha256": "935de2b8e16b1bcf330f651f8e9456e828d6d05eae47c82ea36211120a44ac28",
+        "bytes": 679233,
+        "hash_scope": "file bytes"
+      },
+      "stamp_patch": {
+        "path": "patches/horizon-15-latency-stamps-e25-stamps-r2.patch",
+        "sha256": "7d89061bd244b7c4063a9544704c93b9eb6f5c809de7da9ba177e494f29324a2"
+      },
+      "files": 5587,
+      "post_archive_changed_files": [
+        "Cargo.lock",
+        "crates/horizon-client/Cargo.toml"
+      ],
+      "reconstructed_compiled_source_matches": false,
+      "mismatches": [
+        "CLAUDE.md"
+      ],
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+      "settings": {
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_BUILD_JOBS": "6",
+        "CARGO_PROFILE_RELEASE_LTO": "thin",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "1"
+      },
+      "declared_path_relocation": {
+        "path": "crates/horizon-client/Cargo.toml",
+        "original": "../../../../../crates/goliath-store",
+        "relocated": "../../../../../.local/evidence/E25/timing-dependencies/crates/goliath-store"
+      }
+    },
+    "r2": {
+      "source_archive": {
+        "path": ".local/evidence/E25/e25-stamps-lease-r2-b2-selected-source.tar.gz",
+        "sha256": "5029acf91de5e1564aa4237b8d5b6e4e03cab8cad0026dd99f2e27f622ce4303"
+      },
+      "base_identity": {
+        "path": ".local/evidence/E25/horizon-lease-r2-base/identity.json",
+        "sha256": "94e0d74ecddc24fe6dcc6139932c8f6d0d4a832494f27586f42cc5aaa77ba0e8",
+        "bytes": 679233,
+        "hash_scope": "file bytes"
+      },
+      "stamp_patch": {
+        "path": "patches/horizon-15-latency-stamps-e25-stamps-lease-r2-b2.patch",
+        "sha256": "cdbc4a388f703007a0b4e7bfe6acf320b0a9fd93f6b947d4f5c590decf7c00a9"
+      },
+      "files": 5587,
+      "post_archive_changed_files": [
+        "crates/horizon-client/Cargo.toml"
+      ],
+      "reconstructed_compiled_source_matches": false,
+      "mismatches": [
+        "CLAUDE.md"
+      ],
+      "compiler": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+      "settings": {
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_BUILD_JOBS": "6",
+        "CARGO_PROFILE_RELEASE_LTO": "thin",
+        "CARGO_PROFILE_RELEASE_CODEGEN_UNITS": "1"
+      },
+      "declared_path_relocation": {
+        "path": "crates/horizon-client/Cargo.toml",
+        "original": "../../../../../crates/goliath-store",
+        "relocated": "../../../../../.local/evidence/E25/timing-dependencies-lease-r2/crates/goliath-store"
+      }
+    },
+    "compiled_changed_files": [
+      "crates/horizon-client/src/game/dedicated/cluster/lease.rs",
+      "crates/horizon-client/src/game/dedicated/cluster/lease/clock.rs",
+      "crates/horizon-client/src/lan/io_pool.rs"
+    ],
+    "h13_base_changed_files": [
+      "crates/horizon-client/src/game/dedicated/cluster/lease.rs",
+      "crates/horizon-client/src/game/dedicated/cluster/lease/clock.rs"
+    ],
+    "base_changes_outside_declared_h13_files": [],
+    "stamp_patch_revision_diff": [
+      "--- r1-compiled-stamps\n",
+      "+++ r2-compiled-stamps\n",
+      "@@ -652,7 +652,7 @@\n",
+      "                      if !self.left {",
+      "                          if counting_packets() {",
+      "                              self.outbox.tally(1, [(id, id_len(id) + payload.len())]);",
+      "-@@ -790,6 +801,68 @@",
+      "+@@ -790,6 +801,69 @@",
+      "              kick_on: None,",
+      "              unprompted: None,",
+      "          }",
+      "@@ -689,7 +689,8 @@\n",
+      " +        }",
+      " +        let listener = std::net::TcpListener::bind(\"127.0.0.1:0\").unwrap();",
+      " +        let mut client = Connection::connect(",
+      "-+            &listener.local_addr().unwrap().to_string(),",
+      "++            \"127.0.0.1\",",
+      "++            listener.local_addr().unwrap().port(),",
+      " +            Duration::from_secs(10),",
+      " +        )",
+      " +        .unwrap();"
+    ],
+    "compiler_equal": true,
+    "settings_equal": true
+  },
+  "internal_source_diff": {
+    "r1": {
+      "path": ".local/evidence/E24/lease-fixed-r1-internal-source.tar.gz",
+      "sha256": "800f951224aa2e1bd9163bdb522da2d1af5d22e1850872af86b52a08d24ab8ad"
+    },
+    "r2": {
+      "path": ".local/evidence/E24/lease-fixed-r2-internal-source.tar.gz",
+      "sha256": "1d7a6e641e1b2def4583abc7acffd3123eb8f3ec51ed02a9d4ad28380fee9df0"
+    },
+    "changed_files": [
+      "crates/goliath-model/src/lease.rs",
+      "crates/goliath-model/src/lib.rs",
+      "crates/goliath-model/tests/it/leases.rs",
+      "crates/goliath-store/src/client.rs",
+      "crates/goliath-store/src/codec.rs",
+      "crates/goliath-store/src/engine.rs",
+      "crates/goliath-store/src/journal.rs",
+      "crates/goliath-store/src/lib.rs",
+      "crates/goliath-store/src/main.rs",
+      "crates/goliath-store/src/receipts.rs",
+      "crates/goliath-store/src/state.rs",
+      "crates/goliath-store/src/state/tests.rs"
+    ]
+  },
+  "new_measurements_started": false
+}
