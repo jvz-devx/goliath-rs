@@ -1,0 +1,3180 @@
+{
+  "kind": "E28-latency-lite-ledger",
+  "cells": [
+    {
+      "name": "e28-latency-pin-direct-r0",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e25-latency-cell-r2",
+        "--name",
+        "e28-latency-pin-direct-r0",
+        "--bins",
+        ".local/bin/goliath-e28/final-stamps",
+        "--data-dir",
+        "docs/experiments/data/E28/latency",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "pin",
+        "--plan",
+        "docs/experiments/data/E28/latency/e28-latency-plan-r1.json",
+        "--stop-brackets",
+        "--direct-reference"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:04:18.147645+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 1,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:07:09.410663+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/latency/e28-latency-pin-direct-r0-summary.json.gz",
+        "decompressed_sha256": "f6160b20d168bc9d84adb9ba78ebe10f98e8b1956e656dc2ca84ce9b04f52d29",
+        "stored_sha256": "424f63bc3eec874d67b14f9d696a49758869a9f1e5776591cb592dbc69f187e5",
+        "bytes": 1334847
+      },
+      "status": "failed",
+      "d9_valid": false,
+      "qualified_bound_pass": false,
+      "overall": null,
+      "proxy": null,
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12394,
+            "busy_ticks": 8432,
+            "busy_fraction": 0.6803291915442956
+          },
+          "1": {
+            "total_ticks": 12398,
+            "busy_ticks": 8473,
+            "busy_fraction": 0.6834166801096951
+          },
+          "2": {
+            "total_ticks": 12404,
+            "busy_ticks": 8426,
+            "busy_fraction": 0.6792970009674298
+          },
+          "3": {
+            "total_ticks": 12409,
+            "busy_ticks": 8455,
+            "busy_fraction": 0.6813603030058828
+          },
+          "4": {
+            "total_ticks": 12580,
+            "busy_ticks": 4402,
+            "busy_fraction": 0.3499205087440382
+          },
+          "5": {
+            "total_ticks": 12408,
+            "busy_ticks": 6567,
+            "busy_fraction": 0.5292553191489362
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 18,
+        "memory_available_kb_start": 12292916,
+        "memory_available_kb_end": 10437524,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 1890699,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-1890699/harness"
+          },
+          "tile-a": {
+            "pid": 1891045,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1890699/servers"
+          },
+          "tile-b": {
+            "pid": 1891095,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1890699/servers"
+          },
+          "tile-c": {
+            "pid": 1891148,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1890699/servers"
+          },
+          "tile-d": {
+            "pid": 1891198,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1890699/servers"
+          },
+          "proxy": {
+            "pid": 1891263,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1890699/servers"
+          },
+          "store": {
+            "pid": 1891040,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1890699/servers"
+          },
+          "sidecar-0": {
+            "pid": 1891254,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1890699/servers"
+          },
+          "sidecar-1": {
+            "pid": 1891256,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1890699/servers"
+          },
+          "sidecar-2": {
+            "pid": 1891258,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1890699/servers"
+          },
+          "sidecar-3": {
+            "pid": 1891260,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1890699/servers"
+          },
+          "bots-a": {
+            "pid": 1891298,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1890699/bots"
+          },
+          "bots-b": {
+            "pid": 1891299,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1890699/bots"
+          },
+          "bots-c": {
+            "pid": 1891300,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1890699/bots"
+          },
+          "bots-d": {
+            "pid": 1891301,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1890699/bots"
+          },
+          "bots-cross": {
+            "pid": 1891302,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1890699/bots"
+          },
+          "bots-witness-a": {
+            "pid": 1891303,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1890699/bots"
+          },
+          "bots-witness-b": {
+            "pid": 1891304,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1890699/bots"
+          },
+          "bots-witness-c": {
+            "pid": 1891305,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1890699/bots"
+          },
+          "bots-witness-d": {
+            "pid": 1891306,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1890699/bots"
+          }
+        }
+      }
+    },
+    {
+      "name": "e28-latency-pin-direct-r0-a1",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e25-latency-cell-r2",
+        "--name",
+        "e28-latency-pin-direct-r0-a1",
+        "--bins",
+        ".local/bin/goliath-e28/final-stamps",
+        "--data-dir",
+        "docs/experiments/data/E28/latency",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "pin",
+        "--plan",
+        "docs/experiments/data/E28/latency/e28-latency-plan-r1.json",
+        "--stop-brackets",
+        "--direct-reference"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:08:49.343479+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:11:43.210206+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/latency/e28-latency-pin-direct-r0-a1-summary.json.gz",
+        "decompressed_sha256": "dd6b567e4fe09eb37f4c71d5822df3507ae125b5cd152e9724958f17de35af98",
+        "stored_sha256": "66c3cb54fcc8e8e60503de4e51bd6d40c813f577b9abeb3a4842167dd0a6c5aa",
+        "bytes": 1664742
+      },
+      "status": "complete",
+      "d9_valid": true,
+      "qualified_bound_pass": true,
+      "overall": {
+        "sends": 9848,
+        "matched": 9848,
+        "unmatched_or_ambiguous": 0,
+        "p95_rank": 9356,
+        "p95_ns": 1168883,
+        "p95_is_infinite": false,
+        "below_five_ms": true,
+        "finite_maximum_ns": 9033184,
+        "p50_rank": 4924,
+        "p50_ns": 48226,
+        "p50_is_infinite": false,
+        "p99_rank": 9750,
+        "p99_ns": 2822854,
+        "p99_is_infinite": false
+      },
+      "proxy": {
+        "cpu_s": 0.6946759291632473,
+        "user_s": 0.36755941727763114,
+        "system_s": 0.3271165118856161,
+        "unix_syscalls": null,
+        "context_switches": 25414.516653910432,
+        "unavailable": [
+          "unix_syscalls",
+          "mach_syscalls",
+          "pageins",
+          "cow"
+        ],
+        "cores": 0.6946759291632473,
+        "cores_per_player": 0.00163453159803117,
+        "threads_min": 856,
+        "threads_max": 861,
+        "threads_increment_per_player": 1.9858823529411764,
+        "rss_mb_max": 308.04296875
+      },
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12581,
+            "busy_ticks": 8561,
+            "busy_fraction": 0.6804705508306176
+          },
+          "1": {
+            "total_ticks": 12592,
+            "busy_ticks": 8587,
+            "busy_fraction": 0.6819409148665819
+          },
+          "2": {
+            "total_ticks": 12587,
+            "busy_ticks": 8544,
+            "busy_fraction": 0.678795582744101
+          },
+          "3": {
+            "total_ticks": 12590,
+            "busy_ticks": 8545,
+            "busy_fraction": 0.6787132644956314
+          },
+          "4": {
+            "total_ticks": 12746,
+            "busy_ticks": 4470,
+            "busy_fraction": 0.35069825827710654
+          },
+          "5": {
+            "total_ticks": 12547,
+            "busy_ticks": 7068,
+            "busy_fraction": 0.5633219096198294
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 136,
+        "memory_available_kb_start": 12298904,
+        "memory_available_kb_end": 10277776,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 1902132,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-1902132/harness"
+          },
+          "tile-a": {
+            "pid": 1902323,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1902132/servers"
+          },
+          "tile-b": {
+            "pid": 1902374,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1902132/servers"
+          },
+          "tile-c": {
+            "pid": 1902445,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1902132/servers"
+          },
+          "tile-d": {
+            "pid": 1902502,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1902132/servers"
+          },
+          "proxy": {
+            "pid": 1902564,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1902132/servers"
+          },
+          "store": {
+            "pid": 1902312,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1902132/servers"
+          },
+          "sidecar-0": {
+            "pid": 1902555,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1902132/servers"
+          },
+          "sidecar-1": {
+            "pid": 1902557,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1902132/servers"
+          },
+          "sidecar-2": {
+            "pid": 1902559,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1902132/servers"
+          },
+          "sidecar-3": {
+            "pid": 1902561,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1902132/servers"
+          },
+          "bots-a": {
+            "pid": 1902599,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1902132/bots"
+          },
+          "bots-b": {
+            "pid": 1902600,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1902132/bots"
+          },
+          "bots-c": {
+            "pid": 1902601,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1902132/bots"
+          },
+          "bots-d": {
+            "pid": 1902602,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1902132/bots"
+          },
+          "bots-cross": {
+            "pid": 1902603,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1902132/bots"
+          },
+          "bots-witness-a": {
+            "pid": 1902604,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1902132/bots"
+          },
+          "bots-witness-b": {
+            "pid": 1902605,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1902132/bots"
+          },
+          "bots-witness-c": {
+            "pid": 1902606,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1902132/bots"
+          },
+          "bots-witness-d": {
+            "pid": 1902607,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1902132/bots"
+          }
+        }
+      }
+    },
+    {
+      "name": "e28-latency-pin-via-r0",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e25-latency-cell-r2",
+        "--name",
+        "e28-latency-pin-via-r0",
+        "--bins",
+        ".local/bin/goliath-e28/final-stamps",
+        "--data-dir",
+        "docs/experiments/data/E28/latency",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "pin",
+        "--plan",
+        "docs/experiments/data/E28/latency/e28-latency-plan-r1.json",
+        "--stop-brackets"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:12:10.545303+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:15:19.574432+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/latency/e28-latency-pin-via-r0-summary.json.gz",
+        "decompressed_sha256": "0c862eda344f7ed4ca56cbe80883cf55bc50d424269635f6f19d166d3add90a4",
+        "stored_sha256": "d30e354740864fbe54af178b98a321647d3b4f553d3b5093b3c84d20caf13fe8",
+        "bytes": 1631803
+      },
+      "status": "complete",
+      "d9_valid": false,
+      "qualified_bound_pass": false,
+      "overall": {
+        "sends": 9864,
+        "matched": 9864,
+        "unmatched_or_ambiguous": 0,
+        "p95_rank": 9371,
+        "p95_ns": 4371403,
+        "p95_is_infinite": false,
+        "below_five_ms": true,
+        "finite_maximum_ns": 37659847,
+        "p50_rank": 4932,
+        "p50_ns": 121056,
+        "p50_is_infinite": false,
+        "p99_rank": 9766,
+        "p99_ns": 10112082,
+        "p99_is_infinite": false
+      },
+      "proxy": {
+        "cpu_s": 0.7452140319841921,
+        "user_s": 0.39142391362164897,
+        "system_s": 0.353790118362543,
+        "unix_syscalls": null,
+        "context_switches": 26075.337454054792,
+        "unavailable": [
+          "unix_syscalls",
+          "mach_syscalls",
+          "pageins",
+          "cow"
+        ],
+        "cores": 0.7452140319841921,
+        "cores_per_player": 0.0017534447811392755,
+        "threads_min": 872,
+        "threads_max": 877,
+        "threads_increment_per_player": 2.023529411764706,
+        "rss_mb_max": 311.07421875
+      },
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12957,
+            "busy_ticks": 9461,
+            "busy_fraction": 0.7301844562784595
+          },
+          "1": {
+            "total_ticks": 12943,
+            "busy_ticks": 9438,
+            "busy_fraction": 0.7291972494784825
+          },
+          "2": {
+            "total_ticks": 12959,
+            "busy_ticks": 9366,
+            "busy_fraction": 0.7227409522339687
+          },
+          "3": {
+            "total_ticks": 12957,
+            "busy_ticks": 9448,
+            "busy_fraction": 0.7291811376090145
+          },
+          "4": {
+            "total_ticks": 13048,
+            "busy_ticks": 5031,
+            "busy_fraction": 0.38557633353770693
+          },
+          "5": {
+            "total_ticks": 12946,
+            "busy_ticks": 12257,
+            "busy_fraction": 0.9467789278541634
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 8513,
+        "memory_available_kb_start": 12075340,
+        "memory_available_kb_end": 9604260,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 1913017,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-1913017/harness"
+          },
+          "tile-a": {
+            "pid": 1913454,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1913017/servers"
+          },
+          "tile-b": {
+            "pid": 1913506,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1913017/servers"
+          },
+          "tile-c": {
+            "pid": 1913556,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1913017/servers"
+          },
+          "tile-d": {
+            "pid": 1913607,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1913017/servers"
+          },
+          "proxy": {
+            "pid": 1913740,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1913017/servers"
+          },
+          "store": {
+            "pid": 1913449,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1913017/servers"
+          },
+          "sidecar-0": {
+            "pid": 1913727,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1913017/servers"
+          },
+          "sidecar-1": {
+            "pid": 1913729,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1913017/servers"
+          },
+          "sidecar-2": {
+            "pid": 1913732,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1913017/servers"
+          },
+          "sidecar-3": {
+            "pid": 1913734,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1913017/servers"
+          },
+          "bots-a": {
+            "pid": 1913798,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1913017/bots"
+          },
+          "bots-b": {
+            "pid": 1913799,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1913017/bots"
+          },
+          "bots-c": {
+            "pid": 1913800,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1913017/bots"
+          },
+          "bots-d": {
+            "pid": 1913802,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1913017/bots"
+          },
+          "bots-cross": {
+            "pid": 1913803,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1913017/bots"
+          },
+          "bots-witness-a": {
+            "pid": 1913805,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1913017/bots"
+          },
+          "bots-witness-b": {
+            "pid": 1913806,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1913017/bots"
+          },
+          "bots-witness-c": {
+            "pid": 1913808,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1913017/bots"
+          },
+          "bots-witness-d": {
+            "pid": 1913810,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1913017/bots"
+          }
+        }
+      }
+    },
+    {
+      "name": "e28-latency-limiter-via-r0",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e25-latency-cell-r2",
+        "--name",
+        "e28-latency-limiter-via-r0",
+        "--bins",
+        ".local/bin/goliath-e28/final-stamps",
+        "--data-dir",
+        "docs/experiments/data/E28/latency",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "limiter",
+        "--plan",
+        "docs/experiments/data/E28/latency/e28-latency-plan-r1.json",
+        "--stop-brackets"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:16:11.369614+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:19:50.309050+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/latency/e28-latency-limiter-via-r0-summary.json.gz",
+        "decompressed_sha256": "03579156b7a21368eaca8f33768361e5b07eef3b8035a3d50189edbea9cb4251",
+        "stored_sha256": "88d4d5064f14ab2c32dfce4b9525c83113d04f05a22237632e78341046b7a0dd",
+        "bytes": 1637728
+      },
+      "status": "complete",
+      "d9_valid": true,
+      "qualified_bound_pass": false,
+      "overall": {
+        "sends": 9640,
+        "matched": 9640,
+        "unmatched_or_ambiguous": 0,
+        "p95_rank": 9158,
+        "p95_ns": 6479126,
+        "p95_is_infinite": false,
+        "below_five_ms": false,
+        "finite_maximum_ns": 30771954,
+        "p50_rank": 4820,
+        "p50_ns": 313205,
+        "p50_is_infinite": false,
+        "p99_rank": 9544,
+        "p99_ns": 12038556,
+        "p99_is_infinite": false
+      },
+      "proxy": {
+        "cpu_s": 0.7682562564866863,
+        "user_s": 0.40661651077822025,
+        "system_s": 0.3616397457084661,
+        "unix_syscalls": null,
+        "context_switches": 26358.724450386948,
+        "unavailable": [
+          "unix_syscalls",
+          "mach_syscalls",
+          "pageins",
+          "cow"
+        ],
+        "cores": 0.7682562564866863,
+        "cores_per_player": 0.0018076617799686735,
+        "threads_min": 871,
+        "threads_max": 876,
+        "threads_increment_per_player": 2.021176470588235,
+        "rss_mb_max": 310.328125
+      },
+      "d12": {
+        "cpu_mode": "limiter",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12567,
+            "busy_ticks": 8195,
+            "busy_fraction": 0.6521047187077266
+          },
+          "1": {
+            "total_ticks": 12568,
+            "busy_ticks": 8292,
+            "busy_fraction": 0.6597708465945258
+          },
+          "2": {
+            "total_ticks": 12568,
+            "busy_ticks": 8287,
+            "busy_fraction": 0.6593730108211331
+          },
+          "3": {
+            "total_ticks": 12567,
+            "busy_ticks": 8205,
+            "busy_fraction": 0.6529004535688708
+          },
+          "4": {
+            "total_ticks": 12558,
+            "busy_ticks": 8176,
+            "busy_fraction": 0.6510590858416946
+          },
+          "5": {
+            "total_ticks": 12585,
+            "busy_ticks": 9342,
+            "busy_fraction": 0.7423122765196662
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 1281,
+        "memory_available_kb_start": 12015468,
+        "memory_available_kb_end": 9918912,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 1928478,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-1928478/harness"
+          },
+          "tile-a": {
+            "pid": 1929545,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/servers"
+          },
+          "tile-b": {
+            "pid": 1929674,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/servers"
+          },
+          "tile-c": {
+            "pid": 1929733,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/servers"
+          },
+          "tile-d": {
+            "pid": 1929790,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/servers"
+          },
+          "proxy": {
+            "pid": 1929855,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/servers"
+          },
+          "store": {
+            "pid": 1929540,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/servers"
+          },
+          "sidecar-0": {
+            "pid": 1929846,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/servers"
+          },
+          "sidecar-1": {
+            "pid": 1929848,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/servers"
+          },
+          "sidecar-2": {
+            "pid": 1929850,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/servers"
+          },
+          "sidecar-3": {
+            "pid": 1929852,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/servers"
+          },
+          "bots-a": {
+            "pid": 1929891,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/bots"
+          },
+          "bots-b": {
+            "pid": 1929892,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/bots"
+          },
+          "bots-c": {
+            "pid": 1929893,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/bots"
+          },
+          "bots-d": {
+            "pid": 1929894,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/bots"
+          },
+          "bots-cross": {
+            "pid": 1929895,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/bots"
+          },
+          "bots-witness-a": {
+            "pid": 1929896,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/bots"
+          },
+          "bots-witness-b": {
+            "pid": 1929897,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/bots"
+          },
+          "bots-witness-c": {
+            "pid": 1929898,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/bots"
+          },
+          "bots-witness-d": {
+            "pid": 1929899,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1928478/bots"
+          }
+        }
+      },
+      "cpu5_busy": 0.7423122765196662,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0.2507104742581156,
+          "outside_max_process_cores": 0.16651897670679683
+        },
+        "warmup": {
+          "outside_total_cores": 0.3361863955304949,
+          "outside_max_process_cores": 0.23258366085104432
+        },
+        "steady": {
+          "outside_total_cores": 0.48727857705376204,
+          "outside_max_process_cores": 0.19662987680361466
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.3868412371411379,
+          "outside_max_process_cores": 0.19849186788990744
+        }
+      },
+      "host_noise_retry_eligible": false
+    },
+    {
+      "name": "e28-latency-limiter-direct-r0",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e25-latency-cell-r2",
+        "--name",
+        "e28-latency-limiter-direct-r0",
+        "--bins",
+        ".local/bin/goliath-e28/final-stamps",
+        "--data-dir",
+        "docs/experiments/data/E28/latency",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "limiter",
+        "--plan",
+        "docs/experiments/data/E28/latency/e28-latency-plan-r1.json",
+        "--stop-brackets",
+        "--direct-reference"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:20:29.917500+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:22:59.790081+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/latency/e28-latency-limiter-direct-r0-summary.json.gz",
+        "decompressed_sha256": "5425f7ab8b80f12c9c2a01cee38173a32257b4065007d00befe54a55c497e833",
+        "stored_sha256": "83c6a1ee0507a90268752a60fbe1576fd43ab991a254420d45ae9b917fda9b1c",
+        "bytes": 1662364
+      },
+      "status": "complete",
+      "d9_valid": true,
+      "qualified_bound_pass": true,
+      "overall": {
+        "sends": 9638,
+        "matched": 9638,
+        "unmatched_or_ambiguous": 0,
+        "p95_rank": 9157,
+        "p95_ns": 1774439,
+        "p95_is_infinite": false,
+        "below_five_ms": true,
+        "finite_maximum_ns": 6654504,
+        "p50_rank": 4819,
+        "p50_ns": 135669,
+        "p50_is_infinite": false,
+        "p99_rank": 9542,
+        "p99_ns": 3390582,
+        "p99_is_infinite": false
+      },
+      "proxy": {
+        "cpu_s": 0.7389856719603837,
+        "user_s": 0.3875938333383225,
+        "system_s": 0.3513918386220611,
+        "unix_syscalls": null,
+        "context_switches": 25708.497812941612,
+        "unavailable": [
+          "unix_syscalls",
+          "mach_syscalls",
+          "pageins",
+          "cow"
+        ],
+        "cores": 0.7389856719603837,
+        "cores_per_player": 0.0017387898163773734,
+        "threads_min": 856,
+        "threads_max": 861,
+        "threads_increment_per_player": 1.9858823529411764,
+        "rss_mb_max": 305.8515625
+      },
+      "d12": {
+        "cpu_mode": "limiter",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12642,
+            "busy_ticks": 7964,
+            "busy_fraction": 0.6299636133523177
+          },
+          "1": {
+            "total_ticks": 12649,
+            "busy_ticks": 8176,
+            "busy_fraction": 0.6463752075262866
+          },
+          "2": {
+            "total_ticks": 12642,
+            "busy_ticks": 7991,
+            "busy_fraction": 0.6320993513684544
+          },
+          "3": {
+            "total_ticks": 12644,
+            "busy_ticks": 8050,
+            "busy_fraction": 0.6366656121480544
+          },
+          "4": {
+            "total_ticks": 12641,
+            "busy_ticks": 8163,
+            "busy_fraction": 0.6457558737441658
+          },
+          "5": {
+            "total_ticks": 12602,
+            "busy_ticks": 8522,
+            "busy_fraction": 0.6762418663704174
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 13306,
+        "memory_available_kb_start": 11703504,
+        "memory_available_kb_end": 10122788,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 1941484,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-1941484/harness"
+          },
+          "tile-a": {
+            "pid": 1941781,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/servers"
+          },
+          "tile-b": {
+            "pid": 1941840,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/servers"
+          },
+          "tile-c": {
+            "pid": 1941892,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/servers"
+          },
+          "tile-d": {
+            "pid": 1941984,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/servers"
+          },
+          "proxy": {
+            "pid": 1942073,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/servers"
+          },
+          "store": {
+            "pid": 1941776,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/servers"
+          },
+          "sidecar-0": {
+            "pid": 1942064,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/servers"
+          },
+          "sidecar-1": {
+            "pid": 1942066,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/servers"
+          },
+          "sidecar-2": {
+            "pid": 1942068,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/servers"
+          },
+          "sidecar-3": {
+            "pid": 1942070,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/servers"
+          },
+          "bots-a": {
+            "pid": 1942109,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/bots"
+          },
+          "bots-b": {
+            "pid": 1942110,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/bots"
+          },
+          "bots-c": {
+            "pid": 1942111,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/bots"
+          },
+          "bots-d": {
+            "pid": 1942112,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/bots"
+          },
+          "bots-cross": {
+            "pid": 1942113,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/bots"
+          },
+          "bots-witness-a": {
+            "pid": 1942114,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/bots"
+          },
+          "bots-witness-b": {
+            "pid": 1942115,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/bots"
+          },
+          "bots-witness-c": {
+            "pid": 1942116,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/bots"
+          },
+          "bots-witness-d": {
+            "pid": 1942117,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1941484/bots"
+          }
+        }
+      },
+      "cpu5_busy": 0.6762418663704174,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0.30829906713252175,
+          "outside_max_process_cores": 0.18002186734066142
+        },
+        "warmup": {
+          "outside_total_cores": 0.3424612021103759,
+          "outside_max_process_cores": 0.2068913630649842
+        },
+        "steady": {
+          "outside_total_cores": 0.29363833749547896,
+          "outside_max_process_cores": 0.1798224635817538
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.3104540147198973,
+          "outside_max_process_cores": 0.187125130947654
+        }
+      },
+      "host_noise_retry_eligible": false
+    },
+    {
+      "name": "e28-latency-limiter-via-r1",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e25-latency-cell-r2",
+        "--name",
+        "e28-latency-limiter-via-r1",
+        "--bins",
+        ".local/bin/goliath-e28/final-stamps",
+        "--data-dir",
+        "docs/experiments/data/E28/latency",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "limiter",
+        "--plan",
+        "docs/experiments/data/E28/latency/e28-latency-plan-r1.json",
+        "--stop-brackets"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:23:12.455159+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:26:54.033136+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/latency/e28-latency-limiter-via-r1-summary.json.gz",
+        "decompressed_sha256": "d33e891217e8f71d7945fa7ee51ee934d3ad314673cf2d219c32ecc3e1528e06",
+        "stored_sha256": "ae7b35bf7a348c455d68db8e997f324ee55b7700ffe4a4d56acfa2068d19ad12",
+        "bytes": 1641153
+      },
+      "status": "complete",
+      "d9_valid": true,
+      "qualified_bound_pass": true,
+      "overall": {
+        "sends": 9694,
+        "matched": 9694,
+        "unmatched_or_ambiguous": 0,
+        "p95_rank": 9210,
+        "p95_ns": 2814577,
+        "p95_is_infinite": false,
+        "below_five_ms": true,
+        "finite_maximum_ns": 22387372,
+        "p50_rank": 4847,
+        "p50_ns": 123545,
+        "p50_is_infinite": false,
+        "p99_rank": 9598,
+        "p99_ns": 6141405,
+        "p99_is_infinite": false
+      },
+      "proxy": {
+        "cpu_s": 0.7849020036987594,
+        "user_s": 0.4104472825399908,
+        "system_s": 0.37445472115876866,
+        "unix_syscalls": null,
+        "context_switches": 26546.77593649952,
+        "unavailable": [
+          "unix_syscalls",
+          "mach_syscalls",
+          "pageins",
+          "cow"
+        ],
+        "cores": 0.7849020036987594,
+        "cores_per_player": 0.001846828243997081,
+        "threads_min": 872,
+        "threads_max": 876,
+        "threads_increment_per_player": 2.021176470588235,
+        "rss_mb_max": 311.046875
+      },
+      "d12": {
+        "cpu_mode": "limiter",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12671,
+            "busy_ticks": 8371,
+            "busy_fraction": 0.6606424118064873
+          },
+          "1": {
+            "total_ticks": 12672,
+            "busy_ticks": 8344,
+            "busy_fraction": 0.6584595959595959
+          },
+          "2": {
+            "total_ticks": 12683,
+            "busy_ticks": 8204,
+            "busy_fraction": 0.6468501143262635
+          },
+          "3": {
+            "total_ticks": 12683,
+            "busy_ticks": 8290,
+            "busy_fraction": 0.6536308444374359
+          },
+          "4": {
+            "total_ticks": 12672,
+            "busy_ticks": 8328,
+            "busy_fraction": 0.6571969696969697
+          },
+          "5": {
+            "total_ticks": 12631,
+            "busy_ticks": 9131,
+            "busy_fraction": 0.7229039664317948
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 816,
+        "memory_available_kb_start": 11775060,
+        "memory_available_kb_end": 9843020,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 1952332,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-1952332/harness"
+          },
+          "tile-a": {
+            "pid": 1953849,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/servers"
+          },
+          "tile-b": {
+            "pid": 1953908,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/servers"
+          },
+          "tile-c": {
+            "pid": 1953970,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/servers"
+          },
+          "tile-d": {
+            "pid": 1954024,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/servers"
+          },
+          "proxy": {
+            "pid": 1954100,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/servers"
+          },
+          "store": {
+            "pid": 1953843,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/servers"
+          },
+          "sidecar-0": {
+            "pid": 1954091,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/servers"
+          },
+          "sidecar-1": {
+            "pid": 1954093,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/servers"
+          },
+          "sidecar-2": {
+            "pid": 1954095,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/servers"
+          },
+          "sidecar-3": {
+            "pid": 1954097,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/servers"
+          },
+          "bots-a": {
+            "pid": 1954136,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/bots"
+          },
+          "bots-b": {
+            "pid": 1954137,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/bots"
+          },
+          "bots-c": {
+            "pid": 1954138,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/bots"
+          },
+          "bots-d": {
+            "pid": 1954139,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/bots"
+          },
+          "bots-cross": {
+            "pid": 1954140,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/bots"
+          },
+          "bots-witness-a": {
+            "pid": 1954141,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/bots"
+          },
+          "bots-witness-b": {
+            "pid": 1954142,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/bots"
+          },
+          "bots-witness-c": {
+            "pid": 1954143,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/bots"
+          },
+          "bots-witness-d": {
+            "pid": 1954144,
+            "cpus_allowed_list": "0-4",
+            "cgroup": "/goliath-e28-1952332/bots"
+          }
+        }
+      },
+      "cpu5_busy": 0.7229039664317948,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0.2765221190742875,
+          "outside_max_process_cores": 0.14306071557930902
+        },
+        "warmup": {
+          "outside_total_cores": 0.3169507360559311,
+          "outside_max_process_cores": 0.16858449094152525
+        },
+        "steady": {
+          "outside_total_cores": 0.40348848559206885,
+          "outside_max_process_cores": 0.1887099743666947
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.3482507727174184,
+          "outside_max_process_cores": 0.17176169333119712
+        }
+      },
+      "host_noise_retry_eligible": false
+    },
+    {
+      "name": "e28-latency-pin-via-r1",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e25-latency-cell-r2",
+        "--name",
+        "e28-latency-pin-via-r1",
+        "--bins",
+        ".local/bin/goliath-e28/final-stamps",
+        "--data-dir",
+        "docs/experiments/data/E28/latency",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "pin",
+        "--plan",
+        "docs/experiments/data/E28/latency/e28-latency-plan-r1.json",
+        "--stop-brackets"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:27:08.755826+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:30:34.833064+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/latency/e28-latency-pin-via-r1-summary.json.gz",
+        "decompressed_sha256": "d8a54a0627b12868651f24cf584e8ea1b85bbf7877d6d4994cd8f51caf837088",
+        "stored_sha256": "f0fac5789591a696fb300762fd01a40f41649906d65d4d79d1396568ca4c8dc8",
+        "bytes": 1709624
+      },
+      "status": "complete",
+      "d9_valid": true,
+      "qualified_bound_pass": true,
+      "overall": {
+        "sends": 9666,
+        "matched": 9666,
+        "unmatched_or_ambiguous": 0,
+        "p95_rank": 9183,
+        "p95_ns": 4313780,
+        "p95_is_infinite": false,
+        "below_five_ms": true,
+        "finite_maximum_ns": 37538359,
+        "p50_rank": 4833,
+        "p50_ns": 579682,
+        "p50_is_infinite": false,
+        "p99_rank": 9570,
+        "p99_ns": 9298967,
+        "p99_is_infinite": false
+      },
+      "proxy": {
+        "cpu_s": 0.716178177712356,
+        "user_s": 0.373809266047184,
+        "system_s": 0.342368911665172,
+        "unix_syscalls": null,
+        "context_switches": 26105.240646928327,
+        "unavailable": [
+          "unix_syscalls",
+          "mach_syscalls",
+          "pageins",
+          "cow"
+        ],
+        "cores": 0.716178177712356,
+        "cores_per_player": 0.001685125124029073,
+        "threads_min": 871,
+        "threads_max": 877,
+        "threads_increment_per_player": 2.023529411764706,
+        "rss_mb_max": 311.47265625
+      },
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12766,
+            "busy_ticks": 8973,
+            "busy_fraction": 0.7028826570578098
+          },
+          "1": {
+            "total_ticks": 12767,
+            "busy_ticks": 8956,
+            "busy_fraction": 0.7014960444897
+          },
+          "2": {
+            "total_ticks": 12756,
+            "busy_ticks": 8964,
+            "busy_fraction": 0.702728127939793
+          },
+          "3": {
+            "total_ticks": 12765,
+            "busy_ticks": 8928,
+            "busy_fraction": 0.6994124559341951
+          },
+          "4": {
+            "total_ticks": 12875,
+            "busy_ticks": 4530,
+            "busy_fraction": 0.35184466019417476
+          },
+          "5": {
+            "total_ticks": 12689,
+            "busy_ticks": 6885,
+            "busy_fraction": 0.5425959492473796
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 466,
+        "memory_available_kb_start": 11811024,
+        "memory_available_kb_end": 10161264,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 1964992,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-1964992/harness"
+          },
+          "tile-a": {
+            "pid": 1966067,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1964992/servers"
+          },
+          "tile-b": {
+            "pid": 1966189,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1964992/servers"
+          },
+          "tile-c": {
+            "pid": 1966315,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1964992/servers"
+          },
+          "tile-d": {
+            "pid": 1966463,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1964992/servers"
+          },
+          "proxy": {
+            "pid": 1966537,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1964992/servers"
+          },
+          "store": {
+            "pid": 1966060,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1964992/servers"
+          },
+          "sidecar-0": {
+            "pid": 1966528,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1964992/servers"
+          },
+          "sidecar-1": {
+            "pid": 1966530,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1964992/servers"
+          },
+          "sidecar-2": {
+            "pid": 1966532,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1964992/servers"
+          },
+          "sidecar-3": {
+            "pid": 1966534,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1964992/servers"
+          },
+          "bots-a": {
+            "pid": 1966573,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1964992/bots"
+          },
+          "bots-b": {
+            "pid": 1966574,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1964992/bots"
+          },
+          "bots-c": {
+            "pid": 1966575,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1964992/bots"
+          },
+          "bots-d": {
+            "pid": 1966576,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1964992/bots"
+          },
+          "bots-cross": {
+            "pid": 1966577,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1964992/bots"
+          },
+          "bots-witness-a": {
+            "pid": 1966578,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1964992/bots"
+          },
+          "bots-witness-b": {
+            "pid": 1966579,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1964992/bots"
+          },
+          "bots-witness-c": {
+            "pid": 1966580,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1964992/bots"
+          },
+          "bots-witness-d": {
+            "pid": 1966581,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1964992/bots"
+          }
+        }
+      },
+      "cpu5_busy": 0.5425959492473796,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0.17813279930955056,
+          "outside_max_process_cores": 0.09798869276605764
+        },
+        "warmup": {
+          "outside_total_cores": 0.26460546390884737,
+          "outside_max_process_cores": 0.0838012965958119
+        },
+        "steady": {
+          "outside_total_cores": 0.15271982799627268,
+          "outside_max_process_cores": 0.042248649940837095
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.18962970499728818,
+          "outside_max_process_cores": 0.06754578748249172
+        }
+      },
+      "host_noise_retry_eligible": false
+    },
+    {
+      "name": "e28-lite-clock-r0",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e26-clock-run",
+        "--name",
+        "e28-lite-clock-r0",
+        "--bins",
+        ".local/bin/goliath-e28/final-lite",
+        "--data-dir",
+        "docs/experiments/data/E28/lite",
+        "--cpu-mode",
+        "pin"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:31:05.097660+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:31:41.007511+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/lite/e28-lite-clock-r0.json",
+        "decompressed_sha256": "69b8e18a1e99d3474cb746234d637f242f727a2502724840d11fd4e0420ac999",
+        "stored_sha256": "69b8e18a1e99d3474cb746234d637f242f727a2502724840d11fd4e0420ac999",
+        "bytes": 47047
+      },
+      "status": "complete",
+      "noise_valid": true,
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 216,
+            "busy_ticks": 203,
+            "busy_fraction": 0.9398148148148148
+          },
+          "1": {
+            "total_ticks": 216,
+            "busy_ticks": 0,
+            "busy_fraction": 0.0
+          },
+          "2": {
+            "total_ticks": 215,
+            "busy_ticks": 0,
+            "busy_fraction": 0.0
+          },
+          "3": {
+            "total_ticks": 216,
+            "busy_ticks": 0,
+            "busy_fraction": 0.0
+          },
+          "4": {
+            "total_ticks": 216,
+            "busy_ticks": 0,
+            "busy_fraction": 0.0
+          },
+          "5": {
+            "total_ticks": 215,
+            "busy_ticks": 16,
+            "busy_fraction": 0.07441860465116279
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 0,
+        "memory_available_kb_start": 11974764,
+        "memory_available_kb_end": 11985400,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 1977916,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-1977916/harness"
+          }
+        }
+      },
+      "cpu5_busy": 0.07441860465116279,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0,
+          "outside_max_process_cores": 0
+        },
+        "warmup": {
+          "outside_total_cores": 0,
+          "outside_max_process_cores": 0
+        },
+        "steady": {
+          "outside_total_cores": 0.019072957411552408,
+          "outside_max_process_cores": 0.009536478705721996
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.018500538782012525,
+          "outside_max_process_cores": 0.009250269390953681
+        }
+      },
+      "host_noise_retry_eligible": false
+    },
+    {
+      "name": "e28-lite-a1",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e26-lite-cell",
+        "--name",
+        "e28-lite-a1",
+        "--arm",
+        "A",
+        "--bins",
+        ".local/bin/goliath-e28/final",
+        "--data-dir",
+        "docs/experiments/data/E28/lite",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "pin"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:32:05.106057+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:34:17.289215+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/lite/e28-lite-a1.json.gz",
+        "decompressed_sha256": "434e2089d23012e90fad750edc2fc5ccc428a1a893bd0a1aec663b035c6c90f8",
+        "stored_sha256": "49fd580ea417fa4bb24a4b358d5633a7f8103d3ca4a3a232cdf02b9d0c5ebf25",
+        "bytes": 4276309
+      },
+      "status": "complete",
+      "noise_valid": true,
+      "capacity_pass": true,
+      "failures": [],
+      "selected": "b",
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12369,
+            "busy_ticks": 8394,
+            "busy_fraction": 0.6786320640310454
+          },
+          "1": {
+            "total_ticks": 12369,
+            "busy_ticks": 8483,
+            "busy_fraction": 0.6858274719055704
+          },
+          "2": {
+            "total_ticks": 12389,
+            "busy_ticks": 8402,
+            "busy_fraction": 0.6781822584550811
+          },
+          "3": {
+            "total_ticks": 12374,
+            "busy_ticks": 8294,
+            "busy_fraction": 0.6702763859705835
+          },
+          "4": {
+            "total_ticks": 12542,
+            "busy_ticks": 4214,
+            "busy_fraction": 0.3359910700047839
+          },
+          "5": {
+            "total_ticks": 12391,
+            "busy_ticks": 7119,
+            "busy_fraction": 0.574529900734404
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 262,
+        "memory_available_kb_start": 11843480,
+        "memory_available_kb_end": 10136072,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 1980957,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-1980957/harness"
+          },
+          "tile-a": {
+            "pid": 1981110,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1980957/servers"
+          },
+          "tile-b": {
+            "pid": 1981232,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1980957/servers"
+          },
+          "tile-c": {
+            "pid": 1981311,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1980957/servers"
+          },
+          "tile-d": {
+            "pid": 1981361,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1980957/servers"
+          },
+          "proxy": {
+            "pid": 1981426,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1980957/servers"
+          },
+          "store": {
+            "pid": 1981105,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1980957/servers"
+          },
+          "sidecar-0": {
+            "pid": 1981417,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1980957/servers"
+          },
+          "sidecar-1": {
+            "pid": 1981419,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1980957/servers"
+          },
+          "sidecar-2": {
+            "pid": 1981421,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1980957/servers"
+          },
+          "sidecar-3": {
+            "pid": 1981423,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1980957/servers"
+          },
+          "bots-a": {
+            "pid": 1981461,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1980957/bots"
+          },
+          "bots-b": {
+            "pid": 1981462,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1980957/bots"
+          },
+          "bots-c": {
+            "pid": 1981463,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1980957/bots"
+          },
+          "bots-d": {
+            "pid": 1981464,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1980957/bots"
+          },
+          "bots-cross": {
+            "pid": 1981465,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1980957/bots"
+          }
+        }
+      },
+      "cpu5_busy": 0.574529900734404,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0.2891265319079689,
+          "outside_max_process_cores": 0.12300558594331004
+        },
+        "warmup": {
+          "outside_total_cores": 0.2855509485477102,
+          "outside_max_process_cores": 0.18862925172596112
+        },
+        "steady": {
+          "outside_total_cores": 0.22039493543132554,
+          "outside_max_process_cores": 0.10091768096063183
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.2548734894340425,
+          "outside_max_process_cores": 0.1294850504152754
+        }
+      },
+      "host_noise_retry_eligible": false
+    },
+    {
+      "name": "e28-lite-b1",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e26b-final-lite-cell",
+        "--name",
+        "e28-lite-b1",
+        "--arm",
+        "B",
+        "--bins",
+        ".local/bin/goliath-e28/final-lite",
+        "--data-dir",
+        "docs/experiments/data/E28/lite",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "pin"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:34:28.733368+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:37:49.839894+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/lite/e28-lite-b1.json.gz",
+        "decompressed_sha256": "69a7f95892fdc28bab609d660145edc2330b812ec125898af9fe10d70337d107",
+        "stored_sha256": "d8466275e32b270ba06ad59a3bce24ebd646accb3dddc071cd5e0c4f1bac7c7f",
+        "bytes": 4637959
+      },
+      "status": "complete",
+      "noise_valid": true,
+      "capacity_pass": true,
+      "failures": [],
+      "selected": "a",
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12657,
+            "busy_ticks": 8670,
+            "busy_fraction": 0.6849964446551315
+          },
+          "1": {
+            "total_ticks": 12666,
+            "busy_ticks": 8659,
+            "busy_fraction": 0.6836412442760146
+          },
+          "2": {
+            "total_ticks": 12661,
+            "busy_ticks": 8624,
+            "busy_fraction": 0.6811468288444831
+          },
+          "3": {
+            "total_ticks": 12677,
+            "busy_ticks": 8609,
+            "busy_fraction": 0.6791038889327128
+          },
+          "4": {
+            "total_ticks": 12786,
+            "busy_ticks": 4212,
+            "busy_fraction": 0.329422806194275
+          },
+          "5": {
+            "total_ticks": 12545,
+            "busy_ticks": 5651,
+            "busy_fraction": 0.4504583499402152
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 708,
+        "memory_available_kb_start": 11986792,
+        "memory_available_kb_end": 10186712,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 1991412,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-1991412/harness"
+          },
+          "tile-a": {
+            "pid": 1992741,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1991412/servers"
+          },
+          "tile-b": {
+            "pid": 1992792,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1991412/servers"
+          },
+          "tile-c": {
+            "pid": 1992842,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1991412/servers"
+          },
+          "tile-d": {
+            "pid": 1992892,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1991412/servers"
+          },
+          "proxy": {
+            "pid": 1992954,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1991412/servers"
+          },
+          "store": {
+            "pid": 1992736,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1991412/servers"
+          },
+          "sidecar-0": {
+            "pid": 1992945,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1991412/servers"
+          },
+          "sidecar-1": {
+            "pid": 1992947,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1991412/servers"
+          },
+          "sidecar-2": {
+            "pid": 1992949,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1991412/servers"
+          },
+          "sidecar-3": {
+            "pid": 1992951,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-1991412/servers"
+          },
+          "bots-a": {
+            "pid": 1992989,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1991412/bots"
+          },
+          "bots-b": {
+            "pid": 1992990,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1991412/bots"
+          },
+          "bots-c": {
+            "pid": 1992991,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1991412/bots"
+          },
+          "bots-d": {
+            "pid": 1992992,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1991412/bots"
+          },
+          "bots-cross": {
+            "pid": 1992993,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-1991412/bots"
+          }
+        }
+      },
+      "cpu5_busy": 0.4504583499402152,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0.1285377650897865,
+          "outside_max_process_cores": 0.049510842849339556
+        },
+        "warmup": {
+          "outside_total_cores": 0.22859549383367564,
+          "outside_max_process_cores": 0.1257710912707015
+        },
+        "steady": {
+          "outside_total_cores": 0.1363774511553184,
+          "outside_max_process_cores": 0.04343021363691394
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.15948164118868882,
+          "outside_max_process_cores": 0.06731214247104103
+        }
+      },
+      "host_noise_retry_eligible": false
+    },
+    {
+      "name": "e28-lite-a2",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e26-lite-cell",
+        "--name",
+        "e28-lite-a2",
+        "--arm",
+        "A",
+        "--bins",
+        ".local/bin/goliath-e28/final",
+        "--data-dir",
+        "docs/experiments/data/E28/lite",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "pin"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:37:59.248234+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:41:23.217855+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/lite/e28-lite-a2.json.gz",
+        "decompressed_sha256": "a3868436131695f68030a27328355b40138fac60e7c7f8e4a7d8bb3377079a02",
+        "stored_sha256": "33ea62bcf6e2a9811130073d49cbd78e60a01b23def724bddb6c536bd7fe48a9",
+        "bytes": 4333188
+      },
+      "status": "complete",
+      "noise_valid": true,
+      "capacity_pass": true,
+      "failures": [],
+      "selected": "b",
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12468,
+            "busy_ticks": 8292,
+            "busy_fraction": 0.6650625601539942
+          },
+          "1": {
+            "total_ticks": 12466,
+            "busy_ticks": 8306,
+            "busy_fraction": 0.666292315097064
+          },
+          "2": {
+            "total_ticks": 12471,
+            "busy_ticks": 8210,
+            "busy_fraction": 0.6583273193809638
+          },
+          "3": {
+            "total_ticks": 12460,
+            "busy_ticks": 8327,
+            "busy_fraction": 0.6682985553772071
+          },
+          "4": {
+            "total_ticks": 12580,
+            "busy_ticks": 4005,
+            "busy_fraction": 0.318362480127186
+          },
+          "5": {
+            "total_ticks": 12473,
+            "busy_ticks": 5598,
+            "busy_fraction": 0.448809428365269
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 80,
+        "memory_available_kb_start": 12015436,
+        "memory_available_kb_end": 10252536,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 2003078,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-2003078/harness"
+          },
+          "tile-a": {
+            "pid": 2004124,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2003078/servers"
+          },
+          "tile-b": {
+            "pid": 2004177,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2003078/servers"
+          },
+          "tile-c": {
+            "pid": 2004229,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2003078/servers"
+          },
+          "tile-d": {
+            "pid": 2004279,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2003078/servers"
+          },
+          "proxy": {
+            "pid": 2004406,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2003078/servers"
+          },
+          "store": {
+            "pid": 2004119,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2003078/servers"
+          },
+          "sidecar-0": {
+            "pid": 2004390,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2003078/servers"
+          },
+          "sidecar-1": {
+            "pid": 2004392,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2003078/servers"
+          },
+          "sidecar-2": {
+            "pid": 2004394,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2003078/servers"
+          },
+          "sidecar-3": {
+            "pid": 2004397,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2003078/servers"
+          },
+          "bots-a": {
+            "pid": 2004462,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2003078/bots"
+          },
+          "bots-b": {
+            "pid": 2004463,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2003078/bots"
+          },
+          "bots-c": {
+            "pid": 2004465,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2003078/bots"
+          },
+          "bots-d": {
+            "pid": 2004467,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2003078/bots"
+          },
+          "bots-cross": {
+            "pid": 2004468,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2003078/bots"
+          }
+        }
+      },
+      "cpu5_busy": 0.448809428365269,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0.18385092500601516,
+          "outside_max_process_cores": 0.11475049230815598
+        },
+        "warmup": {
+          "outside_total_cores": 0.06998678603561302,
+          "outside_max_process_cores": 0.008862955436833964
+        },
+        "steady": {
+          "outside_total_cores": 0.1392714971906594,
+          "outside_max_process_cores": 0.06541289107054367
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.1325461077204091,
+          "outside_max_process_cores": 0.062275885352349326
+        }
+      },
+      "host_noise_retry_eligible": false
+    },
+    {
+      "name": "e28-lite-a3",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e26-lite-cell",
+        "--name",
+        "e28-lite-a3",
+        "--arm",
+        "A",
+        "--bins",
+        ".local/bin/goliath-e28/final",
+        "--data-dir",
+        "docs/experiments/data/E28/lite",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "pin"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:41:30.485095+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:44:52.176279+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/lite/e28-lite-a3.json.gz",
+        "decompressed_sha256": "9f6ebf1c57d0828ae6c6a906992d4fe24179914690a5ba89b752aaa38bb2ff42",
+        "stored_sha256": "1d9ff1cecc13b168f8411ee11932ae6e8106b5f48990b34d80682530f377cf6e",
+        "bytes": 4301116
+      },
+      "status": "complete",
+      "noise_valid": true,
+      "capacity_pass": true,
+      "failures": [],
+      "selected": "b",
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12401,
+            "busy_ticks": 8263,
+            "busy_fraction": 0.6663172324812515
+          },
+          "1": {
+            "total_ticks": 12405,
+            "busy_ticks": 8227,
+            "busy_fraction": 0.6632003224506248
+          },
+          "2": {
+            "total_ticks": 12403,
+            "busy_ticks": 8260,
+            "busy_fraction": 0.6659679109892768
+          },
+          "3": {
+            "total_ticks": 12400,
+            "busy_ticks": 8269,
+            "busy_fraction": 0.6668548387096774
+          },
+          "4": {
+            "total_ticks": 12533,
+            "busy_ticks": 3947,
+            "busy_fraction": 0.3149285885262906
+          },
+          "5": {
+            "total_ticks": 12385,
+            "busy_ticks": 5085,
+            "busy_fraction": 0.41057731126362534
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 3,
+        "memory_available_kb_start": 12094636,
+        "memory_available_kb_end": 10289688,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 2014244,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-2014244/harness"
+          },
+          "tile-a": {
+            "pid": 2014593,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2014244/servers"
+          },
+          "tile-b": {
+            "pid": 2014655,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2014244/servers"
+          },
+          "tile-c": {
+            "pid": 2014705,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2014244/servers"
+          },
+          "tile-d": {
+            "pid": 2014755,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2014244/servers"
+          },
+          "proxy": {
+            "pid": 2014817,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2014244/servers"
+          },
+          "store": {
+            "pid": 2014588,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2014244/servers"
+          },
+          "sidecar-0": {
+            "pid": 2014808,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2014244/servers"
+          },
+          "sidecar-1": {
+            "pid": 2014810,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2014244/servers"
+          },
+          "sidecar-2": {
+            "pid": 2014812,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2014244/servers"
+          },
+          "sidecar-3": {
+            "pid": 2014814,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2014244/servers"
+          },
+          "bots-a": {
+            "pid": 2014852,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2014244/bots"
+          },
+          "bots-b": {
+            "pid": 2014853,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2014244/bots"
+          },
+          "bots-c": {
+            "pid": 2014854,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2014244/bots"
+          },
+          "bots-d": {
+            "pid": 2014855,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2014244/bots"
+          },
+          "bots-cross": {
+            "pid": 2014856,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2014244/bots"
+          }
+        }
+      },
+      "cpu5_busy": 0.41057731126362534,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0.053044911950424184,
+          "outside_max_process_cores": 0.007349596234114269
+        },
+        "warmup": {
+          "outside_total_cores": 0.15252079182606434,
+          "outside_max_process_cores": 0.09809300925910551
+        },
+        "steady": {
+          "outside_total_cores": 0.09190749604597483,
+          "outside_max_process_cores": 0.03179502565913374
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.09798617315727816,
+          "outside_max_process_cores": 0.04186755139011552
+        }
+      },
+      "host_noise_retry_eligible": false
+    },
+    {
+      "name": "e28-lite-b2",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e26b-final-lite-cell",
+        "--name",
+        "e28-lite-b2",
+        "--arm",
+        "B",
+        "--bins",
+        ".local/bin/goliath-e28/final-lite",
+        "--data-dir",
+        "docs/experiments/data/E28/lite",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "pin"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:45:18.391385+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:47:36.945963+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/lite/e28-lite-b2.json.gz",
+        "decompressed_sha256": "3c542d6f5a573a64fcc7e46291185799fe8bc529376ae4ec3759be0c39924e79",
+        "stored_sha256": "4985824b0b84ad0f5bad237f3bdf32568bd8540cedc49657fbe160148468bfc0",
+        "bytes": 4623786
+      },
+      "status": "complete",
+      "noise_valid": true,
+      "capacity_pass": true,
+      "failures": [],
+      "selected": "b",
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12412,
+            "busy_ticks": 8227,
+            "busy_fraction": 0.662826297131808
+          },
+          "1": {
+            "total_ticks": 12418,
+            "busy_ticks": 8332,
+            "busy_fraction": 0.6709615074891286
+          },
+          "2": {
+            "total_ticks": 12413,
+            "busy_ticks": 8204,
+            "busy_fraction": 0.660920003222428
+          },
+          "3": {
+            "total_ticks": 12422,
+            "busy_ticks": 8341,
+            "busy_fraction": 0.6714699726292063
+          },
+          "4": {
+            "total_ticks": 12546,
+            "busy_ticks": 3947,
+            "busy_fraction": 0.3146022636696955
+          },
+          "5": {
+            "total_ticks": 12316,
+            "busy_ticks": 4694,
+            "busy_fraction": 0.3811302370899643
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 6,
+        "memory_available_kb_start": 12081288,
+        "memory_available_kb_end": 10317948,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 2024226,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-2024226/harness"
+          },
+          "tile-a": {
+            "pid": 2024375,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2024226/servers"
+          },
+          "tile-b": {
+            "pid": 2024425,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2024226/servers"
+          },
+          "tile-c": {
+            "pid": 2024475,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2024226/servers"
+          },
+          "tile-d": {
+            "pid": 2024526,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2024226/servers"
+          },
+          "proxy": {
+            "pid": 2024588,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2024226/servers"
+          },
+          "store": {
+            "pid": 2024370,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2024226/servers"
+          },
+          "sidecar-0": {
+            "pid": 2024579,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2024226/servers"
+          },
+          "sidecar-1": {
+            "pid": 2024581,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2024226/servers"
+          },
+          "sidecar-2": {
+            "pid": 2024583,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2024226/servers"
+          },
+          "sidecar-3": {
+            "pid": 2024585,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2024226/servers"
+          },
+          "bots-a": {
+            "pid": 2024623,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2024226/bots"
+          },
+          "bots-b": {
+            "pid": 2024624,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2024226/bots"
+          },
+          "bots-c": {
+            "pid": 2024625,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2024226/bots"
+          },
+          "bots-d": {
+            "pid": 2024626,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2024226/bots"
+          },
+          "bots-cross": {
+            "pid": 2024627,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2024226/bots"
+          }
+        }
+      },
+      "cpu5_busy": 0.3811302370899643,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0.08858308993277898,
+          "outside_max_process_cores": 0.03568815133978966
+        },
+        "warmup": {
+          "outside_total_cores": 0.058108762905555666,
+          "outside_max_process_cores": 0.004636337465869148
+        },
+        "steady": {
+          "outside_total_cores": 0.0787426844148432,
+          "outside_max_process_cores": 0.019685671103686252
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.07585387016288803,
+          "outside_max_process_cores": 0.019245302514780842
+        }
+      },
+      "host_noise_retry_eligible": false
+    },
+    {
+      "name": "e28-lite-a4",
+      "command": [
+        "python3",
+        "-u",
+        "-B",
+        "scripts/e26-lite-cell",
+        "--name",
+        "e28-lite-a4",
+        "--arm",
+        "A",
+        "--bins",
+        ".local/bin/goliath-e28/final",
+        "--data-dir",
+        "docs/experiments/data/E28/lite",
+        "--players",
+        "425",
+        "--cpu-mode",
+        "pin"
+      ],
+      "before": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "started": "2026-11-09T15:47:41.830274+00:00",
+      "prerequisite": "docs/experiments/data/E28/reviewer-frontier/repro-e28-frontier-v3-475-r1.json",
+      "exit": 0,
+      "after": {
+        "slices": {
+          "init.scope": "",
+          "machine.slice": "",
+          "system.slice": "",
+          "user.slice": ""
+        },
+        "governors": {
+          "cpufreq/policy0/scaling_governor": "powersave",
+          "cpufreq/policy1/scaling_governor": "powersave",
+          "cpufreq/policy2/scaling_governor": "powersave",
+          "cpufreq/policy3/scaling_governor": "powersave",
+          "cpufreq/policy4/scaling_governor": "powersave",
+          "cpufreq/policy5/scaling_governor": "powersave"
+        }
+      },
+      "finished": "2026-11-09T15:50:47.368404+00:00",
+      "restored": true,
+      "result": {
+        "path": "docs/experiments/data/E28/lite/e28-lite-a4.json.gz",
+        "decompressed_sha256": "1e73c2890b85dd0c9799974c6e5fc15484942cb4f36707a49c1f7b737665f125",
+        "stored_sha256": "fc2fdf11f1ed89dd70168ab6e83b2f477fd95936127a810cf5f1686bde00c064",
+        "bytes": 4318028
+      },
+      "status": "complete",
+      "noise_valid": true,
+      "capacity_pass": true,
+      "failures": [],
+      "selected": "b",
+      "d12": {
+        "cpu_mode": "pin",
+        "per_cpu": {
+          "0": {
+            "total_ticks": 12455,
+            "busy_ticks": 8353,
+            "busy_fraction": 0.6706543556804496
+          },
+          "1": {
+            "total_ticks": 12438,
+            "busy_ticks": 8364,
+            "busy_fraction": 0.6724553786782441
+          },
+          "2": {
+            "total_ticks": 12453,
+            "busy_ticks": 8404,
+            "busy_fraction": 0.674857464064884
+          },
+          "3": {
+            "total_ticks": 12453,
+            "busy_ticks": 8403,
+            "busy_fraction": 0.6747771621296074
+          },
+          "4": {
+            "total_ticks": 12494,
+            "busy_ticks": 3908,
+            "busy_fraction": 0.31279013926684807
+          },
+          "5": {
+            "total_ticks": 12369,
+            "busy_ticks": 5406,
+            "busy_fraction": 0.4370603929177783
+          }
+        },
+        "throttle_delta": {},
+        "swap_in_pages": 6,
+        "memory_available_kb_start": 12118016,
+        "memory_available_kb_end": 10308748,
+        "valid": true,
+        "reasons": [],
+        "placement": {
+          "observer-and-driver": {
+            "pid": 2033690,
+            "cpus_allowed_list": "5",
+            "cgroup": "/goliath-e28-2033690/harness"
+          },
+          "tile-a": {
+            "pid": 2034032,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2033690/servers"
+          },
+          "tile-b": {
+            "pid": 2034082,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2033690/servers"
+          },
+          "tile-c": {
+            "pid": 2034132,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2033690/servers"
+          },
+          "tile-d": {
+            "pid": 2034182,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2033690/servers"
+          },
+          "proxy": {
+            "pid": 2034244,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2033690/servers"
+          },
+          "store": {
+            "pid": 2034027,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2033690/servers"
+          },
+          "sidecar-0": {
+            "pid": 2034235,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2033690/servers"
+          },
+          "sidecar-1": {
+            "pid": 2034237,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2033690/servers"
+          },
+          "sidecar-2": {
+            "pid": 2034239,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2033690/servers"
+          },
+          "sidecar-3": {
+            "pid": 2034241,
+            "cpus_allowed_list": "0-3",
+            "cgroup": "/goliath-e28-2033690/servers"
+          },
+          "bots-a": {
+            "pid": 2034279,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2033690/bots"
+          },
+          "bots-b": {
+            "pid": 2034280,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2033690/bots"
+          },
+          "bots-c": {
+            "pid": 2034281,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2033690/bots"
+          },
+          "bots-d": {
+            "pid": 2034282,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2033690/bots"
+          },
+          "bots-cross": {
+            "pid": 2034283,
+            "cpus_allowed_list": "4",
+            "cgroup": "/goliath-e28-2033690/bots"
+          }
+        }
+      },
+      "cpu5_busy": 0.4370603929177783,
+      "outside": {
+        "cold_join": {
+          "outside_total_cores": 0.1334363790338113,
+          "outside_max_process_cores": 0.07551795072412344
+        },
+        "warmup": {
+          "outside_total_cores": 0.07285930761669036,
+          "outside_max_process_cores": 0.010759813361109071
+        },
+        "steady": {
+          "outside_total_cores": 0.11010900974070623,
+          "outside_max_process_cores": 0.04060991963449922
+        },
+        "whole_cell": {
+          "outside_total_cores": 0.10622760251842281,
+          "outside_max_process_cores": 0.04004643910230457
+        }
+      },
+      "host_noise_retry_eligible": false
+    }
+  ],
+  "command_publication": "python3 is the portable spelling of the private run record interpreter; no measurement bytes changed"
+}

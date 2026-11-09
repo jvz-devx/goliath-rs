@@ -1,0 +1,128 @@
+{
+  "kind": "E28-latency-lite-final-verification",
+  "status": "passed",
+  "suites": [
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "5",
+        "python3",
+        "-B",
+        "scripts/e20-tools-test"
+      ],
+      "exit": 0,
+      "tests": 11,
+      "skipped": 0,
+      "log_sha256": "7272d8a9f35252edde036ff9ad1fff8900d3811e85874d2143cb0c5053c7a283"
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "5",
+        "python3",
+        "-B",
+        "scripts/e28-platform-tests"
+      ],
+      "exit": 0,
+      "tests": 20,
+      "skipped": 0,
+      "log_sha256": "9e4bff098f86faa7624c9041cbd3dfef66c49733bbcf03d0c18a570444be558c"
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "5",
+        "python3",
+        "-B",
+        "scripts/e28-direct-bots-tests"
+      ],
+      "exit": 0,
+      "tests": 8,
+      "skipped": 0,
+      "log_sha256": "9a761169a78ac203799d75851bc7bfa812491c14d1597a349752e0d6a2a0f1ca"
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "5",
+        "python3",
+        "-B",
+        "scripts/e25-tools-test"
+      ],
+      "exit": 0,
+      "tests": 48,
+      "skipped": 4,
+      "log_sha256": "3c0e0c7a5589e507adb67d5360e58b09c49d943f33bbd7e614ed61e2ea1b63cc"
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "5",
+        "python3",
+        "-B",
+        "scripts/e26-tests"
+      ],
+      "exit": 0,
+      "tests": 6,
+      "skipped": 0,
+      "log_sha256": "929636b37b79b2b515a0e731a3a95931e151dd70a99459bbd34d53f9261c9fa1"
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "5",
+        "python3",
+        "-B",
+        "scripts/e26b-tests"
+      ],
+      "exit": 0,
+      "tests": 11,
+      "skipped": 2,
+      "log_sha256": "9c4925efae002364a92c3d1e3beb4c96eec4e5ca47c9fc73c9d752a544b81068"
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "5",
+        "python3",
+        "-B",
+        "scripts/e28-latency-lite-tests"
+      ],
+      "exit": 0,
+      "tests": 10,
+      "skipped": 0,
+      "log_sha256": "db5b7e02d6f0d29d0b901db665cf0f32d873fa6844f42f520d47c82f7930231d"
+    }
+  ],
+  "tests": 114,
+  "skipped": 6,
+  "cell_count": 14,
+  "all_cell_hashes_and_restoration_pass": true,
+  "public_redaction_pass": true,
+  "large_json_compressed": true,
+  "summary_and_native_reference_hashes_pass": true,
+  "bundle_manifest_identities": {
+    "final": "7dd3a3e222d46b319eea6cc65fc586afbe1dc33afd14c8635a0f62111bd10347",
+    "final-lite": "7dd3a3e222d46b319eea6cc65fc586afbe1dc33afd14c8635a0f62111bd10347",
+    "final-stamps": "7dd3a3e222d46b319eea6cc65fc586afbe1dc33afd14c8635a0f62111bd10347"
+  },
+  "host_window_free": true,
+  "run_directories": [],
+  "runtime_acceptance": "pending reviewer reproduction",
+  "cargo_commands_run": 0,
+  "cleanup": {
+    "command": [".local/bin/host-window", "build", "E28L", "--", "scripts/clean-builds"],
+    "exit": 0,
+    "freed_mb": 0,
+    "target_mb": 113,
+    "project_mb": 1631,
+    "host_window_free_after_cleanup": true
+  }
+}

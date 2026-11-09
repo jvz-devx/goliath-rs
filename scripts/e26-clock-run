@@ -22,19 +22,26 @@ def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def main():
+    global DATA, LOCAL
     DATA.mkdir(parents=True,exist_ok=True)
     LOCAL.mkdir(parents=True,exist_ok=True)
     parser=argparse.ArgumentParser(description=__doc__)
     platform.cpu_options(parser)
+    parser.add_argument('--data-dir',type=Path,default=DATA)
     parser.add_argument('--name',required=True)
     parser.add_argument('--bins',type=Path,required=True)
     args=parser.parse_args()
-    if not args.name.startswith(('e26-','repro-')) or '/' in args.name:raise RuntimeError('scoped fresh name required')
+    DATA=args.data_dir.resolve()
+    DATA.mkdir(parents=True,exist_ok=True)
+    if platform.LINUX:
+        LOCAL=ROOT/'.local/evidence/E28'
+        LOCAL.mkdir(parents=True,exist_ok=True)
+    if not args.name.startswith(('e26-','e28-lite-','repro-')) or '/' in args.name:raise RuntimeError('scoped fresh name required')
     target=DATA/(args.name+'.json')
     if target.exists():raise RuntimeError('calibration already exists')
     binary=args.bins.resolve()/'e26_clock_probe'
     identity=sha(binary)
-    result=dict(kind='E26-clock-window',status='preflight',binary_sha256=identity)
+    result=dict(kind='E26-clock-window',status='preflight',binary_sha256=identity,cpu_mode=platform.cpu_mode())
     if goliath_bundle.is_e28(args.bins):
         result['e28_bundle']=goliath_bundle.validate(args.bins, {'final-lite'})
     held=False
@@ -76,6 +83,10 @@ def main():
             result['window_end']=subprocess.check_output([str(ROOT/'.local/bin/host-window'),'status'],text=True)
             subprocess.run([str(ROOT/'.local/bin/host-window'),'release',platform.window_owner('E26')],check=True)
         result['seconds_including_queue']=time.monotonic()-began
+        if result.get('e28_bundle'):
+            result['bundle_unchanged'] = goliath_bundle.validate(args.bins, {'final-lite'}) == result['e28_bundle']
+            if not result['bundle_unchanged']:
+                result.update(status='failed',noise_valid=False,error='E28 clock bundle changed')
         support.save(target,result)
         if sha(binary)!=identity:raise RuntimeError('clock probe binary changed')
     print(json.dumps(dict(status=result['status'],noise_valid=result.get('noise_valid'),calibration=result.get('calibration')),indent=2))

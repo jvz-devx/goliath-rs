@@ -1,0 +1,14 @@
+{
+  "kind": "E28-latency-lite-counter-port",
+  "status": "recorded before the first E28L measurement",
+  "scope": "Linux latency and lite runner comparison budgets only; capacity runners and Darwin counters are unchanged",
+  "counter": "POSIX clock_getcpuclockid followed by clock_gettime_ns, aggregate running CPU of all process threads including exited threads",
+  "reason": "Full /proc usage reports enumerate every thread. Repeating them for every limiter budget sample risks saturating D12's harness CPU. The budget needs aggregate process CPU only.",
+  "helper": "scripts/e28_limiter.py",
+  "helper_sha256": "46d24803bf0f0233292e2a5aa5343cfe0019e6f3cb5cc0db0a9fa6d5d95e658b",
+  "tests": "scripts/e28-latency-lite-tests",
+  "tests_sha256": "58d4b25faa8ac2214770188bd321bc9754230c6801dc5ef3150e861d79864304",
+  "proof": "The native counter includes a completed worker thread's CPU and agrees with the process stat counter within its clock-tick precision. The budget run and signal methods are inherited by identity, not copied or rewritten.",
+  "unchanged": ["token bucket algorithm", "poll interval", "credit and debt thresholds", "signal calls", "PID membership", "four-core server cap", "one-core bot cap", "all D12 validity gates", "preregistered cell order", "witness plan"],
+  "observation": "No limiter saturation measurement was run or discarded to motivate this port; this is source inspection and a native counter unit test."
+}

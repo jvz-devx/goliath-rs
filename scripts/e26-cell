@@ -19,6 +19,7 @@ import time
 import e11_support as support
 import goliath_platform as platform
 import goliath_bundle
+import e28_limiter
 
 ROOT = support.ROOT
 DATA = ROOT / 'docs/experiments/data/E26'
@@ -95,9 +96,16 @@ class Adapt(ast.NodeTransformer):
         return node
 
 
-def kernel(name):
+def kernel(name, direct=False):
     source = ROOT / 'scripts/e20-frontier'
     tree = ast.fix_missing_locations(Adapt().visit(ast.parse(source.read_text())))
+    if direct:
+        # The outer controller has already validated final or final-lite. Only
+        # widen the capacity kernel's bot-selection guard in this executed copy.
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == 'goliath_bundle.validate' and len(node.args) == 2 and ast.unparse(node.args[1]) == "{'final'}":
+                node.args[1] = ast.parse("{'final', 'final-lite'}", mode='eval').body
+        ast.fix_missing_locations(tree)
     transformed = ast.unparse(tree) + '\n'
     executed = DATA / (name + '-kernel.py')
     if executed.exists():
@@ -121,7 +129,7 @@ def main():
     parser.add_argument('--seconds', type=int, default=60)
     args = parser.parse_args()
     DATA=args.data_dir.resolve()
-    if not args.name.startswith(('e26-', 'repro-')) or '/' in args.name:
+    if not args.name.startswith(('e26-', 'e28-lite-', 'repro-')) or '/' in args.name:
         raise RuntimeError('use a fresh e26- or repro- name')
     if args.arm != 'P' and ((args.players != 650 and not platform.LINUX) or args.seconds != 60):
         raise RuntimeError('fixed A/B cells are 650 players for 60 seconds')
@@ -146,7 +154,15 @@ def main():
     if adapter_snapshot.exists():
         raise RuntimeError('adapter snapshot already exists')
     adapter_snapshot.write_bytes(Path(__file__).read_bytes())
-    ns, executed = kernel(args.name)
+    ns, executed = kernel(args.name, direct=bool(linux_identity))
+    if linux_identity:
+        original_load = ns['load']
+        def loaded(name, path):
+            module = original_load(name, path)
+            if Path(path).name == 'e18-proxy':
+                module.TrackedBudget = e28_limiter.budget_class(module.TrackedBudget)
+            return module
+        ns['load'] = loaded
     selected = {}
 
     def warmup(instance, seconds):
@@ -192,6 +208,9 @@ def main():
                                  adapter_sha256=sha(Path(__file__)), control='unchanged FINAL-09',
                                  adapter_snapshot=dict(path=str(adapter_snapshot.relative_to(ROOT)),sha256=sha(adapter_snapshot)),
                                  cpu_scope='four tiles, proxy, store and sidecars inside four aggregate cores')
+                    if linux_identity:
+                        value['control'] = 'E28 final clock-fixed warm-tick stack with bounded store and matched reactor-1'
+                        value['harness_sha256']['e28_limiter.py'] = sha(ROOT/'scripts/e28_limiter.py')
                 return original_save(path, value)
             return save
 
@@ -199,7 +218,7 @@ def main():
     request = ROOT / '.local/quiet-request'
     identity = json.dumps(dict(owner='E26', name=args.name, pid=os.getpid(), time=datetime.now(timezone.utc).isoformat())) + '\n'
     acquired = False
-    window = dict(owner='E26',method='exclusive host-window scheduling; legacy per-builder acknowledgements are not the isolation mechanism')
+    window = dict(owner=platform.window_owner('E26'),method='exclusive host-window scheduling; legacy per-builder acknowledgements are not the isolation mechanism')
     try:
         subprocess.run([str(ROOT / '.local/bin/host-window'), 'quiet', platform.window_owner('E26'), args.name], check=True)
         acquired = True
@@ -211,7 +230,10 @@ def main():
         for key in ['E12_TERRAIN_OFF','E18_TERRAIN_EAGER','E18_WRITES_DIRECT','E18_CONTROL_FRESH','E18_BLOCKING_IO']:
             os.environ.pop(key, None)
         sys.argv = ['e26-cell-kernel', '--name', args.name, '--counts', str(args.players),
-                    '--bins', str(bins), '--no-other-agents', '--warmup', '30', '--seconds', str(args.seconds)]
+                    '--bins', str(bins), '--data-dir', str(DATA), '--cpu-mode', args.cpu_mode,
+                    '--no-other-agents', '--warmup', '30', '--seconds', str(args.seconds)]
+        if linux_identity:
+            sys.argv.append('--direct-bots')
         ns['main']()
     finally:
         if request.exists() and request.read_text() == identity:

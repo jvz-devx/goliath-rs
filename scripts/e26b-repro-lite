@@ -22,7 +22,7 @@ def main():
     parser.add_argument('--calibration',type=Path,help='same-platform thread-clock calibration')
     args = parser.parse_args()
     DATA=args.data_dir.resolve()
-    if any('/' in name or not name.startswith(('e26-', 'repro-')) for name in [args.name, args.out]):
+    if any('/' in name or not name.startswith(('e26-', 'e28-lite-', 'repro-')) for name in [args.name, args.out]):
         raise RuntimeError('scoped fresh names required')
     helpers = runpy.run_path(str(ROOT / 'scripts/e26b-warm-results'))
     base = helpers['load']()
@@ -53,6 +53,11 @@ def main():
         if linux_row and (not control_raw.get('e28_bundle') or control_raw.get('cpu_mode') != raw.get('cpu_mode')
                 or set(control_raw['cells']) != set(raw['cells']) or control_raw.get('e26_arm') != 'A'):
             raise RuntimeError('E28 control platform, CPU mode, load or arm differs')
+        if linux_row and (control_raw['e28_bundle']['bundle'] != 'final' or
+                any(control_raw['binaries'][key] != raw['binaries'][key]
+                    for key in ['meridian', 'goliath-store', 'meridian-sidecar', 'horizon-bots']) or
+                control_raw.get('harness_sha256') != raw.get('harness_sha256')):
+            raise RuntimeError('E28 control support binaries or shared measurement code differs')
         if not control.get('valid'):
             raise RuntimeError('fixed A control invalid')
         controls.append(control)
@@ -60,6 +65,10 @@ def main():
     calibration = json.loads(calibration_path.read_text())
     if linux_row and not calibration.get('e28_bundle'):
         raise RuntimeError('E28 calibration must identify a Linux bundle')
+    if linux_row:
+        bundle = raw['e28_bundle']
+        if calibration.get('cpu_mode') != raw.get('cpu_mode') or calibration['binary_sha256'] != bundle['binaries']['e26_clock_probe']:
+            raise RuntimeError('E28 calibration CPU mode or probe identity differs')
     if calibration['status'] != 'complete' or not calibration['noise_valid']:
         raise RuntimeError('valid calibration required')
     metrics = {}
@@ -85,7 +94,8 @@ def main():
         strictly_above_five_percent=corrected / sample['cycle_cpu_ns'] > .05,
         corroborates_failure=inside and corrected / sample['cycle_cpu_ns'] > .05,
         scope='Single-row runtime corroboration against retained A controls, not a new balanced A/B experiment.',
-        capacity_caveat='A3 retains unselected tile-a raw P99 failure; no capacity acceptance.')
+        capacity_caveat='No capacity acceptance; retain each control and B row capacity result.' if linux_row else 'A3 retains unselected tile-a raw P99 failure; no capacity acceptance.',
+        combined_additions_under_five_percent='unproven: lite measures warming only')
     target = DATA / args.out
     with target.open('x') as stream:
         stream.write(json.dumps(result, indent=2) + '\n')

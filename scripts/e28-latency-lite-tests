@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Check E28 latency and lite adapters without starting a measurement window."""
+import ast
+from collections import Counter
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+from pathlib import Path
+import sys
+import subprocess
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+import e11_support as support
+import goliath_bundle
+import goliath_platform as platform
+import e28_limiter
+from e25_latency_layout import split_witnesses
+
+ROOT = support.ROOT
+
+
+def load(name):
+    loader = importlib.machinery.SourceFileLoader(name.replace('-', '_') + '_e28_test', str(ROOT / 'scripts' / name))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+class Port(unittest.TestCase):
+    def test_linux_null_clock_status_does_not_waive_authority_or_native_audit(self):
+        module = load('e25-latency-cell-r2')
+        self.assertTrue(module.authority_open(dict(authorized=True, clock=None)))
+        self.assertFalse(module.authority_open(dict(authorized=False, clock=None)))
+        self.assertFalse(module.authority_open(dict(authorized=True, clock=dict(closures_by_cause={'expired':1}))))
+        self.assertIn('len(trace_files) == 4', (ROOT/'scripts/e25-latency-cell-r2').read_text())
+
+    @unittest.skipUnless(platform.LINUX, 'native process clocks are Linux-only')
+    def test_limiter_native_counter_covers_child_cpu_and_preserves_budget_algorithm(self):
+        proxy = load('e18-proxy')
+        native = e28_limiter.budget_class(proxy.TrackedBudget)
+        self.assertIs(native.run, proxy.TrackedBudget.run)
+        self.assertIs(native.signal, proxy.TrackedBudget.signal)
+        child = subprocess.Popen([sys.executable, '-B', '-c',
+            'import time, threading\ndef burn():\n target=time.thread_time()+.03\n while time.thread_time()<target: pass\nworker=threading.Thread(target=burn); worker.start(); worker.join(); burn(); print("ready",flush=True); input()'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), 'ready')
+            clock = e28_limiter.process_clock(child.pid)
+            value = time.clock_gettime_ns(clock)/1e9
+            stat = platform.parse_stat((platform.PROC/str(child.pid)/'stat').read_text())
+            self.assertGreaterEqual(value, .06)
+            self.assertGreater(value-platform.thread_usage(child.pid, child.pid)['cpu_s'], .02)
+            self.assertLess(abs(value-stat['user_s']-stat['system_s']), .03)
+            budget = native([child.pid], 4)
+            self.assertGreaterEqual(budget.total(), value)
+            self.assertIn('aggregate', budget.report()['cpu_counter'])
+        finally:
+            child.communicate('\n', timeout=10)
+
+    def readback(self, probe='probe', mode='pin', delta=0, controls=True):
+        module = load('e26b-repro-lite')
+        helpers = load('e26b-warm-results')
+        binaries = {key:'same-' + key for key in ['meridian', 'goliath-store', 'meridian-sidecar', 'horizon-bots']}
+        raw = dict(e28_bundle=dict(bundle='final-lite', binaries={'e26_clock_probe':'probe'}),
+                   cpu_mode='pin', e26_arm='B', binaries=binaries, harness_sha256={'kernel':'same'},
+                   cells={'425':dict(e26_lite=dict(rows=[dict(sequence=2, tick=2, cycle_cpu_ns=1000,
+                       warm_cpu_ns=100, other_cpu_ns=900, warm_calls=2, clock_reads=6)], dropped=0, invalid=0),
+                       e26_selection=dict(tile='a'), game_time_before=dict(a=dict(tick=1, at=0, rtt_s=0)),
+                       game_time_after=dict(a=dict(tick=2, at=1, rtt_s=0)))})
+        control_raw = dict(raw, e28_bundle=dict(bundle='final'), e26_arm='A')
+
+        class Base:
+            def row(self, path):
+                control = '-a' in path.name
+                main = [.29, .30, .31, .30][int(path.name.split('-a')[1][0])-1] if control else .30 + delta
+                return dict(arm='A' if control else 'B', valid=True, selected='a', main_cores=main,
+                            selected_p50_ms=10, selected_p99_ms=30)
+
+            def read(self, path):
+                return (control_raw if '-a' in path.name else raw), 'digest'
+
+        with tempfile.TemporaryDirectory(dir=ROOT / '.local/evidence/E28') as temporary:
+            directory = Path(temporary)
+            calibration = directory / 'calibration.json'
+            calibration.write_text(json.dumps(dict(status='complete', noise_valid=True,
+                e28_bundle=dict(bundle='final-lite'), cpu_mode=mode, binary_sha256=probe,
+                calibration=dict(conservative_read_allowance_ns=1))))
+            argv = ['test', 'e28-lite-b1', '--data-dir', temporary, '--out', 'e28-lite-b1-summary.json',
+                    '--calibration', str(calibration)]
+            if controls:
+                argv += ['--controls', 'e28-lite-a1', 'e28-lite-a2', 'e28-lite-a3', 'e28-lite-a4']
+            with patch.object(sys, 'argv', argv), patch.object(module.runpy, 'run_path',
+                    return_value=dict(load=lambda:Base(), lite=helpers.lite)), contextlib.redirect_stdout(io.StringIO()):
+                module.main()
+            return json.loads((directory / 'e28-lite-b1-summary.json').read_text())
+
+    def test_lite_readback_requires_same_probe_mode_and_explicit_controls(self):
+        for changes, message in [({'probe':'other'}, 'probe identity'), ({'mode':'limiter'}, 'CPU mode'),
+                                 ({'controls':False}, 'four same-platform')]:
+            with self.assertRaisesRegex(RuntimeError, message):
+                self.readback(**changes)
+
+    def test_lite_readback_charges_all_reads_and_positive_main_delta(self):
+        result = self.readback()
+        self.assertEqual(result['clock_read_cpu_charge_ns'], 6)
+        self.assertEqual(result['corrected_ratio_of_sums'], .094)
+        self.assertTrue(result['corroborates_failure'])
+        self.assertEqual(self.readback(delta=.01)['corrected_ratio_of_sums'], 0)
+        self.assertIn('unproven', result['combined_additions_under_five_percent'])
+
+    def test_preregistration_rederives_425_witnesses_and_refuses_overwrite(self):
+        module = load('e25-latency-plan')
+        with tempfile.TemporaryDirectory(dir=ROOT / '.local/evidence/E28') as temporary:
+            argv = ['test', '--name', 'e28-latency-test-plan', '--players', '425', '--data-dir', temporary]
+            with patch.object(sys, 'argv', argv), contextlib.redirect_stdout(io.StringIO()):
+                module.main()
+                with self.assertRaisesRegex(RuntimeError, 'already exists'):
+                    module.main()
+            result = json.loads((Path(temporary) / 'e28-latency-test-plan.json').read_text())
+        self.assertEqual(result['players'], 425)
+        self.assertEqual(result['crossers'], 42)
+        self.assertEqual(Counter(row['tile'] for row in result['witnesses']), dict(a=2, b=2, c=2, d=2))
+        baseline = load('capacity-bench')
+        from e18_d9_layout import plan
+        layout = plan(425, baseline.route_anchor)
+        for direct in [False, True]:
+            split = split_witnesses(layout, result['witnesses'], direct)
+            self.assertEqual(len(split['groups']), 9)
+            self.assertEqual(sum(row['count'] for row in split['groups']), 425)
+            self.assertEqual(split['proxy_players'], 417 if direct else 425)
+            for witness in result['witnesses']:
+                group = next(row for row in layout['groups'] if row['label'] == witness['tile'])
+                self.assertEqual(witness['anchor'], group['starts'][witness['name']])
+
+    def test_no_hop_transform_has_no_shim_launch_and_keeps_425(self):
+        module = load('e25-latency-cell-r2')
+        base = load('e23-cell')
+        tree = ast.fix_missing_locations(module.no_hop_adapter(base.Adapt)().visit(ast.parse((ROOT / 'scripts/e20-frontier').read_text())))
+        compile(tree, 'latency-kernel-test', 'exec')
+        text = ast.unparse(tree)
+        self.assertNotIn("str(ROOT / 'scripts/e18-front-shim')", text)
+        self.assertIn('e25_bot_args(group, folder, instance)', text)
+        self.assertIn("instance.tiles[group['direct_tile']].port", text)
+        self.assertIn('e25_server_budget(cap_pids, 4, proxy)', text)
+        self.assertIn('args.players', (ROOT / 'scripts/e25-latency-cell-r2').read_text())
+
+    def test_all_quantiles_keep_unmatched_denominators(self):
+        module = load('e25-latency-results')
+        values = [dict(delay_ns=index) for index in range(95)] + [dict(delay_ns=None) for _ in range(5)]
+        result = module.percentile(values)
+        self.assertEqual(result['p50_ns'], 49)
+        self.assertEqual(result['p95_ns'], 94)
+        self.assertIsNone(result['p99_ns'])
+        self.assertTrue(result['p99_is_infinite'])
+        self.assertEqual(result['unmatched_or_ambiguous'], 5)
+
+    def test_lite_executed_kernel_only_widens_its_bundle_guard(self):
+        module = load('e26-cell')
+        with tempfile.TemporaryDirectory(dir=ROOT / '.local/evidence/E28') as temporary:
+            module.DATA = Path(temporary)
+            _, original = module.kernel('without-direct')
+            _, direct = module.kernel('with-direct', direct=True)
+            before, after = original.read_text(), direct.read_text()
+        self.assertEqual(after, before.replace("goliath_bundle.validate(bins, {'final'})", "goliath_bundle.validate(bins, {'final', 'final-lite'})"))
+
+    def test_modes_reach_executed_kernels_and_data_directories(self):
+        for filename in ['e25-latency-cell-r2', 'e26-cell']:
+            text = (ROOT / 'scripts' / filename).read_text()
+            tree = ast.parse(text)
+            arguments = [node.value for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                         and any(ast.unparse(target) == 'sys.argv' for target in node.targets)]
+            self.assertTrue(any("'--cpu-mode'" in ast.unparse(node) and 'args.cpu_mode' in ast.unparse(node)
+                                and "'--data-dir'" in ast.unparse(node) for node in arguments))
+
+    @unittest.skipUnless(platform.LINUX, 'E28 bundles are Linux-only')
+    def test_frozen_linux_bundles_validate_in_their_selected_roles(self):
+        for name in ['final', 'final-lite', 'final-stamps']:
+            identity = goliath_bundle.validate(ROOT / '.local/bin/goliath-e28' / name, {name})
+            self.assertEqual(identity['bundle'], name)
+        self.assertIn('e26_clock_probe', goliath_bundle.validate(ROOT / '.local/bin/goliath-e28/final-lite')['binaries'])
+
+
+if __name__ == '__main__':
+    unittest.main()

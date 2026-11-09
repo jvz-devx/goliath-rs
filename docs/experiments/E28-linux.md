@@ -1,7 +1,8 @@
 # E28. Second platform: Linux with core pinning
 
-Status: baseline and cluster frontier reproduced by the reviewer. Latency,
-tick-cost and soak stages are in progress and not claimed here.
+Status: baseline and cluster frontier reproduced by the reviewer. Builder
+latency and lite measurements are complete, pending reviewer reproduction.
+The E28 soak is not claimed here.
 
 ## Question
 
@@ -618,8 +619,9 @@ cluster step, or 2.125x. Baseline fails twice at 225; cluster 450 is mixed and
 
 ## Proxy latency
 
-Status: preregistered, awaiting the reviewer's last frontier cell and a free
-host window. Results will remain pending reviewer reproduction.
+Status: builder measurements complete, pending reviewer reproduction. The
+pin pair does not supply two qualifying rows. Removal of the Mac's
+limiter-associated tail is not demonstrated on this platform.
 
 The [latency and lite protocol](data/E28/latency-lite-protocol.json), SHA-256
 `589514a75eacb3ebaa4fcc93d7f4c671e4ddae5ca080fadfc66efd473053443b`, fixes
@@ -634,7 +636,7 @@ The E25 estimand is unchanged: the complete via-proxy bot-write to tile-decode
 distribution is a conservative upper bound on the proxy contribution. Its
 nearest-rank overall P95 must be strictly below 5 ms, with unmatched or
 ambiguous sends at infinity. Every tile's P95 is reported separately.
-The fixed window is 60 seconds after 30 seconds warmup, followed by two
+The configured window is 60 seconds after 30 seconds warmup, followed by two
 seconds of decode drain. No forwarding tap, handshake shim or login relay
 is present. Nothing subtracts STOP pauses or direct-reference quantiles.
 This covers selected interior movement, not crossing latency or all packets.
@@ -650,7 +652,9 @@ for e28_spec in pin-direct-r0 pin-via-r0 limiter-via-r0 limiter-direct-r0 limite
   e28_direct=()
   case "$e28_spec" in *-direct-*) e28_direct=(--direct-reference);; esac
   python3 -u -B scripts/e25-latency-cell-r2 --name "repro-e28-latency-${e28_spec}" --bins .local/bin/goliath-e28/final-stamps --data-dir docs/experiments/data/E28/reviewer-latency --players 425 --cpu-mode "$e28_mode" --plan docs/experiments/data/E28/latency/e28-latency-plan-r1.json --stop-brackets "${e28_direct[@]}"
-  python3 -B scripts/e25-stop-overlap --summary "docs/experiments/data/E28/reviewer-latency/repro-e28-latency-${e28_spec}-summary.json" --data-dir docs/experiments/data/E28/reviewer-latency --name "repro-e28-latency-${e28_spec}-overlap"
+  e28_summary="docs/experiments/data/E28/reviewer-latency/repro-e28-latency-${e28_spec}-summary.json"
+  test -f "$e28_summary" || e28_summary="${e28_summary}.gz"
+  python3 -B scripts/e25-stop-overlap --summary "$e28_summary" --data-dir docs/experiments/data/E28/reviewer-latency --name "repro-e28-latency-${e28_spec}-overlap"
 done
 ```
 
@@ -658,7 +662,7 @@ If a summary is compressed, pass its actual `.json.gz` path to overlap
 readback. Keep failed or invalid rows; no loop implies permission to overwrite
 them or replace them with another repeat.
 
-Two via rows per CPU mode are planned. The comparison mode keeps servers
+Two via rows per CPU mode were run. The comparison mode keeps servers
 and bots together on CPUs 0 to 4 under the original four-core and one-core
 SIGSTOP caps. Pinning separates servers onto CPUs 0 to 3 and bots onto CPU 4.
 Both modes put everything else on CPU 5 and retain every D12 validity rule.
@@ -675,9 +679,117 @@ proxied sessions and all 42 crossers. E25 needs no direct subtraction to test
 its conservative bound. The references diagnose baseline cost and cannot
 repair a failed via result.
 
+### Latency results and failures
+
+The required reviewer `475/r1` result existed and the host window was free
+before the first builder cell. All 14 cells in this latency/lite campaign
+ran serially in the foreground under `E28L`. The builder ran no other work
+during a cell. [The complete ledger](data/E28/latency-lite-ledger.json)
+retains exact portable commands, outcomes, decompressed and stored hashes,
+and each cell's before/after restoration policy. `python3` in that ledger
+replaces only the private interpreter path, not measurement data.
+
+Cell names below have the common prefix `e28-latency-`. Times are nearest-rank
+milliseconds. The failed cell has no qualified timing readback, not zero
+latency. Every complete row has zero unmatched or ambiguous sends.
+
+| Cell | P50 | P95 | P99 | Worst tile P95 | Matched / sent | Proxy cores | Threads | Disposition |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | --- | --- |
+| [pin-direct-r0](data/E28/latency/e28-latency-pin-direct-r0-summary.json.gz) | - | - | - | - | - | - | - | collector failed; retained |
+| [pin-direct-r0-a1](data/E28/latency/e28-latency-pin-direct-r0-a1-summary.json.gz) | 0.048226 | 1.168883 | 2.822854 | a, 1.610128 | 9,848 / 9,848 | 0.694676 | 856..861 | valid reference |
+| [pin-via-r0](data/E28/latency/e28-latency-pin-via-r0-summary.json.gz) | 0.121056 | 4.371403 | 10.112082 | c, 5.127457 | 9,864 / 9,864 | 0.745214 | 872..877 | raw-tick failure; not qualifying |
+| [limiter-via-r0](data/E28/latency/e28-latency-limiter-via-r0-summary.json.gz) | 0.313205 | 6.479126 | 12.038556 | a, 7.404990 | 9,640 / 9,640 | 0.768256 | 871..876 | valid; latency line failed |
+| [limiter-direct-r0](data/E28/latency/e28-latency-limiter-direct-r0-summary.json.gz) | 0.135669 | 1.774439 | 3.390582 | b, 2.249587 | 9,638 / 9,638 | 0.738986 | 856..861 | valid reference |
+| [limiter-via-r1](data/E28/latency/e28-latency-limiter-via-r1-summary.json.gz) | 0.123545 | 2.814577 | 6.141405 | a, 3.841595 | 9,694 / 9,694 | 0.784902 | 872..876 | valid; overall line passed |
+| [pin-via-r1](data/E28/latency/e28-latency-pin-via-r1-summary.json.gz) | 0.579682 | 4.313780 | 9.298967 | d, 5.839312 | 9,666 / 9,666 | 0.716178 | 871..877 | valid; overall line passed |
+
+The original direct cell failed after packet collection because Linux's
+frozen authority status explicitly returns `clock: null`. The collector
+attempted `.get()` on null. Its row and native traces remain unchanged and
+failed. The collector now accepts the unavailable telemetry field while
+still requiring authorized status and all four complete native authority/
+clock trace audits. A regression test covers null, lost authorization and
+nonzero closure counters. The [explicit additional-attempt record](data/E28/latency-lite-attempts.json)
+registered `-a1` before its run. No performance or intrusion failure was retried.
+
+`pin-via-r0` retained 20 TPS and zero dropped ticks but raw P99 was
+51.789515 / 50.573152 / 51.158516 / 47.079673 ms on a / b / c / d.
+It cannot qualify under the unchanged fixture gates. CPU 5 was 94.68%
+busy, below the 95% invalidation line. Its outside-process limits also
+passed. It was not reclassified as noise or replaced. No causal attribution
+of this tick failure to outside work is established.
+
+| Complete cell | Tile a P95 | Tile b P95 | Tile c P95 | Tile d P95 | Retained send window, seconds |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pin-direct-r0-a1 | 1.610128 | 0.967399 | 0.637388 | 1.314480 | 61.568030 |
+| pin-via-r0 | 3.453428 | 4.295749 | 5.127457 | 4.608811 | 61.646463 |
+| limiter-via-r0 | 7.404990 | 3.721255 | 6.533829 | 7.162697 | 60.253078 |
+| limiter-direct-r0 | 0.793233 | 2.249587 | 1.860129 | 1.942759 | 60.217413 |
+| limiter-via-r1 | 3.841595 | 2.689268 | 2.929898 | 1.906388 | 60.567814 |
+| pin-via-r1 | 4.537922 | 3.807372 | 3.460687 | 5.839312 | 60.431627 |
+
+These are the unchanged E25 counter/census clock brackets around the
+configured 60-second phase, not an assertion that every retained bracket
+lasts exactly 60 seconds. All sends inside the actual recorded brackets
+and the fixed two-second decode drain are retained. Nothing was trimmed
+or rescaled to obtain an exact duration. Each tile has two witnesses.
+Complete rows retain all 425 sessions, 42 readers and 64 pigs per tile at
+both census endpoints. The per-session ledgers distinguish 425 proxied
+sessions from the references' 417 proxied plus eight signed direct sessions.
+Both paths retain the same seeded routes, compression threshold 256 and
+no encryption. Census vectors and every selected send remain in the raw rows.
+
+### STOP association and verdict
+
+No complete latency cell issued a server or bot STOP, including both
+limiter via rows. Both caps remained enabled and their native aggregate
+process-CPU readers reported no error. Shutdown CONT calls are retained;
+they are not fabricated STOP intervals. The overlap readbacks contain no
+open STOPs, dropped signal events or unknown matched spans.
+
+| Cell | P95-tail sends | Server span overlap | Bot span overlap |
+| --- | ---: | ---: | ---: |
+| pin-direct-r0-a1 | 493 | 0 / 493 | 0 / 493 |
+| pin-via-r0 | 494 | 0 / 494 | 0 / 494 |
+| limiter-via-r0 | 483 | 0 / 483 | 0 / 483 |
+| limiter-direct-r0 | 482 | 0 / 482 | 0 / 482 |
+| limiter-via-r1 | 485 | 0 / 485 | 0 / 485 |
+| pin-via-r1 | 484 | 0 / 484 | 0 / 484 |
+
+All shares are 0%. These are E25's signal-call bracket associations, not
+kernel stop acknowledgements or a causal subtraction. Both pin overall P95
+values are below 5 ms, but only the second row passes every fixture gate.
+The limiter pair is mixed on the overall latency line. The direct references
+do not repair either failure, and their quantiles are not subtracted.
+
+Pinning does not demonstrate removal of the Mac's limiter-associated tail
+here: the 425-player comparison never produced limiter STOPs. This platform
+still has finite send-to-decode tails without them. The pin pair is not two
+qualifying M4 observations, and the result remains pending reviewer reproduction.
+
+### Reviewer reproduction of latency
+
+The reviewer reran the fixed order with fresh `repro-e28-latency-*` names, the same plan, bundles and runner. Data: `data/E28/reviewer-latency/`. Nearest-rank milliseconds; every complete row matched all selected sends.
+
+| Cell | Status | P95 | P99 | Tail sends overlapping a STOP |
+| --- | --- | ---: | ---: | --- |
+| pin-direct-r0 | valid reference | 1.21 | 2.78 | 0 / 484 |
+| pin-via-r0 | valid, passes | 4.60 | 9.04 | 0 / 489 |
+| limiter-via-r0 | valid, passes | 3.86 | 9.25 | 0 / 487 |
+| limiter-direct-r0 | valid reference | 1.46 | 2.57 | 0 / 483 |
+| limiter-via-r1 | valid, passes | 3.42 | 7.39 | 0 / 483 |
+| pin-via-r1 | unproven: authority trace truncated | (3.97) | (9.64) | 0 / 482 |
+| pin-via-r1-a1 | valid, passes | 3.20 | 7.05 | 0 / 483 |
+
+`pin-via-r1` is kept as failed. Tile b's lease trace ends with a partial line and no newline because the tile stopped before flushing, and the strict collector refuses a row whose authority trace can't be decoded in full. Its timing is shown in brackets and isn't counted. That is a collection fault, not a latency or tick result, so the reviewer ran one explicitly named retry, `-a1`, under the same rule the builder used.
+
+Verdict on this platform: every pinned via-proxy P95 measured here is under 5 ms (builder 4.37 and 4.31, reviewer 4.60, 3.97 unproven, and 3.20), and the reviewer has two qualifying pinned rows, 4.60 and 3.20 ms. The builder's 4.37 ms row stays failed on its tick gate. So, at this machine's 425-player frontier and under D12 pinning, the proxy path is under the 5 ms line. The comparison mode issued no STOP in any of its six rows across both runs, builder and reviewer, because the servers stayed below their four-core cap at 425 players. This machine therefore can't show that pinning removes the Mac's limiter tail. Its limiter rows ranged from 2.81 to 6.48 ms with no pauses at all. The Mac result under D9 stays as it was.
+
 ## Tick-cost lite rows
 
-Status: preregistered, not yet measured, pending reviewer reproduction.
+Status: all six rows and the fresh calibration are complete, pending reviewer
+reproduction. Both B rows fail an intrusion check. The combined under-5%
+bound remains unproven.
 
 The same protocol fixes a fresh calibration of final-lite's native thread
 clock probe, four final-stack untimed A controls and two final-lite B rows,
@@ -693,6 +805,56 @@ remain inside the A controls' observed range under E26b's rules. An
 out-of-spread row stays in the report and is not replaced. The lite recorder
 covers warming only. A warming result below 5% cannot prove that the combined
 additions are bounded below 5%.
+
+### Lite results and declared charges
+
+The fresh [clock calibration](data/E28/lite/e28-lite-clock-r0.json) uses probe
+SHA-256 `7dc09400ad28537b301528ea0b485c5247ff4cb2800e107c48693636bf6ce484`.
+All 32 batches of 100,000 reads completed. Maximum batch CPU cost is
+621.95276 ns per read; reported resolution is 1 ns. The allowance is
+`ceil(621.95276) + 1 = 623 ns`. The observed minimum positive step is 66 ns,
+step GCD is 1 ns, and none of 100,000 resolution samples has a zero step.
+This is E26b's empirical conservative allowance, not a global worst-case
+clock-latency bound. Bundle identity, noise and restoration checks pass.
+
+All six rows pass host validity and the original TPS/raw-tick gates, with
+zero raw-tick drops. Names below have prefix `e28-lite-`. Each selected tile
+comes from the last five warmup seconds and is not reselected afterward.
+
+| Cell | Arm | Selected tile | Main cores | Selected raw P50 ms | Selected raw P99 ms |
+| --- | --- | --- | ---: | ---: | ---: |
+| [a1](data/E28/lite/e28-lite-a1.json.gz) | A | b | 0.395927 | 21.633467 | 37.497985 |
+| [b1](data/E28/lite/e28-lite-b1.json.gz) | B | a | 0.413878 | 24.891179 | 38.067368 |
+| [a2](data/E28/lite/e28-lite-a2.json.gz) | A | b | 0.398304 | 21.241104 | 40.778922 |
+| [a3](data/E28/lite/e28-lite-a3.json.gz) | A | b | 0.392896 | 20.860476 | 32.379102 |
+| [b2](data/E28/lite/e28-lite-b2.json.gz) | B | b | 0.398126 | 20.414773 | 35.006268 |
+| [a4](data/E28/lite/e28-lite-a4.json.gz) | A | b | 0.394295 | 21.369375 | 38.905329 |
+
+The uncharged warming share is the ratio of CPU sums over complete
+query-bracketed cycles, not a mean of per-cycle percentages.
+
+| B row | Cycles | Cycle CPU s | Warming CPU s | Warm/cycle | Warm ms/cycle | Per-cycle share P50 / P99 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| b1 | 1,227 | 25.395428989 | 0.144429364 | 0.568722% | 0.117709 | 0.574525% / 1.168950% |
+| b2 | 1,220 | 24.283829331 | 0.145141787 | 0.597689% | 0.118969 | 0.614080% / 0.974652% |
+
+| B row | Reads charged | Read charge s | Positive main-CPU delta | Delta charge s | Charged lower bound | Intrusion |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| [b1](data/E28/lite/e28-lite-b1-summary.json) | 57,970 | 0.036115310 | 0.018522567 core | 1.136415187 | 0% | main CPU and P50 outside |
+| [b2](data/E28/lite/e28-lite-b2-summary.json) | 62,198 | 0.038749354 | 0.002770457 core | 0.169037870 | 0% | P50 outside |
+
+The A main-CPU mean is 0.395355794 core and its range is 0.005407781 core.
+The A P50 mean/range is 21.2761055 / 0.772991 ms; P99 is
+37.3903345 / 8.399820 ms. B1 shifts by +0.018522567 core,
++3.6150735 ms P50 and +0.6770335 ms P99. B2 shifts by +0.002770457
+core, -0.8613325 ms P50 and -2.3840665 ms P99. E26b tests absolute
+shifts, so B2's faster P50 still fails. No rule was relaxed and no
+out-of-spread row was replaced.
+
+After both declared charges each lower bound clamps to zero. That does
+not mean warming costs zero and cannot support an under-5% upper bound.
+Both rows are unproven under the intrusion rule. The recorder covers warming
+only, so the combined additions remain unbounded by these lite observations.
 
 Exact reviewer commands, in the preregistered order:
 
@@ -711,6 +873,82 @@ for e28_b in b1 b2; do
 done
 ```
 
+### D12 fields, publication and cleanup
+
+Every cell below passed the D12 host checks, including the collector-failed
+reference and the raw-tick-failed via row. CPU percentages cover cell start
+through steady end, as in the capacity port. Outside totals and maxima use
+steady / whole-cell order. The short clock row uses its native probe phase.
+No CPU 5 saturation or outside-process invalidation occurred, so no noise
+retry was invoked. The one `-a1` attempt fixes the separately recorded null
+telemetry collector failure.
+
+| Cell | Start load | CPU 4 busy | CPU 5 busy | Outside total cores, steady / whole | Largest outside process cores, steady / whole | Swap-in pages |
+| --- | ---: | ---: | ---: | --- | --- | ---: |
+| latency-pin-direct-r0 | 3.968 | 34.99% | 52.93% | 0.259 / 0.229 | 0.170 / 0.156 | 18 |
+| latency-pin-direct-r0-a1 | 3.976 | 35.07% | 56.33% | 0.344 / 0.281 | 0.171 / 0.154 | 136 |
+| latency-pin-via-r0 | 3.857 | 38.56% | 94.68% | 0.662 / 0.619 | 0.238 / 0.248 | 8,513 |
+| latency-limiter-via-r0 | 3.840 | 65.11% | 74.23% | 0.487 / 0.387 | 0.197 / 0.198 | 1,281 |
+| latency-limiter-direct-r0 | 3.782 | 64.58% | 67.62% | 0.294 / 0.310 | 0.180 / 0.187 | 13,306 |
+| latency-limiter-via-r1 | 3.877 | 65.72% | 72.29% | 0.403 / 0.348 | 0.189 / 0.172 | 816 |
+| latency-pin-via-r1 | 3.715 | 35.18% | 54.26% | 0.153 / 0.190 | 0.042 / 0.068 | 466 |
+| lite-clock-r0 | 3.943 | 0.00% | 7.44% | 0.019 / 0.019 | 0.010 / 0.009 | 0 |
+| lite-a1 | 3.991 | 33.60% | 57.45% | 0.220 / 0.255 | 0.101 / 0.129 | 262 |
+| lite-b1 | 3.825 | 32.94% | 45.05% | 0.136 / 0.159 | 0.043 / 0.067 | 708 |
+| lite-a2 | 3.874 | 31.84% | 44.88% | 0.139 / 0.133 | 0.065 / 0.062 | 80 |
+| lite-a3 | 3.775 | 31.49% | 41.06% | 0.092 / 0.098 | 0.032 / 0.042 | 3 |
+| lite-b2 | 3.848 | 31.46% | 38.11% | 0.079 / 0.076 | 0.020 / 0.019 | 6 |
+| lite-a4 | 3.765 | 31.28% | 43.71% | 0.110 / 0.106 | 0.041 / 0.040 | 6 |
+
+Names in this table have prefix `e28-`. Every row has throttle-counter
+coverage with zero increases, the performance governor during the window,
+turbo unchanged, correct server/bot/harness cpusets, and exact restoration
+of the original slice and governor policies. Pin uses `0-3 / 4 / 5`;
+limiter uses `0-4 / 0-4 / 5`. No outside process exceeds 0.5 core in either
+required phase. Outside totals are reported, not substituted for the
+per-process validity rule. The failed raw-tick row's 94.68% CPU 5 value
+remains below the strict 95% invalidation threshold.
+
+[The numerical readback](data/E28/latency-lite-summary.json) retains all six
+CPUs' busy/total ticks, every core's observed frequency range, first/last
+throttle counters, available-memory endpoints, swap-in, cpuset placement,
+outside totals/maxima and per-tile populations for each game row. Its clock
+record retains the same native snapshots for the calibration. The linked
+raw rows retain every frequency sample and outside counter. These fields
+are not replaced with invented Linux equivalents of Darwin counters.
+
+There are 14 retained cells: seven latency attempts, one calibration and
+six lite/control rows. Thirteen complete, one collector fails. One complete
+via row fails raw ticks; one valid limiter row fails the latency line;
+both lite B readbacks fail intrusion. These outcomes are distinct from
+host-noise invalidation. No tails, invalid attempts or failed observations
+were removed. Native traces remain under `$REPO/.local/evidence/E28/`.
+All run/world directories were deleted after extraction.
+
+[The evidence index](data/E28/latency-lite-evidence-index.json) identifies
+110 artifacts with decompressed-byte and stored-file SHA-256 values.
+It contains 154,369,535 decompressed bytes in 13,384,746 stored bytes.
+Every JSON over 1 MB is losslessly compressed. Publication redacts outside
+names and private paths. [Final verification](data/E28/latency-lite-verification.json)
+checks all row/reference hashes, native authority hashes, unchanged selected
+bundles and every restoration. The seven requested suites register 114 tests:
+108 pass, six skip unavailable retained Mac artifacts, none fail. No Cargo
+command or measured-binary rebuild ran. The existing direct-bot suite compiles
+only its tiny native disabled-trace guard through its build reservation.
+
+`host-window build E28L -- scripts/clean-builds` completed after verification,
+freed 0 MB and left the 113 MB target below its cap. The project occupied
+1,631 MB at cleanup. The host window is free, its restore journal is absent,
+and no run/world folder or queued measurement remains.
+
+No commit or push was made by this builder. Progress and decisions were not
+edited by this builder. Proposed progress text is: "E28's pinned via bounds
+are 4.371 and 4.314 ms P95, but the first row fails raw ticks. Limiter is mixed
+at 6.479 and 2.815 ms with zero STOP overlap, so removal of a limiter tail is
+not demonstrated. Lite warming observes 0.569% and 0.598%, but both rows fail
+intrusion; the combined under-5% bound remains unproven. Pending independent
+reviewer reproduction." No change to D12 is proposed.
+
 ### Selected frozen identities
 
 The trust anchor is SHA-256 `7dd3a3e222d46b319eea6cc65fc586afbe1dc33afd14c8635a0f62111bd10347`.
@@ -726,3 +964,43 @@ The manifest retains every bundled metadata and launcher hash as well. These are
 | final | `.local/bin/goliath-e28/final/meridian-sidecar` | `d4523dccd4b03f2d4c6b57909f9323bcfc271ff78e43cb1ee456f5e1f23976ad` |
 | final | `.local/bin/goliath-e28/final/goliath-store` | `ac3c8075a6ec92e52a0201925a2b896c4ffb2803526473630bced68cd35ba888` |
 | final-stamps | `.local/bin/goliath-e28/final-stamps/horizon-bots` | `73a2c53b02ecaf065942381cfdb170d74f205638a61aed3cd1ddb432c9aa4848` |
+
+### Reviewer reproduction of lite rows
+
+The reviewer reran the calibration, four A controls and two B rows with fresh `repro-e28-lite-*` names. Data: `data/E28/reviewer-lite/`. Control `a4` failed in the harness, not the measurement: `goliath-cluster` hit an undecodable `E10_PHASE` log line. It is kept, and one explicitly named retry, `a4-a1`, replaced it as the fourth control.
+
+| B row | Warm/cycle (ratio of sums) | Per-cycle P50 / P99 | Inside A spread | Charged lower bound |
+| --- | ---: | --- | --- | ---: |
+| b1 | 0.579% | 0.589% / 1.068% | yes | 0% |
+| b2 | 0.606% | 0.616% / 1.246% | yes | 0.446% |
+
+Both reproduced B rows pass the intrusion check, where the builder's two did not. Taken with the builder's 0.569% and 0.598%, speculative warming on the final stack costs about 0.6% of the busiest tile's main-thread CPU on this machine, against 0.38% on the Mac, and is far below 5%. As on the Mac, the lite recorder covers warming only, so the combined additions stay unproven.
+
+## 30-minute soak
+
+Status: prepared, not measured. Reviewer reproduction will be required.
+The [soak and M3 protocol](data/E28/soak-m3-protocol.json) is registered before
+the builder takes a measurement window. The builder waits for the reviewer's
+lite B2 summary and a free host window.
+
+The run is `e28-soak-r1`, with final servers, 425 players, pinning and direct
+final-stamps bots with tracing disabled. D9's 10% crossing cohort has 42
+players here, so the unchanged cargo fixture gives 42 unique items, not the
+Mac's 65. RSS, owner audits, cargo conservation, crossings per minute, TPS,
+authority events and long-window raw tick P99 are retained separately.
+Whole-window D12 evidence includes startup, the 30 measured minutes,
+checkpoint/recovery and cleanup. Linux clock histograms are unavailable;
+native lease traces check increasing renewal counters and send-anchored
+250 ms planned wakes without pretending to supply Darwin telemetry.
+
+## M3 campaign
+
+Status: prepared, not measured. Reviewer reproduction will be required.
+The campaign preserves E24's original E13 fault kernels, seed 240001,
+1,000 crossings, 12 partition cases and six stale-login cases. Jobs 4 share
+one four-core server cpuset and one client core. Each low-population fixture
+does not receive its own CPU budget. Whole-window D12 checks decide validity;
+startup pressure or a failed trial is retained, never silently retried.
+M3 uses its original direct `e4-client` path, without capacity bots or front
+shims. Resume is allowed only after a clean `paused-window`, with every
+admitted trial complete and the schedule unchanged.

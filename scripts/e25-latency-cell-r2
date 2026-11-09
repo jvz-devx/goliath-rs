@@ -18,6 +18,7 @@ import goliath_platform as platform
 from e14_snapshot_support import validate_snapshot, sha256
 from e25_latency_layout import split_witnesses
 from e25_stop_brackets import StopBrackets
+import e28_limiter
 
 ROOT = support.ROOT
 DATA = ROOT / 'docs/experiments/data/E25'
@@ -141,8 +142,14 @@ def authority_audit(memory,leases):
                 interpretation='raw authority bytes are incomplete or undecodable; no missing event is classified or discarded'))
 
 
+def authority_open(reply):
+    # The frozen Linux lease status explicitly publishes clock:null. Native
+    # authority-stop/clock-anomaly traces remain mandatory on all four tiles.
+    return bool(reply.get('authorized') and not any((reply.get('clock') or {}).get('closures_by_cause', {}).values()))
+
+
 def main():
-    global DATA
+    global DATA, EVIDENCE
     parser = argparse.ArgumentParser(description=__doc__)
     platform.cpu_options(parser)
     parser.add_argument('--data-dir',type=Path,default=DATA)
@@ -161,8 +168,10 @@ def main():
     DATA.mkdir(parents=True,exist_ok=True)
     if args.profile_after_window:
         platform.mac_only('xctrace profiling')
-    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
-        raise ValueError('fresh e25- or repro- name required')
+    if not re.fullmatch(r'(?:e25-|e28-latency-|repro-)[A-Za-z0-9_-]+',args.name):
+        raise ValueError('fresh scoped latency name required')
+    if platform.LINUX:
+        EVIDENCE = ROOT / '.local/evidence/E28'
     evidence = EVIDENCE / args.name
     evidence.mkdir(parents=True,exist_ok=False)
     stamps = evidence / 'stamps'
@@ -187,7 +196,7 @@ def main():
         owner = ROOT / '.local/host/quiet/owner'
         if not owner.exists() or owner.read_text().splitlines()[0] != platform.window_owner('E25'):
             raise RuntimeError('paired session does not hold the E25 window')
-        if not args.session or not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.session):
+        if not args.session or not re.fullmatch(r'(?:e25-|e28-latency-|repro-)[A-Za-z0-9_-]+',args.session):
             raise ValueError('managed window needs a named paired session')
     else:
         subprocess.run([host,'quiet',platform.window_owner('E25'),args.name],check=True)
@@ -196,6 +205,10 @@ def main():
     owned = False
     summary = dict(name=args.name,status='preparing',collector_revision='r2-preserve-audit-failure',direct_reference=args.direct_reference,
         plan=dict(path=str(args.plan.resolve().relative_to(ROOT)),sha256=sha256(args.plan)),errors=[])
+    summary.update(cpu_mode=platform.cpu_mode(), host_window_owner=platform.window_owner('E25'))
+    source_paths = [Path(__file__), ROOT/'scripts/e25_latency_layout.py', ROOT/'scripts/e25-latency-results',
+        ROOT/'scripts/e25_stop_brackets.py', ROOT/'scripts/e23-cell', ROOT/'scripts/e28_limiter.py']
+    summary['collector_sources'] = {str(path.relative_to(ROOT)):sha256(path) for path in source_paths}
     summary.update(diagnostic_only=contract.get('e25_diagnostic_only',False),
         verification_limits=contract.get('e25_measurement_verification_limits',[]),
         horizon_lease_base=contract.get('horizon_lease_base'),m4_latency_qualified=False)
@@ -255,6 +268,8 @@ def main():
         def loaded(name,path):
             module = original_load(name,path)
             if brackets and Path(path).name=='e18-proxy':module.os=brackets.os_proxy
+            if platform.LINUX and Path(path).name=='e18-proxy':
+                module.TrackedBudget=e28_limiter.budget_class(module.TrackedBudget)
             if Path(path).name == 'e17-m4':
                 factory = module.cluster_module
                 def cluster(selected):
@@ -335,11 +350,11 @@ def main():
                     statuses[label] = tile.ask('e25-latency-status')
                     authority = tile.ask('cluster-authority')
                     authorities.append(dict(tile=label,reply=authority))
-                    if not authority.get('authorized') or any(authority.get('clock',{}).get('closures_by_cause',{}).values()):
+                    if not authority_open(authority):
                         raise RuntimeError('authority closed during latency cell')
             return original_times(instance)
         ns['game_times'] = game_times
-        sys.argv = ['e25-latency-base','--name',args.name,'--counts',str(args.players),'--bins',str(bins),
+        sys.argv = ['e25-latency-base','--name',args.name,'--counts',str(args.players),'--bins',str(bins),'--data-dir',str(evidence),'--cpu-mode',args.cpu_mode,
             '--no-other-agents','--warmup','30','--seconds','60']
         try:
             ns['main']()
@@ -362,9 +377,14 @@ def main():
                     if '--forwarding-secret-file' in command:
                         command[command.index('--forwarding-secret-file')+1] = '<private-fixture-file>'
             summary['cell'] = memory.save(DATA/(args.name+'-raw.json'),raw)
+            if platform.LINUX:
+                support.pack_json(raw_path)
             summary.update(diagnostic_pass=cell.get('diagnostic_pass',False),proxy=cell.get('proxy'),
                 histogram=cell.get('histogram'),game_time_tps=cell.get('game_time_tps'),ticks=cell.get('tick_summary'),
                 limiter=cell.get('limiter_window'),population_before=cell.get('before'),population_after=cell.get('after'))
+            if platform.LINUX:
+                summary.update(d12=cell.get('d12'), processes=cell.get('processes'),
+                    e28_bundle=raw.get('e28_bundle'))
         if summary['status'] == 'complete':
             if len(statuses) != 4 or any(not row.get('enabled') or row.get('errors') or row.get('dropped') for row in statuses.values()):
                 raise RuntimeError('native tile trace reported errors, drops or missing enablement')
@@ -397,6 +417,9 @@ def main():
             if events or cleanup_errors:
                 summary['status'] = 'void-authority-or-cleanup-event'
             summary['binaries_unchanged'] = validate_snapshot(bins) == identity and sha256(bins/'horizon-bots') == bot_hash
+            summary['collector_and_plan_unchanged'] = all(sha256(ROOT/path) == digest for path,digest in summary['collector_sources'].items()) and sha256(args.plan) == summary['plan']['sha256']
+            if not summary['collector_and_plan_unchanged']:
+                summary['status'] = 'void-collector-or-plan-changed'
             summary['qualified_conservative_bound_pass'] = bool(summary['status'] == 'complete' and summary.get('diagnostic_pass')
                 and summary['binaries_unchanged'] and len(trace_files) == 4 and summary.get('overall',{}).get('below_five_ms')
                 and audit['complete'] and not summary['diagnostic_only'] and not summary['verification_limits'])

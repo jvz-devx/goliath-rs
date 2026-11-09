@@ -1,0 +1,34 @@
+{
+  "kind": "E28-latency-lite-preregistration",
+  "status": "preregistered before all E28L measurement cells",
+  "owner": "E28L",
+  "players": 425,
+  "baseline_players": 200,
+  "latency_plan": "docs/experiments/data/E28/latency/e28-latency-plan-r1.json",
+  "latency_plan_sha256": "509025575ab8deda84c02ae01b361c285e61390ff0261e258cc93fe9592100c3",
+  "latency_order": [
+    {"name": "e28-latency-pin-direct-r0", "cpu_mode": "pin", "direct_reference": true},
+    {"name": "e28-latency-pin-via-r0", "cpu_mode": "pin", "direct_reference": false},
+    {"name": "e28-latency-limiter-via-r0", "cpu_mode": "limiter", "direct_reference": false},
+    {"name": "e28-latency-limiter-direct-r0", "cpu_mode": "limiter", "direct_reference": true},
+    {"name": "e28-latency-limiter-via-r1", "cpu_mode": "limiter", "direct_reference": false},
+    {"name": "e28-latency-pin-via-r1", "cpu_mode": "pin", "direct_reference": false}
+  ],
+  "latency_method": "E25 unchanged no-extra-hop send-to-tile-decode conservative upper bound. Every send is included; unmatched or ambiguous sends are infinity. Nearest-rank overall P95 strictly below 5 ms. Report every tile separately. Do not subtract direct-reference quantiles or STOP intervals.",
+  "direct_scope": "One reference per CPU mode, eight direct witnesses and 417 proxied sessions including all 42 crossers. References diagnose baseline cost and cannot repair a failed via bound.",
+  "calibration_name": "e28-lite-clock-r0",
+  "lite_order": [
+    {"name": "e28-lite-a1", "arm": "A", "bundle": "final"},
+    {"name": "e28-lite-b1", "arm": "B", "bundle": "final-lite"},
+    {"name": "e28-lite-a2", "arm": "A", "bundle": "final"},
+    {"name": "e28-lite-a3", "arm": "A", "bundle": "final"},
+    {"name": "e28-lite-b2", "arm": "B", "bundle": "final-lite"},
+    {"name": "e28-lite-a4", "arm": "A", "bundle": "final"}
+  ],
+  "lite_cpu_mode": "pin",
+  "lite_method": "E26b single-B readback against all four same-platform A controls, each B checked separately. Fresh selected-probe calibration. Charge every clock read and the full positive main-CPU delta against warming. Each absolute main-CPU, raw-P50 and raw-P99 difference must be within the four A controls' range. Do not relax rules or replace out-of-spread observations.",
+  "lite_scope": "Warming-only running CPU fraction. A value below 5% does not bound all additions.",
+  "all_game_cells": {"warmup_seconds": 30, "measured_seconds": 60, "pigs_per_tile": 64, "server_cores": 4, "bot_cores": 1},
+  "preconditions": "Reviewer frontier result repro-e28-frontier-v3-475-r1 exists and host window is free. Every cell holds E28L; no measurement, build or analysis overlaps another cell. Keep every failure and invalid attempt.",
+  "acceptance": "pending reviewer reproduction"
+}

@@ -1,0 +1,130 @@
+{
+  "kind": "E25-latency-preregistration",
+  "witness_seed": 25,
+  "players": 425,
+  "crossers": 42,
+  "pigs_per_tile": 64,
+  "server_cores": 4,
+  "bot_cores": 1,
+  "warmup_seconds": 30,
+  "measured_seconds": 60,
+  "decode_drain_seconds": 2,
+  "witnesses": [
+    {
+      "name": "E17BotA1",
+      "tile": "a",
+      "index": 1,
+      "anchor": [
+        978.7612370287546,
+        960.6515253377796
+      ],
+      "forced_host": "d9-a.test",
+      "cohort_count": 96,
+      "seed": 12345
+    },
+    {
+      "name": "E17BotA48",
+      "tile": "a",
+      "index": 48,
+      "anchor": [
+        1069.21977031009,
+        1014.0453735363602
+      ],
+      "forced_host": "d9-a.test",
+      "cohort_count": 96,
+      "seed": 12345
+    },
+    {
+      "name": "E17BotB27",
+      "tile": "b",
+      "index": 27,
+      "anchor": [
+        -995.8514837335363,
+        989.3634406784528
+      ],
+      "forced_host": "d9-b.test",
+      "cohort_count": 96,
+      "seed": 12345
+    },
+    {
+      "name": "E17BotB39",
+      "tile": "b",
+      "index": 39,
+      "anchor": [
+        -970.6672669486019,
+        999.7444707369143
+      ],
+      "forced_host": "d9-b.test",
+      "cohort_count": 96,
+      "seed": 12345
+    },
+    {
+      "name": "E17BotC60",
+      "tile": "c",
+      "index": 60,
+      "anchor": [
+        -1082.281625912114,
+        -1004.7019536286483
+      ],
+      "forced_host": "d9-c.test",
+      "cohort_count": 96,
+      "seed": 12345
+    },
+    {
+      "name": "E17BotC81",
+      "tile": "c",
+      "index": 81,
+      "anchor": [
+        -1068.4776489680924,
+        -982.589060260241
+      ],
+      "forced_host": "d9-c.test",
+      "cohort_count": 96,
+      "seed": 12345
+    },
+    {
+      "name": "E17BotD5",
+      "tile": "d",
+      "index": 5,
+      "anchor": [
+        1028.0409389179736,
+        -1081.9316501228914
+      ],
+      "forced_host": "d9-d.test",
+      "cohort_count": 95,
+      "seed": 12345
+    },
+    {
+      "name": "E17BotD32",
+      "tile": "d",
+      "index": 32,
+      "anchor": [
+        991.4655924365665,
+        -1046.2417963999662
+      ],
+      "forced_host": "d9-d.test",
+      "cohort_count": 95,
+      "seed": 12345
+    }
+  ],
+  "clock": "CLOCK_MONOTONIC_RAW, absolute nanoseconds in both processes",
+  "bot_stamp": "Bot::flush immediately before socket.write, assigned after return to frames whose first byte was accepted",
+  "tile_stamp": "lan::io_pool::Conn::read after buffered frame decode, before session.packet and NetEvent main-thread queue",
+  "compression": "before bot stamp; retain negotiated threshold",
+  "encryption": "offline fixture, record absence of encryption",
+  "primary_estimand": "complete via-proxy send-to-tile-frame-decode delay, conservative upper bound on proxy contribution",
+  "direct_reference": "same eight interior sessions direct, same 425 total gameplay sessions, 417 via proxy and all 42 crossers unchanged",
+  "p95": "nearest rank over every witness send; unmatched and ambiguous sends are infinity; report overall and each tile",
+  "threshold_ms_strictly_less_than": 5,
+  "quantile_subtraction_is_not_an_estimator": true,
+  "authority_closure_voids_pair": true,
+  "no_tail_trimming": true,
+  "no_limiter_pause_subtraction": true,
+  "no_extra_hops": true,
+  "coverage": "interior movement, not crossing or all protocol types",
+  "source_hashes": {
+    "scripts/e25-latency-plan": "8c1fe9574590f4e34f5064387263b419e26ceca21932b426a760213b9997c520",
+    "scripts/e18_d9_layout.py": "3c8b6780fce403949a457677da7f7cf3a1665b24daad4c003792299567b57f6a",
+    "scripts/capacity-bench": "a4c4eff9fcd0a05c889eb5b68a0a7912fa0b53e1bb8b5a7e0c8f0ecfd0e2fd38"
+  }
+}

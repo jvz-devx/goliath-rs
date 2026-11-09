@@ -25,10 +25,16 @@ def percentile(rows):
     rank = (len(rows) * 95 + 99) // 100
     finite = sorted(row['delay_ns'] for row in rows if row['delay_ns'] is not None)
     value = finite[rank - 1] if rank <= len(finite) else None
+    quantiles = {}
+    for label, percent in [('p50', 50), ('p99', 99)]:
+        index = (len(rows) * percent + 99) // 100
+        quantiles[label + '_rank'] = index
+        quantiles[label + '_ns'] = finite[index - 1] if index <= len(finite) else None
+        quantiles[label + '_is_infinite'] = index > len(finite)
     return dict(sends=len(rows), matched=len(finite), unmatched_or_ambiguous=len(rows) - len(finite),
         p95_rank=rank, p95_ns=value, p95_is_infinite=value is None,
         below_five_ms=value is not None and value < 5_000_000,
-        finite_maximum_ns=max(finite) if finite else None)
+        finite_maximum_ns=max(finite) if finite else None, **quantiles)
 
 
 def match(sends, decodes, start_ns, end_ns, drain_end_ns, witnesses):

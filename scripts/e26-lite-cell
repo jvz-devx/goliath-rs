@@ -31,11 +31,14 @@ class Lite(ast.NodeTransformer):
 
 
 def main():
+    global DATA
+    if '--data-dir' in sys.argv:
+        DATA = Path(sys.argv[sys.argv.index('--data-dir')+1]).resolve()
     DATA.mkdir(parents=True,exist_ok=True)
     (ROOT/'.local/evidence/E26').mkdir(parents=True,exist_ok=True)
     if '--name' not in sys.argv:raise RuntimeError('name is required')
     name=sys.argv[sys.argv.index('--name')+1]
-    if not name.startswith(('e26-','repro-')) or '/' in name:raise RuntimeError('scoped fresh name required')
+    if not name.startswith(('e26-','e28-lite-','repro-')) or '/' in name:raise RuntimeError('scoped fresh name required')
     if '--arm' not in sys.argv or sys.argv[sys.argv.index('--arm')+1] not in {'A','B'}:
         raise RuntimeError('lite intrusion uses A or B only')
     source=ROOT/'scripts/e26-cell'
