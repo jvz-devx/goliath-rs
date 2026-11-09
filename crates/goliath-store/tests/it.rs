@@ -22,6 +22,9 @@ struct Server {
 
 impl Server {
     fn start(path: PathBuf) -> Self {
+        Self::start_with(path, &[])
+    }
+    fn start_with(path: PathBuf, extra: &[&str]) -> Self {
         let mut process = ProcessCommand::new(env!("CARGO_BIN_EXE_goliath-store"))
             .args([
                 "--dir",
@@ -29,6 +32,7 @@ impl Server {
                 "--compact-every",
                 "4",
             ])
+            .args(extra)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()

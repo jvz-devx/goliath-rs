@@ -19,7 +19,14 @@
 //! Old wire tags and unleased tiles retain their behavior. Once a tile uses
 //! leases, legacy Claim and Heartbeat cannot bypass them. Upgrading a live
 //! legacy holder is refused. Stop and release it before the first leased claim.
-//! Lease grants, counters and drain state share the existing durable journal.
+//! Claims, drains and releases share the existing durable journal.
+//!
+//! E29: a granted renewal of a lease whose claim is already durable is answered
+//! by `Renewer::renew` without a journal record or barrier. A crash loses it,
+//! and the full-L restart wait above covers the lost grant. Refusals, retries
+//! the journal remembers and every other operation still wait for the barrier.
+//! After a restart the directory's `heartbeat` may be behind the tile's counter
+//! until its next renewal.
 //!
 //! Retry receipts retain the latest 9,216 accepted mutations in FIFO order.
 //! A matching eligible retry in that window returns its original response.
@@ -40,7 +47,7 @@ pub const RECEIPT_CAPACITY: usize = receipts::CAPACITY;
 pub use client::{CallTiming, Client, request_id};
 pub use codec::{read_request, read_response, write_request, write_response};
 pub use durable::SyncMode;
-pub use engine::{Engine, StoreResources};
+pub use engine::{Engine, Renewer, StoreResources};
 pub use goliath_model::{Epoch, Fence, Generation, OwnershipCas, ProcessId, Record, TileId};
 pub use goliath_model::{LeaseGrant, LeaseKeeper, LeaseRequest, RenewalAction, RenewalSchedule};
 pub use journal::{Compaction, CompactionReady};

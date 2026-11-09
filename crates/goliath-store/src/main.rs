@@ -1,7 +1,8 @@
 //! Owns configuration, the localhost listener and all connection threads.
 
 use goliath_store::{
-    Command, CompactionReady, Engine, Operation, Response, SyncMode, read_request, write_response,
+    Command, CompactionReady, Engine, Operation, Renewer, Response, SyncMode, read_request,
+    write_response,
 };
 use std::error::Error;
 use std::fs::File;
@@ -18,6 +19,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut mode = SyncMode::Full;
     let mut compact_every = 1024;
     let mut batch_us = 0;
+    let mut unjournaled_renewals = true;
     let mut args = std::env::args().skip(1);
     #[cfg(feature = "fault-injection")]
     let mut disable_fence = false;
@@ -25,6 +27,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut early_ack = false;
     #[cfg(feature = "fault-injection")]
     let mut power_loss_layer = false;
+    #[cfg(feature = "fault-injection")]
+    let mut barrier_delay_ms = 0;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--dir" => directory = Some(PathBuf::from(args.next().ok_or("--dir needs a path")?)),
@@ -35,13 +39,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             },
             "--compact-every" => compact_every = args.next().ok_or("--compact-every needs a count")?.parse()?,
             "--batch-us" => batch_us = args.next().ok_or("--batch-us needs microseconds")?.parse()?,
+            "--renewals" => unjournaled_renewals = match args.next().as_deref() {
+                Some("unjournaled") => true, Some("barrier") => false,
+                _ => return Err("--renewals needs unjournaled or barrier".into()),
+            },
+            #[cfg(feature = "fault-injection")]
+            "--test-barrier-delay-ms" => barrier_delay_ms = args.next().ok_or("--test-barrier-delay-ms needs milliseconds")?.parse()?,
             #[cfg(feature = "fault-injection")]
             "--fault-disable-fence" => disable_fence = true,
             #[cfg(feature = "fault-injection")]
             "--fault-ack-before-barrier" => early_ack = true,
             #[cfg(feature = "fault-injection")]
             "--test-power-loss-layer" => power_loss_layer = true,
-            _ => return Err("usage: goliath-store --dir PATH [--listen 127.0.0.1:0] [--sync full|fsync] [--compact-every 1024] [--batch-us 0]".into()),
+            _ => return Err("usage: goliath-store --dir PATH [--listen 127.0.0.1:0] [--sync full|fsync] [--compact-every 1024] [--batch-us 0] [--renewals unjournaled|barrier]".into()),
         }
     }
     if !address.ip().is_loopback() {
@@ -60,9 +70,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         if power_loss_layer {
             engine.power_loss_file_layer_for_test();
         }
+        engine.delay_barrier_for_test(Duration::from_millis(barrier_delay_ms));
         engine
     };
-    run(engine, address, Duration::from_micros(batch_us))
+    // `barrier` journals every renewal and answers it after the barrier, as
+    // before E29. The default answers a granted renewal at once, unjournaled.
+    let renewer = unjournaled_renewals.then(|| engine.renewer());
+    run(engine, address, Duration::from_micros(batch_us), renewer)
 }
 
 struct Pending {
@@ -70,6 +84,16 @@ struct Pending {
     reply: mpsc::SyncSender<(Response, Instant)>,
     queued: Instant,
     accepted: Instant,
+}
+
+/// What every connection thread shares.
+#[derive(Clone)]
+struct Route {
+    sender: mpsc::SyncSender<Pending>,
+    renewer: Option<Renewer>,
+    trace: Option<Arc<Mutex<File>>>,
+    renewal_trace: Option<Arc<Mutex<File>>>,
+    origin: Instant,
 }
 
 struct ConnectionPermit(Arc<AtomicUsize>);
@@ -84,6 +108,7 @@ fn run(
     mut engine: Engine,
     address: SocketAddr,
     batch_window: Duration,
+    renewer: Option<Renewer>,
 ) -> Result<(), Box<dyn Error>> {
     let mut trace = std::env::var_os("GOLIATH_STORE_TRACE")
         .map(File::create)
@@ -101,6 +126,15 @@ fn run(
                 file,
                 "request_id,commit,wake_ms,write_ms,admission_ms,total_ms"
             )?;
+            Ok(Arc::new(Mutex::new(file)))
+        })
+        .transpose()?;
+    // Renewals answered without the worker appear here and in the connection
+    // trace, never in the batch or request traces.
+    let renewal_trace = std::env::var_os("GOLIATH_STORE_TRACE")
+        .map(|path| -> io::Result<_> {
+            let mut file = File::create(PathBuf::from(path).with_extension("renewals.csv"))?;
+            writeln!(file, "request_id,accepted_ns,received_ns,answered_ns")?;
             Ok(Arc::new(Mutex::new(file)))
         })
         .transpose()?;
@@ -331,6 +365,13 @@ fn run(
             }
         }
     });
+    let route = Route {
+        sender,
+        renewer,
+        trace: connection_trace,
+        renewal_trace,
+        origin,
+    };
     let listener = TcpListener::bind(address)?;
     let active = Arc::new(AtomicUsize::new(0));
     let mut workers = Vec::new();
@@ -350,12 +391,11 @@ fn run(
             continue;
         }
         let permit = ConnectionPermit(Arc::clone(&active));
-        let sender = sender.clone();
-        let trace = connection_trace.clone();
+        let route = route.clone();
         workers.retain(|worker: &std::thread::JoinHandle<()>| !worker.is_finished());
         workers.push(std::thread::Builder::new().spawn(move || {
             let _permit = permit;
-            if let Err(error) = connection(stream, accepted, &sender, trace.as_ref()) {
+            if let Err(error) = connection(stream, accepted, &route) {
                 eprintln!("connection: {error}");
             }
         })?);
@@ -363,12 +403,7 @@ fn run(
     Ok(())
 }
 
-fn connection(
-    mut stream: TcpStream,
-    accepted: Instant,
-    sender: &mpsc::SyncSender<Pending>,
-    trace: Option<&Arc<Mutex<File>>>,
-) -> io::Result<()> {
+fn connection(mut stream: TcpStream, accepted: Instant, route: &Route) -> io::Result<()> {
     let timeout = Duration::from_secs(5);
     stream.set_nodelay(true)?;
     let mut first = true;
@@ -381,26 +416,64 @@ fn connection(
         }
         let admitted = if first { accepted } else { Instant::now() };
         first = false;
-        exchange(&mut stream, admitted, sender, trace, timeout)?;
+        exchange(&mut stream, admitted, route, timeout)?;
     }
 }
 
 fn exchange(
     stream: &mut TcpStream,
     accepted: Instant,
-    sender: &mpsc::SyncSender<Pending>,
-    trace: Option<&Arc<Mutex<File>>>,
+    route: &Route,
     timeout: Duration,
 ) -> io::Result<()> {
     let command = read_request(stream, timeout)?;
     let id = command.id.0;
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    // A granted renewal never enters the worker's queue, so it cannot wait
+    // behind a batch that is inside its durable barrier.
+    let received = Instant::now();
+    if let Some(response) = route
+        .renewer
+        .as_ref()
+        .and_then(|renewer| renewer.renew(&command))
+    {
+        let answered = Instant::now();
+        write_response(stream, &response, timeout)?;
+        let at = |time: Instant| time.duration_since(route.origin).as_nanos();
+        if let Some(trace) = &route.renewal_trace {
+            let mut trace = trace
+                .lock()
+                .map_err(|_| io::Error::other("trace lock poisoned"))?;
+            writeln!(
+                trace,
+                "{id},{},{},{}",
+                at(accepted),
+                at(received),
+                at(answered)
+            )?;
+        }
+        if let Some(trace) = &route.trace {
+            let mut trace = trace
+                .lock()
+                .map_err(|_| io::Error::other("trace lock poisoned"))?;
+            writeln!(
+                trace,
+                "{id},false,0.000000,{:.6},{:.6},{:.6}",
+                ms(answered.elapsed()),
+                ms(received.duration_since(accepted)),
+                ms(accepted.elapsed())
+            )?;
+        }
+        return Ok(());
+    }
     let commit = matches!(
         command.operation,
         Operation::Commit { .. } | Operation::CommitUuid { .. }
     );
     let queued = Instant::now();
     let (reply, response) = mpsc::sync_channel(1);
-    sender
+    route
+        .sender
         .send(Pending {
             command,
             reply,
@@ -416,8 +489,7 @@ fn exchange(
     write_response(stream, &response, timeout)?;
     let write = write_start.elapsed();
     let total = accepted.elapsed();
-    if let Some(trace) = trace {
-        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+    if let Some(trace) = &route.trace {
         let mut trace = trace
             .lock()
             .map_err(|_| io::Error::other("trace lock poisoned"))?;

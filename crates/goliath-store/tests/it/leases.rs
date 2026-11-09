@@ -421,3 +421,183 @@ fn blocking_helpers_claim_and_renew_with_a_single_caller_owned_keeper() {
     drop(server);
     fs::remove_dir_all(root).unwrap();
 }
+
+fn renew(server: &Server, id: u128, grant: LeaseGrant, counter: u64) -> Response {
+    server.call(
+        id,
+        Operation::RenewLease {
+            fence: grant.fence,
+            counter,
+        },
+    )
+}
+
+fn heartbeat(server: &Server, tile: usize) -> (bool, u64) {
+    let Response::Directory(entries) = server.call(0, Operation::Directory) else {
+        panic!("directory expected")
+    };
+    let entry = entries
+        .iter()
+        .find(|entry| entry.fence.tile == TileId(tile))
+        .expect("tile entry");
+    (entry.active, entry.heartbeat)
+}
+
+#[test]
+fn unjournaled_renewals_are_lost_by_sigkill_and_the_restart_waits_them_out() {
+    let root = path();
+    let second = Duration::from_millis(1000);
+    let mut server = Server::start(root.clone());
+    let grant = leased(&server, 1, 0, 1000);
+    let journal = fs::metadata(root.join("journal")).unwrap().len();
+    for counter in 1..=3 {
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            renew(&server, 10 + u128::from(counter), grant, counter),
+            Response::Leased(LeaseGrant { counter, ..grant })
+        );
+    }
+    let last_lost_grant = Instant::now();
+    // No renewal reached the journal, yet the running store counts all three.
+    assert_eq!(fs::metadata(root.join("journal")).unwrap().len(), journal);
+    assert_eq!(heartbeat(&server, 0), (true, 3));
+    server.kill();
+    // Stay down long enough that the restart wait ends well after the lost
+    // grant's own window would have.
+    std::thread::sleep(Duration::from_millis(500));
+    let before_restart = Instant::now();
+    let restarted = Server::start(root.clone());
+    // The journal knows the claim only.
+    assert_eq!(heartbeat(&restarted, 0), (true, 0));
+    let claim = Operation::ClaimLease {
+        tile: TileId(0),
+        lease_ms: 1000,
+    };
+    // Past the lost grant's window, the full wait from recovery still holds.
+    wait_until(last_lost_grant + second + Duration::from_millis(20));
+    let busy = restarted.call(20, claim.clone());
+    assert!(
+        Instant::now() < before_restart + second,
+        "host too slow to judge"
+    );
+    assert_eq!(busy, Response::Fault(StoreFault::LeaseBusy));
+    // The surviving holder carries on with its next counter, unjournaled again.
+    let journal = fs::metadata(root.join("journal")).unwrap().len();
+    let renewal_sent = Instant::now();
+    assert_eq!(
+        renew(&restarted, 21, grant, 4),
+        Response::Leased(LeaseGrant {
+            counter: 4,
+            ..grant
+        })
+    );
+    let renewal_answered = Instant::now();
+    assert_eq!(fs::metadata(root.join("journal")).unwrap().len(), journal);
+    assert_eq!(
+        restarted.call(22, Operation::BeginTakeover(grant.fence)),
+        Response::Ok
+    );
+    assert_eq!(
+        renew(&restarted, 23, grant, 5),
+        Response::Fault(StoreFault::LeaseDraining)
+    );
+    // The replacement waits out the unjournaled renewal, not the recovery time.
+    let mut id = 100;
+    let replaced = loop {
+        id += 1;
+        match restarted.call(id, claim.clone()) {
+            Response::Leased(next) => break next,
+            Response::Fault(StoreFault::LeaseBusy) => std::thread::sleep(Duration::from_millis(5)),
+            other => panic!("replacement claim: {other:?}"),
+        }
+    };
+    let claimed = Instant::now();
+    assert!(claimed >= renewal_sent + second);
+    assert!(claimed < renewal_answered + second + Duration::from_millis(500));
+    assert_ne!(replaced.fence, grant.fence);
+    drop(restarted);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn the_barrier_mode_still_journals_renewals_and_its_journal_replays_unchanged() {
+    let root = path();
+    let mut server = Server::start_with(root.clone(), &["--renewals", "barrier"]);
+    let grant = leased(&server, 1, 0, 1000);
+    let journal = fs::metadata(root.join("journal")).unwrap().len();
+    assert_eq!(
+        renew(&server, 2, grant, 1),
+        Response::Leased(LeaseGrant {
+            counter: 1,
+            ..grant
+        })
+    );
+    assert!(fs::metadata(root.join("journal")).unwrap().len() > journal);
+    // An identical retry is the journal's receipt in this mode.
+    assert_eq!(
+        renew(&server, 2, grant, 1),
+        Response::Leased(LeaseGrant {
+            counter: 1,
+            ..grant
+        })
+    );
+    server.kill();
+    // A journal with renewal records, as written before E29, opens in the
+    // default mode with its counter intact.
+    let restarted = Server::start(root.clone());
+    assert_eq!(heartbeat(&restarted, 0), (true, 1));
+    assert_eq!(
+        renew(&restarted, 3, grant, 1),
+        Response::Fault(StoreFault::RenewalReplay)
+    );
+    assert_eq!(
+        renew(&restarted, 4, grant, 2),
+        Response::Leased(LeaseGrant {
+            counter: 2,
+            ..grant
+        })
+    );
+    drop(restarted);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_stalled_barrier_delays_a_renewal_only_in_barrier_mode() {
+    let stall = Duration::from_millis(600);
+    for mode in ["unjournaled", "barrier"] {
+        let root = path();
+        let server = Server::start_with(
+            root.clone(),
+            &["--renewals", mode, "--test-barrier-delay-ms", "600"],
+        );
+        // The claim itself always waits for its barrier.
+        let claimed = Instant::now();
+        let grant = leased(&server, 1, 0, 10_000);
+        assert!(claimed.elapsed() >= stall);
+        let waited = std::thread::scope(|scope| {
+            // Another connection's mutation holds the store in its barrier.
+            let other = scope.spawn(|| server.call(2, Operation::Claim(TileId(7))));
+            std::thread::sleep(Duration::from_millis(150));
+            let asked = Instant::now();
+            assert_eq!(
+                renew(&server, 3, grant, 1),
+                Response::Leased(LeaseGrant {
+                    counter: 1,
+                    ..grant
+                })
+            );
+            let waited = asked.elapsed();
+            assert!(matches!(other.join().unwrap(), Response::Claimed(_)));
+            waited
+        });
+        if mode == "unjournaled" {
+            assert!(waited < Duration::from_millis(300), "{mode}: {waited:?}");
+        } else {
+            // Its own barrier alone is one full stall.
+            assert!(waited >= stall, "{mode}: {waited:?}");
+        }
+        drop(server);
+        fs::remove_dir_all(root).unwrap();
+    }
+}

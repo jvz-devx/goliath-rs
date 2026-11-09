@@ -153,6 +153,12 @@ pub(crate) struct State {
     uuid_players: BTreeMap<PlayerKey, Record<Blob>>,
     clock: Option<ClusterClock>,
     leases: BTreeMap<TileId, StoreLease>,
+    // The last renewal answered without a journal record, per tile, so its
+    // transport retry gets the same grant. Never serialized, and kept out of
+    // `receipts` so journal replay sees the same retry window as the live run.
+    unjournaled: BTreeMap<TileId, (Command, Response)>,
+    // Set once the journal has failed. Nothing is answered early after that.
+    closed: bool,
     // None only during deterministic historical journal replay.
     now: Option<Instant>,
     #[cfg(feature = "fault-injection")]
@@ -479,6 +485,66 @@ impl State {
             _ => {}
         }
         Ok((response, Some(change)))
+    }
+
+    /// Answers a renewal that needs neither a journal record nor a barrier.
+    /// `None` sends the command down the journaled path unchanged, which is
+    /// where every refusal comes from.
+    ///
+    /// The caller holds the one lock that also covers `prepare` and `apply`,
+    /// and reads `now` under it. The extension therefore lands in the lease a
+    /// later takeover or claim reads, and a drain, release or successor that
+    /// was applied first, durable or not, is seen here. Only a settled lease
+    /// is extended: its claim is on disk, so a restart finds it and waits a
+    /// full lease from a time after this grant (`restart_leases`).
+    pub(crate) fn renew_unjournaled(
+        &mut self,
+        command: &Command,
+        now: Instant,
+    ) -> Option<Response> {
+        let Operation::RenewLease { fence, counter } = command.operation else {
+            return None;
+        };
+        if self.closed || command.id.0 == 0 {
+            return None;
+        }
+        self.set_now(now);
+        self.check(fence).ok()?;
+        if let Some((previous, response)) = self.unjournaled.get(&fence.tile)
+            && previous.id == command.id
+        {
+            // A retry never extends the deadline a second time.
+            return Some(if previous == command {
+                response.clone()
+            } else {
+                Response::Fault(StoreFault::RequestConflict)
+            });
+        }
+        if self.receipts.get(&command.id).is_some() {
+            return None;
+        }
+        let lease = self.leases.get_mut(&fence.tile)?;
+        if !lease.renew_unjournaled(counter, now) {
+            return None;
+        }
+        let response = Response::Leased(lease.grant(fence));
+        if let Some(entry) = self.tiles.get_mut(&fence.tile) {
+            entry.heartbeat = counter;
+        }
+        self.unjournaled
+            .insert(fence.tile, (command.clone(), response.clone()));
+        Some(response)
+    }
+
+    /// Every applied claim is now on stable storage.
+    pub(crate) fn settle(&mut self) {
+        for lease in self.leases.values_mut() {
+            lease.settle();
+        }
+    }
+
+    pub(crate) fn close(&mut self) {
+        self.closed = true;
     }
 
     pub(crate) fn apply(&mut self, command: Command, response: Response, change: Change) {

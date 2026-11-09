@@ -28,6 +28,9 @@ pub(crate) struct Journal {
     pub(crate) fail_barrier: bool,
     #[cfg(test)]
     pub(crate) barriers: u64,
+    // Slow storage for tests. It delays the barrier and removes none.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub(crate) barrier_delay: Duration,
 }
 
 pub(crate) struct Recovery {
@@ -266,6 +269,8 @@ impl Journal {
                 fail_barrier: false,
                 #[cfg(test)]
                 barriers: 0,
+                #[cfg(any(test, feature = "fault-injection"))]
+                barrier_delay: Duration::ZERO,
             },
             Recovery { snapshot, records },
         ))
@@ -301,6 +306,8 @@ impl Journal {
             return Err(io::Error::other("injected barrier failure"));
         }
         let barrier_start = Instant::now();
+        #[cfg(any(test, feature = "fault-injection"))]
+        std::thread::sleep(self.barrier_delay);
         self.mode.sync(&self.log)?;
         let barrier_end = Instant::now();
         self.last_barrier = barrier_end.duration_since(barrier_start);
