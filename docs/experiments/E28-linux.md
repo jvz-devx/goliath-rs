@@ -1,8 +1,13 @@
 # E28. Second platform: Linux with core pinning
 
-Status: baseline and cluster frontier reproduced by the reviewer. Builder
-latency and lite measurements are complete, pending reviewer reproduction.
-The E28 soak is not claimed here.
+Status: the reviewer reproduced the baseline (200 players), the cluster
+frontier (425, a ratio of 2.125x), the proxy latency rows and the lite rows.
+The 30-minute soak failed on `final` and again on `final-r2`, the tile bundle
+with the two soak fixes. The log diagnostic and the frontier check on
+`final-r2` are builder results. M3 is paused at 72 of 1,000 seeds on `final`
+and deferred on `final-r2`. An independent audit found harness defects; none
+changes the baseline, the frontier or the ratio. They are listed under
+[Harness defects found by audit](#harness-defects-found-by-audit).
 
 ## Question
 
@@ -33,7 +38,7 @@ The SIGSTOP limiter stays as a comparison mode (`limiter`). The default mode is 
 
 ## Plan
 
-Work runs in this order. Each step names its owner. Builders get exclusive files and checkouts.
+The plan as registered. Each step names its owner, and builders get exclusive files and checkouts.
 
 1. **Harness port** (builder H). Add a platform layer to `scripts/`: `/proc`-based process and thread counters in place of libproc and mach, a `GOLIATH_RESOURCES` override for the resources path, the D12 cpuset layout, the system-slice narrowing and restore, frequency and throttle recording, and a `--cpu-mode pin|limiter` switch. Counters with no Linux equivalent are reported as null, never faked. Mac behaviour stays unchanged. The Python harness tests pass on Linux.
 2. **Fresh rebuild** (builder B). Clone Horizon and Meridian from upstream at the README pins into `.local/src/{horizon,horizon-tiles,meridian}`, apply `patches/` in the documented order, and build release binaries with `CARGO_INCREMENTAL=0`, one target dir per workspace. Binaries: plain-09 server and bots; final tiles (FINAL-09, `horizon-13-lease-renewal-r2`, patch 10); the reactor-1 proxy, sidecar and e4 client; the bounded store from this repository; the lite variant (final tiles plus `horizon-21-lite-cpu-clean`); the latency-stamp tiles and bots (`horizon-15-...-lease-r2-b2`). Each is frozen under `.local/bin/goliath-e28/` with a build record of pins, patch hashes, gates and binary hashes. The Linux BOOTTIME path of the lease keeper is checked by build, lease tests and a short run. This is the first fresh-clone reconstruction of the stack.
@@ -46,44 +51,61 @@ Work runs in this order. Each step names its owner. Builders get exclusive files
 
 Steps 1 and 2 run in parallel. Measurements run one at a time inside host windows.
 
+What changed while it ran:
+
+- The cluster frontier needed two harness changes before its rows could count. The test-only front shims saturated CPU 5 (harness v1), a forward-only shim helped little (v2), and the qualifying rows (v3) have the bots name their tile host themselves. See [Cluster frontier](#cluster-frontier).
+- Latency and lite ran as one 14-cell campaign on the `final-stamps` and `final-lite` bundles.
+- The soak failed. Its diagnosis led to two tile patches, a new bundle `final-r2`, a second soak, a labelled log diagnostic and a four-cell frontier check on `final-r2`.
+- M3's jobs-4 campaign lost two seeds at startup. A jobs-1 campaign was registered and paused at 72 seeds. M3 on `final-r2` is deferred.
+- The reviewer reproduced the baseline, the frontier, latency and lite. The soak, M3 and the `final-r2` rows have no reviewer run.
+
 ## Results
 
-The matched plain-09 baseline is 200 players: two passes at 200 and two valid
-failures at 225. The direct-routing harness-v3 cluster frontier is the highest
-stable tested pass, 425: two passes at 425, a mixed 450 step, and two valid
-raw-P99 failures at 475. The tested upper bracket is 475, not an exact maximum.
+| Item | Result | Status | Section |
+| --- | --- | --- | --- |
+| Plain-09 baseline | 200 players: 200 passes twice, 225 fails twice | Reproduced | [Baseline](#plain-09-baseline) |
+| Cluster frontier, final stack | 425 players: 400 and 425 pass twice, 475 fails twice; 450 mixed for the builder, failed twice for the reviewer | Reproduced | [Frontier](#cluster-frontier) |
+| Ratio | 425 / 200 = 2.125x (Mac: 650 / 325 = 2.0x) | Reproduced | [Reviewer reproduction](#reviewer-reproduction-of-baseline-and-frontier) |
+| Proxy latency, pinned | Every via-proxy P95 under 5 ms. Builder 4.37 ms (tick gate failed) and 4.31 ms; reviewer 4.60 and 3.20 ms qualifying, 3.97 ms unproven | Reproduced | [Proxy latency](#proxy-latency) |
+| Limiter comparison | No STOP in any of six limiter rows; P95 2.81 to 6.48 ms. Inconclusive about the Mac's limiter tail | Reproduced | [Latency verdict](#latency-verdict) |
+| Lite warming cost | 0.57 to 0.61% of the busiest tile's main-thread CPU (Mac: 0.38%). Combined additions unproven | Reproduced | [Lite rows](#tick-cost-lite-rows) |
+| Soak on `final` | `e28-soak-r1` stopped on a collector crash at 893 s; retry `-a1` lost tiles a and b at about 544 s | Failed | [Soak on final](#30-minute-soak-on-final) |
+| Soak on `final-r2` | `e28-soak-r2` lost tiles a and d to lease expiry at 1,216 s | Failed, builder run | [Soak on final-r2](#soak-on-final-r2) |
+| Log diagnostic on `final-r2` | Bulk logs on tmpfs: 1,800 s, no authority stop, largest barrier 88.8 ms. Not the M4 soak row | Builder result | [Soak on final-r2](#soak-on-final-r2) |
+| Frontier check on `final-r2` | 425 passes twice; 450 has one raw-P99 failure and one cell that lost a tile | Builder result | [Frontier check on final-r2](#frontier-check-on-final-r2) |
+| M3 on `final` | Jobs-4 lost two seeds at startup; matrix passes all 18 cases; jobs-1 paused at 72 of 1,000 seeds, zero failures | Paused | [M3 on final](#m3-campaign-on-final) |
+| M3 on `final-r2` | Not started | Deferred | [M3 on final-r2](#m3-on-final-r2) |
 
-The platform-local frontier/baseline ratio is **425 / 200 = 2.125x**. Only v3
-qualifies it. V1, v2, pilots, smokes and diagnostics remain in the full ledger
-but are excluded from the final frontier. The reviewer reproduced both brackets (below).
+**Brackets.** The builder's baseline bracket is 200/225 and its frontier
+bracket 425/475, with 450 mixed: one pass, one fail at 49.8 to 53.0 ms raw
+P99. The reviewer's baseline bracket is also 200/225. Its frontier bracket is
+425/450: both 450 repeats failed, r0 on tile d alone at 50.785 ms and r1 at
+52.041 and 50.526 ms on two tiles, so 450 is a narrow fail. 425 is the highest
+step with two passes in both runs. Only harness-v3 rows count toward it.
 
-There are 26 retained cells: 25 valid, including six valid performance failures,
-and one invalid startup. Nineteen cells pass. No mixed step got an extra repeat.
-Every complete raw row over 1 MB is losslessly compressed. The 26 rows contain
-100,281,041 decompressed bytes stored in 8,392,150 bytes, with the startup's
-11,339-byte native failure evidence retained separately in 1,576 bytes.
+**Open items.**
 
-
-### Reviewer reproduction
-
-The reviewer ran every baseline and v3 frontier step again, two fresh repeats each, with the builder's documented commands, the same bundles and `--cpu-mode pin`. All 12 cells are valid. Data: `data/E28/reviewer-baseline/` and `data/E28/reviewer-frontier/`.
-
-| Step | Repeat 0 | Repeat 1 | Server cores | Proxy cores |
-| --- | --- | --- | --- | --- |
-| Plain 200 | pass, 19.99 TPS | pass, 19.99 TPS | | |
-| Plain 225 | fail, 19.67 TPS | fail, 19.57 TPS | | |
-| Cluster 400 | pass | pass | 2.46, 2.41 | 0.64, 0.65 |
-| Cluster 425 | pass | pass | 2.64, 2.67 | 0.69, 0.72 |
-| Cluster 450 | fail | fail | 2.97, 2.94 | 0.79, 0.79 |
-| Cluster 475 | fail | fail | 3.29, 3.30 | 0.87, 0.88 |
-
-The baseline reproduces at 200 and the frontier at 425, so the ratio is 2.125x on this machine. The reviewer's 450 step failed both repeats where the builder's was mixed, which closes the bracket one step lower. The cluster fails on raw tick P99 while the four tiles together use under 3.3 of the four server cores: on this CPU each tile's main thread runs out of room first, not the core budget. The Mac's ratio was 2.0x (650 / 325).
+- The soak line is not met on this machine. Store fsync stalls end tile
+  leases. The log diagnostic points at writeback of the fixture's logs; the 600 ms a renewal
+  can wait is unchanged. E29, on the branch `e29-lease-renewal`, answers a
+  granted renewal without waiting for the journal barrier. Nothing from it is
+  measured.
+- The store's memory line. The [D12 addendum](../decisions.md#d12-addendum-the-soaks-memory-line-on-this-platform)
+  judges resident plus swap from the later of minute 5 and a full receipt
+  window. The soak figures in this report are minute 5 to the last sample and
+  predate that ruling; the ruled figures are not computed here.
+- The registration fix has no live-fire evidence.
+- M3: 928 seeds on `final` are unattempted, and nothing has run on `final-r2`.
+- Why the cluster's tick tail fails at 450 to 475 is open. See
+  [Why the cluster fails](#why-the-cluster-fails) and
+  [E31](E31-tile-cost.md). The proxy's cost is analysed in [E30](E30-proxy-cost.md).
+- The combined tick additions under 5% stay unproven.
+- Fixes for the audit's harness defects are in progress.
 
 ## Harness port
 
-The following describes the port handoff before game-server measurements.
-Those builder port checks are separate from the capacity results below.
-Darwin's libproc and mach counter paths remain in place.
+Status: builder checks, plus the reviewer's own live pinning check. These
+are port checks, not capacity results.
 
 `scripts/goliath_platform.py` reads process and thread counters from `/proc`.
 Thread totals use nanosecond schedstat counters. Process totals retain observed
@@ -110,6 +132,9 @@ samples, throttle counters, available memory, swap-in pages, fixture placement,
 outside CPU per PID and its total, and the CPU mode. Outside names are `outside`.
 Start load above 4, outside work above 0.5 core per process, CPU 5 at least 95%
 busy, missing throttle coverage or a throttle increase invalidate a cell.
+CPU 5 busy is measured from cell start to the end of the measured minute, so
+it can read lower than the minute itself (audit finding 1). The outside rule
+does not count the measurement driver on Linux (finding 8).
 
 `GOLIATH_RESOURCES` overrides the resources directory. The Linux default is
 `$HOME/.local/share/goliath-resources/26.3`. Resource files stay outside Git.
@@ -140,11 +165,11 @@ done
 
 These suites pass. Seven tests are explicitly skipped on Linux because their
 retained Mac executables or private Git indexes are absent. The new platform
-suite has 19 passing tests, including parsing fixtures, wrapper arguments,
-private environment propagation, native main-thread selection, recovery
-idempotence, partial recovery retries, bundle tampering and compression hashes.
-Initial failures and subsequent test logs remain under
-`$REPO/.local/evidence/E28/harness-*`.
+suite had 19 passing tests at the port, including parsing fixtures, wrapper
+arguments, private environment propagation, native main-thread selection,
+recovery idempotence, partial recovery retries, bundle tampering and
+compression hashes. It has 20 in the audit's later run. Initial failures and
+subsequent test logs remain under `$REPO/.local/evidence/E28/harness-*`.
 
 The short live check ran inside a drained H host window:
 
@@ -166,22 +191,22 @@ rose, and 23 swap-in pages were recorded. Slice, governor and driver-cgroup
 settings matched their originals after normal cleanup and after SIGTERM.
 Both standalone restore calls were no-ops. The local record is
 `$REPO/.local/evidence/E28/harness-live.json`.
-For an independent check, the reviewer uses a fresh name such as
-`python3 -B scripts/e28-platform-check --name repro-harness-live` in its own
-drained H host window. The original record cannot be overwritten.
+The reviewer ran its own check under a fresh name in its own drained H host
+window, for example `python3 -B scripts/e28-platform-check --name repro-harness-live`.
+The original record cannot be overwritten.
 
-These are builder checks, not capacity results. Actual E28 bundle execution,
-limiter-mode load, Darwin runtime regression checks, the soak and M3 remain
-unproven until the reviewer runs them. No Rust build or game-server load ran as
-part of the harness port.
+The Mac paths were compared by reading the diff and have not been run on a
+Mac since the port. Three of them changed; see
+[What changed on the Mac paths](#what-changed-on-the-mac-paths). No Rust build
+or game-server load ran as part of the harness port.
 
 ## Fresh rebuild
 
-Disposition: ready for reviewer measurements under the explicit
-[gate disposition](data/E28/gate-disposition.json). All four Linux release
-bundles pass `goliath_bundle.validate`. The canonical replacement was made
-inside B's quiet reservation, then the reservation was released. No capacity
-result is claimed by this rebuild.
+Status: checked by the reviewer. All four Linux release bundles pass
+`goliath_bundle.validate` under the explicit
+[gate disposition](data/E28/gate-disposition.json). The canonical replacement
+was made inside B's quiet reservation, then the reservation was released. No
+capacity result is claimed by this rebuild.
 
 The builder cloned the three requested upstream trees at the documented pins.
 All canonical patch application checks passed, including the stamp overlay on
@@ -199,6 +224,9 @@ hashes exactly match the first canonical proxy build. Post-rebuild Clippy has
 only the deprecated `fetch_update` diagnostic at `meridian-net/src/io_pool.rs:323`.
 Root strict Clippy retains the same deprecation at
 `crates/goliath-store/src/main.rs:345`; internal crates remain unchanged.
+After the bundles froze, the store's `fetch_update` was renamed to
+`try_update`, so the root gates pass again. The frozen store binary was built
+before that rename.
 Additional whole-workspace formatting checks find historical E2 formatting;
 the exact scoped proxy formatter passes. These four failed gate labels remain
 failed and are accepted only by the reviewer's named toolchain-lint disposition.
@@ -219,47 +247,91 @@ qualify the instrumentation-cost bound.
 All stored bytes match it, but a matching hash does not waive a failed gate.
 Per-bundle build records retain failures, corrected attempts, profile settings,
 ordered patch hashes and compiled source identities. Later gate evidence stays
-outside the frozen bundles. The replacement anchor SHA-256 is
-`7dd3a3e222d46b319eea6cc65fc586afbe1dc33afd14c8635a0f62111bd10347`.
+outside the frozen bundles. The anchor's SHA-256 at this rebuild was
+`7dd3a3e222d46b319eea6cc65fc586afbe1dc33afd14c8635a0f62111bd10347`; it changed
+when `final-r2` was added (see [Frozen identities](#frozen-identities)).
 The removed lint-only patch is absent from both the canonical source stack and
 the patch directory. The real stamp clock port remains selected.
 
 Linux's keeper uses BOOTTIME against MONOTONIC-backed `Instant` brackets. Its
 slack is `(next.after - previous.before) / 500 + 1 microsecond`, rebased after
-each accepted check. A reviewer-owned live smoke should retain lease traces
-for at least 30 seconds, verify increasing renewal counters and send-anchored
-250 ms cadence, and reject false clock anomalies or authority stops. A real
-system suspend was not performed.
+each accepted check. The planned check (lease traces for at least 30 seconds,
+increasing renewal counters, send-anchored 250 ms cadence, no false clock
+anomaly or authority stop) is covered by the builder's renewal readback of the
+first soak over its partial run; see [First run](#first-run-e28-soak-r1).
+A real system suspend was not performed.
 
 Disposable target directories and redundant staging copies were removed through
 the measurement-aware B build window using scoped `scripts/clean-builds`, never
 `--all`. This freed 10,256,855,296 apparent bytes, about 9.55 GiB. All three
 manual source checkouts and the four frozen bundles remain. The workspace used
 1,448,943,616 allocated bytes after cleanup, about 1.35 GiB; exact accounting is
-in [the disk record](data/E28/build-disk.json). No commit or push was made.
+in [the disk record](data/E28/build-disk.json).
+
+## Frozen identities
+
+The trust anchor is [the build manifest](data/E28/build-manifest.json), which
+hashes every file in every E28 bundle, metadata and launchers included. Its
+SHA-256 was `7dd3a3e222d46b319eea6cc65fc586afbe1dc33afd14c8635a0f62111bd10347`
+for every measurement before `final-r2` was added, and has been
+`d9cbbdcc0e3dc54e5119ccd37dd8662d9ca42a7b1e2ce33b98e50e8d08ee6698` since.
+Records that store the value carry the one they ran against: the latency and
+lite summary, the lite clock row and the `e28-soak-r1` and `-a1` plans carry
+`7dd3a3e2...`; the `e28-soak-r2` and diagnostic plans carry `d9cbbdcc...`.
+The capacity rows and M3 windows hash the bundle files directly instead.
+
+The disabled-trace proof is `5411d3d5039c3b6dccfd9e1a3da7eb78a30eb9347474f940aae7c0fd72f917ec`.
+These are frozen-file identities, separate from the decompressed raw-row
+hashes in the ledgers.
+
+| Bundle | Used executable | SHA-256 |
+| --- | --- | --- |
+| plain-09 | `.local/bin/goliath-e28/plain-09/horizon-client` | `f9527d1acc54c25fd98efad4f8bdaec88c9d35a6051c1fb9c286e550eceaa629` |
+| plain-09 | `.local/bin/goliath-e28/plain-09/horizon-bots` | `3a4874246ad92ec7dbd2f5a8e2280b14e25df4410615e229d30fef99f2b2c9e4` |
+| final | `.local/bin/goliath-e28/final/horizon-client` | `1614a5f60b87b44e1cb08c28aae6925539dc30ff5572c9fe06e723cfe3f2e9a0` |
+| final | `.local/bin/goliath-e28/final/meridian` | `085414788e7bd53c49346e22ee36924940a134bc44f05336f2a43d6af282fe2c` |
+| final | `.local/bin/goliath-e28/final/meridian-sidecar` | `d4523dccd4b03f2d4c6b57909f9323bcfc271ff78e43cb1ee456f5e1f23976ad` |
+| final | `.local/bin/goliath-e28/final/goliath-store` | `ac3c8075a6ec92e52a0201925a2b896c4ffb2803526473630bced68cd35ba888` |
+| final | `.local/bin/goliath-e28/final/e4-client` | `f886e67fbc0ac9004f7d07126465119d813b10995f22f8733a2656ef526ce8b6` |
+| final-lite | `.local/bin/goliath-e28/final-lite/horizon-client` | `1370d3f34f92d6a07465f7468e9fee9c922850af5b9221f4c04b6cb9ecc19883` |
+| final-lite | `.local/bin/goliath-e28/final-lite/e26_clock_probe` | `7dc09400ad28537b301528ea0b485c5247ff4cb2800e107c48693636bf6ce484` |
+| final-stamps | `.local/bin/goliath-e28/final-stamps/horizon-client` | `8b285fd908948dc26cdfe8ab4baea8a064d2b215aaba26144344c797bb174088` |
+| final-stamps | `.local/bin/goliath-e28/final-stamps/horizon-bots` | `73a2c53b02ecaf065942381cfdb170d74f205638a61aed3cd1ddb432c9aa4848` |
+| final-r2 | `.local/bin/goliath-e28/final-r2/horizon-client` | `673fd535a946ae0b909e5ba62e897f141fccde006eb00b637058894bf06b7162` |
+
+In `final-lite`, `final-stamps` and `final-r2`, every executable not listed
+here is byte-identical to `final`'s. `final`'s own `horizon-bots` is
+plain-09's. The v3 capacity cells and the soaks use the `final-stamps` bots
+with tracing off (see [Direct routing](#direct-routing-and-harness-v3)).
 
 ## Plain-09 baseline
 
-The initial builder preflight rejected the published plain-09
-bundle with `E28 source equality or build gates did not pass`. Its build record
-has `verification_status: failed` and retains `plain-09-fmt`. The manifest
-existed and the host had no running or waiting builds at that preflight, but
-those two scheduling prerequisites did not waive the validation failure.
+Status: reproduced by the reviewer. 200 passes and 225 fails in both runs.
 
-The reviewer subsequently recorded [the gate disposition](data/E28/gate-disposition.json),
-SHA-256 `0247ea9473e7cb4f07598f885fc0052dc3a48aaf593d7b22c6f5acb832ccfa5f`.
+The builder's first preflight rejected the plain-09 bundle with
+`E28 source equality or build gates did not pass`: its build record has
+`verification_status: failed` and retains `plain-09-fmt`. The reviewer then
+recorded [the gate disposition](data/E28/gate-disposition.json). At the time
+of these measurements its SHA-256 was
+`0247ea9473e7cb4f07598f885fc0052dc3a48aaf593d7b22c6f5acb832ccfa5f`. It gained
+`final-r2` entries in a later commit and is now
+`e54b2b89df118d9964f8073258dd5148053de808f382e25dce4be9215042d01c`.
 It accepts only the named, bundle-specific toolchain-lint failures for
 `plain-09-fmt`, `root-clippy`, `proxy-fmt` and `proxy-clippy`. Tests, compile
-errors, source deviations and any other failed gate still block. Plain-09 now
-validates. Measurements below used this disposition; all results
-remain pending reviewer reproduction.
+errors, source deviations and any other failed gate still block. Plain-09 then
+validated, and every measurement below used this disposition.
 
-The builder's baseline bracket is 200/225 players, pending reviewer reproduction.
-Both 200-player repeats pass; both 225-player repeats are valid TPS/raw-P99
-overloads. Single pilots at 150 and 250 and the 50-player smoke are retained
-separately and do not count toward this staircase. The retained-data checker
-passes geometry, movement, population, raw-tick and CPU/noise checks for all
-four staircase rows. No rejected preflight is represented as an overload.
+The builder's bracket is 200/225. Both 200-player repeats pass; both
+225-player repeats are valid TPS and raw-P99 overloads. Single pilots at 150
+and 250 and the 50-player smoke are retained separately and do not count
+toward the staircase. The retained-data checker passes geometry, movement,
+population, raw-tick and CPU/noise checks for all four staircase rows. No
+rejected preflight is represented as an overload.
+
+The reviewer's repeats agree: 200 passes twice at raw P99 46.549 and
+47.882 ms, and 225 fails twice at 19.673 and 19.575 TPS. Its rows are in
+`data/E28/reviewer-baseline/` and in the
+[combined reproduction table](#reviewer-reproduction-of-baseline-and-frontier).
 
 The direct single-cell Linux command now establishes the legacy baseline
 quiet marker inside an existing host reservation. Both this command and the
@@ -267,7 +339,7 @@ cluster runner refuse to overwrite an existing compressed raw row. Regression
 coverage includes marker setup, compressed-name protection and relative-path
 compression. Unit checks do not waive release gates.
 
-The original builder smoke command was:
+The builder's smoke command was:
 
 ```sh
 export GOLIATH_WINDOW_OWNER=E28M
@@ -279,9 +351,8 @@ python3 -B scripts/e17-d9-baseline --bins .local/bin/goliath-e28/plain-09 --data
 This smoke passed. Its relative-path compression failure occurred after the
 measurement; the gzip was verified byte-exact, its decompressed hash was saved,
 and only the duplicate uncompressed copy was removed. No measurement was rerun.
-The path-handling bug is fixed and regression-tested. If interrupted, restore with
-`python3 -B scripts/goliath-cpu restore` before handling stale host locks.
-The completed baseline's raw rows and retained-data check are indexed by
+The path-handling bug is fixed and regression-tested. The completed baseline's
+raw rows and retained-data check are indexed by
 `data/E28/baseline/staircase.json` and `verified-summary.json`.
 
 ### All baseline cells
@@ -320,33 +391,36 @@ Virtual plain tiles are in a/b/c/d order. These are observed player ranges acros
 
 ## Cluster frontier
 
-The completed v3 tested bracket is 425/475. Both 425 rows pass, 450 is mixed,
-and both 475 rows fail raw P99. No extra 450 repeat ran. This is the same
-unstable-band rule as E20: 425 is the highest stable tested pass, not a claim
-that every count above it fails. The ratio to this machine's 200 baseline is
-2.125x, pending reviewer reproduction.
+Status: reproduced by the reviewer. The builder's v3 bracket is 425/475 with
+450 mixed. The reviewer's two 450 repeats both failed, which closes its
+bracket at 425/450. Only harness-v3 rows count, and they ran last; the v1 and
+v2 rows below are kept as evidence.
 
-All eight v3 cells are valid. CPU 4 busy ranges from 29.30% to 40.36%, and CPU 5
-from 45.72% to 53.40%; bots are not late. The two upper rows use 3.220 and
-3.238 server cores and still miss the strict raw-P99 rule. Average server CPU
-need not reach four cores before the tick-tail limit fails. No harness-core or
-bot-core saturation is claimed as a cluster failure.
+The builder's v3 staircase: both 400 and both 425 rows pass, 450 is mixed, and both 475
+rows fail raw P99. This is E20's unstable-band rule: 425 is the highest
+stable tested pass, not a claim that every count above it fails. All eight v3
+cells are valid. CPU 4 busy ranges from 29.30% to 40.36%, and CPU 5 from
+45.72% to 53.40%; bots are not late. The two 475 rows use 3.220 and 3.238
+server cores and still miss the raw-P99 rule. No harness-core or bot-core
+saturation is claimed as a cluster failure.
 
-The replacement final bundle validates under the explicit gate disposition.
-The manifest and all proxy source-stack records exclude the rejected lint-only
-Meridian Linux patch. The 100-player cluster smoke passes, with all four tiles
-at 20 TPS, 64 pigs per tile, correct cpusets and restored slices/governors.
-All cluster results remain pending reviewer reproduction.
+The final bundle validates under the gate disposition. The manifest and all
+proxy source-stack records exclude the rejected lint-only Meridian Linux
+patch. The 100-player cluster smoke passes, with all four tiles at 20 TPS, 64
+pigs per tile, correct cpusets and restored slices and governors.
 
-The original staircase is now **harness-v1 evidence only**. Both 400-player
-repeats and both 425-player repeats pass, with one invalid 400/r1 startup and
-its explicitly named retry retained. The final v1 row, 450/r0, passes as well.
-It uses only 2.587 server cores while CPU 5 is 94.13% busy. At 425/r1 CPU 5 is
-92.76% busy and servers use 2.412 cores. Continuing that staircase would risk
-measuring the test-only shims' core limit before reaching the server frontier.
-No v1 row will determine the reported frontier.
+### Harness v1: front shims
 
-The original builder cluster smoke command was:
+The original staircase is harness-v1 evidence only. Both 400-player repeats
+and both 425-player repeats pass, with one invalid 400/r1 startup and its
+explicitly named retry retained. The last v1 row, 450/r0, passes as well. It
+uses only 2.587 server cores while CPU 5 is 94.13% busy. At 425/r1 CPU 5 is
+92.76% busy and servers use 2.412 cores. Continuing would have risked
+measuring the test-only shims' core limit instead of the server frontier, so
+no v1 row determines the frontier. The audit later found CPU 5 at 100% over
+the measured minute in 400/r1-a1, 425/r1 and 450/r0 (finding 1).
+
+The builder's cluster smoke command was:
 
 ```sh
 export GOLIATH_WINDOW_OWNER=E28M
@@ -355,14 +429,13 @@ python3 -B scripts/e20-frontier --bins .local/bin/goliath-e28/final --data-dir d
 .local/bin/host-window release E28M
 ```
 
-This historical smoke used harness-v1, whose hashes are in its raw row. The
-command above records that run, not a v3 reproduction. Final reproduction uses
-the explicit `--direct-bots` commands below. The local resume record is
+This smoke used harness-v1, whose hashes are in its raw row. The command
+records that run, not a v3 reproduction. The local resume record is
 `$REPO/.local/evidence/E28/measure-state.md`.
 
 ### Forward-only capacity shim and harness-v2
 
-The reviewer requested this change after the 450/r0 row completed. The capacity
+The reviewer asked for this change after the 450/r0 row completed. The capacity
 pass rule consumes shim errors only, not shim packet counts. Proxy path
 histograms are separate and unchanged. Capacity shims now opt into
 `--forward-only`: `HostPrelude` rewrites the initial host as before, then a
@@ -451,6 +524,10 @@ triggered. No further load cells ran after the bracket closed.
 Every cell is retained, including the invalid startup. TPS and raw P99 use tile order a / b / c / d. CPU values are steady process counters; CPU 4/5 busy and swap-in cover D12's cell-start through steady-end window. Outside totals show both steady and whole-cell phases. A dash means unavailable, never zero. The invalid startup has no steady window, so its CPU 5 and swap-in values describe startup only. All completed cluster rows have zero dropped raw ticks, all requested bots online without late rounds, and 64 pigs per tile before and after measurement.
 
 #### Harness-v1, retained only
+
+CPU 5 was at 100% over the measured minute in the three v1 rows the audit
+checked (400/r1-a1, 425/r1, 450/r0), so these rows under-loaded the servers
+even where they read valid.
 
 | Cell | Players | Repeat | Valid | Pass | TPS | Raw P99 ms | Reason |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -548,6 +625,12 @@ The following vectors use a / b / c / d order and show before -> after. Placed a
 
 ### Readback, hashes and exact reproduction
 
+There are 26 retained capacity cells: 25 valid, including six valid
+performance failures, and one invalid startup. Nineteen cells pass. Every
+complete raw row over 1 MB is losslessly compressed. The 26 rows contain
+100,281,041 decompressed bytes stored in 8,392,150 bytes, with the startup's
+11,339-byte native failure evidence retained separately in 1,576 bytes.
+
 [The complete ledger](data/E28/measurement-ledger.json) records every raw path, decompressed-byte and stored-file SHA-256, exact builder command, harness generation, outcome, CPU counters, populations, and restoration check. Every raw JSON over 1 MB is `.json.gz`; no samples were trimmed. The failed startup's native evidence is retained and hashed separately in that ledger. The first plain smoke's native exit 1 was a publication error after a passing measurement, repaired byte-exact without a rerun. The failed IO-pool startup was a readiness race: the proxy binds TCP before starting its pool, and the old launcher returned on TCP connect. The runner now waits at most 10 seconds for the complete pool message and rejects early proxy exit. Its failed row and explicit `-a1` retry remain separate.
 
 Retained-data checks reproduce the baseline bracket and v3 endpoint arithmetic:
@@ -557,7 +640,10 @@ python3 -B scripts/e17-flat09-report --data-dir docs/experiments/data/E28/baseli
 python3 -B scripts/e20-results e28-frontier-v3 --baseline 200 --data-dir docs/experiments/data/E28/frontier
 ```
 
-The reviewer runs fresh cells from the repository root after validating both selected bundles and independently checking the disabled-trace guard. The guard test uses a tiny native probe through the build reservation, so run it before acquiring a measurement window. These commands have not been run by the builder and create only reviewer-owned `repro-*` results:
+The reviewer ran fresh cells from the repository root after validating both
+selected bundles and checking the disabled-trace guard, which compiles a tiny
+native probe through the build reservation before any measurement window.
+As run by the reviewer:
 
 ```sh
 export GOLIATH_WINDOW_OWNER=E28R
@@ -581,11 +667,13 @@ done
 python3 -B scripts/e20-results repro-e28-frontier-v3 --baseline 200 --data-dir docs/experiments/data/E28/reviewer-frontier
 ```
 
-Each cell stays in the foreground. Keep invalid and failed reproductions; do not repeat a mixed step. If interrupted, run `python3 -B scripts/goliath-cpu restore` before removing stale host locks. If the reproduced baseline differs, supply that value to readback rather than silently reusing 200. No `repro-*` data was created by the builder.
+Each cell stays in the foreground. Keep invalid and failed reproductions and
+do not repeat a mixed step. If the reproduced baseline differs, supply that
+value to readback rather than reusing 200. After an interrupted cell anywhere
+in this report, restore the host as described under
+[Harness port](#harness-port) before removing a stale host lock.
 
-The source proof and all numerical cross-checks are builder evidence, not reviewer reproduction. The 30-minute soak, proxy latency, instrumentation-cost bound and optional M3 campaign are outside this capacity task and remain unclaimed here. No commit or push was made. Progress and decisions were not edited by the measurement builder.
-
-### Final verification and handoff
+### Verification
 
 [The verification record](data/E28/verification.json) lists 239 registered test
 cases: 232 pass, seven explicitly skip retained Mac artifacts, and none fail.
@@ -599,106 +687,65 @@ cluster TPS/raw P99 and baseline geometry/movement, checks zero raw-tick drops,
 all bots online without late rounds, 64 pigs per tile, the stamped bot identity,
 the disabled-trace proof, and one unchanged v3 harness identity. No raw samples
 were trimmed. All private run/world folders were removed after extraction.
-At the builder handoff, the host window was free; cleanup freed 0 MB and left
-the remaining target under its cap. No builder measurement is queued. The
-reviewer has since started independent reproduction as E28R. Those files are
-not inspected or changed by this write-up.
 
 Three harness failures were resolved without hiding results: the initial
 single-cell marker gap, relative-path compression after the passing plain
 smoke, and the IO-pool readiness race before the invalid cluster startup.
-The native disabled-trace probe initially had a test-module nesting error;
-the unchanged method was put in its original module context and the guard
-tests then passed. No application or frozen binary was changed for that fix.
+The native disabled-trace probe first had a test-module nesting error; the
+unchanged method was put in its original module context and the guard tests
+then passed. No application or frozen binary changed for that fix.
 
-Reviewer reproduction is the remaining acceptance step. A proposed progress
-update, not applied to progress or decisions, is: "E28 builder evidence under
-D12 pinning gives a 200-player matched baseline and a 425-player stable v3
-cluster step, or 2.125x. Baseline fails twice at 225; cluster 450 is mixed and
-475 fails twice on raw P99. Pending independent reviewer reproduction."
+### Reviewer reproduction of baseline and frontier
 
-### Frontier check on final-r2
+The reviewer ran every baseline and v3 frontier step again, two fresh repeats each, with the builder's documented commands, the same bundles and `--cpu-mode pin`. All 12 cells are valid. Data: `data/E28/reviewer-baseline/` and `data/E28/reviewer-frontier/`.
 
-Status: builder evidence, pending reviewer reproduction. The tile binary
-changed in final-r2, so four v3 direct-bot cells under pin check that
-capacity did not move. Servers come from final-r2, bots from final-stamps
-with tracing off, and the pass rule is the one above. Each row records
-`bundle: final-r2`.
+| Step | Repeat 0 | Repeat 1 | Server cores | Proxy cores |
+| --- | --- | --- | --- | --- |
+| Plain 200 | pass, 19.99 TPS | pass, 19.99 TPS | | |
+| Plain 225 | fail, 19.67 TPS | fail, 19.57 TPS | | |
+| Cluster 400 | pass | pass | 2.46, 2.41 | 0.64, 0.65 |
+| Cluster 425 | pass | pass | 2.64, 2.67 | 0.69, 0.72 |
+| Cluster 450 | fail | fail | 2.97, 2.94 | 0.79, 0.79 |
+| Cluster 475 | fail | fail | 3.29, 3.30 | 0.87, 0.88 |
 
-| Cell | Players | Valid | Pass | TPS | Raw P99 ms | Reason |
-| --- | --- | --- | --- | --- | --- | --- |
-| [frontier-r2-425-r0](data/E28/frontier/e28-frontier-r2-425-r0.json.gz) | 425 | yes | yes | 19.998 / 19.998 / 19.998 / 19.998 | 40.647 / 42.110 / 38.407 / 39.264 | pass |
-| [frontier-r2-425-r1](data/E28/frontier/e28-frontier-r2-425-r1.json.gz) | 425 | yes | yes | 20.002 / 20.000 / 19.999 / 20.012 | 36.697 / 38.414 / 37.461 / 37.683 | pass |
-| [frontier-r2-450-r0](data/E28/frontier/e28-frontier-r2-450-r0.json.gz) | 450 | no | no | - | - | tile a lost its lease 32.7 s into the steady window; no measurement |
-| [frontier-r2-450-r1](data/E28/frontier/e28-frontier-r2-450-r1.json.gz) | 450 | yes | no | 19.996 / 19.996 / 20.010 / 20.003 | 53.040 / 54.334 / 53.208 / 53.380 | raw P99 >= 50 ms; no drops |
+The baseline reproduces at 200 and the frontier at 425, so the ratio is
+2.125x on this machine. The reviewer's 450 step failed both repeats where the
+builder's was mixed, which closes the bracket one step lower. The Mac's ratio
+was 2.0x (650 / 325).
 
-| Cell | Server cores | Proxy cores | Proxy threads | Bot cores | CPU 4 busy | CPU 5 busy | Outside total steady | Swap-in pages |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| frontier-r2-425-r0 | 2.718 | 0.721 | 871..877 | 0.295 | 33.41% | 55.88% | 0.288 | 24 |
-| frontier-r2-425-r1 | 2.643 | 0.702 | 872..879 | 0.278 | 31.93% | 50.08% | 0.209 | 92 |
-| frontier-r2-450-r0 | - | - | - | - | 34.62% | 52.88% | - | 46 |
-| frontier-r2-450-r1 | 3.058 | 0.812 | 922..928 | 0.332 | 37.38% | 54.41% | 0.350 | 744 |
+### Why the cluster fails
 
-Against the final-bundle v3 rows, 425 is unchanged within the spread of two
-repeats: raw P99 36.7 to 42.1 ms here against 35.2 to 40.5 ms, and server
-cores 2.64 and 2.72 against 2.62 and 2.67. 450 was mixed on final (one pass
-at 42.1 to 46.2 ms, one fail at 49.8 to 53.0 ms). Here it has one fail at
-53.0 to 54.3 ms and one invalid cell, so 450 still does not qualify and
-nothing suggests the fixes cost capacity. Two cells per step cannot resolve a
-difference of a few percent. The stable step stays 425.
+The cluster fails on raw tick P99, not on TPS. The "Server cores" column sums
+the CPU of the registered server processes. Under pinning the budget is the
+four CPUs themselves, and they were busier than that sum:
 
-`frontier-r2-450-r0` is a cluster failure, not a harness fault, and was not
-rerun. Tile a refused its clean shutdown cut with `local cluster lease
-expired`. The proxy logged 107 lost-backend lines for a within 0.1 s and one
-ALERT for a hand-over from a to b that a's sidecar refused for the expired
-lease. Bot groups a and cross exited 1. D12 checks pass (CPU 5 52.88% busy,
-46 swap-in pages). The frontier harness keeps no lease or store trace, so the
-store stall behind this expiry is not observed in this row. The soak below
-shows the mechanism on the same fixture. The
-[failure evidence](data/E28/frontier/e28-frontier-r2-450-r0-450-failure-native.json.gz)
-is retained.
+| Cell | Server cores | CPUs 0 to 3 busy, measured minute | Tile main threads, cores each |
+| --- | ---: | ---: | --- |
+| `e28-frontier-v3-425-r0` | 2.668 | 2.95 (73.7% each) | 0.39 to 0.41 |
+| `repro-e28-frontier-v3-450-r0` | 2.972 | 3.27 (81.8%) | 0.43 to 0.45 |
+| `e28-frontier-v3-475-r0` | 3.220 | 3.53 (88.2%) | 0.46 to 0.49 |
+| `repro-e28-frontier-v3-475-r1` | 3.296 | not computed | 0.49 to 0.50 |
 
-The rows' harness hashes differ from the final-bundle v3 rows in two files.
-`goliath_bundle.py` gained the final-r2 guard. `goliath_platform.py` carries
-the retired-thread counter fix made after the v3 staircase. The kernel,
-layout, bots and pass rule are the same. The
-[ledger](data/E28/frontier/e28-frontier-r2-staircase.json) comes from
-`e20-results`.
-
-The builder ran, once per cell and in this order (425 r0, 425 r1, 450 r0,
-450 r1):
-
-```sh
-export GOLIATH_WINDOW_OWNER=E28R2
-.local/bin/host-window quiet E28R2 e28-frontier-r2-425-r0
-python3 -B scripts/e20-frontier --bins .local/bin/goliath-e28/final-r2 --data-dir docs/experiments/data/E28/frontier --cpu-mode pin --direct-bots --counts 425 --name e28-frontier-r2-425-r0
-.local/bin/host-window release E28R2
-python3 -B scripts/e20-results e28-frontier-r2 --baseline 200 --data-dir docs/experiments/data/E28/frontier
-```
-
-Reviewer commands, not run by the builder:
-
-```sh
-export GOLIATH_WINDOW_OWNER=E28R
-for e28_count in 425 450; do
-  for e28_repeat in 0 1; do
-    e28_label="repro-e28-frontier-r2-${e28_count}-r${e28_repeat}"
-    .local/bin/host-window quiet E28R "$e28_label"
-    python3 -B scripts/e20-frontier --bins .local/bin/goliath-e28/final-r2 --data-dir docs/experiments/data/E28/reviewer-frontier --cpu-mode pin --direct-bots --counts "$e28_count" --name "$e28_label"
-    .local/bin/host-window release E28R
-  done
-done
-python3 -B scripts/e20-results repro-e28-frontier-r2 --baseline 200 --data-dir docs/experiments/data/E28/reviewer-frontier
-```
-
-A cell that loses a tile exits 1 and stays in the ledger as invalid. Keep it
-and do not repeat it.
+The figures beyond "Server cores" are the audit's, recomputed from the raw
+rows. At the failing 450 and 475 steps each tile's main thread averages 0.43
+to 0.50 core; the plain server's main thread passes 200 players at 0.82 to
+0.84 core. At 475 the server CPUs are about 88% busy and about 0.3 core on
+them belongs to no registered process. Interrupt and softirq time for
+loopback traffic and kernel threads are the likely source; none is
+attributed. The four tiles themselves use about 2.4 cores. At 475 the raw tick
+P50 is 29 to 33 ms while the main thread's CPU is about 24 ms per tick, so the
+main thread spends part of each tick not running. It was either waiting for
+one of four CPUs that were 88% busy, or blocked on its own worker threads. No
+run-delay data was kept, so the cause of the tick tail is open.
+[E31](E31-tile-cost.md) takes the question further from retained data. An
+earlier version of this report said each tile's main thread "runs out of room
+first"; the data does not support that, and the statement is withdrawn.
 
 ## Proxy latency
 
-Status: builder measurements complete, pending reviewer reproduction. The
-pin pair does not supply two qualifying rows. Removal of the Mac's
-limiter-associated tail is not demonstrated on this platform.
+Status: reproduced by the reviewer. Every pinned via-proxy P95 is under 5 ms,
+and the reviewer has two qualifying pinned rows. The limiter comparison is
+inconclusive.
 
 The [latency and lite protocol](data/E28/latency-lite-protocol.json), SHA-256
 `589514a75eacb3ebaa4fcc93d7f4c671e4ddae5ca080fadfc66efd473053443b`, fixes
@@ -718,27 +765,6 @@ seconds of decode drain. No forwarding tap, handshake shim or login relay
 is present. Nothing subtracts STOP pauses or direct-reference quantiles.
 This covers selected interior movement, not crossing latency or all packets.
 
-The reviewer can reproduce the fixed order from the repository root with
-fresh reviewer-owned names. The runner acquires and releases each window
-under the exported owner; do not wrap a second owner around it.
-
-```sh
-export GOLIATH_WINDOW_OWNER=E28R
-for e28_spec in pin-direct-r0 pin-via-r0 limiter-via-r0 limiter-direct-r0 limiter-via-r1 pin-via-r1; do
-  e28_mode="${e28_spec%%-*}"
-  e28_direct=()
-  case "$e28_spec" in *-direct-*) e28_direct=(--direct-reference);; esac
-  python3 -u -B scripts/e25-latency-cell-r2 --name "repro-e28-latency-${e28_spec}" --bins .local/bin/goliath-e28/final-stamps --data-dir docs/experiments/data/E28/reviewer-latency --players 425 --cpu-mode "$e28_mode" --plan docs/experiments/data/E28/latency/e28-latency-plan-r1.json --stop-brackets "${e28_direct[@]}"
-  e28_summary="docs/experiments/data/E28/reviewer-latency/repro-e28-latency-${e28_spec}-summary.json"
-  test -f "$e28_summary" || e28_summary="${e28_summary}.gz"
-  python3 -B scripts/e25-stop-overlap --summary "$e28_summary" --data-dir docs/experiments/data/E28/reviewer-latency --name "repro-e28-latency-${e28_spec}-overlap"
-done
-```
-
-If a summary is compressed, pass its actual `.json.gz` path to overlap
-readback. Keep failed or invalid rows; no loop implies permission to overwrite
-them or replace them with another repeat.
-
 Two via rows per CPU mode were run. The comparison mode keeps servers
 and bots together on CPUs 0 to 4 under the original four-core and one-core
 SIGSTOP caps. Pinning separates servers onto CPUs 0 to 3 and bots onto CPU 4.
@@ -756,7 +782,7 @@ proxied sessions and all 42 crossers. E25 needs no direct subtraction to test
 its conservative bound. The references diagnose baseline cost and cannot
 repair a failed via result.
 
-### Latency results and failures
+### Builder run
 
 The required reviewer `475/r1` result existed and the host window was free
 before the first builder cell. All 14 cells in this latency/lite campaign
@@ -792,9 +818,12 @@ registered `-a1` before its run. No performance or intrusion failure was retried
 `pin-via-r0` retained 20 TPS and zero dropped ticks but raw P99 was
 51.789515 / 50.573152 / 51.158516 / 47.079673 ms on a / b / c / d.
 It cannot qualify under the unchanged fixture gates. CPU 5 was 94.68%
-busy, below the 95% invalidation line. Its outside-process limits also
-passed. It was not reclassified as noise or replaced. No causal attribution
-of this tick failure to outside work is established.
+busy over the whole cell, below the 95% invalidation line. Over the measured
+minute alone it was 97.66% busy, so this cell's harness core was saturated
+while it was measured (audit finding 1); the rule now applies to the measured
+minute too. Its outside-process limits passed. It was not reclassified as
+noise or replaced. No causal attribution of this tick failure to outside work
+is established.
 
 | Complete cell | Tile a P95 | Tile b P95 | Tile c P95 | Tile d P95 | Retained send window, seconds |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -816,7 +845,7 @@ sessions from the references' 417 proxied plus eight signed direct sessions.
 Both paths retain the same seeded routes, compression threshold 256 and
 no encryption. Census vectors and every selected send remain in the raw rows.
 
-### STOP association and verdict
+#### STOP association, builder rows
 
 No complete latency cell issued a server or bot STOP, including both
 limiter via rows. Both caps remained enabled and their native aggregate
@@ -834,15 +863,11 @@ open STOPs, dropped signal events or unknown matched spans.
 | pin-via-r1 | 484 | 0 / 484 | 0 / 484 |
 
 All shares are 0%. These are E25's signal-call bracket associations, not
-kernel stop acknowledgements or a causal subtraction. Both pin overall P95
-values are below 5 ms, but only the second row passes every fixture gate.
-The limiter pair is mixed on the overall latency line. The direct references
-do not repair either failure, and their quantiles are not subtracted.
-
-Pinning does not demonstrate removal of the Mac's limiter-associated tail
-here: the 425-player comparison never produced limiter STOPs. This platform
-still has finite send-to-decode tails without them. The pin pair is not two
-qualifying M4 observations, and the result remains pending reviewer reproduction.
+kernel stop acknowledgements or a causal subtraction. Both builder pin P95
+values are below 5 ms, but only the second row passes every fixture gate, so
+the builder's pin pair is not two qualifying M4 observations. The limiter pair
+is mixed on the overall latency line. The direct references do not repair
+either failure, and their quantiles are not subtracted.
 
 ### Reviewer reproduction of latency
 
@@ -860,13 +885,44 @@ The reviewer reran the fixed order with fresh `repro-e28-latency-*` names, the s
 
 `pin-via-r1` is kept as failed. Tile b's lease trace ends with a partial line and no newline because the tile stopped before flushing, and the strict collector refuses a row whose authority trace can't be decoded in full. Its timing is shown in brackets and isn't counted. That is a collection fault, not a latency or tick result, so the reviewer ran one explicitly named retry, `-a1`, under the same rule the builder used.
 
-Verdict on this platform: every pinned via-proxy P95 measured here is under 5 ms (builder 4.37 and 4.31, reviewer 4.60, 3.97 unproven, and 3.20), and the reviewer has two qualifying pinned rows, 4.60 and 3.20 ms. The builder's 4.37 ms row stays failed on its tick gate. So, at this machine's 425-player frontier and under D12 pinning, the proxy path is under the 5 ms line. The comparison mode issued no STOP in any of its six rows across both runs, builder and reviewer, because the servers stayed below their four-core cap at 425 players. This machine therefore can't show that pinning removes the Mac's limiter tail. Its limiter rows ranged from 2.81 to 6.48 ms with no pauses at all. The Mac result under D9 stays as it was.
+As run by the reviewer from the repository root; `pin-via-r1-a1` was
+registered and run on its own after this loop. The runner acquires and
+releases each window under the exported owner, so do not wrap a second owner
+around it.
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28R
+for e28_spec in pin-direct-r0 pin-via-r0 limiter-via-r0 limiter-direct-r0 limiter-via-r1 pin-via-r1; do
+  e28_mode="${e28_spec%%-*}"
+  e28_direct=()
+  case "$e28_spec" in *-direct-*) e28_direct=(--direct-reference);; esac
+  python3 -u -B scripts/e25-latency-cell-r2 --name "repro-e28-latency-${e28_spec}" --bins .local/bin/goliath-e28/final-stamps --data-dir docs/experiments/data/E28/reviewer-latency --players 425 --cpu-mode "$e28_mode" --plan docs/experiments/data/E28/latency/e28-latency-plan-r1.json --stop-brackets "${e28_direct[@]}"
+  e28_summary="docs/experiments/data/E28/reviewer-latency/repro-e28-latency-${e28_spec}-summary.json"
+  test -f "$e28_summary" || e28_summary="${e28_summary}.gz"
+  python3 -B scripts/e25-stop-overlap --summary "$e28_summary" --data-dir docs/experiments/data/E28/reviewer-latency --name "repro-e28-latency-${e28_spec}-overlap"
+done
+```
+
+If a summary is compressed, pass its actual `.json.gz` path to overlap
+readback. Keep failed or invalid rows; no loop implies permission to overwrite
+them or replace them with another repeat.
+
+### Latency verdict
+
+Verdict on this platform: every pinned via-proxy P95 measured here is under 5 ms (builder 4.37 and 4.31, reviewer 4.60, 3.97 unproven, and 3.20), and the reviewer has two qualifying pinned rows, 4.60 and 3.20 ms. The builder's 4.37 ms row stays failed on its tick gate, and its harness core was saturated over the measured minute. So, at this machine's 425-player frontier and under D12 pinning, the proxy path is under the 5 ms line. The comparison mode issued no STOP in any of its six rows across both runs, builder and reviewer, because the servers stayed below their four-core cap at 425 players. This machine therefore can't show that pinning removes the Mac's limiter tail. Its limiter rows ranged from 2.81 to 6.48 ms with no pauses at all. The Mac result under D9 stays as it was.
+
+The audit adds that no test or cell shows the Linux limiter issuing a STOP at
+all. In all six limiter rows the server budget's largest debt was at most
+9.9 ms of CPU against a 20 ms threshold, and the bot budget's at most 0.7 ms
+against 5 ms, all before the measured window. The limiter ran and was never
+close to pausing anything.
 
 ## Tick-cost lite rows
 
-Status: all six rows and the fresh calibration are complete, pending reviewer
-reproduction. Both B rows fail an intrusion check. The combined under-5%
-bound remains unproven.
+Status: reproduced by the reviewer. Warming costs about 0.6% of the busiest
+tile's main-thread CPU. The builder's two B rows fall outside the A controls'
+spread and the reviewer's two fall inside it. The combined bound stays
+unproven.
 
 The same protocol fixes a fresh calibration of final-lite's native thread
 clock probe, four final-stack untimed A controls and two final-lite B rows,
@@ -907,6 +963,9 @@ comes from the last five warmup seconds and is not reselected afterward.
 | [b2](data/E28/lite/e28-lite-b2.json.gz) | B | b | 0.398126 | 20.414773 | 35.006268 |
 | [a4](data/E28/lite/e28-lite-a4.json.gz) | A | b | 0.394295 | 21.369375 | 38.905329 |
 
+B1's selected tile is a, while every A control selected b, so B1's intrusion
+check compares different tiles.
+
 The uncharged warming share is the ratio of CPU sums over complete
 query-bracketed cycles, not a mean of per-cycle percentages.
 
@@ -933,32 +992,17 @@ not mean warming costs zero and cannot support an under-5% upper bound.
 Both rows are unproven under the intrusion rule. The recorder covers warming
 only, so the combined additions remain unbounded by these lite observations.
 
-Exact reviewer commands, in the preregistered order:
+### D12 fields for the latency and lite cells
 
-```sh
-export GOLIATH_WINDOW_OWNER=E28R
-python3 -u -B scripts/e26-clock-run --name repro-e28-lite-clock-r0 --bins .local/bin/goliath-e28/final-lite --data-dir docs/experiments/data/E28/reviewer-lite --cpu-mode pin
-for e28_arm in a1 b1 a2 a3 b2 a4; do
-  case "$e28_arm" in
-    a*) e28_script=e26-lite-cell; e28_kind=A; e28_bundle=final;;
-    b*) e28_script=e26b-final-lite-cell; e28_kind=B; e28_bundle=final-lite;;
-  esac
-  python3 -u -B "scripts/$e28_script" --name "repro-e28-lite-${e28_arm}" --arm "$e28_kind" --bins ".local/bin/goliath-e28/$e28_bundle" --data-dir docs/experiments/data/E28/reviewer-lite --players 425 --cpu-mode pin
-done
-for e28_b in b1 b2; do
-  python3 -B scripts/e26b-repro-lite "repro-e28-lite-$e28_b" --data-dir docs/experiments/data/E28/reviewer-lite --controls repro-e28-lite-a1 repro-e28-lite-a2 repro-e28-lite-a3 repro-e28-lite-a4 --calibration docs/experiments/data/E28/reviewer-lite/repro-e28-lite-clock-r0.json --out "repro-e28-lite-${e28_b}-summary.json"
-done
-```
-
-### D12 fields, publication and cleanup
-
-Every cell below passed the D12 host checks, including the collector-failed
-reference and the raw-tick-failed via row. CPU percentages cover cell start
-through steady end, as in the capacity port. Outside totals and maxima use
-steady / whole-cell order. The short clock row uses its native probe phase.
-No CPU 5 saturation or outside-process invalidation occurred, so no noise
-retry was invoked. The one `-a1` attempt fixes the separately recorded null
-telemetry collector failure.
+Every cell below passed the D12 host checks as coded, including the
+collector-failed reference and the raw-tick-failed via row. CPU percentages
+cover cell start through steady end, as in the capacity port. Outside totals
+and maxima use steady / whole-cell order. The short clock row uses its native
+probe phase. By the rule as coded no CPU 5 saturation or outside-process
+invalidation occurred, so no noise retry was invoked. Over the measured
+minute alone, `latency-pin-via-r0` had CPU 5 at 97.66% (see
+[Builder run](#builder-run)). The one `-a1` attempt fixes the separately
+recorded null telemetry collector failure.
 
 | Cell | Start load | CPU 4 busy | CPU 5 busy | Outside total cores, steady / whole | Largest outside process cores, steady / whole | Swap-in pages |
 | --- | ---: | ---: | ---: | --- | --- | ---: |
@@ -983,8 +1027,7 @@ turbo unchanged, correct server/bot/harness cpusets, and exact restoration
 of the original slice and governor policies. Pin uses `0-3 / 4 / 5`;
 limiter uses `0-4 / 0-4 / 5`. No outside process exceeds 0.5 core in either
 required phase. Outside totals are reported, not substituted for the
-per-process validity rule. The failed raw-tick row's 94.68% CPU 5 value
-remains below the strict 95% invalidation threshold.
+per-process validity rule.
 
 [The numerical readback](data/E28/latency-lite-summary.json) retains all six
 CPUs' busy/total ticks, every core's observed frequency range, first/last
@@ -1015,32 +1058,7 @@ only its tiny native disabled-trace guard through its build reservation.
 
 `host-window build E28L -- scripts/clean-builds` completed after verification,
 freed 0 MB and left the 113 MB target below its cap. The project occupied
-1,631 MB at cleanup. The host window is free, its restore journal is absent,
-and no run/world folder or queued measurement remains.
-
-No commit or push was made by this builder. Progress and decisions were not
-edited by this builder. Proposed progress text is: "E28's pinned via bounds
-are 4.371 and 4.314 ms P95, but the first row fails raw ticks. Limiter is mixed
-at 6.479 and 2.815 ms with zero STOP overlap, so removal of a limiter tail is
-not demonstrated. Lite warming observes 0.569% and 0.598%, but both rows fail
-intrusion; the combined under-5% bound remains unproven. Pending independent
-reviewer reproduction." No change to D12 is proposed.
-
-### Selected frozen identities
-
-The trust anchor is SHA-256 `7dd3a3e222d46b319eea6cc65fc586afbe1dc33afd14c8635a0f62111bd10347`.
-The disabled-trace proof is `5411d3d5039c3b6dccfd9e1a3da7eb78a30eb9347474f940aae7c0fd72f917ec`.
-The manifest retains every bundled metadata and launcher hash as well. These are frozen-file identities, separate from the decompressed raw-row hashes in the ledger.
-
-| Bundle | Used executable | SHA-256 |
-| --- | --- | --- |
-| plain-09 | `.local/bin/goliath-e28/plain-09/horizon-client` | `f9527d1acc54c25fd98efad4f8bdaec88c9d35a6051c1fb9c286e550eceaa629` |
-| plain-09 | `.local/bin/goliath-e28/plain-09/horizon-bots` | `3a4874246ad92ec7dbd2f5a8e2280b14e25df4410615e229d30fef99f2b2c9e4` |
-| final | `.local/bin/goliath-e28/final/horizon-client` | `1614a5f60b87b44e1cb08c28aae6925539dc30ff5572c9fe06e723cfe3f2e9a0` |
-| final | `.local/bin/goliath-e28/final/meridian` | `085414788e7bd53c49346e22ee36924940a134bc44f05336f2a43d6af282fe2c` |
-| final | `.local/bin/goliath-e28/final/meridian-sidecar` | `d4523dccd4b03f2d4c6b57909f9323bcfc271ff78e43cb1ee456f5e1f23976ad` |
-| final | `.local/bin/goliath-e28/final/goliath-store` | `ac3c8075a6ec92e52a0201925a2b896c4ffb2803526473630bced68cd35ba888` |
-| final-stamps | `.local/bin/goliath-e28/final-stamps/horizon-bots` | `73a2c53b02ecaf065942381cfdb170d74f205638a61aed3cd1ddb432c9aa4848` |
+1,631 MB at cleanup. No run or world folder remained.
 
 ### Reviewer reproduction of lite rows
 
@@ -1053,13 +1071,35 @@ The reviewer reran the calibration, four A controls and two B rows with fresh `r
 
 Both reproduced B rows pass the intrusion check, where the builder's two did not. Taken with the builder's 0.569% and 0.598%, speculative warming on the final stack costs about 0.6% of the busiest tile's main-thread CPU on this machine, against 0.38% on the Mac, and is far below 5%. As on the Mac, the lite recorder covers warming only, so the combined additions stay unproven.
 
-## 30-minute soak
+As run by the reviewer, in the preregistered order (the `a4-a1` retry was
+registered and run on its own):
 
-Status: the initial collection failed and is not a 30-minute qualification.
-The reviewer explicitly authorized the registered retry `e28-soak-r1-a1`
-for that collection crash. Its [retry registration](data/E28/soak-retry-plan-r1-a1.json)
-preserves the fixture and pass line. `e28-soak-r1` stays failed. No result is
-qualified before reviewer reproduction.
+```sh
+export GOLIATH_WINDOW_OWNER=E28R
+python3 -u -B scripts/e26-clock-run --name repro-e28-lite-clock-r0 --bins .local/bin/goliath-e28/final-lite --data-dir docs/experiments/data/E28/reviewer-lite --cpu-mode pin
+for e28_arm in a1 b1 a2 a3 b2 a4; do
+  case "$e28_arm" in
+    a*) e28_script=e26-lite-cell; e28_kind=A; e28_bundle=final;;
+    b*) e28_script=e26b-final-lite-cell; e28_kind=B; e28_bundle=final-lite;;
+  esac
+  python3 -u -B "scripts/$e28_script" --name "repro-e28-lite-${e28_arm}" --arm "$e28_kind" --bins ".local/bin/goliath-e28/$e28_bundle" --data-dir docs/experiments/data/E28/reviewer-lite --players 425 --cpu-mode pin
+done
+for e28_b in b1 b2; do
+  python3 -B scripts/e26b-repro-lite "repro-e28-lite-$e28_b" --data-dir docs/experiments/data/E28/reviewer-lite --controls repro-e28-lite-a1 repro-e28-lite-a2 repro-e28-lite-a3 repro-e28-lite-a4 --calibration docs/experiments/data/E28/reviewer-lite/repro-e28-lite-clock-r0.json --out "repro-e28-lite-${e28_b}-summary.json"
+done
+```
+
+## 30-minute soak on final
+
+Status: failed on this machine. `e28-soak-r1` stopped on a collector crash at
+893 s. Its registered retry `e28-soak-r1-a1` lost tiles a and b at about
+544 s. Neither reached minute 30. The diagnosis is the builder's; the reviewer
+took its two bugs as the basis for the fixes in `final-r2`
+([Fixes](#fixes-for-the-soak-failure)). The soak on `final-r2` is under
+[Measurements on final-r2](#measurements-on-final-r2).
+
+### Protocol and log integrity
+
 The [soak and M3 protocol](data/E28/soak-m3-protocol.json) was registered before
 measurement. The reviewer's lite B2 summary existed and the host window was
 free before acquisition under `E28S`.
@@ -1087,41 +1127,7 @@ second to complete, with framing snapshots retained; malformed complete
 records fail and retain their native bytes. No prior reviewer failure is
 repaired or reclassified. No frozen executable changes for this port.
 
-### Retry a1: genuine cluster loss, not bot duration
-
-The explicitly registered `e28-soak-r1-a1` also failed, at about 544 seconds
-of bot runtime. The [bot-exit diagnosis](data/E28/soak/e28-soak-r1-a1-bot-exit-diagnosis.json)
-checks actual recorded argv, archived final telemetry, stderr, native process
-exit statuses and the backend logs. All five groups have exactly one
-`--seconds 3300`, a 55-minute lifetime, plus their direct handshake host.
-The helper appends host routing without dropping duration. There is no route
-completion limit explaining this exit.
-
-The generic failure message contained an earlier cached A sample with
-`failed: 0`. Its final archived sample has 96 failures and exit 1, with stderr
-`horizon-bots: not all bots remained online`. B also exits 1 with 96 failures;
-the crossing group exits 1 with 42. C and D remain online at failure capture.
-Tile A itself exits 1 after a native panic during new-player registration,
-`Fault(AlreadyExists)`. Tile B separately exhausts its confirmed lease after
-two WouldBlock reads and an overall-deadline timeout, recording
-`renew-keeper-deadline`. No clock-anomaly event is observed. Its refused clean
-shutdown cut is retained. These are real cluster failures, not a harness timer.
-
-The retry's whole-window D12 checks pass: CPU 5 is 74.45% busy, the largest
-outside process averages 0.15894 core, no throttle counter rises and policy
-restoration is exact. The last RSS sample is at 485.153 seconds, with seven
-completed owner audits. There is no minute-30 endpoint or 30-minute pass.
-No `a2` is registered or started. The reviewer required a stop/report if the
-cluster actually dropped a group, so no further soak or M3 cell is queued.
-
-The explicitly authorized retry was executed once:
-
-```sh
-export GOLIATH_WINDOW_OWNER=E28S
-python3 -u -B scripts/e25-soak-control --name e28-soak-r1-a1 --bins .local/bin/goliath-e28/final --data-dir docs/experiments/data/E28/soak --cpu-mode pin --direct-bots --players 425 --campaign-plan docs/experiments/data/E28/soak-retry-plan-r1-a1.json --owner E28S --collect-only
-```
-
-### Initial failed run and partial readback
+### First run: e28-soak-r1
 
 The [failed-run readback](data/E28/soak/e28-soak-r1-result.json) retains the
 raw row, all RSS samples, native authority traces and partial ticks. Collection
@@ -1204,36 +1210,42 @@ start-load and noise checks pass. Slice, governor and turbo policies restore
 exactly. These fields cover startup through recovery/cleanup, not just the
 last successful RSS sample. They do not repair the collection failure.
 
-### Exact soak commands
+### Retry: e28-soak-r1-a1
 
-The builder ran this once:
+The reviewer authorized one registered retry, `e28-soak-r1-a1`, for the
+collection crash. Its [retry registration](data/E28/soak-retry-plan-r1-a1.json)
+preserves the fixture and the pass line, and `e28-soak-r1` stays failed.
 
-```sh
-export GOLIATH_WINDOW_OWNER=E28S
-python3 -u -B scripts/e25-soak-control --name e28-soak-r1 --bins .local/bin/goliath-e28/final --data-dir docs/experiments/data/E28/soak --cpu-mode pin --direct-bots --players 425 --campaign-plan docs/experiments/data/E28/soak-m3-protocol.json --owner E28S --collect-only
-```
+The retry also failed, at about 544 seconds
+of bot runtime. The [bot-exit diagnosis](data/E28/soak/e28-soak-r1-a1-bot-exit-diagnosis.json)
+checks actual recorded argv, archived final telemetry, stderr, native process
+exit statuses and the backend logs. All five groups have exactly one
+`--seconds 3300`, a 55-minute lifetime, plus their direct handshake host.
+The helper appends host routing without dropping duration. There is no route
+completion limit explaining this exit.
 
-For a fresh reviewer attempt, use the current collector with the retired-thread
-fix and the same frozen workload. This does not reproduce or reclassify the
-old collector failure. The runner acquires and releases its own window.
+The generic failure message contained an earlier cached A sample with
+`failed: 0`. Its final archived sample has 96 failures and exit 1, with stderr
+`horizon-bots: not all bots remained online`. B also exits 1 with 96 failures;
+the crossing group exits 1 with 42. C and D remain online at failure capture.
+Tile A itself exits 1 after a native panic during new-player registration,
+`Fault(AlreadyExists)`. Tile B separately exhausts its confirmed lease after
+two WouldBlock reads and an overall-deadline timeout, recording
+`renew-keeper-deadline`. No clock-anomaly event is observed. Its refused clean
+shutdown cut is retained. These are real cluster failures, not a harness timer.
 
-```sh
-export GOLIATH_WINDOW_OWNER=E28R
-.local/bin/host-window build E28R -- python3 -B scripts/e28-log-integrity-tests
-.local/bin/host-window build E28R -- python3 -B scripts/e28-soak-tests
-python3 -u -B scripts/e25-soak-control --name repro-e28-soak-r1 --bins .local/bin/goliath-e28/final --data-dir docs/experiments/data/E28/reviewer-soak --cpu-mode pin --direct-bots --players 425 --campaign-plan docs/experiments/data/E28/soak-m3-protocol.json --owner E28R --collect-only
-# Only after a full collection and release:
-python3 -B scripts/e25-soak-readback --name repro-e28-soak-r1 --data-dir docs/experiments/data/E28/reviewer-soak --owner E28R
-```
+The retry's whole-window D12 checks pass: CPU 5 is 74.45% busy, the largest
+outside process averages 0.15894 core, no throttle counter rises and policy
+restoration is exact. The last RSS sample is at 485.153 seconds, with seven
+completed owner audits. There is no minute-30 endpoint or 30-minute pass.
+The reviewer required a stop and a report if the cluster actually dropped a
+group, so no `a2` was registered and the next M3 window was held.
 
-Do not manufacture a final endpoint or run the full readback on a shortened
-collection. Keep every failure and use a new name for any authorized attempt.
+### Diagnosis
 
-### Soak failure diagnosis
-
-Status: diagnosis by the builder, not yet reproduced by the reviewer. No
-binary, bundle or Rust source changed. The numbers are in the
-[diagnosis record](data/E28/soak/e28-soak-diagnosis-r1.json).
+Status: builder diagnosis. Fixes 1 and 2 below were built afterwards as
+`final-r2`; see [Fixes for the soak failure](#fixes-for-the-soak-failure).
+The numbers are in the [diagnosis record](data/E28/soak/e28-soak-diagnosis-r1.json).
 
 `e28-soak-r1-a1` lost two tiles. One cause led to both losses, through two
 separate weaknesses. A slow durable barrier in the store made tile b's lease
@@ -1270,7 +1282,7 @@ retained, so runnable delay of the store and keeper threads is unobserved.
 The slow barriers follow a 31.2 s cycle. In a1, 26 of the 37 barriers over
 50 ms after second 150 fall in one 2.5 s slice of that cycle, which covers 8%
 of the time. Every cycle produced a slow barrier: 59 to 409 ms. CPU bursts
-of the unconfined `vdo0:*` kernel threads land on the same cycle, at 520.7
+of the volume's unconfined kernel threads land on the same cycle, at 520.7
 and 552.3 s among others. r1 shows the same spacing. The kernel writes back a
 dirty file about 30 s after it is first dirtied (`dirty_expire_centisecs`
 3000, flusher every 5 s). The fixture keeps rewriting large logs on the
@@ -1344,7 +1356,7 @@ store stalls stayed under the 200 ms read cap, which its 41 ms maximum
 shows, and no tile lost its lease, so the fallback path never ran there.
 Neither Mac document records a fallback or `AlreadyExists` event.
 
-**Fixes, ranked.** None is built or measured.
+**Fixes, ranked.** As proposed at the time of the diagnosis.
 
 1. Code: give the renewal client a per-phase cap of lease minus margin
    (900 ms) instead of 200 ms at `lease.rs:215`. The call deadline still
@@ -1372,20 +1384,190 @@ Neither Mac document records a fallback or `AlreadyExists` event.
    stderr to tmpfs for collection afterwards. The journal stays on the data
    volume under `--sync full`. In isolation this removes the burst tail
    (p99.9 19.2 instead of 39.8 ms). Its effect at soak load is unmeasured.
-   Moving the store's directory to the root NVMe was not tried: house rules
-   keep runs on `/srv/ai`, the root volume's idle fsync tail is no better
-   (max 48 ms), and both volumes share one physical disk.
+   Moving the store's directory to the root NVMe was not tried: runs stay on
+   the data volume, the root volume's idle fsync tail is no better (max 48 ms),
+   and both volumes share one physical disk.
 
-Fixes 3 and 4 change no binary. The reviewer must decide whether they keep
+Fixes 3 and 4 change no binary; the reviewer has to decide whether they keep
 the cell comparable under D9 and D12. Fixes 1 and 2 address the weaknesses
 themselves. Without fix 1, any stall that holds renewal replies past 200 ms
-for about 650 ms can still end a tile, as in a1.
+for about 650 ms can still end a tile, as in a1. Fixes 1 and 2 became
+`final-r2`. Fixes 3 and 4 were not applied to the standard fixture; fix 4's
+log move became the labelled diagnostic on `final-r2`.
 
-### Fixes for the soak failure
+### Soak commands
 
-Status: built and gated by the builder, not yet reproduced by the reviewer.
-Nothing has been measured with these fixes. The soak, a fresh M3 campaign and
-a frontier check come next, on the unchanged fixture.
+The builder ran each once:
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28S
+python3 -u -B scripts/e25-soak-control --name e28-soak-r1 --bins .local/bin/goliath-e28/final --data-dir docs/experiments/data/E28/soak --cpu-mode pin --direct-bots --players 425 --campaign-plan docs/experiments/data/E28/soak-m3-protocol.json --owner E28S --collect-only
+python3 -u -B scripts/e25-soak-control --name e28-soak-r1-a1 --bins .local/bin/goliath-e28/final --data-dir docs/experiments/data/E28/soak --cpu-mode pin --direct-bots --players 425 --campaign-plan docs/experiments/data/E28/soak-retry-plan-r1-a1.json --owner E28S --collect-only
+```
+
+For a fresh reviewer attempt on `final`, not yet run, use the current
+collector with the retired-thread fix and the same frozen workload. This does
+not reproduce or reclassify the old collector failure. The runner acquires and
+releases its own window.
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28R
+.local/bin/host-window build E28R -- python3 -B scripts/e28-log-integrity-tests
+.local/bin/host-window build E28R -- python3 -B scripts/e28-soak-tests
+python3 -u -B scripts/e25-soak-control --name repro-e28-soak-r1 --bins .local/bin/goliath-e28/final --data-dir docs/experiments/data/E28/reviewer-soak --cpu-mode pin --direct-bots --players 425 --campaign-plan docs/experiments/data/E28/soak-m3-protocol.json --owner E28R --collect-only
+# Only after a full collection and release:
+python3 -B scripts/e25-soak-readback --name repro-e28-soak-r1 --data-dir docs/experiments/data/E28/reviewer-soak --owner E28R
+```
+
+Do not manufacture a final endpoint or run the full readback on a shortened
+collection. Keep every failure and use a new name for any authorized attempt.
+
+## M3 campaign on final
+
+Status: paused at 72 of 1,000 seeds. The first jobs-4 crash campaign failed
+on two seeds at startup; the serial refusal matrix passes. Both ran between
+`e28-soak-r1` and its retry. A separately registered jobs-1 campaign, run
+after the retry, reached a clean pause after 72 completed trials with no
+failed trial. Its next window has not started. M3 on `final-r2` is
+deferred (see [M3 on final-r2](#m3-on-final-r2)). No M3 run has a reviewer
+reproduction.
+
+The campaign preserves E24's original E13 fault kernels, seed 240001,
+1,000 crossings, 12 partition cases and six stale-login cases. Jobs 4 share
+one four-core server cpuset and one client core. Each low-population fixture
+does not receive its own CPU budget. Whole-window D12 checks decide validity;
+startup pressure or a failed trial is retained, never silently retried.
+M3 uses its original direct `e4-client` path, without capacity bots or front
+shims. Resume is allowed only after a clean `paused-window`, with every
+admitted trial complete and the schedule unchanged.
+
+### Jobs-4 crash campaign and refusal matrix
+
+The [complete M3 readback](data/E28/m3/e28-m3-results-r1.json) retains all
+12 admitted crash trials, including both failures, and all 18 matrix cases.
+The crash campaign stops at its first observed failed trial and drains the
+other admitted work. Ten trials complete and pass the original E13 item
+checker, covering 30 named stacks and 310 units, with zero duplicates,
+unaccounted losses or stale files. Two trials fail before their scheduled
+fault. The remaining 988 seeds are unattempted, not passes.
+
+| Seed | Scheduled fault | Outcome |
+| --- | --- | --- |
+| 240001 to 240010 | Original seeded phase/victim schedule | 10 complete recovery audits |
+| 240011 | fsync, target | Cluster-clock initialization failed before fault |
+| 240012 | install, both | Tile d exited during startup with `Resource temporarily unavailable` |
+| 240013 to 241000 | Unchanged retained schedule | Not attempted |
+
+Jobs 4 was selected to preserve E24's protocol, sharing one D12 budget rather
+than receiving four budgets. It is not qualified on this machine. The precise
+resource or timing cause of the startup failures is unproven. No failed seed
+was rerun and the campaign was not resumed. A new, separately authorized
+lower-concurrency campaign is needed to establish the 1,000-seed item.
+
+The first window also retains one placement snapshot pairing a server
+executable and server cgroup with allowed CPU 5. That raw window is invalid,
+not retroactively repaired. Placement capture had read process status,
+cgroup and executable at different instants. Future capture brackets those
+values, retries observed migration/exec transitions at most four times, and
+reports unresolved observations as unproven. A known pre-exec launcher is
+charged to its declared destination only after joining that cgroup. Stable
+wrong placement still fails. Tests cover both cases.
+
+The separate serial matrix completes all 12 partition and six stale-login
+cases. The original checker confirms zero accepted stale cuts, placements,
+CAS operations or returning logins, with the old processes still alive and
+the replacements running. Its D12 window is valid. Intentional crash/partition
+lease traces retain framing metadata without claiming zero authority events
+from such faulted processes.
+
+| Window | Seconds | CPU 5 busy | Largest outside process, cores | Swap-in pages | D12 | Restored |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| e28-m3-crash-w1 | 96.257 | 57.39% | 0.14966 | 2,720 | invalid placement snapshot | yes |
+| e28-m3-matrix-w1 | 233.324 | 42.22% | 0.14361 | 43 | valid | yes |
+
+Neither window has a throttle-counter rise. The matrix's outside total is
+0.20266 core. Native snapshots retain all six CPU counters, frequency ranges,
+memory endpoints and placements. The invalid crash row stays invalid despite
+its passing outside-CPU and thermal checks.
+
+`e24-m3-results` was run and exited 1 with `ValueError: campaign incomplete`.
+It did not pack or delete any trial. The published crash and matrix archives
+retain every original JSON byte sequence, individual SHA-256 and parsed
+record, with byte-identical base64 round-trip checks. There is no complete
+campaign result hidden behind the passing matrix.
+
+### Startup diagnosis
+
+The [startup diagnosis](data/E28/m3-startup-diagnosis.json) and
+[request-ID timing join](data/E28/m3-startup-read-overlap.json) identify
+seed 240012's EAGAIN on the blocking Directory response read. The store
+response took 231.83 ms: about 93.95 ms queued followed by a shared 137.66 ms
+durable barrier, beyond the client's 207.61 ms read failure. This is a real
+finding, not noise or a task-limit rejection. Seed 240011's clock writer
+used tile-a authority after its renewal outage; original rejection bytes
+were not retained, so expired-fence attribution is distinguished from a
+direct wire capture. Frozen-store live/expired controls confirm the expected
+fencing responses. Future startup records capture the exact clock replies.
+
+Three serial and 12 concurrent startup-only diagnostics all pass. That does
+not reproduce the original full fault workload or prove concurrency alone
+causal. All 60 stable native placements have allowed CPUs and last processor
+on 0 to 3. The old CPU-5 observation mixed reads across a wrapper migration
+and exec; the checked cgroup write completes before native exec. Its original
+invalid window is retained, not silently reclassified.
+
+### Jobs-1 campaign, paused
+
+The [fresh jobs-1 registration](data/E28/m3-fresh-jobs1-r2-plan.json) keeps
+the exact seed, phase and victim schedule and the native binaries. It lowers
+avoidable simultaneous store and fsync pressure without changing timeouts,
+leases or fences, and adds no startup retries.
+
+At the reviewer's instruction this window was allowed to drain at its budget
+without being killed. It ended as a clean `paused-window` after 72 completed
+trials, zero failures, in 1,209.790 seconds. The
+[verified pause record](data/E28/m3/e28-m3-j1-r2-w1-pause.json) retains every
+completed trial hash. D12 is valid, CPU 5 is 36.97% busy and policy is
+restored. The original E13 checker verifies all 72 completed item audits. The
+other 928 seeds are not passes. No next window starts while the soak's
+cluster failures await direction.
+
+### M3 commands
+
+The builder ran these, serially, with no resume:
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28S
+python3 -u -B scripts/e24-m3 campaign --name e28-m3-crash-w1 --data-name e28-m3-crash --window-name e28-m3-crash-w1 --evidence-dir .local/evidence/E28/m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --seed 240001 --crossings 1000 --jobs 4 --budget-seconds 1200
+python3 -u -B scripts/e24-m3 matrix --name e28-m3-matrix --data-name e28-m3-matrix --window-name e28-m3-matrix-w1 --evidence-dir .local/evidence/E28/m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --budget-seconds 1200
+.local/bin/host-window build E28S -- python3 -B scripts/e24-m3-results --evidence-dir .local/evidence/E28/m3 --data-dir docs/experiments/data/E28/m3 --campaign-data e28-m3-crash --campaign e28-m3-crash-w1 --matrix-data e28-m3-matrix --matrix e28-m3-matrix --name e28-m3-results-r1 --pack
+python3 -u -B scripts/e24-m3 campaign --name e28-m3-j1-r2-w1 --data-name e28-m3-j1-r2 --window-name e28-m3-j1-r2-w1 --evidence-dir .local/evidence/E28/m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --seed 240001 --crossings 1000 --jobs 1 --budget-seconds 1200
+```
+
+Reviewer commands, not yet run. They reproduce the same jobs-4 configuration,
+including its risk of startup failure, and are not a recommendation to replace
+the failed campaign with fewer jobs.
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28R
+python3 -u -B scripts/e24-m3 campaign --name repro-e28-m3-crash-w1 --data-name repro-e28-m3-crash --window-name repro-e28-m3-crash-w1 --evidence-dir .local/evidence/E28/reviewer-m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --seed 240001 --crossings 1000 --jobs 4 --budget-seconds 1200
+python3 -u -B scripts/e24-m3 matrix --name repro-e28-m3-matrix --data-name repro-e28-m3-matrix --window-name repro-e28-m3-matrix-w1 --evidence-dir .local/evidence/E28/reviewer-m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --budget-seconds 1200
+# This rejects an incomplete or failed crash campaign:
+.local/bin/host-window build E28R -- python3 -B scripts/e24-m3-results --evidence-dir .local/evidence/E28/reviewer-m3 --data-dir docs/experiments/data/E28/reviewer-m3 --campaign-data repro-e28-m3-crash --campaign repro-e28-m3-crash-w1 --matrix-data repro-e28-m3-matrix --matrix repro-e28-m3-matrix --name repro-e28-m3-results-r1 --pack
+```
+
+If, and only if, a window ends as a clean `paused-window`, with all admitted
+trials complete, valid D12 evidence and restored policy, use a fresh `-w2`
+run/window name and `--resume-from` the immediately preceding campaign.
+Preserve its data name, seed, crossings, jobs and binary hashes. Do not resume
+the failed builder window or any actual failed seed.
+
+## Fixes for the soak failure
+
+Status: built and gated by the builder. Measured since on `final-r2`: the soak
+failed, the log diagnostic ran its full 30 minutes, and in the frontier check
+425 passes twice while 450 fails once and loses a tile once. See
+[Measurements on final-r2](#measurements-on-final-r2).
 
 Two tile patches follow the final stack (FINAL-09,
 `horizon-13-lease-renewal-r2.patch`, patch 10), in this order:
@@ -1486,9 +1668,17 @@ final-r2 for those three entries and nothing else.
 The final-stamps and final-lite tiles run the same keeper and registration
 code, and patches 22 and 23 touch no file those variants change. Neither
 variant was rebuilt. A latency or lite measurement under lease load would
-need them rebuilt with the fixes. The soak, frontier and slope runners name
-the `final` bundle directly, so measuring final-r2 needs runner changes,
-though no fixture change.
+need them rebuilt with the fixes.
+
+**Runners.** The soak, frontier and M3 runners accept `final-r2` through
+`goliath_bundle.validate_server_stack`. It validates the bundle against the
+build manifest, accepts `final` and `final-r2` only, and requires `final-r2` to
+differ from `final` in `horizon-client` alone. The runners validate again after
+each cell as before. The soak plan and M3 window rows record the bundle name
+and the manifest hash; frontier and soak rows carry `bundle: final-r2`. Five
+new cases in `e28-soak-tests` cover the guard. All ten suites pass: 165
+cases in the first run and 168 after the diagnostic option below, with four
+retained Mac skips each time.
 
 Commands:
 
@@ -1503,22 +1693,14 @@ python3 -B -c 'import sys; sys.path.insert(0, "scripts"); import goliath_bundle;
 `scripts/e28-build run` builds through `.local/bin/host-window build E28F`
 with `CARGO_INCREMENTAL=0` and `RUSTC_WRAPPER=` empty.
 
+## Measurements on final-r2
+
 ### Soak on final-r2
 
 Status: `e28-soak-r2` failed at 1,216 s on a real cluster event and stays
 failed. `e28-soak-r2-diag-logs` is a labelled diagnostic that tests the
-cause. It is not the M4 soak row, whatever it shows. Both are builder
-evidence, pending reviewer reproduction. Neither was rerun.
-
-**Runners.** The soak, frontier and M3 runners now accept final-r2 through
-`goliath_bundle.validate_server_stack`. It validates the bundle against the
-build manifest, accepts final and final-r2 only, and requires final-r2 to
-differ from final in `horizon-client` alone. The runners validate again after
-each cell as before. The soak plan and M3 window rows record the bundle name
-and the manifest hash; frontier and soak rows carry `bundle: final-r2`. Five
-new cases in `e28-soak-tests` cover the guard. All ten suites pass: 165
-cases in the first run and 168 after the diagnostic option below, with four
-retained Mac skips each time.
+cause; it is not the M4 soak row, whatever it shows. Both are builder runs
+with no reviewer reproduction. Neither was rerun.
 
 **The run.** `e28-soak-r2` used the [registered plan](data/E28/soak-r2-plan.json)
 and the unchanged fixture: 425 players, pin, direct final-stamps bots, the
@@ -1596,6 +1778,10 @@ RSS fell by tens of megabytes at a time while the host's swap-in counter
 rose by 117,828 pages. The host swaps to compressed memory and the sampler
 does not record per-process swap, so RSS in this run does not bound memory
 and the falls prove nothing about the processes.
+The [D12 addendum](../decisions.md#d12-addendum-the-soaks-memory-line-on-this-platform),
+recorded after these runs, judges the line on resident plus swap from the
+later of minute 5 and a full receipt window. The figures here are not that
+ruled figure.
 
 **Diagnostic: bulk logs off the store's volume.** `e28-soak-r2-diag-logs`
 repeats the soak with one change, [registered](data/E28/soak-r2-diag-logs-plan.json)
@@ -1711,150 +1897,139 @@ cycle: one stall in 38 cycles was fatal here and one more came within
 that about 9 GiB of memory is available first and that
 `/dev/shm/goliath-e28-logs-<run>` is gone afterwards.
 
-## M3 campaign
+### Frontier check on final-r2
 
-Status: the original jobs-4 crash campaign failed; the serial refusal matrix
-passes. A separately registered jobs-1 campaign reached a requested clean
-pause after 72 completed trials, with no failed trial in that campaign.
-Its next window has not started. Pending reviewer reproduction.
-The campaign preserves E24's original E13 fault kernels, seed 240001,
-1,000 crossings, 12 partition cases and six stale-login cases. Jobs 4 share
-one four-core server cpuset and one client core. Each low-population fixture
-does not receive its own CPU budget. Whole-window D12 checks decide validity;
-startup pressure or a failed trial is retained, never silently retried.
-M3 uses its original direct `e4-client` path, without capacity bots or front
-shims. Resume is allowed only after a clean `paused-window`, with every
-admitted trial complete and the schedule unchanged.
+Status: builder result, no reviewer reproduction. The tile binary changed in
+`final-r2`, so four v3 direct-bot cells under pin check that capacity did not
+move. Servers come from `final-r2`, bots from `final-stamps` with tracing
+off, and the pass rule is the one above. Each row records `bundle: final-r2`.
 
-### Current requested pause
+| Cell | Players | Valid | Pass | TPS | Raw P99 ms | Reason |
+| --- | --- | --- | --- | --- | --- | --- |
+| [frontier-r2-425-r0](data/E28/frontier/e28-frontier-r2-425-r0.json.gz) | 425 | yes | yes | 19.998 / 19.998 / 19.998 / 19.998 | 40.647 / 42.110 / 38.407 / 39.264 | pass |
+| [frontier-r2-425-r1](data/E28/frontier/e28-frontier-r2-425-r1.json.gz) | 425 | yes | yes | 20.002 / 20.000 / 19.999 / 20.012 | 36.697 / 38.414 / 37.461 / 37.683 | pass |
+| [frontier-r2-450-r0](data/E28/frontier/e28-frontier-r2-450-r0.json.gz) | 450 | no | no | - | - | tile a lost its lease 32.7 s into the steady window; no measurement |
+| [frontier-r2-450-r1](data/E28/frontier/e28-frontier-r2-450-r1.json.gz) | 450 | yes | no | 19.996 / 19.996 / 20.010 / 20.003 | 53.040 / 54.334 / 53.208 / 53.380 | raw P99 >= 50 ms; no drops |
 
-The [startup diagnosis](data/E28/m3-startup-diagnosis.json) and
-[request-ID timing join](data/E28/m3-startup-read-overlap.json) identify
-seed 240012's EAGAIN on the blocking Directory response read. The store
-response took 231.83 ms: about 93.95 ms queued followed by a shared 137.66 ms
-durable barrier, beyond the client's 207.61 ms read failure. This is a real
-finding, not noise or a task-limit rejection. Seed 240011's clock writer
-used tile-a authority after its renewal outage; original rejection bytes
-were not retained, so expired-fence attribution is distinguished from a
-direct wire capture. Frozen-store live/expired controls confirm the expected
-fencing responses. Future startup records capture the exact clock replies.
+| Cell | Server cores | Proxy cores | Proxy threads | Bot cores | CPU 4 busy | CPU 5 busy | Outside total steady | Swap-in pages |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| frontier-r2-425-r0 | 2.718 | 0.721 | 871..877 | 0.295 | 33.41% | 55.88% | 0.288 | 24 |
+| frontier-r2-425-r1 | 2.643 | 0.702 | 872..879 | 0.278 | 31.93% | 50.08% | 0.209 | 92 |
+| frontier-r2-450-r0 | - | - | - | - | 34.62% | 52.88% | - | 46 |
+| frontier-r2-450-r1 | 3.058 | 0.812 | 922..928 | 0.332 | 37.38% | 54.41% | 0.350 | 744 |
 
-Three serial and 12 concurrent startup-only diagnostics all pass. That does
-not reproduce the original full fault workload or prove concurrency alone
-causal. All 60 stable native placements have allowed CPUs and last processor
-on 0 to 3. The old CPU-5 observation mixed reads across a wrapper migration
-and exec; the checked cgroup write completes before native exec. Its original
-invalid window is retained, not silently reclassified.
+Against the final-bundle v3 rows, 425 is unchanged within the spread of two
+repeats: raw P99 36.7 to 42.1 ms here against 35.2 to 40.5 ms, and server
+cores 2.64 and 2.72 against 2.62 and 2.67. 450 was mixed on final (one pass
+at 42.1 to 46.2 ms, one fail at 49.8 to 53.0 ms). Here it has one fail at
+53.0 to 54.3 ms and one invalid cell, so 450 still does not qualify and
+nothing suggests the fixes cost capacity. Two cells per step cannot resolve a
+difference of a few percent. The stable step stays 425.
 
-The [fresh jobs-1 registration](data/E28/m3-fresh-jobs1-r2-plan.json) preserves
-the exact seed/phase/victim schedule and native binaries. It lowers avoidable
-simultaneous store/fsync pressure without changing timeouts, leases, fences
-or adding startup retries. The builder ran:
+`frontier-r2-450-r0` is a cluster failure, not a harness fault, and was not
+rerun. Tile a refused its clean shutdown cut with `local cluster lease
+expired`. The proxy logged 107 lost-backend lines for a within 0.1 s and one
+ALERT for a hand-over from a to b that a's sidecar refused for the expired
+lease. Bot groups a and cross exited 1. D12 checks pass (CPU 5 52.88% busy,
+46 swap-in pages). The frontier harness keeps no lease or store trace, so the
+store stall behind this expiry is not observed in this row. The soak above
+shows the mechanism on the same fixture. The
+[failure evidence](data/E28/frontier/e28-frontier-r2-450-r0-450-failure-native.json.gz)
+is retained.
 
-```sh
-export GOLIATH_WINDOW_OWNER=E28S
-python3 -u -B scripts/e24-m3 campaign --name e28-m3-j1-r2-w1 --data-name e28-m3-j1-r2 --window-name e28-m3-j1-r2-w1 --evidence-dir .local/evidence/E28/m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --seed 240001 --crossings 1000 --jobs 1 --budget-seconds 1200
-```
+The ledger records `frontier-r2-450-r0` as not valid, because every cell whose
+status is not `complete` is not valid. The frontier rule says players must
+stay online, so a tile lost during a valid D12 window is a failure of the
+step, not a missing measurement (audit finding 4). Either way 450 has no pass
+on `final-r2`.
 
-Per the reviewer's subsequent instruction, this window was allowed to drain
-at its budget without being killed. It ended as a clean `paused-window`
-after 72 completed trials, zero failures, in 1,209.790 seconds. The
-[verified pause record](data/E28/m3/e28-m3-j1-r2-w1-pause.json) retains every
-completed trial hash. D12 is valid,
-CPU 5 is 36.97% busy and policy is restored. The original E13 checker verifies
-all 72 completed item audits. The other 928 seeds are not passes. No next
-window starts while the soak's actual cluster failures remain for direction.
+The rows' harness hashes differ from the final-bundle v3 rows in two files.
+`goliath_bundle.py` gained the final-r2 guard. `goliath_platform.py` carries
+the retired-thread counter fix made after the v3 staircase. The kernel,
+layout, bots and pass rule are the same. The
+[ledger](data/E28/frontier/e28-frontier-r2-staircase.json) comes from
+`e20-results`.
 
-### Crash failures and refusal matrix
-
-The [complete M3 readback](data/E28/m3/e28-m3-results-r1.json) retains all
-12 admitted crash trials, including both failures, and all 18 matrix cases.
-The crash campaign stops at its first observed failed trial and drains the
-other admitted work. Ten trials complete and pass the original E13 item
-checker, covering 30 named stacks and 310 units, with zero duplicates,
-unaccounted losses or stale files. Two trials fail before their scheduled
-fault. The remaining 988 seeds are unattempted, not passes.
-
-| Seed | Scheduled fault | Outcome |
-| --- | --- | --- |
-| 240001 to 240010 | Original seeded phase/victim schedule | 10 complete recovery audits |
-| 240011 | fsync, target | Cluster-clock initialization failed before fault |
-| 240012 | install, both | Tile d exited during startup with `Resource temporarily unavailable` |
-| 240013 to 241000 | Unchanged retained schedule | Not attempted |
-
-Jobs 4 was selected to preserve E24's protocol, sharing one D12 budget rather
-than receiving four budgets. It is not qualified on this machine. The precise
-resource or timing cause of the startup failures is unproven. No failed seed
-was rerun and the campaign was not resumed. A new, separately authorized
-lower-concurrency campaign is needed to establish the 1,000-seed item.
-
-The first window also retains one placement snapshot pairing a server
-executable and server cgroup with allowed CPU 5. That raw window is invalid,
-not retroactively repaired. Placement capture had read process status,
-cgroup and executable at different instants. Future capture brackets those
-values, retries observed migration/exec transitions at most four times, and
-reports unresolved observations as unproven. A known pre-exec launcher is
-charged to its declared destination only after joining that cgroup. Stable
-wrong placement still fails. Tests cover both cases.
-
-The separate serial matrix completes all 12 partition and six stale-login
-cases. The original checker confirms zero accepted stale cuts, placements,
-CAS operations or returning logins, with the old processes still alive and
-the replacements running. Its D12 window is valid. Intentional crash/partition
-lease traces retain framing metadata without claiming zero authority events
-from such faulted processes.
-
-| Window | Seconds | CPU 5 busy | Largest outside process, cores | Swap-in pages | D12 | Restored |
-| --- | ---: | ---: | ---: | ---: | --- | --- |
-| e28-m3-crash-w1 | 96.257 | 57.39% | 0.14966 | 2,720 | invalid placement snapshot | yes |
-| e28-m3-matrix-w1 | 233.324 | 42.22% | 0.14361 | 43 | valid | yes |
-
-Neither window has a throttle-counter rise. The matrix's outside total is
-0.20266 core. Native snapshots retain all six CPU counters, frequency ranges,
-memory endpoints and placements. The invalid crash row stays invalid despite
-its passing outside-CPU and thermal checks.
-
-`e24-m3-results` was run and exited 1 with `ValueError: campaign incomplete`.
-It did not pack or delete any trial. The published crash and matrix archives
-retain every original JSON byte sequence, individual SHA-256 and parsed
-record, with byte-identical base64 round-trip checks. There is no complete
-campaign result hidden behind the passing matrix.
-
-### Exact M3 commands
-
-The builder ran these commands, serially, with no resume:
+The builder ran, once per cell and in this order (425 r0, 425 r1, 450 r0,
+450 r1):
 
 ```sh
-export GOLIATH_WINDOW_OWNER=E28S
-python3 -u -B scripts/e24-m3 campaign --name e28-m3-crash-w1 --data-name e28-m3-crash --window-name e28-m3-crash-w1 --evidence-dir .local/evidence/E28/m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --seed 240001 --crossings 1000 --jobs 4 --budget-seconds 1200
-python3 -u -B scripts/e24-m3 matrix --name e28-m3-matrix --data-name e28-m3-matrix --window-name e28-m3-matrix-w1 --evidence-dir .local/evidence/E28/m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --budget-seconds 1200
-.local/bin/host-window build E28S -- python3 -B scripts/e24-m3-results --evidence-dir .local/evidence/E28/m3 --data-dir docs/experiments/data/E28/m3 --campaign-data e28-m3-crash --campaign e28-m3-crash-w1 --matrix-data e28-m3-matrix --matrix e28-m3-matrix --name e28-m3-results-r1 --pack
+export GOLIATH_WINDOW_OWNER=E28R2
+.local/bin/host-window quiet E28R2 e28-frontier-r2-425-r0
+python3 -B scripts/e20-frontier --bins .local/bin/goliath-e28/final-r2 --data-dir docs/experiments/data/E28/frontier --cpu-mode pin --direct-bots --counts 425 --name e28-frontier-r2-425-r0
+.local/bin/host-window release E28R2
+python3 -B scripts/e20-results e28-frontier-r2 --baseline 200 --data-dir docs/experiments/data/E28/frontier
 ```
 
-Fresh reviewer commands below reproduce the same jobs-4 configuration,
-including its risk of startup failure. They are not a recommendation to
-silently replace the failed campaign with fewer jobs.
+Reviewer commands, not yet run:
 
 ```sh
 export GOLIATH_WINDOW_OWNER=E28R
-python3 -u -B scripts/e24-m3 campaign --name repro-e28-m3-crash-w1 --data-name repro-e28-m3-crash --window-name repro-e28-m3-crash-w1 --evidence-dir .local/evidence/E28/reviewer-m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --seed 240001 --crossings 1000 --jobs 4 --budget-seconds 1200
-python3 -u -B scripts/e24-m3 matrix --name repro-e28-m3-matrix --data-name repro-e28-m3-matrix --window-name repro-e28-m3-matrix-w1 --evidence-dir .local/evidence/E28/reviewer-m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --budget-seconds 1200
-# This rejects an incomplete or failed crash campaign:
-.local/bin/host-window build E28R -- python3 -B scripts/e24-m3-results --evidence-dir .local/evidence/E28/reviewer-m3 --data-dir docs/experiments/data/E28/reviewer-m3 --campaign-data repro-e28-m3-crash --campaign repro-e28-m3-crash-w1 --matrix-data repro-e28-m3-matrix --matrix repro-e28-m3-matrix --name repro-e28-m3-results-r1 --pack
+for e28_count in 425 450; do
+  for e28_repeat in 0 1; do
+    e28_label="repro-e28-frontier-r2-${e28_count}-r${e28_repeat}"
+    .local/bin/host-window quiet E28R "$e28_label"
+    python3 -B scripts/e20-frontier --bins .local/bin/goliath-e28/final-r2 --data-dir docs/experiments/data/E28/reviewer-frontier --cpu-mode pin --direct-bots --counts "$e28_count" --name "$e28_label"
+    .local/bin/host-window release E28R
+  done
+done
+python3 -B scripts/e20-results repro-e28-frontier-r2 --baseline 200 --data-dir docs/experiments/data/E28/reviewer-frontier
 ```
 
-If, and only if, a window ends as a clean `paused-window`, with all admitted
-trials complete, valid D12 evidence and restored policy, use a fresh `-w2`
-run/window name and `--resume-from` the immediately preceding campaign.
-Preserve its data name, seed, crossings, jobs and binary hashes. Do not resume
-the failed builder window or any actual failed seed.
+A cell that loses a tile exits 1 and stays in the ledger as invalid. Keep it
+and do not repeat it.
 
 ### M3 on final-r2
 
-Status: deferred by the reviewer, not started. No final-r2 M3 trial, pilot
-or matrix case ran on this machine, and no `e28-m3-r2-` data exists. The
-final-bundle campaign stays paused at 72 of 1,000 seeds as described above.
-The M3 runner accepts final-r2 and its window rows record the bundle name
-and manifest hash; that change is covered by tests only. Whether two
-clusters at a time are sound on this machine with the 900 ms read cap is
-untested.
+<!-- The measuring builder replaces this subsection with its results when the M3 run on final-r2 is done. -->
+
+Status: deferred by the reviewer, not started. No `final-r2` M3 trial, pilot
+or matrix case has run on this machine, and no `e28-m3-r2-` data exists. The
+campaign on `final` stays paused at 72 of 1,000 seeds. The M3 runner accepts
+`final-r2` and its window rows record the bundle name and manifest hash; that
+change is covered by tests only. Whether two clusters at a time are sound on
+this machine with the 900 ms read cap is untested.
+
+## Harness defects found by audit
+
+An independent audit recomputed the baseline, frontier, latency and lite rows
+from the raw files and read the harness code. The headline numbers hold. It
+found these defects in the harness that produced the rows above. They are
+known limitations of this report. None changes the baseline, the frontier or
+the ratio. Fixes are in progress; at the time of writing none is in
+`scripts/` with a test, so every row here was measured with these defects
+present.
+
+| # | Defect | Effect on published rows |
+| ---: | --- | --- |
+| 1 | The CPU 5 saturation rule averages over join and warmup, not only the measured minute. | `latency-pin-via-r0` had CPU 5 at 97.66% over the measured minute and still read valid; it is a tick failure in a harness-saturated cell and never counted. The v1 rows read valid with CPU 5 at 100% in the measured minute; v1 is excluded from the frontier. v3 rows are at 46 to 54%. No published verdict changes. |
+| 2 | "Server cores" sums registered processes. Under pinning the four CPUs carried about 0.3 core more. | Interpretation only. The failure explanation is corrected under [Why the cluster fails](#why-the-cluster-fails). |
+| 3 | The bundle guard ignores pending gates when accepted lint failures are present. | `final-stamps` was frozen with five pending gates and validated. Those gates passed later (exit 0 in [its build record](data/E28/build-final-stamps.json)). No row changes. |
+| 4 | A cell where the cluster dropped players is recorded as not valid instead of as a failure. | `frontier-r2-450-r0` on `final-r2`. Under the frontier rule it is a failure; 450 has no pass on `final-r2` either way. The final-stack frontier is unaffected. |
+| 5 | The placement check accepts any group whose CPUs match its own leaf, not the group a role belongs to, and only checks at the end mark. | No misplaced role in any capacity row. The lite clock probe exited before the end mark and has no placement record; CPU 0 was 94% busy and CPUs 1 to 4 idle in both calibrations, so it ran on a server core. |
+| 6 | Restore gaps: SIGQUIT, SIGUSR1, SIGUSR2 and SIGALRM skip cleanup; a vanished driver cgroup blocks removal; other top-level cgroups and all kernel threads keep CPUs 0 to 4 unchecked. | No row known to be affected. The soak diagnosis names the volume's kernel threads bursting on the fixture's cores, and their CPU is not reported separately. |
+| 7 | Three Mac paths changed without a platform switch. | No Mac row was rerun. See [What changed on the Mac paths](#what-changed-on-the-mac-paths). |
+| 8 | On Linux the outside rule does not count the measurement driver. | Plain baseline only; the driver used 0.03 core in every baseline cell. No validity result changes. |
+
+The audit's smaller items include an unhandled ESRCH in the process sampler
+(it fails closed, the same class as the first soak's crash), no positive
+control for the Linux limiter, and the soak runners' hard-coded 425 players.
+They change no row.
+
+## What changed on the Mac paths
+
+The plan said Mac behaviour stays unchanged. These three changes are not
+behind a platform switch:
+
+- `scripts/e20-frontier` always starts capacity shims with `--forward-only`.
+  A Mac rerun of an E20 frontier cell would use a different shim from the
+  published E20 rows. The shim sits outside both caps, so server numbers
+  should not move, but the harness is no longer the one that produced 650.
+- `scripts/e20-summary` uses `thread_role`, which adds a `player supervisors`
+  role and matches `terrain-manager` by prefix. A Mac rerun of the derived
+  summary reclassifies those threads.
+- `scripts/e18_d9_wire.py` applies the 8,192-byte handshake buffer cap only
+  while the handshake is incomplete, and a zero-byte send now raises.
+
+Everything else the audit compared is equivalent on Darwin by reading. None
+of it was run on a Mac, and no Mac result in E17 to E27 was remeasured.
