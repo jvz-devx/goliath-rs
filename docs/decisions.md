@@ -105,3 +105,10 @@ D9's budget stays: four cores for the servers (tiles, proxy, store and sidecars,
 The reason: on the Mac, 82 to 88% of the proxy's P95-tail sends overlapped a limiter STOP (E25). The limiter turns a CPU budget into pauses that show up as latency. Pinning gives the same core count with no pauses. The limiter stays available as a comparison mode, so the effect of the change is measured on this machine.
 
 D9's validity rules apply unchanged: load 4 or less at the start of a cell, and no outside process averaging more than 0.5 core. With six cores that rule leaves the harness core little room, so each cell reports CPU 5's total busy time and the outside total, and a cell with CPU 5 saturated (95% busy or more) is invalid. Each cell also reports swap-in, since the machine has 16 GiB.
+
+### D12 addendum: the soak's memory line on this platform
+
+Two things about the 30-minute soak's memory line needed a ruling once it ran on the second machine. The line itself, no process growing more than 10%, is unchanged.
+
+- Memory is resident plus swapped. This host swaps to compressed memory under soak load, so a process's resident size can fall while its real use doesn't. The line is judged on resident plus swap for each process, and both are published.
+- The baseline is taken at the later of minute 5 and the first sample after the store's receipt window is full, and the judged window runs 25 minutes from there. The store keeps a bounded window of retry receipts. At the Mac's 650 players it filled before minute 5. At this machine's 425 players it fills about 30 seconds after, so the store appeared to grow 14 to 16% and then stayed flat. Growth from minute 5 to minute 30 is still published beside the ruled figure.

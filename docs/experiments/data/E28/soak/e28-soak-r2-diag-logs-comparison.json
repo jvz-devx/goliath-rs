@@ -1,0 +1,476 @@
+{
+  "kind": "E28-soak-r2-bulk-log-diagnostic-comparison",
+  "diagnostic": true,
+  "not_the_soak_row": "e28-soak-r2-diag-logs tests a cause; it is not the M4 soak row and e28-soak-r2 stays failed",
+  "only_difference": "tile stdout/stderr logs and anticheat logs on tmpfs in the diagnostic",
+  "runs": [
+    {
+      "name": "e28-soak-r2",
+      "loaded_seconds": 1216.022671263,
+      "ended_by": "authority stop",
+      "authority_stops": 2,
+      "barriers": {
+        "count": 24462,
+        "p50_ms": 12.434545,
+        "p99_ms": 35.862151,
+        "p999_ms": 112.201112,
+        "max_ms": 462.915173,
+        "over_50ms": 124,
+        "over_100ms": 32,
+        "over_200ms": 3,
+        "over_400ms": 2,
+        "over_50ms_per_1000s": 101.97178303526994,
+        "longest_run_of_consecutive_slow_barriers_ms": 643.982911
+      },
+      "cycle": {
+        "seconds": 31.2,
+        "bins": 12,
+        "over_50ms": {
+          "threshold_ms": 50,
+          "count": 124,
+          "per_bin": [
+            6,
+            2,
+            9,
+            1,
+            4,
+            2,
+            3,
+            3,
+            2,
+            2,
+            0,
+            90
+          ],
+          "largest_bin_share": 0.7258064516129032,
+          "uniform_share": 0.08333333333333333
+        },
+        "over_30ms": {
+          "threshold_ms": 30,
+          "count": 489,
+          "per_bin": [
+            38,
+            29,
+            29,
+            28,
+            31,
+            25,
+            28,
+            31,
+            33,
+            36,
+            34,
+            147
+          ],
+          "largest_bin_share": 0.3006134969325153,
+          "uniform_share": 0.08333333333333333
+        },
+        "cycles": 38,
+        "cycles_with_a_barrier_over_50ms": 37,
+        "median_of_per_cycle_maximum_ms": 113.696774,
+        "note": "loaded seconds folded on 31.2 s; a visible cycle puts most slow barriers in one or two adjacent bins"
+      },
+      "renewals": {
+        "replies": 19417,
+        "over_200ms": 18,
+        "over_200ms_installed": 16,
+        "over_200ms_not_installed": 2,
+        "max_ms": 633.261563,
+        "p99_ms": 62.161161,
+        "rows": [
+          {
+            "loaded_send_s": 216.133274237,
+            "tile": "d",
+            "counter": 1095,
+            "reply_ms": 218.677374,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 216.135412883,
+            "tile": "b",
+            "counter": 1110,
+            "reply_ms": 216.663343,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 372.126627179,
+            "tile": "b",
+            "counter": 1733,
+            "reply_ms": 282.341003,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 746.983583714,
+            "tile": "d",
+            "counter": 3215,
+            "reply_ms": 252.875644,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 903.132340667,
+            "tile": "c",
+            "counter": 3846,
+            "reply_ms": 408.14414,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 903.156642109,
+            "tile": "a",
+            "counter": 3860,
+            "reply_ms": 475.059679,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 903.234336767,
+            "tile": "d",
+            "counter": 3839,
+            "reply_ms": 393.843684,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 903.250817621,
+            "tile": "b",
+            "counter": 3854,
+            "reply_ms": 379.386698,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 934.422822392,
+            "tile": "a",
+            "counter": 3984,
+            "reply_ms": 216.031839,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 1184.317358883,
+            "tile": "d",
+            "counter": 4961,
+            "reply_ms": 212.233462,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 1184.31842325,
+            "tile": "a",
+            "counter": 4982,
+            "reply_ms": 211.667262,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 1184.321893428,
+            "tile": "b",
+            "counter": 4976,
+            "reply_ms": 206.781293,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 1210.282685146,
+            "tile": "c",
+            "counter": 5072,
+            "reply_ms": 237.144231,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 1215.367508565,
+            "tile": "b",
+            "counter": 5100,
+            "reply_ms": 464.9265,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 1215.372496595,
+            "tile": "d",
+            "counter": 5085,
+            "reply_ms": 633.261563,
+            "installed": false
+          },
+          {
+            "loaded_send_s": 1215.372739989,
+            "tile": "a",
+            "counter": 5106,
+            "reply_ms": 633.055852,
+            "installed": false
+          },
+          {
+            "loaded_send_s": 1215.545237263,
+            "tile": "c",
+            "counter": 5093,
+            "reply_ms": 468.173252,
+            "installed": true
+          },
+          {
+            "loaded_send_s": 1215.832722063,
+            "tile": "b",
+            "counter": 5101,
+            "reply_ms": 229.532275,
+            "installed": true
+          }
+        ]
+      },
+      "inputs": {
+        "store_batches": {
+          "path": ".local/evidence/E28/soak/e28-soak-r2/store-batches.csv.gz",
+          "sha256": "c7807fb62512ef84484605897208f5bf763104ddf8027d720dd9ec29cbbbefb8",
+          "bytes": 6459532,
+          "stored_sha256": "5b5642cde2aabf1726162f6e1a6969895f19df0e850e5287fe543a0ab23dab0a",
+          "stored_bytes": 1864940,
+          "hash_scope": "decompressed bytes"
+        }
+      }
+    },
+    {
+      "name": "e28-soak-r2-diag-logs",
+      "loaded_seconds": 1800.0,
+      "ended_by": "full window",
+      "authority_stops": 0,
+      "barriers": {
+        "count": 38854,
+        "p50_ms": 11.943171,
+        "p99_ms": 31.15871,
+        "p999_ms": 47.491246,
+        "max_ms": 88.830608,
+        "over_50ms": 31,
+        "over_100ms": 0,
+        "over_200ms": 0,
+        "over_400ms": 0,
+        "over_50ms_per_1000s": 17.22222222222222,
+        "longest_run_of_consecutive_slow_barriers_ms": 120.29574399999998
+      },
+      "cycle": {
+        "seconds": 31.2,
+        "bins": 12,
+        "over_50ms": {
+          "threshold_ms": 50,
+          "count": 31,
+          "per_bin": [
+            2,
+            4,
+            4,
+            2,
+            2,
+            6,
+            1,
+            5,
+            0,
+            4,
+            1,
+            0
+          ],
+          "largest_bin_share": 0.1935483870967742,
+          "uniform_share": 0.08333333333333333
+        },
+        "over_30ms": {
+          "threshold_ms": 30,
+          "count": 501,
+          "per_bin": [
+            43,
+            41,
+            45,
+            53,
+            35,
+            41,
+            33,
+            46,
+            43,
+            42,
+            31,
+            48
+          ],
+          "largest_bin_share": 0.10578842315369262,
+          "uniform_share": 0.08333333333333333
+        },
+        "cycles": 57,
+        "cycles_with_a_barrier_over_50ms": 27,
+        "median_of_per_cycle_maximum_ms": 48.131184,
+        "note": "loaded seconds folded on 31.2 s; a visible cycle puts most slow barriers in one or two adjacent bins"
+      },
+      "renewals": {
+        "replies": 28755,
+        "over_200ms": 0,
+        "over_200ms_installed": 0,
+        "over_200ms_not_installed": 0,
+        "max_ms": 117.336885,
+        "p99_ms": 40.131048,
+        "rows": []
+      },
+      "inputs": {
+        "store_batches": {
+          "path": ".local/evidence/E28/soak/e28-soak-r2-diag-logs/store-batches.csv.gz",
+          "sha256": "c153aeaac173663b15ae455f2219f1650f2ce83a264c0aaa0c8270604e994768",
+          "bytes": 9602356,
+          "stored_sha256": "56c65b05010b4cf931608f17c8a9f17d56041cd649a57d4694e9d376fca4eac7",
+          "stored_bytes": 2769608,
+          "hash_scope": "decompressed bytes"
+        }
+      }
+    },
+    {
+      "name": "e28-soak-r2-diag-logs, first 1,216 s",
+      "loaded_seconds": 1216.022671263,
+      "ended_by": "cut for comparison",
+      "authority_stops": null,
+      "barriers": {
+        "count": 26206,
+        "p50_ms": 11.930774,
+        "p99_ms": 31.413567,
+        "p999_ms": 47.491246,
+        "max_ms": 88.830608,
+        "over_50ms": 22,
+        "over_100ms": 0,
+        "over_200ms": 0,
+        "over_400ms": 0,
+        "over_50ms_per_1000s": 18.091767957870474,
+        "longest_run_of_consecutive_slow_barriers_ms": 88.830608
+      },
+      "cycle": {
+        "seconds": 31.2,
+        "bins": 12,
+        "over_50ms": {
+          "threshold_ms": 50,
+          "count": 22,
+          "per_bin": [
+            1,
+            2,
+            2,
+            2,
+            2,
+            4,
+            1,
+            3,
+            0,
+            4,
+            1,
+            0
+          ],
+          "largest_bin_share": 0.18181818181818182,
+          "uniform_share": 0.08333333333333333
+        },
+        "over_30ms": {
+          "threshold_ms": 30,
+          "count": 355,
+          "per_bin": [
+            34,
+            30,
+            35,
+            36,
+            24,
+            26,
+            22,
+            36,
+            31,
+            30,
+            22,
+            29
+          ],
+          "largest_bin_share": 0.10140845070422536,
+          "uniform_share": 0.08333333333333333
+        },
+        "cycles": 38,
+        "cycles_with_a_barrier_over_50ms": 19,
+        "median_of_per_cycle_maximum_ms": 50.19483,
+        "note": "loaded seconds folded on 31.2 s; a visible cycle puts most slow barriers in one or two adjacent bins"
+      },
+      "renewals": {
+        "replies": 19427,
+        "over_200ms": 0,
+        "over_200ms_installed": 0,
+        "over_200ms_not_installed": 0,
+        "max_ms": 117.336885,
+        "p99_ms": 40.278057,
+        "rows": []
+      },
+      "inputs": {
+        "store_batches": {
+          "path": ".local/evidence/E28/soak/e28-soak-r2-diag-logs/store-batches.csv.gz",
+          "sha256": "c153aeaac173663b15ae455f2219f1650f2ce83a264c0aaa0c8270604e994768",
+          "bytes": 9602356,
+          "stored_sha256": "56c65b05010b4cf931608f17c8a9f17d56041cd649a57d4694e9d376fca4eac7",
+          "stored_bytes": 2769608,
+          "hash_scope": "decompressed bytes"
+        }
+      }
+    }
+  ],
+  "bulk_logs_tmpfs": {
+    "directory": "tmpfs:goliath-e28-logs-e28-soak-r2-diag-logs",
+    "filesystem": "tmpfs",
+    "estimate_bytes": 6442450944,
+    "tmpfs_free_bytes_before": 8308260864,
+    "memory_available_kb_before": 11871980,
+    "moved": "each tile stdout/stderr log and logs/anticheat.log",
+    "unchanged": "store journal and snapshots, worlds, tile cuts, proxy and sidecar state, lease and store traces",
+    "clusters": [
+      {
+        "files": [
+          {
+            "path": "a/logs/anticheat.log",
+            "link_intact": true,
+            "bytes": 828334428
+          },
+          {
+            "path": "b/logs/anticheat.log",
+            "link_intact": true,
+            "bytes": 837519295
+          },
+          {
+            "path": "c/logs/anticheat.log",
+            "link_intact": true,
+            "bytes": 850036068
+          },
+          {
+            "path": "d/logs/anticheat.log",
+            "link_intact": true,
+            "bytes": 828681965
+          },
+          {
+            "path": "server-a-913019246239044.log",
+            "link_intact": true,
+            "bytes": 509573741
+          },
+          {
+            "path": "server-a-914891516550452.log",
+            "link_intact": true,
+            "bytes": 3136
+          },
+          {
+            "path": "server-b-913020836317796.log",
+            "link_intact": true,
+            "bytes": 513402939
+          },
+          {
+            "path": "server-b-914893982306398.log",
+            "link_intact": true,
+            "bytes": 3136
+          },
+          {
+            "path": "server-c-913022423415201.log",
+            "link_intact": true,
+            "bytes": 518391310
+          },
+          {
+            "path": "server-c-914896163274387.log",
+            "link_intact": true,
+            "bytes": 3136
+          },
+          {
+            "path": "server-d-913024070386557.log",
+            "link_intact": true,
+            "bytes": 509273745
+          },
+          {
+            "path": "server-d-914898799558818.log",
+            "link_intact": true,
+            "bytes": 3136
+          }
+        ],
+        "replaced_links": [],
+        "tmpfs_bytes": 5395226035,
+        "memory_available_kb": 3637744
+      }
+    ],
+    "tmpfs_bytes_at_end": 5395226035,
+    "memory_available_kb_at_end": 4149800,
+    "removed": true,
+    "memory_available_kb_after_removal": 9136700
+  },
+  "acceptance": "pending reviewer reproduction"
+}
