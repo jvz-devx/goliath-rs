@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""Compare lite intrusion and bound warming as a running-CPU ratio of sums."""
+import argparse
+import gzip
+import importlib.machinery
+import importlib.util
+import json
+import math
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E26'
+
+
+def load():
+    loader=importlib.machinery.SourceFileLoader('e26_full_results',str(ROOT/'scripts/e26-results'))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module);return module
+
+
+def read(path):
+    return json.loads(gzip.decompress(path.read_bytes()) if path.suffix=='.gz' else path.read_bytes())
+
+
+def quantile(values,q):return sorted(values)[math.ceil(q*len(values))-1]
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('names',nargs='+')
+    parser.add_argument('--calibration',required=True)
+    parser.add_argument('--out',required=True)
+    args=parser.parse_args()
+    if '/' in args.out or not args.out.startswith(('e26-','repro-')):raise RuntimeError('scoped output required')
+    base=load()
+    records=[]
+    raw_records=[]
+    for name in args.names:
+        path=DATA/(name+'.json')
+        if not path.exists():path=path.with_suffix('.json.gz')
+        record=base.row(path);records.append(record);raw=read(path);raw_records.append(raw)
+        if record['arm']!='B' or not record.get('valid'):continue
+        cell=raw['cells']['650'];sample=cell['e26_lite'];tile=record['selected']
+        lo=cell['game_time_before'][tile]['tick'];hi=cell['game_time_after'][tile]['tick']
+        rows=[r for r in sample['rows'] if r['sequence']>1 and lo<r['tick']<=hi]
+        if not rows or sample['dropped'] or sample['invalid']:raise RuntimeError('lite cycle coverage failed')
+        if any(r['cycle_cpu_ns']!=r['warm_cpu_ns']+r['other_cpu_ns'] or r['cycle_cpu_ns']<=0
+               or r['clock_reads']!=2*(1+r['warm_calls']) for r in rows):raise RuntimeError('lite partition or read count failed')
+        fractions=[r['warm_cpu_ns']/r['cycle_cpu_ns'] for r in rows]
+        first,last=cell['game_time_before'][tile],cell['game_time_after'][tile]
+        wall_upper=last['at']+last['rtt_s']/2-first['at']+first['rtt_s']/2
+        record['lite']=dict(cycles=len(rows),cycle_cpu_ns=sum(r['cycle_cpu_ns'] for r in rows),
+            warm_cpu_ns=sum(r['warm_cpu_ns'] for r in rows),warm_calls=sum(r['warm_calls'] for r in rows),
+            clock_reads=sum(r['clock_reads'] for r in rows),wall_window_seconds_upper=wall_upper,
+            per_cycle_fraction_p50=quantile(fractions,.5),per_cycle_fraction_p99=quantile(fractions,.99),
+            ratio_of_sums=sum(r['warm_cpu_ns'] for r in rows)/sum(r['cycle_cpu_ns'] for r in rows),
+            cycle_cpu_ms_p50=quantile([r['cycle_cpu_ns']/1e6 for r in rows],.5),
+            cycle_cpu_ms_p99=quantile([r['cycle_cpu_ns']/1e6 for r in rows],.99),
+            warm_cpu_ms_per_cycle=sum(r['warm_cpu_ns'] for r in rows)/len(rows)/1e6,
+            scope='main-thread running CPU per cycle, including between-tick control and pump CPU; off-main work excluded')
+    comparison=base.compare(records)
+    calibration=read(DATA/args.calibration)
+    calibration_valid=calibration['status']=='complete' and calibration['noise_valid']
+    allowance=calibration['calibration']['conservative_read_allowance_ns']
+    timed=[r['lite'] for r in records if 'lite' in r]
+    total=sum(r['cycle_cpu_ns'] for r in timed);warm=sum(r['warm_cpu_ns'] for r in timed)
+    reads=sum(r['clock_reads'] for r in timed);wall=sum(r['wall_window_seconds_upper'] for r in timed)
+    cpu_delta=max(0,comparison['metrics'].get('main_cores',{}).get('mean_B_minus_A',0))
+    read_charge=reads*allowance
+    delta_charge=math.ceil(cpu_delta*wall*1e9)
+    corrected=max(0,warm-read_charge-delta_charge)
+    required=['main_cores','selected_p50_ms','selected_p99_ms']
+    intrusion=all(comparison['metrics'].get(k,{}).get('shift_inside_observed_noise',False) for k in required)
+    complete=comparison['complete_fixed_AB'] and calibration_valid
+    result=dict(kind='E26-lite-running-main-cpu-verdict',records=records,comparison=comparison,
+        calibration=args.calibration,clock_read_allowance_ns=allowance,
+        window=dict(cycle_cpu_ns=total,warm_cpu_ns=warm,clock_reads=reads,
+            ratio_of_sums=warm/total if total else None,
+            clock_read_cpu_charge_ns=read_charge,full_positive_main_cpu_delta_cores=cpu_delta,
+            full_positive_main_cpu_delta_charge_ns=delta_charge,
+            corrected_warm_cpu_ns=corrected,corrected_ratio_of_sums=corrected/total if total else None),
+        intrusion_inside_within_arm_spread=intrusion,complete=complete,
+        verdict='failed: warming alone strictly exceeds 5% under the declared conservative charges'
+            if complete and intrusion and total and corrected/total>.05 else 'unproven',
+        combined_additions_verdict='unproven; lite measures warming and other running CPU, not the combined additions',
+        notes=['Both CPU clock reads per whole cycle and both reads per warm call are charged.',
+            'Maximum measured unsubtracted clock-read batch mean plus one resolution quantum is the empirical allowance.',
+            'The full observed positive main-CPU mean delta is also charged to the numerator. Charges may overlap deliberately.',
+            'No wall-clock tick, waiting time or limiter pause is subtracted. Off-main CPU remains separate.'])
+    (DATA/args.out).write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(verdict=result['verdict'],window=result['window'],intrusion_inside_spread=intrusion,complete=complete),indent=2))
+
+
+if __name__=='__main__':main()

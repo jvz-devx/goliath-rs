@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Prove the frozen FINAL-09 stack without changing the real Git index."""
+import argparse
+import difflib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tarfile
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon-tiles'
+LOCAL = ROOT / '.local/evidence/E26'
+DATA = ROOT / 'docs/experiments/data/E26'
+CANONICAL = ROOT / '.local/bin/meridian-e18/flat09-tiles/canonical.json'
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def git(*args, private=False, root=False):
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS='0')
+    if private:
+        env['GIT_INDEX_FILE'] = str(LOCAL / 'final09-index')
+    return subprocess.check_output(['git', *map(str, args)], cwd=ROOT if root else SOURCE, env=env)
+
+
+def save(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def prepare():
+    if (LOCAL / 'original-source.tar.gz').exists():
+        raise RuntimeError('original backup already exists')
+    LOCAL.mkdir(parents=True, exist_ok=True)
+    canonical = json.loads(CANONICAL.read_text())
+    selected = canonical['projects']['horizon']
+    if git('rev-parse', 'HEAD').decode().strip() != selected['pin']:
+        raise RuntimeError('owned checkout is not pinned')
+    index = Path(git('rev-parse', '--path-format=absolute', '--git-path', 'index').decode().strip())
+    shutil.copy2(index, LOCAL / 'original-index')
+    (LOCAL / 'original-status.bin').write_bytes(git('status', '--porcelain=v1', '-z'))
+    dirty = git('ls-files', '-m', '-o', '--exclude-standard').decode().splitlines()
+    with tarfile.open(LOCAL / 'original-source.tar.gz', 'x:gz') as archive:
+        for name in dirty:
+            if not name.startswith('crates/') and name != 'Cargo.lock':
+                raise RuntimeError('unexpected dirty path: ' + name)
+            archive.add(SOURCE / name, arcname=name, recursive=False)
+    git('read-tree', selected['pin'], private=True)
+    rows = selected['patches'] + canonical['measurement_patches']
+    for row in rows:
+        path = ROOT / row['path']
+        if digest(path.read_bytes()) != row['sha256']:
+            raise RuntimeError('frozen patch differs: ' + row['path'])
+        git('apply', '--cached', *row.get('apply_options', []), path, private=True)
+    changed = git('diff', '--cached', '--name-only', private=True).decode().splitlines()
+    names = sorted(set(changed + dirty))
+    files = {name: digest(git('show', ':' + name, private=True)) for name in names}
+    before = {name: digest((SOURCE / name).read_bytes()) for name in dirty}
+    internal = canonical['internal_crates']
+    commit = internal['goliath_rs_commit']
+    with tarfile.open(LOCAL / 'original-internal.tar.gz', 'x:gz') as archive:
+        for name, expected in internal['files'].items():
+            blob = git('show', commit + ':' + name, root=True)
+            if digest(blob) != expected:
+                raise RuntimeError('frozen dependency not reproduced by recorded commit: ' + name)
+            entry = tarfile.TarInfo(name)
+            entry.size = len(blob)
+            entry.mode = 0o644
+            archive.addfile(entry, io.BytesIO(blob))
+    with tarfile.open(LOCAL / 'original-internal.tar.gz') as archive:
+        archive.extractall(LOCAL / 'original-internal', filter='data')
+    proof = dict(kind='E26-FINAL-09-source-assembly', pin=selected['pin'],
+                 baseline_binary=canonical['binaries']['horizon-client'],
+                 observed_binary=digest((CANONICAL.parent / 'horizon-client').read_bytes()),
+                 canonical_sha256=digest(CANONICAL.read_bytes()), patches=rows,
+                 tree=git('write-tree', private=True).decode().strip(), files=files,
+                 original_files=before, original_index_sha256=digest(index.read_bytes()),
+                 internal_files=internal['files'], original_internal_commit=commit,
+                 original_source_archive_sha256=digest((LOCAL / 'original-source.tar.gz').read_bytes()),
+                 original_internal_archive_sha256=digest((LOCAL / 'original-internal.tar.gz').read_bytes()),
+                 source_equality='pending')
+    if proof['baseline_binary'] != proof['observed_binary']:
+        raise RuntimeError('frozen executable differs')
+    save(DATA / 'e26-final09-source.json', proof)
+    print(json.dumps(dict(files=len(names), paths=names, tree=proof['tree'], internal_files=len(internal['files']))))
+
+
+def emit(name):
+    proof = json.loads((DATA / 'e26-final09-source.json').read_text())
+    if name not in proof['files'] and name not in {'crates/horizon-client/src/game/commands/pregen.rs','crates/horizon-client/src/lan/entity.rs'}:
+        raise RuntimeError('path outside assembly')
+    path = SOURCE / name
+    new = git('show', ':' + name, private=True).decode()
+    print('*** Begin Patch')
+    if not path.exists():
+        print('*** Add File: ' + str(path))
+        for line in new.splitlines():
+            print('+' + line)
+    else:
+        old = path.read_text()
+        if old != new:
+            print('*** Update File: ' + str(path))
+            lines = list(difflib.unified_diff(old.splitlines(), new.splitlines(), n=3))[2:]
+            for line in lines:
+                print('@@' if line.startswith('@@') else line)
+    print('*** End Patch')
+
+
+def check():
+    path = DATA / 'e26-final09-source.json'
+    proof = json.loads(path.read_text())
+    mismatches = [name for name, expected in proof['files'].items()
+                  if not (SOURCE / name).exists() or digest((SOURCE / name).read_bytes()) != expected]
+    index = Path(git('rev-parse', '--path-format=absolute', '--git-path', 'index').decode().strip())
+    if digest(index.read_bytes()) != proof['original_index_sha256']:
+        raise RuntimeError('real index changed')
+    proof.update(source_equality='passed' if not mismatches else 'failed', mismatches=mismatches)
+    save(path, proof)
+    print(json.dumps(dict(source_equality=proof['source_equality'], files=len(proof['files']), mismatches=mismatches)))
+    if mismatches:
+        raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['prepare', 'emit', 'check'])
+    parser.add_argument('path', nargs='?')
+    args = parser.parse_args()
+    if args.action == 'emit':
+        emit(args.path)
+    else:
+        (prepare if args.action == 'prepare' else check)()

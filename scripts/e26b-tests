@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Check the continuation adapter without builds or fixture load."""
+import ast
+import contextlib
+import io
+import json
+import runpy
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+import shutil
+
+ROOT = Path(__file__).resolve().parent.parent
+WARM = runpy.run_path(str(ROOT / 'scripts/e26b-warm-cell'))
+
+
+class Adapter(unittest.TestCase):
+    def tree(self, timed):
+        return ast.fix_missing_locations(WARM['WarmCell'](timed).visit(ast.parse((ROOT / 'scripts/e26-cell').read_text())))
+
+    def test_both_variants_compile_and_keep_the_kernel(self):
+        original = ast.parse((ROOT / 'scripts/e26-cell').read_text())
+        kernel = next(node for node in original.body if isinstance(node, ast.FunctionDef) and node.name == 'kernel')
+        adapt = next(node for node in original.body if isinstance(node, ast.ClassDef) and node.name == 'Adapt')
+        for timed in [False, True]:
+            tree = self.tree(timed)
+            compile(tree, 'adapter-test', 'exec')
+            self.assertEqual(ast.dump(kernel), ast.dump(next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'kernel')))
+            self.assertEqual(ast.dump(adapt), ast.dump(next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Adapt')))
+
+    def test_untimed_never_enables_or_drains_a_probe(self):
+        tree = self.tree(False)
+        blocks = [node for node in ast.walk(tree) if isinstance(node, ast.If) and any(
+            isinstance(child, ast.Constant) and child.value in {'e26-lite on', 'e26-lite drain'}
+            for statement in node.body for child in ast.walk(statement))]
+        # The enclosing main function is not an If. Each direct probe block is disabled.
+        direct = [node for node in blocks if isinstance(node.test, ast.Constant)]
+        self.assertEqual(len(direct), 2)
+        self.assertTrue(all(node.test.value is False for node in direct))
+
+    def test_timed_enables_and_drains_in_both_arms(self):
+        tree = self.tree(True)
+        blocks = [node for node in ast.walk(tree) if isinstance(node, ast.If)
+                  and isinstance(node.test, ast.Constant) and node.test.value is True]
+        self.assertEqual(len(blocks), 3)
+        text = ast.unparse(tree)
+        self.assertIn(WARM['ENGINES'][True]['A'], text)
+        self.assertNotIn('e26-timers on', text)
+        self.assertNotIn('e26-timers drain', text)
+        self.assertIn('E26-lite-native-release', text)
+
+    def test_untimed_retains_frozen_source_proof_gate(self):
+        text = ast.unparse(self.tree(False))
+        self.assertIn('E26-retained-patch10-qualification-not-capacity-accepted', text)
+        self.assertIn('diagnostic source proof changed', text)
+        self.assertIn('frozen executable changed during cell', text)
+        self.assertIn("ROOT / 'docs/experiments/data/E21/stack-proof.json'", text)
+
+    def test_all_selected_frozen_proofs_exist_and_match(self):
+        plans = json.loads((ROOT / 'docs/experiments/data/E26/e26-patch10-plan-1.json').read_text())
+        import hashlib
+        for timed, label in [(False, 'untimed'), (True, 'timed')]:
+            for arm, directory in plans[label + '_bins'].items():
+                if not timed and arm == 'A':
+                    continue
+                bins = ROOT / directory
+                build = json.loads((bins / 'build.json').read_text())
+                proof = bins / 'source-proof.json' if timed else ROOT / 'docs/experiments/data/E21/stack-proof.json'
+                expected = build.get('source_proof_sha256', build.get('source_proof', {}).get('sha256'))
+                self.assertEqual(hashlib.sha256(proof.read_bytes()).hexdigest(), expected)
+
+    def test_lite_partition_and_sequence_validation(self):
+        result = runpy.run_path(str(ROOT / 'scripts/e26b-warm-results'))
+        rows = [dict(sequence=i, tick=i, cycle_cpu_ns=100, warm_cpu_ns=10,
+                     other_cpu_ns=90, warm_calls=2, clock_reads=6) for i in range(2, 5)]
+        cell = dict(e26_lite=dict(rows=rows, dropped=0, invalid=0),
+                    e26_selection=dict(tile='a'), game_time_before=dict(a=dict(tick=1)),
+                    game_time_after=dict(a=dict(tick=4)))
+        actual = result['lite'](cell)
+        self.assertEqual(actual['ratio_of_sums'], .1)
+        self.assertEqual(actual['cycles'], 3)
+        rows[1]['sequence'] = 9
+        with self.assertRaises(RuntimeError):
+            result['lite'](cell)
+        rows[1]['sequence'] = 3
+        rows[1]['clock_reads'] = 4
+        with self.assertRaises(RuntimeError):
+            result['lite'](cell)
+
+    def verdict(self, warm=57, delta=0, intrusion=True, noise=True):
+        module = runpy.run_path(str(ROOT / 'scripts/e26-lite-results'))
+        names = ['a1', 'b1', 'b2', 'a2', 'b3', 'a3', 'a4', 'b4']
+        class Base:
+            def row(self, path):
+                name = path.name.split('.')[0]
+                return dict(arm=name[0].upper(), valid=True, selected='a')
+            def compare(self, records):
+                return dict(complete_fixed_AB=True, metrics={
+                    key: dict(mean_B_minus_A=delta if key == 'main_cores' else 0,
+                              shift_inside_observed_noise=intrusion)
+                    for key in ['main_cores', 'selected_p50_ms', 'selected_p99_ms']})
+        raw = dict(cells={'650': dict(e26_lite=dict(rows=[dict(sequence=2, tick=2,
+            cycle_cpu_ns=1000, warm_cpu_ns=warm, other_cpu_ns=1000-warm,
+            warm_calls=2, clock_reads=6)], dropped=0, invalid=0),
+            game_time_before=dict(a=dict(tick=1, at=0, rtt_s=0)),
+            game_time_after=dict(a=dict(tick=2, at=1, rtt_s=0)))})
+        calibration = dict(status='complete', noise_valid=noise,
+                           calibration=dict(conservative_read_allowance_ns=1))
+        with tempfile.TemporaryDirectory(prefix='e26b-verdict-test-') as temporary:
+            space = Path(temporary)
+            globals_ = module['main'].__globals__
+            with patch.dict(globals_, DATA=space, load=lambda: Base(),
+                            read=lambda path: calibration if path.name == 'calibration.json' else raw), \
+                 patch.object(sys, 'argv', ['test', *names, '--calibration', 'calibration.json', '--out', 'e26-test.json']), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                module['main']()
+            return json.loads((space / 'e26-test.json').read_text())
+
+    def test_failure_is_strictly_above_five_percent_after_every_read(self):
+        result = self.verdict()
+        self.assertEqual(result['window']['clock_reads'], 24)
+        self.assertEqual(result['window']['clock_read_cpu_charge_ns'], 24)
+        self.assertEqual(result['window']['corrected_ratio_of_sums'], .051)
+        self.assertTrue(result['verdict'].startswith('failed:'))
+        self.assertEqual(self.verdict(warm=56)['verdict'], 'unproven')
+
+    def test_main_cpu_delta_and_intrusion_block_an_unsupported_failure(self):
+        self.assertEqual(self.verdict(delta=1e-7)['window']['corrected_warm_cpu_ns'], 0)
+        self.assertEqual(self.verdict(delta=1e-7)['verdict'], 'unproven')
+        self.assertEqual(self.verdict(intrusion=False)['verdict'], 'unproven')
+        self.assertEqual(self.verdict(noise=False)['verdict'], 'unproven')
+
+    def test_final_manifest_overlay_is_one_verified_dependency_path(self):
+        module = runpy.run_path(str(ROOT / 'scripts/e26b-final-source'))
+        raw = ('[dependencies]\ngoliath-store = { path = "' + module['LOGICAL_STORE'] + '" }\n').encode()
+        changed = module['overlay'](raw)
+        self.assertIn(module['FROZEN_STORE'].encode(), changed)
+        self.assertNotIn(module['LOGICAL_STORE'].encode(), changed)
+        with self.assertRaises(RuntimeError):
+            module['overlay'](raw.replace(module['LOGICAL_STORE'].encode(), b'elsewhere'))
+
+    def test_final_lite_adapter_changes_only_the_historical_control_label(self):
+        module = runpy.run_path(str(ROOT / 'scripts/e26b-final-lite-cell'))
+        final = module['adapter']()
+        legacy = runpy.run_path(str(ROOT / 'scripts/e26-lite-cell'))
+        text = (ROOT / 'scripts/e26-cell').read_text()
+        original = ast.fix_missing_locations(legacy['Lite']().visit(ast.parse(text)))
+        changed = ast.fix_missing_locations(final.Lite().visit(ast.parse(text)))
+        expected = ast.unparse(original).replace("'unchanged FINAL-09'", repr(module['CONTROL']))
+        self.assertEqual(ast.unparse(changed), expected)
+        compile(changed, 'final-lite-adapter-test', 'exec')
+
+    def test_final_snapshot_metadata_identifies_both_candidate_kinds(self):
+        module = runpy.run_path(str(ROOT / 'scripts/e26b-final-build'))
+        base = ROOT / '.local/bin/goliath-e24/lease-fixed-r2'
+        proof_path = ROOT / 'docs/experiments/data/E26/e26-lite-warm-source.json'
+        for lite in [False, True]:
+            with tempfile.TemporaryDirectory(prefix='metadata-test-', dir=ROOT / '.local/evidence/E26') as temporary:
+                directory = Path(temporary)
+                for name in ['FINAL.json', 'canonical.json', 'candidate.json', 'manifest.json']:
+                    shutil.copy2(base / name, directory / name)
+                shutil.copy2(ROOT / '.local/bin/meridian-e25/e25-reactor1-matched-r2/build.json', directory / 'proxy-build.json')
+                module['metadata'](directory, 'a' * 64, proof_path,
+                    dict(tree='test-tree', internal_root='test-snapshot', internal_files={}), lite)
+                final = json.loads((directory / 'FINAL.json').read_text())
+                candidate = json.loads((directory / 'candidate.json').read_text())
+                canonical = json.loads((directory / 'canonical.json').read_text())
+                manifest = json.loads((directory / 'manifest.json').read_text())
+                self.assertEqual(final['binaries']['horizon-client']['sha256'], 'a' * 64)
+                self.assertEqual(canonical['binaries']['horizon-client'], 'a' * 64)
+                self.assertEqual(manifest['horizon-client'], 'a' * 64)
+                self.assertEqual(candidate['final_sha256'], module['sha'](directory / 'FINAL.json'))
+                self.assertNotIn('candidate_sha256', final)
+                self.assertIn('base_candidate_sha256', final)
+                self.assertEqual(final['validation']['runtime'], 'pending reviewer reproduction')
+                self.assertEqual(final['validation']['frontier'], 'pending reviewer reproduction')
+                self.assertEqual(canonical['binaries']['meridian'], module['PROXY_SHA'])
+                self.assertEqual(manifest['meridian'], module['PROXY_SHA'])
+                self.assertEqual(canonical['internal_crates']['snapshot'], 'test-snapshot')
+                self.assertEqual(final['projects']['horizon']['patches'][-1]['path'], 'patches/horizon-10-warm-tick.patch')
+                self.assertEqual(any(row['path'] == 'patches/horizon-21-lite-cpu-clean.patch' for row in final['measurement_patches']), lite)
+
+
+if __name__ == '__main__':
+    unittest.main()

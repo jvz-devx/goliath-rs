@@ -1,0 +1,124 @@
+diff --git a/crates/horizon-client/src/game/commands/pregen.rs b/crates/horizon-client/src/game/commands/pregen.rs
+--- a/crates/horizon-client/src/game/commands/pregen.rs
++++ b/crates/horizon-client/src/game/commands/pregen.rs
+@@ -264,7 +264,7 @@
+             if now >= until {
+                 break;
+             }
+-            horizon_core::tick_timers::pause();
++            horizon_core::tick_timers::pause_worker();
+             self.streaming
+                 .wait((until - now).min(Duration::from_millis(5)));
+             horizon_core::tick_timers::resume();
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -86,6 +86,7 @@
+                                     json!({
+                             "sequence":row.sequence,"tick":row.tick,"busy_ns":row.busy_ns,
+                             "pacing_wait_ns":row.pacing_wait_ns,
++                            "worker_wait_ns":row.worker_wait_ns,
+                             "ns":row.ns,"calls":row.calls})
+                                 })
+                                 .collect();
+diff --git a/crates/horizon-core/src/tick_timers.rs b/crates/horizon-core/src/tick_timers.rs
+--- a/crates/horizon-core/src/tick_timers.rs
++++ b/crates/horizon-core/src/tick_timers.rs
+@@ -28,6 +28,7 @@
+     pub tick: i64,
+     pub busy_ns: u64,
+     pub pacing_wait_ns: u64,
++    pub worker_wait_ns: u64,
+     pub ns: [u64; 16],
+     pub calls: [u64; 16],
+ }
+@@ -39,6 +40,8 @@
+     current: usize,
+     last: u64,
+     pacing_wait_ns: u64,
++    worker_wait_ns: u64,
++    waiting_worker: bool,
+     ns: [u64; 16],
+     calls: [u64; 16],
+     rows: VecDeque<Row>,
+@@ -56,6 +59,8 @@
+             current: UPSTREAM,
+             last: 0,
+             pacing_wait_ns: 0,
++            worker_wait_ns: 0,
++            waiting_worker: false,
+             ns: [0; 16],
+             calls: [0; 16],
+             rows: VecDeque::new(),
+@@ -86,13 +91,23 @@
+     fn pause_at(&mut self, now: u64) {
+         self.charge(now);
+         self.running = false;
++        self.waiting_worker = false;
++    }
++    fn pause_worker_at(&mut self, now: u64) {
++        self.pause_at(now);
++        self.waiting_worker = true;
+     }
+     fn resume_at(&mut self, now: u64) {
+         if !self.running {
+-            self.pacing_wait_ns += now.saturating_sub(self.last);
++            let elapsed = now.saturating_sub(self.last);
++            self.pacing_wait_ns += elapsed;
++            if self.waiting_worker {
++                self.worker_wait_ns += elapsed;
++            }
+         }
+         self.last = now;
+         self.running = true;
++        self.waiting_worker = false;
+     }
+     fn finish(&mut self, tick: i64, now: u64) {
+         self.charge(now);
+@@ -102,6 +117,7 @@
+             tick,
+             busy_ns: self.ns.iter().sum(),
+             pacing_wait_ns: std::mem::take(&mut self.pacing_wait_ns),
++            worker_wait_ns: std::mem::take(&mut self.worker_wait_ns),
+             ns: std::mem::take(&mut self.ns),
+             calls: std::mem::take(&mut self.calls),
+         };
+@@ -162,6 +178,8 @@
+         s.current = UPSTREAM;
+         s.last = s.now();
+         s.pacing_wait_ns = 0;
++        s.worker_wait_ns = 0;
++        s.waiting_worker = false;
+         s.ns = [0; 16];
+         s.calls = [0; 16];
+         s.sequence = 0;
+@@ -182,6 +200,14 @@
+     STATE.with_borrow_mut(|s| {
+         if s.enabled {
+             s.resume_at(s.now());
++        }
++    });
++}
++
++pub fn pause_worker() {
++    STATE.with_borrow_mut(|s| {
++        if s.enabled {
++            s.pause_worker_at(s.now());
+         }
+     });
+ }
+@@ -268,6 +294,14 @@
+         assert_eq!(row.ns[8], 40);
+         assert_eq!(row.pacing_wait_ns, 10_000);
+         assert_eq!(row.busy_ns + row.pacing_wait_ns, 10_050);
++        assert_eq!(row.worker_wait_ns, 0);
++        s.pause_worker_at(10_060);
++        s.resume_at(11_060);
++        s.finish(2, 11_070);
++        let row = s.rows.pop_front().unwrap();
++        assert_eq!(row.busy_ns, 20);
++        assert_eq!(row.pacing_wait_ns, 1_000);
++        assert_eq!(row.worker_wait_ns, 1_000);
+     }
+ 
+     #[test]

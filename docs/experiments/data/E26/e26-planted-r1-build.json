@@ -1,0 +1,100 @@
+{
+  "kind": "E26-native-release",
+  "status": "complete",
+  "profile": "release",
+  "incremental": false,
+  "planted": true,
+  "commands": [
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 1838.0602705000201,
+      "test_results": [],
+      "reused_from": "docs/experiments/data/E26/e26-diagnostic-r8-build.json",
+      "reused_record_sha256": "52307f400ec17fb8d672b648ea8c4355024541cf2676bd3915c8c46827b53e26"
+    },
+    {
+      "label": "timer-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "horizon-core",
+        "--lib",
+        "tick_timers::tests::"
+      ],
+      "exit": 0,
+      "timing": "serial batch; not separately timed",
+      "test_results": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "timing": "serial batch; not separately timed",
+      "test_results": []
+    },
+    {
+      "label": "release",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--bin",
+        "horizon-client"
+      ],
+      "exit": 0,
+      "timing": "serial batch; not separately timed",
+      "test_results": []
+    }
+  ],
+  "source": ".local/src/horizon-tiles",
+  "source_proof_sha256": "f7cd434edf886ede2b84ea5ed48e3fe0ab8f1f2e1136dfd899710dd64a0834ff",
+  "batch": {
+    "command": [
+      "bash",
+      "-c",
+      "{ printf '%s\\n' 'E26_PHASE_BEGIN timer-tests' && cargo test --locked --release -p horizon-core --lib tick_timers::tests:: && printf '%s\\n' 'E26_PHASE_END timer-tests'; } && { printf '%s\\n' 'E26_PHASE_BEGIN clippy' && cargo clippy --locked --release --no-default-features -p horizon-client --lib -- -D warnings && printf '%s\\n' 'E26_PHASE_END clippy'; } && { printf '%s\\n' 'E26_PHASE_BEGIN release' && cargo build --locked --release --no-default-features -p horizon-client --bin horizon-client && printf '%s\\n' 'E26_PHASE_END release'; }"
+    ],
+    "exit": 0,
+    "seconds_including_queue": 314.2285892920045,
+    "one_build_marker": true,
+    "workspace": ".local/src/horizon-tiles"
+  },
+  "directory": ".local/bin/horizon-e26/e26-planted-r1",
+  "binaries": {
+    "horizon-client": "632a692a270fc7a92942a6d3917ea47ab4edef431213ab2d31517b33e39718cb",
+    "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+    "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+    "meridian": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+    "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+    "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025"
+  },
+  "seconds": 314.37487099997816
+}

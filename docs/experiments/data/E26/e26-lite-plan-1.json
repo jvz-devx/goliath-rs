@@ -1,0 +1,82 @@
+{
+  "kind": "E26-fixed-lite-running-cpu-plan",
+  "schema": 1,
+  "order": [
+    {
+      "name": "e26-lite-a1",
+      "arm": "A",
+      "pair": 1
+    },
+    {
+      "name": "e26-lite-b1",
+      "arm": "B",
+      "pair": 1
+    },
+    {
+      "name": "e26-lite-b2",
+      "arm": "B",
+      "pair": 2
+    },
+    {
+      "name": "e26-lite-a2",
+      "arm": "A",
+      "pair": 2
+    },
+    {
+      "name": "e26-lite-b3",
+      "arm": "B",
+      "pair": 3
+    },
+    {
+      "name": "e26-lite-a3",
+      "arm": "A",
+      "pair": 3
+    },
+    {
+      "name": "e26-lite-a4",
+      "arm": "A",
+      "pair": 4
+    },
+    {
+      "name": "e26-lite-b4",
+      "arm": "B",
+      "pair": 4
+    }
+  ],
+  "players": 650,
+  "pigs_per_tile": 64,
+  "readers_expected_per_tile": 65,
+  "warmup_seconds": 30,
+  "measurement_seconds": 60,
+  "server_cores": 4,
+  "bot_cores": 1,
+  "scope": "main-thread running CPU per cycle, including between-tick control and pump CPU; off-main separately",
+  "timer_kinds": [
+    "warm",
+    "other"
+  ],
+  "clock": "CLOCK_THREAD_CPUTIME_ID",
+  "clock_calibration": "e26-clock-calibration-1.json",
+  "clock_read_charge": "2*(1+warm_calls) reads per cycle times maximum measured unsubtracted CPU batch mean plus reported resolution quantum",
+  "other_charge": "Subtract the full positive mean main-CPU delta times the upper query-bracketed B window from the warming numerator, even if this overlaps the clock-read charge",
+  "verdict_number": "ratio of corrected warm CPU sum to full cycle CPU sum over the same cycles",
+  "failure": "strictly above0.05, and mainCPU/rawP50/rawP99 mean deltas all inside maximum within-arm ranges; otherwise unproven",
+  "per_cycle_outputs": [
+    "fraction P50",
+    "fraction P99"
+  ],
+  "ratio_output": "ratio of sums",
+  "bins": {
+    "A": ".local/bin/meridian-e18/reactor-1",
+    "B": ".local/bin/horizon-e26/e26-lite-r2"
+  },
+  "engines": {
+    "A": "b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d",
+    "B": "92af479e9047649281819c52e6b7cc2a7a1b4b0ba91156c2724fb1d0fb2323d3"
+  },
+  "adapter_sha256": "fb9e53b1ff989b91ee9702a0bba8d7427d03c1efe462bde84e28d3efa31dffa7",
+  "base_adapter_sha256": "8a0a3a640437941be0fc3a5a3cc9e92ddc9531e68b05d5f3f3be9358d74e4a78",
+  "kernel_sha256": "f2b6da6c771676a20e1f32d01a8b63862440734545e881e86303d2dd7616f86c",
+  "reuse_old_A_rows": false,
+  "retention": "All attempts remain. No replacement for an observed failure. Release between every cell. No wall-clock or limiter subtraction."
+}

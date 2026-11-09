@@ -1,0 +1,331 @@
+diff --git a/crates/horizon-client-render/examples/e26_clock_probe.rs b/crates/horizon-client-render/examples/e26_clock_probe.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client-render/examples/e26_clock_probe.rs
+@@ -0,0 +1,71 @@
++//! Measures the existing thread CPU clock's cost and represented resolution.
++use horizon_client_render::spans::thread_cpu;
++use serde_json::json;
++use std::{
++    hint::black_box,
++    time::{Duration, Instant},
++};
++
++fn read() -> Duration {
++    thread_cpu().expect("the native thread CPU clock is required")
++}
++
++fn gcd(mut a: u64, mut b: u64) -> u64 {
++    while b != 0 {
++        let next = a % b;
++        a = b;
++        b = next;
++    }
++    a
++}
++
++fn main() {
++    let resolution = rustix::time::clock_getres(rustix::time::ClockId::ThreadCPUTime);
++    let resolution_ns = resolution.tv_sec as u64 * 1_000_000_000 + resolution.tv_nsec as u64;
++    for _ in 0..10_000 {
++        black_box(read());
++    }
++    let mut batches = Vec::new();
++    let reads = 100_000u64;
++    for batch in 0..32 {
++        let wall = Instant::now();
++        let start = read();
++        for _ in 0..reads {
++            black_box(read());
++        }
++        let end = read();
++        let cpu_ns = (end - start).as_nanos() as u64;
++        batches.push(json!({"batch":batch,"reads":reads,"cpu_ns":cpu_ns,
++            "wall_ns":wall.elapsed().as_nanos(),
++            "cpu_ns_per_read_unsubtracted":cpu_ns as f64/reads as f64}));
++    }
++    let mut previous = read();
++    let mut min_step = u64::MAX;
++    let mut step_gcd = 0;
++    let mut zero = 0u64;
++    for _ in 0..100_000 {
++        let next = read();
++        let step = (next - previous).as_nanos() as u64;
++        if step == 0 {
++            zero += 1;
++        } else {
++            min_step = min_step.min(step);
++            step_gcd = gcd(step_gcd, step);
++        }
++        previous = next;
++    }
++    let maximum = batches
++        .iter()
++        .map(|b| b["cpu_ns_per_read_unsubtracted"].as_f64().unwrap())
++        .fold(0.0, f64::max);
++    println!(
++        "{}",
++        json!({"kind":"E26-thread-cpu-clock-calibration",
++        "clock":"CLOCK_THREAD_CPUTIME_ID","reported_resolution_ns":resolution_ns,
++        "observed_min_positive_step_ns":min_step,"observed_step_gcd_ns":step_gcd,
++        "zero_step_reads":zero,"resolution_samples":100_000,"batches":batches,
++        "maximum_batch_cpu_ns_per_read":maximum,
++        "conservative_read_allowance_ns":maximum.ceil() as u64+resolution_ns,
++        "method":"Unsubtracted maximum batch mean includes loop and black-box cost. Add one reported quantum. This is a measured conservative allowance, not a global worst-case latency claim."})
++    );
++}
+diff --git a/crates/horizon-client/src/game/dedicated.rs b/crates/horizon-client/src/game/dedicated.rs
+--- a/crates/horizon-client/src/game/dedicated.rs
++++ b/crates/horizon-client/src/game/dedicated.rs
+@@ -35,6 +35,7 @@
+ };
+ 
+ mod cluster;
++mod e26_lite;
+ pub(super) mod events;
+ mod management;
+ mod report;
+@@ -1454,6 +1455,7 @@
+                 far.brake(mspt, host.hub.config.view_distance);
+             }
+             state.ticked(Instant::now());
++            e26_lite::finish(self.world.game_time);
+             // MinecraftServer.runServer: a server more than a second's ticks
+             // behind skips them and says so, at most every 15 seconds.
+             let waited = if fast_cut_control {
+diff --git a/crates/horizon-client/src/game/dedicated/e26_lite.rs b/crates/horizon-client/src/game/dedicated/e26_lite.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client/src/game/dedicated/e26_lite.rs
+@@ -0,0 +1,173 @@
++//! Two-kind main-thread running-CPU accounting, with no pacing-wait probes.
++use serde_json::{Value, json};
++use std::{cell::RefCell, collections::VecDeque, time::Duration};
++
++const LIMIT: usize = 8192;
++
++#[derive(Debug)]
++struct Row {
++    sequence: u64,
++    tick: i64,
++    cycle_ns: u64,
++    warm_ns: u64,
++    warm_calls: u64,
++}
++
++#[derive(Default)]
++struct Probe {
++    enabled: bool,
++    start: Option<Duration>,
++    warm: Duration,
++    calls: u64,
++    sequence: u64,
++    dropped: u64,
++    invalid: u64,
++    rows: VecDeque<Row>,
++}
++
++thread_local! { static PROBE: RefCell<Probe> = RefCell::new(Probe::default()); }
++
++fn cpu() -> Option<Duration> {
++    horizon_client::spans::thread_cpu()
++}
++
++pub(super) struct Warm(Option<Duration>);
++
++impl Drop for Warm {
++    fn drop(&mut self) {
++        let Some(start) = self.0 else { return };
++        let end = cpu();
++        PROBE.with_borrow_mut(|p| {
++            if !p.enabled {
++                return;
++            }
++            p.calls += 1;
++            match end.and_then(|end| end.checked_sub(start)) {
++                Some(elapsed) => p.warm += elapsed,
++                None => p.invalid += 1,
++            }
++        });
++    }
++}
++
++pub(super) fn warm() -> Warm {
++    let enabled = PROBE.with_borrow(|p| p.enabled);
++    Warm(if enabled { cpu() } else { None })
++}
++
++fn append(p: &mut Probe, tick: i64, end: Option<Duration>) {
++    let elapsed = p.start.zip(end).and_then(|(a, b)| b.checked_sub(a));
++    let warm = std::mem::take(&mut p.warm);
++    let calls = std::mem::take(&mut p.calls);
++    p.sequence += 1;
++    if let Some(elapsed) = elapsed.filter(|elapsed| *elapsed >= warm) {
++        if p.rows.len() == LIMIT {
++            p.rows.pop_front();
++            p.dropped += 1;
++        }
++        p.rows.push_back(Row {
++            sequence: p.sequence,
++            tick,
++            cycle_ns: elapsed.as_nanos() as u64,
++            warm_ns: warm.as_nanos() as u64,
++            warm_calls: calls,
++        });
++    } else {
++        p.invalid += 1;
++    }
++}
++
++pub(super) fn finish(tick: i64) {
++    if !PROBE.with_borrow(|p| p.enabled) {
++        return;
++    }
++    let end = cpu();
++    PROBE.with_borrow_mut(|p| append(p, tick, end));
++    // One ending read and one starting read per whole cycle. The interval
++    // crosses pacing sleep, but this clock charges only this thread's CPU.
++    let start = cpu();
++    PROBE.with_borrow_mut(|p| p.start = start);
++}
++
++pub(super) fn command(mode: &str) -> Value {
++    if !matches!(mode, "on" | "off" | "drain") {
++        return json!({"error":"e26-lite takes on, off or drain"});
++    }
++    if mode != "drain" {
++        let start = (mode == "on").then(cpu).flatten();
++        PROBE.with_borrow_mut(|p| {
++            *p = Probe {
++                enabled: mode == "on",
++                start,
++                ..Probe::default()
++            };
++        });
++    }
++    PROBE.with_borrow_mut(|p| {
++        let rows: Vec<_> = p
++            .rows
++            .drain(..)
++            .map(|r| {
++                json!({"sequence":r.sequence,"tick":r.tick,
++            "cycle_cpu_ns":r.cycle_ns,"warm_cpu_ns":r.warm_ns,
++            "other_cpu_ns":r.cycle_ns-r.warm_ns,"warm_calls":r.warm_calls,
++            "clock_reads":2*(1+r.warm_calls)})
++            })
++            .collect();
++        json!({"ok":true,"schema":"E26-running-main-cpu-v1","clock":"CLOCK_THREAD_CPUTIME_ID",
++            "scope":"main-thread running CPU per cycle; between-tick control and pump CPU included",
++            "timer_kinds":["warm","other"],"rows":rows,
++            "dropped":std::mem::take(&mut p.dropped),"invalid":std::mem::take(&mut p.invalid)})
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn warm_and_other_partition_the_same_cpu_cycle() {
++        let mut p = Probe {
++            enabled: true,
++            start: Some(Duration::from_nanos(100)),
++            warm: Duration::from_nanos(25),
++            calls: 3,
++            ..Probe::default()
++        };
++        append(&mut p, 42, Some(Duration::from_nanos(200)));
++        let row = p.rows.pop_front().unwrap();
++        assert_eq!(row.cycle_ns, 100);
++        assert_eq!(row.warm_ns, 25);
++        assert_eq!(row.warm_calls, 3);
++        assert_eq!(row.tick, 42);
++        assert_eq!(p.warm, Duration::ZERO);
++        assert_eq!(p.calls, 0);
++    }
++
++    #[test]
++    fn reversed_or_inconsistent_clocks_are_not_accepted() {
++        let mut p = Probe {
++            start: Some(Duration::from_nanos(200)),
++            ..Probe::default()
++        };
++        append(&mut p, 1, Some(Duration::from_nanos(100)));
++        p.warm = Duration::from_nanos(500);
++        append(&mut p, 2, Some(Duration::from_nanos(300)));
++        assert_eq!(p.invalid, 2);
++        assert!(p.rows.is_empty());
++    }
++
++    #[test]
++    fn overflow_reports_every_lost_cycle() {
++        let mut p = Probe {
++            start: Some(Duration::ZERO),
++            ..Probe::default()
++        };
++        for tick in 0..LIMIT + 2 {
++            append(&mut p, tick as i64, Some(Duration::from_nanos(1)));
++        }
++        assert_eq!(p.rows.len(), LIMIT);
++        assert_eq!(p.dropped, 2);
++        assert_eq!(p.rows.front().unwrap().sequence, 3);
++    }
++}
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -61,6 +61,7 @@
+             // A `console stop` just before stops this server for the next request too.
+             self.note_stopping(state.lists.lock().unwrap().stop);
+             let reply = match request.line.trim().split_once(' ') {
++                Some(("e26-lite", mode)) => super::e26_lite::command(mode),
+                 Some(("tile-cut", args)) => {
+                     self.tile_cut_request(
+                         args,
+diff --git a/crates/horizon-client/src/game/dedicated/tile_cut.rs b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+--- a/crates/horizon-client/src/game/dedicated/tile_cut.rs
++++ b/crates/horizon-client/src/game/dedicated/tile_cut.rs
+@@ -511,6 +511,7 @@
+ impl Game<'_> {
+     /// Prepare only immutable accepted generation images between freezes.
+     pub(super) fn tile_warm_generation(&mut self, runtime: &mut Option<Runtime>) {
++        let _e26_warm_cpu = super::e26_lite::warm();
+         let Some(state) = runtime else {
+             return;
+         };
+diff --git a/crates/horizon-client/src/lan/entity.rs b/crates/horizon-client/src/lan/entity.rs
+--- a/crates/horizon-client/src/lan/entity.rs
++++ b/crates/horizon-client/src/lan/entity.rs
+@@ -944,6 +944,10 @@
+             )];
+             let mut bodies = None;
+             for v in &mut *viewers {
++                let _e26_reader_pair = horizon_core::tick_timers::scope_if(
++                    11,
++                    horizon_core::tick_timers::reader(v.entity_id),
++                );
+                 if v.entity_id == e.id
+                     || v.tracker.is_tracking(e.id)
+                     || !sees(v, &probe, &chunks, &mut [0])
+@@ -1135,6 +1139,10 @@
+         self.pairs.clear();
+         self.pairs.resize(entities.len(), false);
+         for (v, flags) in viewers.iter_mut().zip(&mut self.flags) {
++            let _e26_reader_tracking = horizon_core::tick_timers::scope_if(
++                11,
++                horizon_core::tick_timers::reader(v.entity_id),
++            );
+             flags.clear();
+             self.held.clear();
+             self.held.resize(self.chunks.len(), 0);
+@@ -1284,6 +1292,10 @@
+             let mut encoded = false;
+             let mut pairing: Option<Vec<Vec<u8>>> = None;
+             for (v, flags) in viewers.iter_mut().zip(&self.flags) {
++                let _e26_reader_output = horizon_core::tick_timers::scope_if(
++                    11,
++                    horizon_core::tick_timers::reader(v.entity_id),
++                );
+                 let f = flags[index];
+                 if f & TRACKS != 0 {
+                     if self.packets.is_empty() {

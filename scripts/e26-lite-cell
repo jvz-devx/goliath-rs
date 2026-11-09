@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Use the unchanged D9 cell controller with only the lite probe protocol changed."""
+import ast
+import fcntl
+import json
+from pathlib import Path
+import sys
+import e11_support as support
+
+ROOT=support.ROOT
+DATA=ROOT/'docs/experiments/data/E26'
+
+
+class Lite(ast.NodeTransformer):
+    def visit_Constant(self,node):
+        if isinstance(node.value,str):
+            value=node.value.replace('e26-timers on','e26-lite on').replace('e26-timers drain','e26-lite drain')
+            if value=='e26_timers':value='e26_lite'
+            return ast.copy_location(ast.Constant(value),node)
+        return node
+
+    def visit_If(self,node):
+        if any(isinstance(statement,ast.Raise) and any(isinstance(item,ast.Constant) and item.value=='diagnostic and planted bundles must not be mixed' for item in ast.walk(statement)) for statement in node.body):
+            node.test=ast.parse('build["status"] != "complete" or build["kind"] != "E26-lite-native-release"').body[0].value
+        return self.generic_visit(node)
+
+    def visit_Subscript(self,node):
+        if isinstance(node.value,ast.Name) and node.value.id=='build' and isinstance(node.slice,ast.Constant) and node.slice.value=='source_proof_sha256':
+            return ast.copy_location(ast.parse('build["source_proof"]["sha256"]').body[0].value,node)
+        return self.generic_visit(node)
+
+
+def main():
+    if '--name' not in sys.argv:raise RuntimeError('name is required')
+    name=sys.argv[sys.argv.index('--name')+1]
+    if not name.startswith(('e26-','repro-')) or '/' in name:raise RuntimeError('scoped fresh name required')
+    if '--arm' not in sys.argv or sys.argv[sys.argv.index('--arm')+1] not in {'A','B'}:
+        raise RuntimeError('lite intrusion uses A or B only')
+    source=ROOT/'scripts/e26-cell'
+    tree=ast.fix_missing_locations(Lite().visit(ast.parse(source.read_text())))
+    executed=DATA/(name+'-lite-driver.py')
+    if executed.exists():raise RuntimeError('use a fresh attempt name')
+    executed.write_text(ast.unparse(tree)+'\n')
+    namespace=dict(__name__='e26_lite_runtime',__file__=str(executed))
+    exec(compile(tree,str(executed),'exec'),namespace)
+    with (ROOT/'.local/evidence/E26/operation.lock').open('a') as operation:
+        fcntl.flock(operation,fcntl.LOCK_EX)
+        namespace['main']()
+
+
+if __name__=='__main__':main()

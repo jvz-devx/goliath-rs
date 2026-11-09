@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Gate and freeze the source-proved final tile, with a separate optional lite bundle."""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import shlex
+import shutil
+import subprocess
+import time
+import e11_support as support
+from e14_snapshot_support import validate_snapshot
+
+ROOT = support.ROOT
+SOURCE = ROOT / '.local/src/horizon-tiles'
+LOCAL = ROOT / '.local/evidence/E26'
+DATA = ROOT / 'docs/experiments/data/E26'
+BASE = ROOT / '.local/bin/goliath-e24/lease-fixed-r2'
+PROXY = ROOT / '.local/bin/meridian-e25/e25-reactor1-matched-r2'
+PROXY_SHA = '80f8953a201a51a0cae84341080af0bd70e08586ad608475b3092b2c30d3c378'
+STORE_SHA = '9636fa6d8089b071be241437e79eb2942a07dc756039b394e73cc8f705e26d0e'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify(path):
+    proof = json.loads(path.read_text())
+    if proof['source_equality'] != 'passed':
+        raise RuntimeError('final source proof required')
+    source_helpers = runpy.run_path(str(ROOT / 'scripts/e26b-final-source'))
+    source_helpers['index_identity']()
+    unexpected = source_helpers['modified_compile_inputs']() - set(proof['files'])
+    if unexpected:
+        raise RuntimeError('unexpected modified compile inputs remain untouched: ' + str(sorted(unexpected)))
+    for name, expected in proof['files'].items():
+        if name == proof['build_overlay']['path']:
+            expected = proof['build_overlay']['build_sha256']
+        if sha(SOURCE / name) != expected:
+            raise RuntimeError('final source changed: ' + name)
+    for name, expected in proof['internal_files'].items():
+        if sha(ROOT / proof['internal_root'] / name) != expected:
+            raise RuntimeError('frozen internal source changed: ' + name)
+    for record in proof['patches']:
+        if sha(ROOT / record['path']) != record['sha256']:
+            raise RuntimeError('final source patch changed: ' + record['path'])
+    qualification = proof['qualification']
+    if sha(ROOT / qualification['path']) != qualification['sha256']:
+        raise RuntimeError('qualification record changed')
+    return proof
+
+
+def patch_record(path):
+    return dict(path=str(path.relative_to(ROOT)), sha256=sha(path))
+
+
+def proxy_identity():
+    record = json.loads((PROXY / 'build.json').read_text())
+    if record['status'] != 'complete' or record['profile'] != 'release' or record['incremental']:
+        raise RuntimeError('matched reactor-1 release incomplete')
+    if record['binary_sha256'] != PROXY_SHA or sha(PROXY / 'meridian') != PROXY_SHA:
+        raise RuntimeError('requested matched reactor-1 proxy changed')
+    if any(command['exit'] for command in record['commands']):
+        raise RuntimeError('matched reactor-1 gate failed')
+    return record
+
+
+def metadata(directory, engine, proof_path, proof, lite):
+    extra = [patch_record(ROOT / 'patches/horizon-10-warm-tick.patch')]
+    measurements = [patch_record(ROOT / 'patches/horizon-21-lite-cpu-clean.patch')] if lite else []
+    source = dict(path=str(proof_path.relative_to(ROOT)), sha256=sha(proof_path), tree=proof['tree'])
+    proxy = proxy_identity()
+    proxy_provenance = dict(path='proxy-build.json', sha256=sha(directory / 'proxy-build.json'),
+                            binary_sha256=PROXY_SHA, original_directory=str(PROXY.relative_to(ROOT)))
+    internals = dict(snapshot=proof['internal_root'], files=proof['internal_files'],
+                     identity=hashlib.sha256(json.dumps(proof['internal_files'], sort_keys=True).encode()).hexdigest(),
+                     scope='Frozen E24 renewal-r2 dependency closure; no single-commit reconstruction claimed.')
+    final = json.loads((directory / 'FINAL.json').read_text())
+    if 'candidate_sha256' in final:
+        final['base_candidate_sha256'] = final.pop('candidate_sha256')
+    final['kind'] = 'E26b-final-tile-lite-diagnostic' if lite else 'E26b-final-tile-candidate'
+    for name, value in final['binaries'].items():
+        value['path'] = str((directory / name).relative_to(ROOT))
+    final['binaries']['horizon-client']['sha256'] = engine
+    final['binaries']['meridian']['sha256'] = PROXY_SHA
+    final['projects']['meridian'] = proxy['frozen_stack']
+    final['e25_proxy'] = proxy_provenance
+    final['projects']['horizon']['patches'].extend(extra)
+    final['measurement_patches'].extend(measurements)
+    if 'e24_source' in final:
+        final['base_e24_source'] = final.pop('e24_source')
+    if 'validation' in final:
+        final['base_validation'] = final.pop('validation')
+    final['validation'] = dict(release_gates='Passed for this source; see build.json.',
+                               runtime='pending reviewer reproduction', frontier='pending reviewer reproduction',
+                               soak='pending reviewer reproduction', combined_added_cost='unproven')
+    final['e26_source'] = source
+    support.save(directory / 'FINAL.json', final)
+    for name in ['canonical.json', 'candidate.json']:
+        record = json.loads((directory / name).read_text())
+        record['binaries']['horizon-client'] = engine
+        record['binaries']['meridian'] = PROXY_SHA
+        record['projects']['meridian'] = proxy['frozen_stack']
+        record['e25_proxy'] = proxy_provenance
+        record['kind'] = final['kind']
+        record['projects']['horizon']['patches'].extend(extra)
+        record['measurement_patches'].extend(measurements)
+        for key in ['e24_source', 'gates', 'internal_crates']:
+            if key in record:
+                record['base_' + key] = record.pop(key)
+        record['internal_crates'] = internals
+        record['gates'] = dict(status='passed', record=str((directory / 'build.json').relative_to(ROOT)),
+                               scope='Scoped release gates only; runtime and frontier are pending.')
+        record['e26_source'] = source
+        if 'final_sha256' in record:
+            record['base_final_sha256'] = record['final_sha256']
+            record['final_sha256'] = sha(directory / 'FINAL.json')
+        support.save(directory / name, record)
+    manifest = json.loads((directory / 'manifest.json').read_text())
+    manifest['horizon-client'] = engine
+    manifest['meridian'] = PROXY_SHA
+    support.save(directory / 'manifest.json', manifest)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--proof', required=True)
+    parser.add_argument('--reuse-gates-from', help='freeze only after a reporting-pipe failure; never rerun Cargo')
+    args = parser.parse_args()
+    if not re.fullmatch(r'e26-[a-z0-9-]+', args.name) or '/' in args.proof:
+        raise RuntimeError('scoped fresh identities required')
+    if args.reuse_gates_from and not re.fullmatch(r'e26-[a-z0-9-]+', args.reuse_gates_from):
+        raise RuntimeError('scoped retained gate identity required')
+    target = DATA / (args.name + '-build.json')
+    frozen = ROOT / '.local/bin/horizon-e26' / args.name
+    if target.exists() or frozen.exists():
+        raise RuntimeError('never overwrite a build identity')
+    proof_path = DATA / args.proof
+    proof = verify(proof_path)
+    lite = proof['lite']
+    validate_snapshot(BASE)
+    matched_proxy = proxy_identity()
+    proxy_build_sha = sha(PROXY / 'build.json')
+    proxy_lock_sha = sha(PROXY / 'Cargo.lock')
+    if sha(BASE / 'goliath-store') != STORE_SHA:
+        raise RuntimeError('requested bounded store changed')
+    base_record = json.loads((BASE / 'build.json').read_text())
+    if base_record['status'] != 'complete':
+        raise RuntimeError('base release incomplete')
+    for name, expected in base_record['binaries'].items():
+        if sha(BASE / name) != expected:
+            raise RuntimeError('base frozen executable changed: ' + name)
+    for name, expected in base_record['source']['internal_files'].items():
+        if proof['internal_files'].get(name) != expected:
+            raise RuntimeError('final internal closure differs from E24 r2: ' + name)
+    common = ['cargo', 'test', '--locked', '--release', '--no-default-features', '-p', 'horizon-client', '--lib']
+    commands = [('fmt', ['cargo', 'fmt', '--all', '--check']),
+                ('lease-tests', common + ['game::dedicated::cluster::lease::']),
+                ('warm-tests', common + ['game::dedicated::tile_cut::tests::'])]
+    expected_tests = {'lease-tests': 13, 'warm-tests': 3}
+    if lite:
+        commands.append(('lite-tests', common + ['game::dedicated::e26_lite::tests::']))
+        expected_tests['lite-tests'] = 3
+    commands.append(('clippy', ['cargo', 'clippy', '--locked', '--release', '--no-default-features', '-p', 'horizon-client', '--lib', '--', '-D', 'warnings']))
+    if lite:
+        commands.append(('clock-clippy', ['cargo', 'clippy', '--locked', '--release', '--no-default-features', '-p', 'horizon-client-render', '--example', 'e26_clock_probe', '--', '-D', 'warnings']))
+    release = ['cargo', 'build', '--locked', '--release', '--no-default-features', '-p', 'horizon-client', '--bin', 'horizon-client']
+    if lite:
+        release += ['-p', 'horizon-client-render', '--example', 'e26_clock_probe']
+    commands.append(('release', release))
+    env = {key: value for key, value in os.environ.items() if key not in {'CI', 'CARGO_TARGET_DIR', 'HORIZON_E26_PLANTED_COST'} and not key.startswith('CARGO_PROFILE_')}
+    env.update(CARGO_INCREMENTAL='0', CARGO_BUILD_JOBS='6', CARGO_PROFILE_RELEASE_LTO='thin', CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1')
+    groups = ["{ printf '%s\\n' " + shlex.quote('E26_PHASE_BEGIN ' + label) + ' && ' + shlex.join(command) +
+              " && printf '%s\\n' " + shlex.quote('E26_PHASE_END ' + label) + '; }' for label, command in commands]
+    result = dict(kind='E26-lite-native-release' if lite else 'E26-final-tile-native-release',
+                  status='running', profile='release', incremental=False, lto='thin', codegen_units=1,
+                  one_build_marker=True, source_proof=dict(path=str(proof_path.relative_to(ROOT)), sha256=sha(proof_path)),
+                  base_snapshot=dict(path=str(BASE.relative_to(ROOT)), build_sha256=sha(BASE / 'build.json')), commands=[])
+    result['matched_proxy'] = dict(path=str(PROXY.relative_to(ROOT)), binary_sha256=PROXY_SHA,
+                                   build_sha256=proxy_build_sha, cargo_lock_sha256=proxy_lock_sha)
+    began = time.monotonic()
+    try:
+        if args.reuse_gates_from:
+            prior_path = DATA / (args.reuse_gates_from + '-build.json')
+            prior = json.loads(prior_path.read_text())
+            if prior['status'] != 'failed' or 'broken pipe' not in prior.get('error', '').lower():
+                raise RuntimeError('only an archived reporting-pipe failure can reuse gates')
+            for key in ['profile', 'incremental', 'lto', 'codegen_units', 'source_proof', 'matched_proxy']:
+                if prior[key] != result[key]:
+                    raise RuntimeError('retained gate identity changed: ' + key)
+            log = LOCAL / (args.reuse_gates_from + '-serial.log')
+            text = log.read_text(errors='replace')
+            if any('E26_PHASE_END ' + label + '\n' not in text for label, _ in commands):
+                raise RuntimeError('retained serial gate chain did not complete')
+            result.update(one_build_marker=False, no_new_cargo_commands=True,
+                gate_reuse=dict(record=str(prior_path.relative_to(ROOT)), record_sha256=sha(prior_path),
+                    log=str(log.relative_to(ROOT)), log_sha256=sha(log), retained_chain_one_marker=prior['one_build_marker'],
+                    reason='All retained gates completed; transport reporting failed before snapshot creation.'))
+            gate_exit = 0
+        else:
+            print('E26b final serial gate chain queued: ' + args.name, flush=True)
+            log = LOCAL / (args.name + '-serial.log')
+            with log.open('x') as stream:
+                completed = subprocess.run([str(ROOT / '.local/bin/host-window'), 'build', 'E26', '--', 'bash', '-c', ' && '.join(groups)],
+                                           cwd=SOURCE, env=env, stdout=stream, stderr=subprocess.STDOUT)
+            text = log.read_text(errors='replace')
+            gate_exit = completed.returncode
+        for label, command in commands:
+            marker = 'E26_PHASE_BEGIN ' + label + '\n'
+            if marker not in text:
+                break
+            section = text.split(marker, 1)[1].split('E26_PHASE_BEGIN ', 1)[0]
+            row = dict(label=label, command=command, exit=0 if 'E26_PHASE_END ' + label in section else gate_exit,
+                       test_results=re.findall(r'test result: .*', section))
+            if args.reuse_gates_from:
+                row['reused_from'] = args.reuse_gates_from
+            result['commands'].append(row)
+            print(json.dumps(row), flush=True)
+        if gate_exit:
+            print('\n'.join(text.splitlines()[-70:]), flush=True)
+            raise RuntimeError('final release gates failed')
+        for label, count in expected_tests.items():
+            row = next(row for row in result['commands'] if row['label'] == label)
+            if not any(f'{count} passed; 0 failed;' in value for value in row['test_results']):
+                raise RuntimeError('required tests did not execute: ' + label)
+        verify(proof_path)
+        for name, expected in base_record['binaries'].items():
+            if sha(BASE / name) != expected:
+                raise RuntimeError('base executable changed during gates: ' + name)
+        proxy_identity()
+        if sha(PROXY / 'build.json') != proxy_build_sha or sha(PROXY / 'Cargo.lock') != proxy_lock_sha:
+            raise RuntimeError('matched proxy provenance changed during gates')
+        shutil.copytree(BASE, frozen)
+        shutil.copy2(SOURCE / 'target/release/horizon-client', frozen / 'horizon-client')
+        shutil.copy2(PROXY / 'meridian', frozen / 'meridian')
+        shutil.copy2(PROXY / 'build.json', frozen / 'proxy-build.json')
+        shutil.copy2(PROXY / 'Cargo.lock', frozen / 'proxy-Cargo.lock')
+        shutil.copy2(proof_path, frozen / 'source-proof.json')
+        names = ['horizon-client', 'meridian', 'goliath-store', 'meridian-sidecar', 'horizon-bots', 'e4-client']
+        if lite:
+            shutil.copy2(SOURCE / 'target/release/examples/e26_clock_probe', frozen / 'e26_clock_probe')
+            names.append('e26_clock_probe')
+        metadata(frozen, sha(frozen / 'horizon-client'), proof_path, proof, lite)
+        validate_snapshot(frozen)
+        result.update(status='complete', directory=str(frozen.relative_to(ROOT)),
+                      binaries={name: sha(frozen / name) for name in names},
+                      acceptance='Candidate only. Runtime, capacity and review acceptance are separate.')
+        support.save(frozen / 'build.json', result)
+        canonical = json.loads((frozen / 'canonical.json').read_text())
+        canonical['bundle_files'] = {path.name: sha(path) for path in sorted(frozen.iterdir())
+                                     if path.is_file() and path.name != 'canonical.json'}
+        canonical['bundle_files_note'] = 'Every bundled file except canonical.json itself, which cannot contain its own hash.'
+        support.save(frozen / 'canonical.json', canonical)
+        validate_snapshot(frozen)
+    except BaseException as error:
+        result.update(status='failed', error=str(error))
+        raise
+    finally:
+        result['seconds_including_queue'] = time.monotonic() - began
+        support.save(target, result)
+
+
+if __name__ == '__main__':
+    with (LOCAL / 'operation.lock').open('a') as operation:
+        fcntl.flock(operation, fcntl.LOCK_EX)
+        main()

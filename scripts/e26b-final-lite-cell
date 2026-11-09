@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Run the unchanged lite adapter on the proved final bundle, with honest B-only metadata."""
+import ast
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+CONTROL = 'final clock-fixed warm-tick stack with bounded store and matched reactor-1; B-only observation'
+
+
+def adapter():
+    loader = importlib.machinery.SourceFileLoader('e26b_final_lite_adapter', str(ROOT / 'scripts/e26-lite-cell'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    original = module.Lite
+
+    class FinalLite(original):
+        def visit_Constant(self, node):
+            node = super().visit_Constant(node)
+            if isinstance(node.value, str) and node.value == 'unchanged FINAL-09':
+                return ast.copy_location(ast.Constant(CONTROL), node)
+            return node
+
+    module.Lite = FinalLite
+    return module
+
+
+def main():
+    if '--arm' not in sys.argv or sys.argv[sys.argv.index('--arm') + 1] != 'B':
+        raise RuntimeError('the final-stack diagnostic is a B-only observation')
+    if '--bins' not in sys.argv:
+        raise RuntimeError('explicit complete final lite bundle required')
+    bins = Path(sys.argv[sys.argv.index('--bins') + 1])
+    build = json.loads((bins / 'build.json').read_text())
+    proof = json.loads((bins / 'source-proof.json').read_text())
+    if build['status'] != 'complete' or proof['kind'] != 'E26b-final-tile-source-proof' or proof['lite'] is not True:
+        raise RuntimeError('a proved complete final lite bundle is required')
+    if build['binaries']['meridian'] != '80f8953a201a51a0cae84341080af0bd70e08586ad608475b3092b2c30d3c378' or build['binaries']['goliath-store'] != '9636fa6d8089b071be241437e79eb2942a07dc756039b394e73cc8f705e26d0e':
+        raise RuntimeError('final selected proxy/store identity mismatch')
+    adapter().main()
+
+
+if __name__ == '__main__':
+    main()

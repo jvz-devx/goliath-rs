@@ -1,0 +1,61 @@
+{
+  "kind": "E26-native-release",
+  "status": "failed",
+  "profile": "release",
+  "incremental": false,
+  "planted": false,
+  "commands": [
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 96.22181425002054,
+      "test_results": []
+    },
+    {
+      "label": "timer-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "horizon-core",
+        "--lib",
+        "tick_timers::tests::"
+      ],
+      "exit": 0,
+      "seconds": 9.765642791986465,
+      "test_results": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 101,
+      "seconds": 27.206175917002838,
+      "test_results": []
+    }
+  ],
+  "source": ".local/src/horizon-tiles",
+  "error": "gate failed: clippy",
+  "seconds": 133.19533275000867
+}

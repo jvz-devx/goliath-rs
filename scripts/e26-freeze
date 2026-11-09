@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Publish a fresh diagnostic bundle with its ordered source and gate identities."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import e11_support as support
+from e14_snapshot_support import validate_snapshot
+
+ROOT = support.ROOT
+DATA = ROOT / 'docs/experiments/data/E26'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--from-build', required=True)
+    parser.add_argument('--name', required=True)
+    args = parser.parse_args()
+    if any('/' in name or not name.startswith('e26-') for name in [args.from_build,args.name]):
+        raise RuntimeError('use scoped build and bundle names')
+    source = ROOT / '.local/bin/horizon-e26' / args.from_build
+    target = ROOT / '.local/bin/horizon-e26' / args.name
+    if target.exists():
+        raise RuntimeError('never overwrite a frozen bundle')
+    build_path = DATA / (args.from_build + '-build.json')
+    build = json.loads(build_path.read_text())
+    if build['status'] != 'complete' or any(row['exit'] for row in build['commands']):
+        raise RuntimeError('complete native release gates are required')
+    if {row['label'] for row in build['commands']} != {'fmt','timer-tests','clippy','release'}:
+        raise RuntimeError('the native gate set is incomplete')
+    for name,expected in build['binaries'].items():
+        if sha(source/name) != expected:
+            raise RuntimeError('compiled bundle changed: ' + name)
+    proof_path = DATA / 'e26-patch18-proof.json'
+    proof = json.loads(proof_path.read_text())
+    if proof['source_equality'] != 'passed' or proof['after_patch'] != 17:
+        raise RuntimeError('ordered diagnostic patch source proof required')
+    owned = ROOT / '.local/src/horizon-tiles'
+    for name,expected in proof['files'].items():
+        actual = sha(owned/name)
+        if name == proof['build_overlay']['path']:
+            expected = proof['build_overlay']['build_sha256']
+        if actual != expected:
+            raise RuntimeError('owned source no longer matches build proof: ' + name)
+    original = json.loads((DATA / 'e26-final09-source.json').read_text())
+    for name,expected in original['internal_files'].items():
+        if sha(ROOT/'.local/evidence/E26/original-internal'/name) != expected:
+            raise RuntimeError('frozen dependency changed: ' + name)
+    shutil.copytree(source,target)
+    patches = []
+    for number in [14,15,16,17,18]:
+        item = json.loads((DATA/f'e26-patch{number}-proof.json').read_text())
+        if sha(ROOT/item['patch']) != item['patch_sha256']:
+            raise RuntimeError('diagnostic patch changed')
+        patches.append(dict(path=item['patch'],sha256=item['patch_sha256']))
+    for name in ['canonical.json','candidate.json']:
+        manifest = json.loads((target/name).read_text())
+        manifest['diagnostic_patches_after_measurement'] = patches
+        manifest['diagnostic_source_proof_sha256'] = sha(proof_path)
+        manifest['planted_cost'] = build['planted']
+        support.save(target/name,manifest)
+    shutil.copy2(proof_path,target/'source-proof.json')
+    build.update(directory=str(target.relative_to(ROOT)), source_proof_sha256=sha(proof_path),
+                 source_build_record=dict(path=str(build_path.relative_to(ROOT)),sha256=sha(build_path)),
+                 diagnostic_patches_after_measurement=patches,
+                 source_dependencies=original['internal_files'])
+    support.save(target/'build.json',build)
+    validate_snapshot(target)
+    support.save(DATA/(args.name+'-freeze.json'),dict(kind='E26-frozen-diagnostic',directory=str(target.relative_to(ROOT)),
+                 planted=build['planted'],binaries=build['binaries'],source_proof_sha256=sha(proof_path),
+                 build_record_sha256=sha(target/'build.json'),snapshot_validation='passed'))
+    print(json.dumps(dict(directory=str(target.relative_to(ROOT)),binaries=build['binaries'],planted=build['planted'])))
+
+
+if __name__ == '__main__':
+    main()

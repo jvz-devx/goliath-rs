@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Emit scoped checkout edits, then prove a preflighted final tile source tree."""
+import argparse
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import tomllib
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon-tiles'
+LOCAL = ROOT / '.local/evidence/E26'
+DATA = ROOT / 'docs/experiments/data/E26'
+MANIFEST = 'crates/horizon-client/Cargo.toml'
+LOGICAL_STORE = '../../../../../crates/goliath-store'
+FROZEN_STORE = '../../../../evidence/E26/renewal-r2-internal/crates/goliath-store'
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def git(*args, index=None):
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS='0')
+    if index:
+        env['GIT_INDEX_FILE'] = str(index)
+    return subprocess.check_output(['git', *args], cwd=SOURCE, env=env, stderr=subprocess.DEVNULL)
+
+
+def index_identity():
+    identities = {}
+    for args in [('ls-files', '--stage', '-z'), ('ls-files', '-v', '-z'), ('ls-files', '--resolve-undo', '-z')]:
+        current = git(*args)
+        if current != git(*args, index=LOCAL / 'original-index'):
+            raise RuntimeError('logical index changed: ' + str(args))
+        identities[' '.join(args)] = sha(current)
+    return identities
+
+
+def modified_compile_inputs():
+    names = set(git('diff', '--name-only', 'HEAD').decode().splitlines())
+    names.update(git('ls-files', '--others', '--exclude-standard').decode().splitlines())
+    return {name for name in names if name.startswith(('crates/', '.cargo/')) or
+            name in {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}}
+
+
+def overlay(raw):
+    text = raw.decode()
+    if tomllib.loads(text)['dependencies']['goliath-store']['path'] != LOGICAL_STORE or text.count(LOGICAL_STORE) != 1:
+        raise RuntimeError('unexpected logical dependency path')
+    return text.replace(LOGICAL_STORE, FROZEN_STORE).encode()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['emit', 'check'])
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--from-proof', required=True)
+    parser.add_argument('--lite', action='store_true')
+    args = parser.parse_args()
+    if '/' in args.name or not args.name.startswith(('e26-', 'repro-')) or '/' in args.from_proof:
+        raise RuntimeError('scoped names required')
+    identities = index_identity()
+    original = json.loads((DATA / 'e26-final09-source.json').read_text())
+    if git('rev-parse', 'HEAD').decode().strip() != original['pin']:
+        raise RuntimeError('owned source pin changed')
+    preflight = json.loads((DATA / 'e26-final-preflight-1.json').read_text())
+    for record in preflight['patches']:
+        if sha((ROOT / record['path']).read_bytes()) != record['sha256']:
+            raise RuntimeError('preflight patch changed: ' + record['path'])
+    qualification_path = DATA / 'e26-patch10-qualification-1.json'
+    qualification = json.loads(qualification_path.read_text())
+    if qualification['qualified'] is not True or sha((DATA / 'e26-patch10-summary-1.json').read_bytes()) != qualification['summary_sha256']:
+        raise RuntimeError('interpreted patch10 qualification required')
+    tree = preflight['lite_tree' if args.lite else 'untimed_tree']
+    before = json.loads((DATA / args.from_proof).read_text())
+    internal_path = DATA / 'e26-renewal-r2-internal-source.json'
+    internal = json.loads(internal_path.read_text())
+    for name, expected in internal['files'].items():
+        if sha((ROOT / internal['directory'] / name).read_bytes()) != expected:
+            raise RuntimeError('frozen renewal dependency changed: ' + name)
+    if args.action == 'emit':
+        for name, expected in before['files'].items():
+            if name == before['build_overlay']['path']:
+                expected = before['build_overlay']['build_sha256']
+            if sha((SOURCE / name).read_bytes()) != expected:
+                raise RuntimeError('owned source changed before activation: ' + name)
+    names = sorted(set(original['files']) | set(before['files']) |
+                   set(git('diff', '--name-only', original['pin'], tree).decode().splitlines()))
+    unexpected = modified_compile_inputs() - set(names)
+    if unexpected:
+        raise RuntimeError('unexpected modified compile inputs remain untouched: ' + str(sorted(unexpected)))
+    wanted = {}
+    for name in names:
+        if name != 'Cargo.lock' and not name.startswith('crates/'):
+            raise RuntimeError('source path outside ownership: ' + name)
+        try:
+            wanted[name] = git('show', tree + ':' + name)
+        except subprocess.CalledProcessError:
+            wanted[name] = None
+    if args.action == 'emit':
+        parts = ['*** Begin Patch\n']
+        for name, logical in wanted.items():
+            path = SOURCE / name
+            new = overlay(logical) if name == MANIFEST else logical
+            old = path.read_bytes() if path.exists() else None
+            if new == old:
+                continue
+            if new is None:
+                parts.append('*** Delete File: ' + str(path) + '\n')
+            elif old is None:
+                parts.append('*** Add File: ' + str(path) + '\n')
+                parts.extend('+' + line + '\n' for line in new.decode().splitlines())
+            else:
+                parts.append('*** Update File: ' + str(path) + '\n')
+                for line in list(difflib.unified_diff(old.decode().splitlines(keepends=True), new.decode().splitlines(keepends=True)))[2:]:
+                    parts.append('@@\n' if line.startswith('@@') else line)
+        parts.append('*** End Patch\n')
+        print(''.join(parts), end='')
+        return
+    files = {}
+    for name, logical in wanted.items():
+        path = SOURCE / name
+        if logical is None:
+            if path.exists():
+                raise RuntimeError('removed diagnostic file remains: ' + name)
+            continue
+        expected = overlay(logical) if name == MANIFEST else logical
+        if path.read_bytes() != expected:
+            raise RuntimeError('final source byte mismatch: ' + name)
+        files[name] = sha(logical)
+    result = dict(kind='E26b-final-tile-source-proof', name=args.name, tree=tree,
+                  source_equality='passed', files=files, lite=args.lite,
+                  build_overlay=dict(path=MANIFEST, build_sha256=sha((SOURCE / MANIFEST).read_bytes())),
+                  internal_root=internal['directory'], internal_files=internal['files'],
+                  internal_proof=dict(path=str(internal_path.relative_to(ROOT)), sha256=sha(internal_path.read_bytes())),
+                  logical_index=identities, base='FINAL-09 + horizon-13 r2 + patch10',
+                  patches=preflight['patches'] if args.lite else preflight['patches'][:2],
+                  qualification=dict(path=str(qualification_path.relative_to(ROOT)), sha256=sha(qualification_path.read_bytes())),
+                  diagnostic_patch=preflight['lite_patch'] if args.lite else None)
+    with (DATA / (args.name + '-source.json')).open('x') as stream:
+        stream.write(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(dict(source_equality='passed', tree=tree, files=len(files), lite=args.lite)))
+
+
+if __name__ == '__main__':
+    main()

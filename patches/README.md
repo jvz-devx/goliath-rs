@@ -231,6 +231,14 @@ upstream changes.
   builds, not selected production or M4 acceptance binaries. Native gates and
   measurements are tracked in `docs/experiments/E26-tick-profile.md`.
 
+- `horizon-21-lite-cpu-clean.patch`: the clean, measurement-only two-kind
+  main-thread CPU probe used by E26b. It is the exact five-file net effect
+  of patches 19 and 20, without full-timer hooks. It applies after the
+  FINAL-09 measurement stack and also after horizon-13 renewal-r2 plus
+  patch 10. The separately frozen lite bundle is not the untimed runtime
+  candidate. Final-stack load runs belong to the reviewer; see the E26
+  report for complete bundles, hashes and the guarded lite-B command.
+
 - `horizon-08-m4-measurement.patch`: E17's measurement-only integration on
   Horizon `fc2868b2b26d56ec76e17414909fe58a3b87bb92`. Apply the E12 FINAL stack
   through `horizon-07-observer-status.patch`, then `horizon-03-bots.patch`,
@@ -403,3 +411,21 @@ do not replace the accepted measurement stack or qualify an availability fix.
   including the decode-before-dispatch test. Earlier `horizon-15-latency-stamps-*`
   revisions are retained as diagnostic or failed builds; b1 differs only in its
   test constructor. Not part of any production stack.
+
+- `horizon-14-tick-timers.patch` through `horizon-18-tick-wait-detail.patch`, and
+  `horizon-15-tick-timer-conditions.patch`: E26's measurement-only main-thread
+  timers on FINAL-09, applied in order 14, 15, 16, 17, 18. They time every
+  main-thread hunk of our patches and split pacing, worker wait and busy work.
+  They are visibly intrusive, so they bound nothing by themselves. See
+  [E26](../docs/experiments/E26-tick-profile.md).
+
+- `horizon-19-lite-cpu.patch`: E26b's two-timer diagnostic on FINAL-09, or on
+  FINAL-09 with patch 10. It reads the main thread's CPU clock once per cycle
+  and once per speculative warm call. It stays inside run-to-run noise and
+  measures warming at 5.24% of main-thread CPU without patch 10 and 0.38% with
+  it. Measurement only.
+
+- `horizon-10-warm-tick.patch` is now qualified as a warming-cost fix and is part
+  of the final tile stack: FINAL-09, then `horizon-13-lease-renewal-r2.patch`,
+  then patch 10. Frozen as `e26-final-stack-r1` with the bounded store and the
+  rebuilt reactor-1 proxy.

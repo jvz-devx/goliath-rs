@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Re-prove and retain unchanged patch10 bytes without touching another checkout."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import e11_support as support
+from e14_snapshot_support import validate_snapshot
+
+ROOT=support.ROOT
+DATA=ROOT/'docs/experiments/data/E26'
+LOCAL=ROOT/'.local/evidence/E26'
+SOURCE=ROOT/'.local/src/horizon-tiles'
+
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    source=ROOT/'.local/bin/horizon-e21-fc2868b2b/warmtick-2'
+    control=ROOT/'.local/bin/meridian-e18/reactor-1'
+    target=ROOT/'.local/bin/horizon-e26/e26-warm-1'
+    if target.exists():raise RuntimeError('never overwrite a frozen bundle')
+    build=json.loads((source/'build.json').read_text())
+    if build['status']!='complete' or build['profile']!='release' or build['incremental']:
+        raise RuntimeError('retained release provenance is incomplete')
+    if any(row['exit'] for row in build['commands']):raise RuntimeError('retained gate failed')
+    patch=ROOT/'patches/horizon-10-warm-tick.patch'
+    if sha(patch)!=build['patch10_sha256']:raise RuntimeError('patch10 changed')
+    validate_snapshot(source)
+    for name,expected in build['binaries'].items():
+        if sha(source/name)!=expected:raise RuntimeError('retained executable changed: '+name)
+        if name!='horizon-client' and sha(control/name)!=expected:raise RuntimeError('support executable differs from FINAL-09: '+name)
+    old_proof=ROOT/'docs/experiments/data/E21/stack-proof.json'
+    if sha(old_proof)!=build['source_proof_sha256']:raise RuntimeError('original source proof changed')
+    proof=json.loads(old_proof.read_text())
+    base=json.loads((DATA/'e26-final09-source.json').read_text())
+    if proof['baseline_tree']!=base['tree']:raise RuntimeError('candidate uses a different baseline')
+    env=dict(os.environ,GIT_OPTIONAL_LOCKS='0',GIT_INDEX_FILE=str(LOCAL/'e26-untimed-warm-index'))
+    def git(*args):return subprocess.check_output(['git',*map(str,args)],cwd=SOURCE,env=env)
+    git('read-tree',base['tree']);git('apply','--cached','--check',patch);git('apply','--cached',patch)
+    for name,expected in proof['files'].items():
+        if hashlib.sha256(git('show',':'+name)).hexdigest()!=expected:raise RuntimeError('candidate source mismatch: '+name)
+    shutil.copytree(source,target)
+    build.update(kind='E26-retained-patch10-qualification-not-capacity-accepted',directory=str(target.relative_to(ROOT)),
+        original_build_record=dict(path=str((source/'build.json').relative_to(ROOT)),sha256=sha(source/'build.json')))
+    support.save(target/'build.json',build)
+    validate_snapshot(target)
+    result=dict(kind='E26-patch10-untimed-freeze',status='complete',directory=str(target.relative_to(ROOT)),
+        engine_sha256=sha(target/'horizon-client'),patch_sha256=sha(patch),
+        source_tree=git('write-tree').decode().strip(),source_files=len(proof['files']),
+        original_source_proof_sha256=sha(old_proof),source_reproduction='passed',
+        original_release_gates=build['commands'],new_build=False,
+        gameplay='unchanged; only speculative pre-encoding admission is coalesced per world tick',
+        final_stack_note='These FINAL-09 rows must be repeated on the selected horizon-13 r2 stack later.')
+    support.save(DATA/'e26-warm-1-freeze.json',result)
+    print(json.dumps(dict(directory=result['directory'],engine_sha256=result['engine_sha256'],source_reproduction='passed',files=result['source_files'])))
+
+
+if __name__=='__main__':main()

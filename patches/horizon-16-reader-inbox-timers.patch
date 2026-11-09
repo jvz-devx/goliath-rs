@@ -1,0 +1,25 @@
+diff --git a/crates/horizon-client/src/lan/hub.rs b/crates/horizon-client/src/lan/hub.rs
+--- a/crates/horizon-client/src/lan/hub.rs
++++ b/crates/horizon-client/src/lan/hub.rs
+@@ -2455,6 +2455,10 @@
+     /// here, in the order they came: the client counts them as acknowledged,
+     /// and its next message after the freeze would not validate otherwise.
+     pub(crate) fn keep_acknowledgements(&mut self, i: usize, events: &mut Vec<HostEvent>) {
++        let _e26_reader_inbox = horizon_core::tick_timers::scope_if(
++            5,
++            self.terrain_observers.contains(&self.guests[i].uuid),
++        );
+         let inbox = std::mem::take(&mut self.guests[i].inbox);
+         let mut bytes = 0;
+         for (packet, size) in inbox {
+@@ -4069,6 +4073,10 @@
+     }
+ 
+     fn process_inbox(&mut self, i: usize, ctx: &mut TickCtx, events: &mut Vec<HostEvent>) {
++        let _e26_reader_inbox = horizon_core::tick_timers::scope_if(
++            5,
++            self.terrain_observers.contains(&self.guests[i].uuid),
++        );
+         {
+             let _e26_inline = horizon_core::tick_timers::scope(5);
+             if !horizon_core::authority::may_act() {

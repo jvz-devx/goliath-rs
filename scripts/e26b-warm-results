@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Summarize untimed patch-10 costs and its separate two-arm lite diagnostic."""
+import importlib.machinery
+import importlib.util
+import json
+import math
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E26'
+
+
+def load():
+    loader = importlib.machinery.SourceFileLoader('e26b_full_results', str(ROOT / 'scripts/e26-results'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def quantile(values, q):
+    return sorted(values)[math.ceil(q * len(values)) - 1]
+
+
+def lite(cell):
+    sample = cell['e26_lite']
+    selected = cell['e26_selection']['tile']
+    low = cell['game_time_before'][selected]['tick']
+    high = cell['game_time_after'][selected]['tick']
+    rows = [row for row in sample['rows'] if row['sequence'] > 1 and low < row['tick'] <= high]
+    if not rows or sample['dropped'] or sample['invalid']:
+        raise RuntimeError('lite coverage failed')
+    sequence = [row['sequence'] for row in rows]
+    if sequence != list(range(sequence[0], sequence[-1] + 1)):
+        raise RuntimeError('lite sequence gap')
+    for row in rows:
+        if row['cycle_cpu_ns'] <= 0 or row['cycle_cpu_ns'] != row['warm_cpu_ns'] + row['other_cpu_ns'] or row['clock_reads'] != 2 * (1 + row['warm_calls']):
+            raise RuntimeError('lite partition or read accounting failed')
+    total = sum(row['cycle_cpu_ns'] for row in rows)
+    warm = sum(row['warm_cpu_ns'] for row in rows)
+    fractions = [row['warm_cpu_ns'] / row['cycle_cpu_ns'] for row in rows]
+    return dict(cycles=len(rows), cycle_cpu_ns=total, warm_cpu_ns=warm,
+                clock_reads=sum(row['clock_reads'] for row in rows),
+                warm_calls=sum(row['warm_calls'] for row in rows), ratio_of_sums=warm / total,
+                per_cycle_fraction_p50=quantile(fractions, .5), per_cycle_fraction_p99=quantile(fractions, .99),
+                warm_cpu_ms_per_cycle=warm / len(rows) / 1e6,
+                warm_cpu_ms_p50=quantile([row['warm_cpu_ns'] / 1e6 for row in rows], .5),
+                warm_cpu_ms_p99=quantile([row['warm_cpu_ns'] / 1e6 for row in rows], .99))
+
+
+def main():
+    base = load()
+    plan = json.loads((DATA / 'e26-patch10-plan-1.json').read_text())
+    all_rows = {}
+    for label in ['untimed', 'timed']:
+        rows = []
+        for name in plan[label + '_names']:
+            path = DATA / (name + '.json')
+            if not path.exists():
+                path = path.with_suffix('.json.gz')
+            row = base.row(path)
+            raw, _ = base.read(path)
+            if label == 'timed' and row.get('valid'):
+                row['lite'] = lite(raw['cells']['650'])
+            rows.append(row)
+        all_rows[label] = rows
+    result = dict(kind='E26b-patch10-cost-comparison',
+                  untimed=dict(rows=all_rows['untimed'], comparison=base.compare(all_rows['untimed'])),
+                  timed=dict(rows=all_rows['timed'], comparison=base.compare(all_rows['timed'])),
+                  intrusion={}, warming={}, acceptance=False,
+                  capacity='No frontier increase claimed; final-stack recheck remains required.')
+    for arm in ['A', 'B']:
+        a = [dict(row, arm='A') for row in all_rows['untimed'] if row['arm'] == arm]
+        b = [dict(row, arm='B') for row in all_rows['timed'] if row['arm'] == arm]
+        metrics = base.compare(a + b)['metrics']
+        result['intrusion'][arm] = dict(metrics=metrics,
+            inside_spread=all(metrics.get(key, {}).get('shift_inside_observed_noise', False)
+                              for key in ['main_cores', 'selected_p50_ms', 'selected_p99_ms']),
+            method='Timed minus untimed for the same candidate. Probe-control code differs intentionally; D9 kernel is unchanged.')
+        timed = [row['lite'] for row in all_rows['timed'] if row['arm'] == arm and 'lite' in row]
+        total = sum(row['cycle_cpu_ns'] for row in timed)
+        warm = sum(row['warm_cpu_ns'] for row in timed)
+        cycles = sum(row['cycles'] for row in timed)
+        result['warming'][arm] = dict(cycles=cycles, cycle_cpu_ns=total, warm_cpu_ns=warm,
+            ratio_of_sums=warm / total if total else None,
+            warm_cpu_ms_per_cycle=warm / cycles / 1e6 if cycles else None,
+            mean_warm_calls_per_cycle=sum(row['warm_calls'] for row in timed) / cycles if cycles else None)
+    target = DATA / 'e26-patch10-summary-1.json'
+    if target.exists():
+        raise RuntimeError('never overwrite an existing comparison')
+    target.write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(dict(untimed=result['untimed']['comparison'], timed=result['timed']['comparison'],
+                         warming=result['warming'], intrusion={arm: row['inside_spread'] for arm, row in result['intrusion'].items()}), indent=2))
+
+
+if __name__ == '__main__':
+    main()

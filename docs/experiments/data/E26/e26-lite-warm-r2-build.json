@@ -1,0 +1,130 @@
+{
+  "kind": "E26-lite-native-release",
+  "status": "complete",
+  "profile": "release",
+  "incremental": false,
+  "lto": "thin",
+  "codegen_units": 1,
+  "source_proof": {
+    "path": "docs/experiments/data/E26/e26-lite-warm-source.json",
+    "sha256": "fff1f04f31eb4b89200169f9d633b02aae0b440c0e2476d0a64187f3140d7bd9"
+  },
+  "commands": [
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "test_results": []
+    },
+    {
+      "label": "lite-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "game::dedicated::e26_lite::tests::"
+      ],
+      "exit": 0,
+      "test_results": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1255 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "warm-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "game::dedicated::tile_cut::tests::"
+      ],
+      "exit": 0,
+      "test_results": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1255 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "test_results": []
+    },
+    {
+      "label": "clock-clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client-render",
+        "--example",
+        "e26_clock_probe",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "test_results": []
+    },
+    {
+      "label": "release",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "-p",
+        "horizon-client-render",
+        "--bin",
+        "horizon-client",
+        "--example",
+        "e26_clock_probe"
+      ],
+      "exit": 0,
+      "test_results": []
+    }
+  ],
+  "one_build_marker": true,
+  "directory": ".local/bin/horizon-e26/e26-lite-warm-r2",
+  "binaries": {
+    "horizon-client": "06b3b567aedcc92191d89046d8c957beba4859cae8ae4b0e554848a75f03c4b8",
+    "meridian": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+    "goliath-store": "6c54dbeb982470f2712555eb4059ba65ee0b110c84ec9b9266bc6d57cf6fd4af",
+    "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+    "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+    "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025",
+    "e26_clock_probe": "9d7e98efc60f768ec3bb477ac8589f53ebb53e82f3004da4f6832f0394d09ab0"
+  },
+  "seconds_including_queue": 1883.883025624993
+}

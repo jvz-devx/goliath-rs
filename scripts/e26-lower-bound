@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Read-only lower-bound attempt from the retained E26 rows; no timing run."""
+import gzip
+import hashlib
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E26'
+
+
+def read(path):
+    raw = gzip.decompress(path.read_bytes()) if path.suffix=='.gz' else path.read_bytes()
+    return json.loads(raw)
+
+
+def main():
+    summary = read(DATA/'e26-profile-summary-1.json')
+    controls = []
+    diagnostics = []
+    for record in summary['rows']:
+        raw = read(ROOT/record['path'])
+        cell = raw['cells']['650']
+        tile = record['selected']
+        if record['arm']=='A':
+            first,last = cell['game_time_before'][tile],cell['game_time_after'][tile]
+            # Queries can observe different positions within a tick. Their send/
+            # receive brackets contain at least delta-1 complete cadence intervals.
+            wall = last['at']+last['rtt_s']/2-first['at']+first['rtt_s']/2
+            count = last['tick']-first['tick']-1
+            controls.append(dict(path=record['path'],completed_cadence_intervals_at_least=count,
+                wall_seconds_upper=wall,mean_busy_ms_upper=wall*1000/count,
+                method='busy work cannot exceed the whole query-bracketed wall cadence; pacing sleep is not available for subtraction in A'))
+        else:
+            t = record['timers']
+            buckets = {}
+            for name in ['warm_generation','cut_enqueue','digest_samples']:
+                value = t['categories'][name]
+                buckets[name] = dict(exclusive_ms_per_tick=value['seconds']*1000/t['ticks'],
+                    calls_per_tick=value['calls']/t['ticks'],
+                    strict_corrected_ms_lower=0,
+                    reason='No certified physical timer-overhead upper bound is stored. Charging the whole diagnostic busy interval to possible measurement overhead gives the valid but trivial zero lower bound.')
+            diagnostics.append(dict(path=record['path'],ticks=t['ticks'],buckets=buckets,
+                global_timer_calls_per_tick_upper_for_inside_warming=sum(v['calls'] for v in t['categories'].values())/t['ticks'],
+                whole_busy_ms_per_tick=t['busy_seconds']*1000/t['ticks']))
+    denominator = max(row['mean_busy_ms_upper'] for row in controls)
+    for record in diagnostics:
+        for bucket in record['buckets'].values():
+            bucket['uncorrected_exclusive_ratio_to_cadence_upper'] = bucket['exclusive_ms_per_tick']/denominator
+            bucket['strict_fraction_lower'] = 0
+    positive = read(DATA/'e26-planted-control-1.json.gz')['cells']['100']['e26_timers']['rows']
+    pulses = [row['ns'][15]/1000 for row in positive if row['sequence']>1 and row['calls'][15]]
+    result = dict(kind='E26-retained-data-strict-lower-bound-attempt',controls=controls,
+        denominator_mean_busy_ms_upper=denominator,diagnostics=diagnostics,
+        calibration=dict(pulse_us_min=min(pulses),pulse_us_max=max(pulses),
+            observed_pulse_excess_us_max=max(pulses)-200,
+            limitation='The pulse validates a known span. Excess includes busy-wait overshoot and scheduling, and omits some entry/exit bookkeeping. It is not a certified upper bound for every other timer. Deterministic tests use supplied clock values, not a physical overhead calibration.'),
+        inclusive_warming='Not stored. warm_generation is an exclusive aggregate over 17.57 to 19.29 calls per tick, not one inclusive call per tick. Child scope families are not attributed to their invoking routine.',
+        denominator_limit='A retains raw E11 simulation durations and native CPU counters, not total busy wall time including the between-tick control prelude. Neither raw tick P99 nor main CPU is a safe upper bound for that missing wall quantity.',
+        verdict='unproven',strict_failure_proved=False,
+        interpretation='No nonzero strict corrected lower bound above 5% follows from these retained data. Zero is a statement about the available proof, not an estimate of the feature cost.')
+    target = DATA/'e26-lower-bound-1.json'
+    if target.exists():
+        raise RuntimeError('lower-bound result already exists')
+    target.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(verdict=result['verdict'],denominator_mean_busy_ms_upper=denominator,
+        warming_ms_per_tick=[row['buckets']['warm_generation']['exclusive_ms_per_tick'] for row in diagnostics],
+        calls_per_tick=[row['buckets']['warm_generation']['calls_per_tick'] for row in diagnostics],
+        strict_fraction_lower=0,sha256=hashlib.sha256(target.read_bytes()).hexdigest())))
+
+
+if __name__=='__main__':
+    main()

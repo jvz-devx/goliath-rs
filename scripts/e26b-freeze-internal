@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Retain exact E24 r2 dependency bytes without building or changing shared source."""
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import e11_support as support
+
+ROOT = support.ROOT
+LOCAL = ROOT / '.local/evidence/E26'
+DATA = ROOT / 'docs/experiments/data/E26'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    build_path = ROOT / '.local/bin/goliath-e24/lease-fixed-r2/build.json'
+    build = json.loads(build_path.read_text())
+    if build['status'] != 'complete':
+        raise RuntimeError('complete E24 r2 build required')
+    destination = LOCAL / 'renewal-r2-internal'
+    result_path = DATA / 'e26-renewal-r2-internal-source.json'
+    if destination.exists() or result_path.exists():
+        raise RuntimeError('never replace the frozen dependency closure')
+    files = dict(build['source']['internal_files'])
+    for name in files:
+        if not name.startswith('crates/') or '..' in Path(name).parts:
+            raise RuntimeError('unexpected dependency source path')
+    for name in ['Cargo.toml', 'clippy.toml']:
+        if (ROOT / name).read_bytes() != (LOCAL / 'original-internal' / name).read_bytes():
+            raise RuntimeError('workspace conventions changed: ' + name)
+    files.update({name: sha(ROOT / name) for name in ['Cargo.toml', 'Cargo.lock', 'clippy.toml']})
+    for name, expected in files.items():
+        if sha(ROOT / name) != expected:
+            raise RuntimeError('E24 r2 dependency source changed: ' + name)
+    destination.mkdir()
+    for name, expected in files.items():
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / name, target)
+        if sha(target) != expected:
+            raise RuntimeError('dependency snapshot byte mismatch: ' + name)
+    result = dict(kind='E26b-frozen-renewal-r2-dependencies', status='complete',
+                  directory=str(destination.relative_to(ROOT)), files=files,
+                  source_record=dict(path=str(build_path.relative_to(ROOT)), sha256=sha(build_path)),
+                  E24_internal_files=len(build['source']['internal_files']),
+                  workspace_files='Cargo.toml and clippy.toml match the archived conventions; Cargo.lock is retained with its current hash.',
+                  source_changed=False, build_started=False)
+    support.save(result_path, result)
+    print(json.dumps(dict(status='complete', directory=result['directory'], files=len(files))))
+
+
+if __name__ == '__main__':
+    main()

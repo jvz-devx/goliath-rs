@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Check E26 publication boundaries and record hashes of decompressed raw bytes."""
+import argparse
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E26'
+LOCAL = ROOT / '.local/evidence/E26'
+SOURCE = ROOT / '.local/src/horizon-tiles'
+
+
+def sha(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def outside(value):
+    count = 0
+    if isinstance(value, dict):
+        for key,item in value.items():
+            if key == 'outside_process_names':
+                if any(name != 'outside' for name in item.values()):
+                    raise RuntimeError('outside process name was not redacted')
+                count += len(item)
+            elif key == 'outside' and isinstance(item,list):
+                if any(row.get('name') != 'outside' for row in item):
+                    raise RuntimeError('outside phase row was not redacted')
+                count += len(item)
+            count += outside(item)
+    elif isinstance(value,list):
+        count += sum(outside(item) for item in value)
+    return count
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--source-proof', default='e26-patch18-proof.json')
+    args = parser.parse_args()
+    if not re.fullmatch(r'(e26-|repro-)[a-z0-9-]+', args.name):
+        raise RuntimeError('use a scoped fresh audit name')
+    target = DATA / (args.name+'.json')
+    if target.exists():
+        raise RuntimeError('audit already exists')
+    files, checked = [], 0
+    for path in sorted(DATA.iterdir()):
+        if not path.name.startswith(('e26-','repro-')):
+            raise RuntimeError('unscoped evidence file: ' + path.name)
+        raw = gzip.decompress(path.read_bytes()) if path.name.endswith('.json.gz') else path.read_bytes()
+        text = raw.decode()
+        if re.search(r'/(?:Users|home)/[^/]+/',text):
+            raise RuntimeError('private home path in evidence: ' + path.name)
+        if path.suffix == '.md' and re.search(r'(?i)\b(parent|opus|sol)\b',text):
+            raise RuntimeError('forbidden wording in public Markdown: ' + path.name)
+        if path.name.endswith(('.json','.json.gz')):
+            checked += outside(json.loads(text))
+            if path.suffix == '.json' and len(raw) > 1_000_000:
+                raise RuntimeError('raw JSON over 1 MB is not compressed: ' + path.name)
+        files.append(dict(path=str(path.relative_to(ROOT)),raw_bytes=len(raw),decompressed_sha256=sha(raw)))
+    proof_path = DATA / args.source_proof
+    proof = json.loads(proof_path.read_text())
+    for name,expected in proof['files'].items():
+        if name == proof['build_overlay']['path']:
+            expected = proof['build_overlay']['build_sha256']
+        if sha((SOURCE/name).read_bytes()) != expected:
+            raise RuntimeError('owned source differs from the diagnostic proof: ' + name)
+    original = json.loads((DATA/'e26-final09-source.json').read_text())
+    for name,expected in original['internal_files'].items():
+        if sha((LOCAL/'original-internal'/name).read_bytes()) != expected:
+            raise RuntimeError('frozen dependency differs: ' + name)
+    index_checks = {}
+    for command in [('ls-files','--stage','-z'),('ls-files','-v','-z'),('ls-files','--resolve-undo','-z')]:
+        env = dict(os.environ,GIT_OPTIONAL_LOCKS='0')
+        current = subprocess.check_output(['git',*command],cwd=SOURCE,env=env)
+        saved = subprocess.check_output(['git',*command],cwd=SOURCE,
+            env=dict(env,GIT_INDEX_FILE=str(LOCAL/'original-index')))
+        if current != saved:
+            raise RuntimeError('logical source index changed')
+        index_checks[' '.join(command)] = sha(current)
+    result = dict(kind='E26-evidence-audit',publication='passed',outside_entries_checked=checked,
+                  source_equality='passed',source_proof_sha256=sha(proof_path.read_bytes()),
+                  frozen_internal_sources='passed',logical_index='passed',index_checks=index_checks,
+                  files=files,measurement_acceptance='not decided by this audit')
+    target.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(publication='passed',files=len(files),outside_entries_checked=checked,
+                         source_equality='passed',logical_index='passed')))
+
+
+if __name__ == '__main__':
+    main()

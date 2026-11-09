@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Export a small variant from a proved Git index and verify every selected byte."""
+import argparse
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+
+ROOT=Path(__file__).resolve().parent.parent
+SOURCE=ROOT/'.local/src/horizon-tiles'
+LOCAL=ROOT/'.local/evidence/E26'
+DATA=ROOT/'docs/experiments/data/E26'
+
+
+def git(*args,index):
+    return subprocess.check_output(['git',*map(str,args)],cwd=SOURCE,
+        env=dict(os.environ,GIT_OPTIONAL_LOCKS='0',GIT_INDEX_FILE=str(LOCAL/index)),stderr=subprocess.DEVNULL)
+
+
+def sha(raw):return hashlib.sha256(raw).hexdigest()
+
+
+def files(base):
+    original=json.loads((DATA/'e26-final09-source.json').read_text())
+    changed=git('diff','--name-only',index=base).decode().splitlines()
+    inherited=git('diff','--cached','--name-only',original['pin'],index=base).decode().splitlines()
+    others=git('ls-files','--others','--exclude-standard',index=base).decode().splitlines()
+    names=sorted(set(original['files'])|{name for name in changed+others+inherited if name.startswith('crates/')})
+    result={}
+    for name in names:
+        if not (SOURCE/name).is_file():continue
+        value=(SOURCE/name).read_text()
+        if name=='crates/horizon-client/Cargo.toml':
+            value=value.replace('../../../../evidence/E26/original-internal/crates/goliath-store','../../../../../crates/goliath-store')
+        result[name]=value
+    return result
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action',choices=['emit','check','verify'])
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--patch')
+    parser.add_argument('--base-index',default='final09-index')
+    args=parser.parse_args()
+    if not args.name.startswith(('e26-','repro-')) or '/' in args.name:raise RuntimeError('scoped variant name required')
+    patch=ROOT/args.patch if args.patch else None
+    current=files(args.base_index)
+    if args.action=='emit':
+        if patch.exists():raise RuntimeError('never overwrite an existing patch')
+        parts=[]
+        for name,value in current.items():
+            try:old=git('show',':'+name,index=args.base_index).decode()
+            except subprocess.CalledProcessError:old=''
+            if old==value:continue
+            parts.append(f'diff --git a/{name} b/{name}\n')
+            if not old:parts.append('new file mode 100644\n')
+            parts.extend(difflib.unified_diff(old.splitlines(keepends=True),value.splitlines(keepends=True),
+                fromfile='a/'+name if old else '/dev/null',tofile='b/'+name))
+        print('*** Begin Patch\n*** Add File: '+str(patch))
+        for line in ''.join(parts).splitlines():print('+'+line)
+        print('*** End Patch')
+        return
+    index=args.name+'-index'
+    tree=git('write-tree',index=args.base_index).decode().strip()
+    git('read-tree',tree,index=index)
+    if args.action!='verify':
+        git('apply','--cached','--check',patch,index=index)
+        git('apply','--cached',patch,index=index)
+    for name,value in current.items():
+        if git('show',':'+name,index=index).decode()!=value:raise RuntimeError('source mismatch: '+name)
+    overlay='crates/horizon-client/Cargo.toml'
+    result=dict(kind='E26-variant-source-proof',name=args.name,base_tree=tree,
+        tree=git('write-tree',index=index).decode().strip(),index=index,
+        patch=args.patch,patch_sha256=sha(patch.read_bytes()) if patch else None,clean_apply='passed',source_equality='passed',
+        files={name:sha(value.encode()) for name,value in current.items()},
+        build_overlay=dict(path=overlay,build_sha256=sha((SOURCE/overlay).read_bytes())))
+    path=DATA/(args.name+'-source.json')
+    if path.exists():raise RuntimeError('variant proof already exists')
+    path.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(source_equality='passed',files=len(current),tree=result['tree'],patch_sha256=result['patch_sha256'])))
+
+
+if __name__=='__main__':main()

@@ -1,0 +1,84 @@
+{
+  "kind": "E26-fixed-profile-plan",
+  "schema": 1,
+  "setup_failures_not_observations": [
+    "e26-ab-a1"
+  ],
+  "server_cores": 4,
+  "bot_cores": 1,
+  "players": 650,
+  "pigs_per_tile": 64,
+  "total_pigs": 256,
+  "view_distance": 3,
+  "warmup_seconds": 30,
+  "measurement_seconds": 60,
+  "maximum_additions_fraction": 0.05,
+  "selection": "native process CPU deltas in the last five warmup seconds",
+  "order": [
+    {
+      "name": "e26-ab-a1-r2",
+      "arm": "A",
+      "pair": 1
+    },
+    {
+      "name": "e26-ab-b1",
+      "arm": "B",
+      "pair": 1
+    },
+    {
+      "name": "e26-ab-b2",
+      "arm": "B",
+      "pair": 2
+    },
+    {
+      "name": "e26-ab-a2",
+      "arm": "A",
+      "pair": 2
+    },
+    {
+      "name": "e26-ab-b3",
+      "arm": "B",
+      "pair": 3
+    },
+    {
+      "name": "e26-ab-a3",
+      "arm": "A",
+      "pair": 3
+    },
+    {
+      "name": "e26-ab-a4",
+      "arm": "A",
+      "pair": 4
+    },
+    {
+      "name": "e26-ab-b4",
+      "arm": "B",
+      "pair": 4
+    }
+  ],
+  "positive_control": {
+    "name": "e26-planted-control-1",
+    "players": 100,
+    "warmup_seconds": 30,
+    "measurement_seconds": 15,
+    "pulse_us": 200,
+    "median_tolerance_us": [
+      200,
+      220
+    ]
+  },
+  "bins": {
+    "A": ".local/bin/meridian-e18/reactor-1",
+    "B": ".local/bin/horizon-e26/e26-timers-1",
+    "P": ".local/bin/horizon-e26/e26-planted-1"
+  },
+  "engines": {
+    "A": "b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d",
+    "B": "216f1d247f41610fc83437f5fa8e71da7dd4ade54eca75014d3b2e19f955b111",
+    "P": "632a692a270fc7a92942a6d3917ea47ab4edef431213ab2d31517b33e39718cb"
+  },
+  "adapter_sha256": "8a0a3a640437941be0fc3a5a3cc9e92ddc9531e68b05d5f3f3be9358d74e4a78",
+  "kernel_sha256": "f2b6da6c771676a20e1f32d01a8b63862440734545e881e86303d2dd7616f86c",
+  "source_proof_sha256": "f7cd434edf886ede2b84ea5ed48e3fe0ab8f1f2e1136dfd899710dd64a0834ff",
+  "retention": "Every attempt remains. No replacement for an observed failure. No limiter time is subtracted."
+}

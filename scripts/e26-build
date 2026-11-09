@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Run one queued native release pipeline and freeze only after every gate passes."""
+import argparse
+import fcntl
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import time
+import e11_support as support
+
+ROOT = support.ROOT
+SOURCE = ROOT / '.local/src/horizon-tiles'
+LOCAL = ROOT / '.local/evidence/E26'
+DATA = ROOT / 'docs/experiments/data/E26'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_diagnostic_source():
+    path = DATA / 'e26-patch18-proof.json'
+    proof = json.loads(path.read_text())
+    for name,expected in proof['files'].items():
+        if name == proof['build_overlay']['path']:
+            expected = proof['build_overlay']['build_sha256']
+        if sha(SOURCE/name) != expected:
+            raise RuntimeError('diagnostic source differs: ' + name)
+    return sha(path)
+
+
+def serial_batch(args, commands, env, result, target):
+    prior_path = DATA / (args.reuse_fmt_from + '-build.json')
+    prior = json.loads(prior_path.read_text())
+    fmt = next((row for row in prior['commands'] if row['label']=='fmt' and row['exit']==0),None)
+    if not fmt:
+        raise RuntimeError('a passed formatting gate is required for the remaining serial batch')
+    result['commands'] = [dict(fmt,reused_from=str(prior_path.relative_to(ROOT)),reused_record_sha256=sha(prior_path))]
+    selected = [(label,command) for label,command in commands if label!='fmt']
+    groups = []
+    for label,command in selected:
+        begin = "printf '%s\\n' " + shlex.quote('E26_PHASE_BEGIN '+label)
+        end = "printf '%s\\n' " + shlex.quote('E26_PHASE_END '+label)
+        groups.append('{ '+begin+' && '+shlex.join(command)+' && '+end+'; }')
+    chain = ' && '.join(groups)
+    log = LOCAL / (args.name+'-serial.log')
+    started = time.monotonic()
+    print('E26_BATCH queued: timer-tests, clippy, release; no load commands',flush=True)
+    with log.open('x') as stream:
+        done = subprocess.run([str(ROOT/'.local/bin/host-window'),'build','E26','--','bash','-c',chain],
+            cwd=SOURCE,env=env,stdout=stream,stderr=subprocess.STDOUT)
+    text = log.read_text(errors='replace')
+    result['batch'] = dict(command=['bash','-c',chain],exit=done.returncode,
+        seconds_including_queue=time.monotonic()-started,one_build_marker=True,workspace=str(SOURCE.relative_to(ROOT)))
+    for label,command in selected:
+        marker = 'E26_PHASE_BEGIN '+label+'\n'
+        if marker not in text:
+            break
+        section = text.split(marker,1)[1].split('E26_PHASE_BEGIN ',1)[0]
+        passed = 'E26_PHASE_END '+label in section
+        row = dict(label=label,command=command,exit=0 if passed else done.returncode,
+            timing='serial batch; not separately timed',test_results=re.findall(r'test result: .*',section))
+        result['commands'].append(row)
+        print(json.dumps(row),flush=True)
+    support.save(target,result)
+    if done.returncode:
+        print('\n'.join(text.splitlines()[-100:]),flush=True)
+        raise RuntimeError('serial diagnostic pipeline failed')
+    timer = next(row for row in result['commands'] if row['label']=='timer-tests')
+    if not any('4 passed;' in line for line in timer['test_results']):
+        raise RuntimeError('four timer tests did not run')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--planted', action='store_true')
+    parser.add_argument('--tests-only', action='store_true')
+    parser.add_argument('--serial-batch', action='store_true')
+    parser.add_argument('--reuse-fmt-from')
+    args = parser.parse_args()
+    if args.serial_batch and (not args.reuse_fmt_from or not re.fullmatch(r'e26-[a-z0-9-]+',args.reuse_fmt_from)):
+        raise RuntimeError('serial batching requires a scoped passed-format build record')
+    if not re.fullmatch(r'e26-[a-z0-9-]+', args.name):
+        raise RuntimeError('use an e26-prefixed fresh name')
+    target = DATA / (args.name + '-build.json')
+    frozen = ROOT / '.local/bin/horizon-e26' / args.name
+    if target.exists() or frozen.exists():
+        raise RuntimeError('attempt already exists')
+    proof = json.loads((DATA / 'e26-final09-source.json').read_text())
+    if proof['source_equality'] != 'passed':
+        raise RuntimeError('FINAL-09 reconstruction must pass before the first build')
+    internal = LOCAL / 'original-internal'
+    for name, expected in proof['internal_files'].items():
+        if sha(internal / name) != expected:
+            raise RuntimeError('frozen dependency changed: ' + name)
+    env = {key: value for key, value in os.environ.items()
+           if key not in {'CI', 'CARGO_TARGET_DIR', 'HORIZON_E26_PLANTED_COST'}
+           and not key.startswith('CARGO_PROFILE_')}
+    env.update(CARGO_INCREMENTAL='0', CARGO_PROFILE_RELEASE_LTO='thin',
+               CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1', CARGO_BUILD_JOBS='6')
+    if args.planted:
+        env['HORIZON_E26_PLANTED_COST'] = '1'
+    commands = [
+        ('fmt', ['cargo', 'fmt', '--all', '--check']),
+        ('timer-tests', ['cargo', 'test', '--locked', '--release', '-p', 'horizon-core', '--lib', 'tick_timers::tests::']),
+    ]
+    if not args.tests_only:
+        commands += [
+            ('clippy', ['cargo', 'clippy', '--locked', '--release', '--no-default-features', '-p', 'horizon-client', '--lib', '--', '-D', 'warnings']),
+            ('release', ['cargo', 'build', '--locked', '--release', '--no-default-features', '-p', 'horizon-client', '--bin', 'horizon-client']),
+        ]
+    result = dict(kind='E26-native-release', status='running', profile='release', incremental=False,
+                  planted=args.planted, commands=[], source=str(SOURCE.relative_to(ROOT)))
+    result['source_proof_sha256'] = verify_diagnostic_source()
+    began = time.monotonic()
+    try:
+        if args.serial_batch:
+            serial_batch(args,commands,env,result,target)
+        for label, command in ([] if args.serial_batch else commands):
+            log = LOCAL / (args.name + '-' + label + '.log')
+            started = time.monotonic()
+            print('E26_GATE ' + label, flush=True)
+            with log.open('x') as stream:
+                done = subprocess.run([str(ROOT / '.local/bin/host-window'), 'build', 'E26', '--', *command],
+                                      cwd=SOURCE, env=env, stdout=stream, stderr=subprocess.STDOUT)
+            text = log.read_text(errors='replace')
+            row = dict(label=label, command=command, exit=done.returncode,
+                       seconds=time.monotonic()-started, test_results=re.findall(r'test result: .*', text))
+            result['commands'].append(row)
+            print(json.dumps(row), flush=True)
+            support.save(target, result)
+            if done.returncode:
+                print('\n'.join(text.splitlines()[-80:]), flush=True)
+                raise RuntimeError('gate failed: ' + label)
+            if label == 'timer-tests' and not any('4 passed;' in line for line in row['test_results']):
+                raise RuntimeError('timer tests did not run')
+        if args.tests_only:
+            result['status'] = 'tests-passed'
+            return
+        if verify_diagnostic_source()!=result['source_proof_sha256']:
+            raise RuntimeError('source proof changed during the build')
+        source_bundle = ROOT / '.local/bin/meridian-e18/reactor-1'
+        candidate = json.loads((source_bundle / 'candidate.json').read_text())
+        frozen.mkdir(parents=True)
+        for name in ['meridian', 'meridian-sidecar', 'horizon-bots', 'goliath-store', 'e4-client',
+                     'LEASES', 'manifest.json', 'FINAL.json', 'cluster-launcher.py']:
+            shutil.copy2(source_bundle / name, frozen / name)
+        shutil.copy2(SOURCE / 'target/release/horizon-client', frozen / 'horizon-client')
+        for manifest_name in ['candidate.json', 'canonical.json']:
+            manifest = json.loads((source_bundle / manifest_name).read_text())
+            manifest['binaries']['horizon-client'] = sha(frozen / 'horizon-client')
+            manifest['kind'] = 'E26-diagnostic-not-capacity-accepted'
+            support.save(frozen / manifest_name, manifest)
+        executable_manifest = json.loads((frozen / 'manifest.json').read_text())
+        executable_manifest['horizon-client'] = sha(frozen / 'horizon-client')
+        support.save(frozen / 'manifest.json', executable_manifest)
+        final = json.loads((frozen / 'FINAL.json').read_text())
+        final['binaries']['horizon-client']['sha256'] = executable_manifest['horizon-client']
+        final['binaries']['horizon-client']['path'] = str((frozen / 'horizon-client').relative_to(ROOT))
+        support.save(frozen / 'FINAL.json', final)
+        result.update(status='complete', directory=str(frozen.relative_to(ROOT)),
+                      binaries={name:sha(frozen/name) for name in candidate['binaries']})
+        support.save(frozen / 'build.json', result)
+    except BaseException as error:
+        result.update(status='failed', error=str(error))
+        raise
+    finally:
+        result['seconds'] = time.monotonic() - began
+        support.save(target, result)
+
+
+if __name__ == '__main__':
+    LOCAL.mkdir(parents=True, exist_ok=True)
+    with (LOCAL / 'operation.lock').open('a') as operation:
+        fcntl.flock(operation, fcntl.LOCK_EX)
+        main()

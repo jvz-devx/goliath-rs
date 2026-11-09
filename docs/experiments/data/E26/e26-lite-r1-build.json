@@ -1,0 +1,44 @@
+{
+  "kind": "E26-lite-native-release",
+  "status": "failed",
+  "profile": "release",
+  "incremental": false,
+  "lto": "thin",
+  "codegen_units": 1,
+  "source_proof": {
+    "path": "docs/experiments/data/E26/e26-lite-source.json",
+    "sha256": "c73f8a3f7820fb35ac2e14b27fcac8cbc6589a7c55fce7397f4fd0eaa0933afa"
+  },
+  "commands": [
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "test_results": []
+    },
+    {
+      "label": "lite-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "game::dedicated::e26_lite::tests::"
+      ],
+      "exit": 101,
+      "test_results": []
+    }
+  ],
+  "one_build_marker": true,
+  "error": "lite release pipeline failed",
+  "seconds_including_queue": 105.7109138329979
+}

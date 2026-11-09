@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Check one fresh lite-B row against the four fixed A controls and their spread."""
+import argparse
+import hashlib
+import json
+import math
+from pathlib import Path
+import runpy
+import statistics
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E26'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('name')
+    parser.add_argument('--out', required=True)
+    args = parser.parse_args()
+    if any('/' in name or not name.startswith(('e26-', 'repro-')) for name in [args.name, args.out]):
+        raise RuntimeError('scoped fresh names required')
+    helpers = runpy.run_path(str(ROOT / 'scripts/e26b-warm-results'))
+    base = helpers['load']()
+    path = DATA / (args.name + '.json')
+    if not path.exists():
+        path = path.with_suffix('.json.gz')
+    row = base.row(path)
+    raw, _ = base.read(path)
+    if row['arm'] != 'B' or not row.get('valid'):
+        raise RuntimeError('one valid lite-B observation required')
+    cell = raw['cells']['650']
+    sample = helpers['lite'](cell)
+    selected = row['selected']
+    low, high = cell['game_time_before'][selected], cell['game_time_after'][selected]
+    wall_upper = high['at'] + high['rtt_s'] / 2 - low['at'] + low['rtt_s'] / 2
+    controls = []
+    for name in ['e26-lite-a1', 'e26-lite-a2', 'e26-lite-a3', 'e26-lite-a4']:
+        control_path = DATA / (name + '.json.gz')
+        if not control_path.exists():
+            control_path = control_path.with_suffix('')
+        control = base.row(control_path)
+        if not control.get('valid'):
+            raise RuntimeError('fixed A control invalid')
+        controls.append(control)
+    calibration_path = DATA / 'e26-clock-calibration-2.json'
+    calibration = json.loads(calibration_path.read_text())
+    if calibration['status'] != 'complete' or not calibration['noise_valid']:
+        raise RuntimeError('valid calibration required')
+    metrics = {}
+    for key in ['main_cores', 'selected_p50_ms', 'selected_p99_ms']:
+        values = [control[key] for control in controls]
+        mean, spread = statistics.mean(values), max(values) - min(values)
+        delta = row[key] - mean
+        metrics[key] = dict(A_mean=mean, A_min=min(values), A_max=max(values), A_spread=spread,
+                            B=row[key], B_minus_A_mean=delta, inside_A_spread=abs(delta) <= spread)
+    allowance = calibration['calibration']['conservative_read_allowance_ns']
+    read_charge = sample['clock_reads'] * allowance
+    delta = max(0, metrics['main_cores']['B_minus_A_mean'])
+    delta_charge = math.ceil(delta * wall_upper * 1e9)
+    corrected = max(0, sample['warm_cpu_ns'] - read_charge - delta_charge)
+    inside = all(metric['inside_A_spread'] for metric in metrics.values())
+    result = dict(kind='E26b-single-lite-B-reproduction', record=row, lite=sample,
+        controls=controls, comparison=metrics, intrusion_inside_A_spread=inside,
+        calibration=dict(path=str(calibration_path.relative_to(ROOT)),
+                         sha256=hashlib.sha256(calibration_path.read_bytes()).hexdigest()),
+        clock_read_allowance_ns=allowance, clock_read_cpu_charge_ns=read_charge,
+        positive_main_cpu_delta_cores=delta, positive_main_cpu_delta_charge_ns=delta_charge,
+        corrected_warm_cpu_ns=corrected, corrected_ratio_of_sums=corrected / sample['cycle_cpu_ns'],
+        strictly_above_five_percent=corrected / sample['cycle_cpu_ns'] > .05,
+        corroborates_failure=inside and corrected / sample['cycle_cpu_ns'] > .05,
+        scope='Single-row runtime corroboration against retained A controls, not a new balanced A/B experiment.',
+        capacity_caveat='A3 retains unselected tile-a raw P99 failure; no capacity acceptance.')
+    target = DATA / args.out
+    with target.open('x') as stream:
+        stream.write(json.dumps(result, indent=2) + '\n')
+    print(json.dumps({key: result[key] for key in ['corrected_ratio_of_sums',
+        'clock_read_cpu_charge_ns', 'positive_main_cpu_delta_charge_ns',
+        'intrusion_inside_A_spread', 'strictly_above_five_percent', 'corroborates_failure', 'comparison']}, indent=2))
+
+
+if __name__ == '__main__':
+    main()

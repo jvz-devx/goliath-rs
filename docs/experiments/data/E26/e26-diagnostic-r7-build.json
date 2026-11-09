@@ -1,0 +1,40 @@
+{
+  "kind": "E26-native-release",
+  "status": "failed",
+  "profile": "release",
+  "incremental": false,
+  "planted": false,
+  "commands": [
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 1838.0602705000201,
+      "test_results": []
+    },
+    {
+      "label": "timer-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "-p",
+        "horizon-core",
+        "--lib",
+        "tick_timers::tests::"
+      ],
+      "exit": -15,
+      "seconds": 540.1115171669808,
+      "test_results": []
+    }
+  ],
+  "source": ".local/src/horizon-tiles",
+  "error": "gate failed: timer-tests",
+  "seconds": 2378.1728965829825
+}

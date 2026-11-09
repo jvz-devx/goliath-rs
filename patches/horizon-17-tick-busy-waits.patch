@@ -1,0 +1,125 @@
+diff --git a/crates/horizon-client/src/game/commands/pregen.rs b/crates/horizon-client/src/game/commands/pregen.rs
+--- a/crates/horizon-client/src/game/commands/pregen.rs
++++ b/crates/horizon-client/src/game/commands/pregen.rs
+@@ -264,8 +264,10 @@
+             if now >= until {
+                 break;
+             }
++            horizon_core::tick_timers::pause();
+             self.streaming
+                 .wait((until - now).min(Duration::from_millis(5)));
++            horizon_core::tick_timers::resume();
+             self.update_world();
+         }
+     }
+diff --git a/crates/horizon-client/src/game/dedicated/status.rs b/crates/horizon-client/src/game/dedicated/status.rs
+--- a/crates/horizon-client/src/game/dedicated/status.rs
++++ b/crates/horizon-client/src/game/dedicated/status.rs
+@@ -85,6 +85,7 @@
+                                 .map(|row| {
+                                     json!({
+                             "sequence":row.sequence,"tick":row.tick,"busy_ns":row.busy_ns,
++                            "pacing_wait_ns":row.pacing_wait_ns,
+                             "ns":row.ns,"calls":row.calls})
+                                 })
+                                 .collect();
+diff --git a/crates/horizon-core/src/tick_timers.rs b/crates/horizon-core/src/tick_timers.rs
+--- a/crates/horizon-core/src/tick_timers.rs
++++ b/crates/horizon-core/src/tick_timers.rs
+@@ -27,6 +27,7 @@
+     pub sequence: u64,
+     pub tick: i64,
+     pub busy_ns: u64,
++    pub pacing_wait_ns: u64,
+     pub ns: [u64; 16],
+     pub calls: [u64; 16],
+ }
+@@ -37,6 +38,7 @@
+     running: bool,
+     current: usize,
+     last: u64,
++    pacing_wait_ns: u64,
+     ns: [u64; 16],
+     calls: [u64; 16],
+     rows: VecDeque<Row>,
+@@ -53,6 +55,7 @@
+             running: false,
+             current: UPSTREAM,
+             last: 0,
++            pacing_wait_ns: 0,
+             ns: [0; 16],
+             calls: [0; 16],
+             rows: VecDeque::new(),
+@@ -79,6 +82,17 @@
+         self.current = site;
+         self.calls[site] += 1;
+         previous
++    }
++    fn pause_at(&mut self, now: u64) {
++        self.charge(now);
++        self.running = false;
++    }
++    fn resume_at(&mut self, now: u64) {
++        if !self.running {
++            self.pacing_wait_ns += now.saturating_sub(self.last);
++        }
++        self.last = now;
++        self.running = true;
+     }
+     fn finish(&mut self, tick: i64, now: u64) {
+         self.charge(now);
+@@ -87,6 +101,7 @@
+             sequence: self.sequence,
+             tick,
+             busy_ns: self.ns.iter().sum(),
++            pacing_wait_ns: std::mem::take(&mut self.pacing_wait_ns),
+             ns: std::mem::take(&mut self.ns),
+             calls: std::mem::take(&mut self.calls),
+         };
+@@ -146,6 +161,7 @@
+         s.running = enabled;
+         s.current = UPSTREAM;
+         s.last = s.now();
++        s.pacing_wait_ns = 0;
+         s.ns = [0; 16];
+         s.calls = [0; 16];
+         s.sequence = 0;
+@@ -157,8 +173,7 @@
+ pub fn pause() {
+     STATE.with_borrow_mut(|s| {
+         if s.enabled {
+-            s.charge(s.now());
+-            s.running = false;
++            s.pause_at(s.now());
+         }
+     });
+ }
+@@ -166,8 +181,7 @@
+ pub fn resume() {
+     STATE.with_borrow_mut(|s| {
+         if s.enabled {
+-            s.last = s.now();
+-            s.running = true;
++            s.resume_at(s.now());
+         }
+     });
+ }
+@@ -246,14 +260,14 @@
+             ..State::default()
+         };
+         s.enter(8, 10);
+-        s.charge(20);
+-        s.running = false;
+-        s.charge(10_020);
+-        s.running = true;
++        s.pause_at(20);
++        s.resume_at(10_020);
+         s.finish(1, 10_050);
+         let row = s.rows.pop_front().unwrap();
+         assert_eq!(row.busy_ns, 50);
+         assert_eq!(row.ns[8], 40);
++        assert_eq!(row.pacing_wait_ns, 10_000);
++        assert_eq!(row.busy_ns + row.pacing_wait_ns, 10_050);
+     }
+ 
+     #[test]

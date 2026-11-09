@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+"""Keep diagnostic boolean timers out of block-valued Rust conditions."""
+import difflib
+import gzip
+import json
+from pathlib import Path
+import re
+from tree_sitter import Language, Parser
+import tree_sitter_rust
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon-tiles'
+parser = Parser(Language(tree_sitter_rust.language()))
+
+
+def walk(node):
+    yield node
+    for child in node.named_children:
+        yield from walk(child)
+
+
+print('*** Begin Patch')
+paths = json.loads(gzip.decompress((ROOT / '.local/evidence/E26/e26-instrumented-source.json.gz').read_bytes()))
+for name in paths:
+    path = SOURCE / name
+    old = path.read_text()
+    raw = old.encode()
+    tree = parser.parse(raw)
+    edits = []
+    for node in walk(tree.root_node):
+        if node.type not in {'if_expression', 'while_expression'}:
+            continue
+        condition = node.child_by_field_name('condition')
+        if condition is None or condition.type != 'block':
+            continue
+        children = condition.named_children
+        if len(children) != 2 or children[0].type != 'let_declaration':
+            continue
+        guard = children[0].text.decode()
+        match = re.fullmatch(r'let _e26_inline = (horizon_core|crate)::tick_timers::scope\((\d+)\);', guard)
+        if match:
+            # Moving these into a closure would change control-flow ownership.
+            # Keep their explicit scoped blocks instead.
+            if any(child.type in {'return_expression','break_expression','continue_expression','try_expression'}
+                   for child in walk(children[1])):
+                continue
+            if children[1].type == 'macro_invocation':
+                continue
+            if children[1].text.count(b'let _e26_inline'):
+                continue
+            value = children[1].text.decode()
+            prefix, site = match.groups()
+            edits.append((condition.start_byte, condition.end_byte,
+                          f'{prefix}::tick_timers::timed({site}, || {value})'.encode()))
+    for start, end, value in sorted(edits, reverse=True):
+        raw = raw[:start] + value + raw[end:]
+    new = raw.decode()
+    if old != new:
+        print('*** Update File: ' + str(path))
+        for line in list(difflib.unified_diff(old.splitlines(), new.splitlines(), n=3))[2:]:
+            print('@@' if line.startswith('@@') else line)
+print('*** End Patch')

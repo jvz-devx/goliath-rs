@@ -1,0 +1,407 @@
+diff --git a/crates/horizon-client-render/src/streaming.rs b/crates/horizon-client-render/src/streaming.rs
+--- a/crates/horizon-client-render/src/streaming.rs
++++ b/crates/horizon-client-render/src/streaming.rs
+@@ -1743,10 +1743,9 @@
+                             horizon_core::tile_ownership::area()
+                                 .is_some_and(|a| !a.chunk(x - 2, z - 2) || !a.chunk(x + 2, z + 2))
+                         };
+-                        if {
+-                            let _e26_inline = horizon_core::tick_timers::scope(2);
++                        if horizon_core::tick_timers::timed(2, || {
+                             decorated || !self.decorates || wall_ring
+-                        } {
++                        }) {
+                             self.decorated.insert((x, z));
+                         }
+                     }
+diff --git a/crates/horizon-client-render/src/world.rs b/crates/horizon-client-render/src/world.rs
+--- a/crates/horizon-client-render/src/world.rs
++++ b/crates/horizon-client-render/src/world.rs
+@@ -456,10 +456,9 @@
+         for cx in lo[0] >> 4..=hi[0] >> 4 {
+             for cz in lo[2] >> 4..=hi[2] >> 4 {
+                 let Some(chunk) = self.chunks.get(&(cx, cz)) else {
+-                    if {
+-                        let _e26_inline = horizon_core::tick_timers::scope(0);
++                    if horizon_core::tick_timers::timed(0, || {
+                         matches(self.tile_barrier.unwrap_or(self.air))
+-                    } {
++                    }) {
+                         return true;
+                     }
+                     continue;
+diff --git a/crates/horizon-client/src/command_storage.rs b/crates/horizon-client/src/command_storage.rs
+--- a/crates/horizon-client/src/command_storage.rs
++++ b/crates/horizon-client/src/command_storage.rs
+@@ -46,10 +46,7 @@
+         s
+     }
+     pub fn save(&mut self, root: &Path) {
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
+-            !self.dirty && !save::cut_active()
+-        } {
++        if horizon_core::tick_timers::timed(4, || !self.dirty && !save::cut_active()) {
+             return;
+         }
+         self.dirty = false;
+diff --git a/crates/horizon-client/src/control.rs b/crates/horizon-client/src/control.rs
+--- a/crates/horizon-client/src/control.rs
++++ b/crates/horizon-client/src/control.rs
+@@ -378,8 +378,7 @@
+             continue;
+         }
+         let (reply, response) = mpsc::channel();
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             sender
+                 .send(Request {
+                     line,
+@@ -387,7 +386,7 @@
+                     queued_at: std::time::Instant::now(),
+                 })
+                 .is_err()
+-        } {
++        }) {
+             return;
+         }
+         // The game dropping the reply sender means it exited mid-command.
+diff --git a/crates/horizon-client/src/game.rs b/crates/horizon-client/src/game.rs
+--- a/crates/horizon-client/src/game.rs
++++ b/crates/horizon-client/src/game.rs
+@@ -2426,11 +2426,10 @@
+             if dx == 0 && dz == 0 {
+                 continue;
+             }
+-            if {
+-                let _e26_inline = horizon_core::tick_timers::scope(4);
++            if horizon_core::tick_timers::timed(4, || {
+                 horizon_core::tile_ownership::owns_chunk(x + dx, z + dz)
+                     && !world.chunks.contains_key(&(x + dx, z + dz))
+-            } {
++            }) {
+                 return false;
+             }
+         }
+diff --git a/crates/horizon-client/src/game/bossbars.rs b/crates/horizon-client/src/game/bossbars.rs
+--- a/crates/horizon-client/src/game/bossbars.rs
++++ b/crates/horizon-client/src/game/bossbars.rs
+@@ -110,10 +110,9 @@
+         if !self.bosses.loaded || self.remote.is_some() {
+             return;
+         }
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             !save::cut_active() && self.bosses.bars.bars.is_empty() && !self.bossbar_path().exists()
+-        } {
++        }) {
+             return;
+         }
+         if let Err(e) = save::write_dat(
+diff --git a/crates/horizon-client/src/game/dedicated.rs b/crates/horizon-client/src/game/dedicated.rs
+--- a/crates/horizon-client/src/game/dedicated.rs
++++ b/crates/horizon-client/src/game/dedicated.rs
+@@ -1372,10 +1372,7 @@
+                     break;
+                 }
+             }
+-            if {
+-                let _e26_inline = horizon_core::tick_timers::scope(4);
+-                !horizon_core::authority::may_act()
+-            } {
++            if horizon_core::tick_timers::timed(4, || !horizon_core::authority::may_act()) {
+                 {
+                     let _e26_inline = horizon_core::tick_timers::scope(4);
+                     continue;
+diff --git a/crates/horizon-client/src/game/dedicated/transfer.rs b/crates/horizon-client/src/game/dedicated/transfer.rs
+--- a/crates/horizon-client/src/game/dedicated/transfer.rs
++++ b/crates/horizon-client/src/game/dedicated/transfer.rs
+@@ -336,10 +336,9 @@
+                 return json!({"error":"a terrain observer cannot be activated"});
+             }
+         }
+-        let generation = match {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        let generation = match horizon_core::tick_timers::timed(4, || {
+             super::cluster::activation(uuid, &request)
+-        } {
++        }) {
+             Ok(generation) => generation,
+             Err(e) => {
+                 let _e26_inline = horizon_core::tick_timers::scope(4);
+@@ -544,10 +543,9 @@
+             let _e26_inline = horizon_core::tick_timers::scope(4);
+             std::env::var_os("GOLIATH_STORE").is_some()
+         };
+-        let i = match {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        let i = match horizon_core::tick_timers::timed(4, || {
+             arrivals::check_exportable_with_vehicle(&host.hub, uuid, cluster)
+-        } {
++        }) {
+             Ok(i) => i,
+             Err(why) => return json!({ "error": why }),
+         };
+diff --git a/crates/horizon-client/src/game/dragon.rs b/crates/horizon-client/src/game/dragon.rs
+--- a/crates/horizon-client/src/game/dragon.rs
++++ b/crates/horizon-client/src/game/dragon.rs
+@@ -1057,10 +1057,9 @@
+         })
+     }
+     pub(super) fn save_fight(&mut self) {
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             !self.fight.loaded || (!self.fight.dirty && !horizon_client::save::cut_active())
+-        } {
++        }) {
+             return;
+         }
+ 
+diff --git a/crates/horizon-client/src/game/functions.rs b/crates/horizon-client/src/game/functions.rs
+--- a/crates/horizon-client/src/game/functions.rs
++++ b/crates/horizon-client/src/game/functions.rs
+@@ -347,10 +347,9 @@
+                 ])
+             })
+             .collect();
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             !save::cut_active() && events.is_empty() && !self.schedule_path().exists()
+-        } {
++        }) {
+             return;
+         }
+         let _ = save::write_dat(
+diff --git a/crates/horizon-client/src/game/maps.rs b/crates/horizon-client/src/game/maps.rs
+--- a/crates/horizon-client/src/game/maps.rs
++++ b/crates/horizon-client/src/game/maps.rs
+@@ -1661,10 +1661,8 @@
+     /// Writes changed maps and the id counter (`MapItemSavedData`, `MapIndex`).
+     pub(super) fn save_maps(&mut self) {
+         for (id, m) in &mut self.maps.data {
+-            if {
+-                let _e26_inline = horizon_core::tick_timers::scope(4);
+-                m.dirty || horizon_client::save::cut_active()
+-            } {
++            if horizon_core::tick_timers::timed(4, || m.dirty || horizon_client::save::cut_active())
++            {
+                 let path = self
+                     .world_root
+                     .join("data/minecraft/maps")
+diff --git a/crates/horizon-client/src/game/native_entities.rs b/crates/horizon-client/src/game/native_entities.rs
+--- a/crates/horizon-client/src/game/native_entities.rs
++++ b/crates/horizon-client/src/game/native_entities.rs
+@@ -469,13 +469,12 @@
+     /// entity it announces; nothing runs when no mod is loaded, on a client
+     /// of a server (which tells nothing), or when nothing is new.
+     pub(super) fn native_joins_flush(&mut self, loaded_from_disk: bool, watch: u32) -> bool {
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             self.remote.is_some()
+                 || (crate::mod_api::mods().is_empty()
+                     && horizon_core::tile_ownership::area().is_none())
+                 || !self.joins_pending()
+-        } {
++        }) {
+             return true;
+         }
+         {
+diff --git a/crates/horizon-client/src/game/nether_portal.rs b/crates/horizon-client/src/game/nether_portal.rs
+--- a/crates/horizon-client/src/game/nether_portal.rs
++++ b/crates/horizon-client/src/game/nether_portal.rs
+@@ -1338,10 +1338,9 @@
+     }
+     /// Write the waiting entities when they changed.
+     pub(super) fn save_portal_arrivals(&mut self) {
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             (!self.portals.dirty && !horizon_client::save::cut_active()) || self.remote.is_some()
+-        } {
++        }) {
+             return;
+         }
+         let list = self
+diff --git a/crates/horizon-client/src/game/raids.rs b/crates/horizon-client/src/game/raids.rs
+--- a/crates/horizon-client/src/game/raids.rs
++++ b/crates/horizon-client/src/game/raids.rs
+@@ -293,11 +293,10 @@
+         let Some(dim) = self.raiding.loaded else {
+             return;
+         };
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             (!self.raiding.raids.dirty && !horizon_client::save::cut_active())
+                 || self.remote.is_some()
+-        } {
++        }) {
+             return;
+         }
+         let tag = horizon_world::nbt::Tag::compound([
+diff --git a/crates/horizon-client/src/game/scoreboard.rs b/crates/horizon-client/src/game/scoreboard.rs
+--- a/crates/horizon-client/src/game/scoreboard.rs
++++ b/crates/horizon-client/src/game/scoreboard.rs
+@@ -126,8 +126,7 @@
+         }
+         if {
+             let _e26_inline = horizon_core::tick_timers::scope(4);
+-            (save::cut_active()
+-                || self.border != horizon_client::worldborder::WorldBorder::default())
++            save::cut_active() || self.border != horizon_client::worldborder::WorldBorder::default()
+         } && let Err(e) = save::write_dat(
+             &self.border_path(self.dim),
+             Tag::compound([
+@@ -166,10 +165,9 @@
+         // The border is saved with its level (`save_level`).
+         let path = self.scoreboard_path();
+         let board = &self.score.board;
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             !save::cut_active() && board == &Scoreboard::default() && !path.exists()
+-        } {
++        }) {
+             return;
+         }
+         if let Err(e) = save::write_dat(
+diff --git a/crates/horizon-client/src/game/trading.rs b/crates/horizon-client/src/game/trading.rs
+--- a/crates/horizon-client/src/game/trading.rs
++++ b/crates/horizon-client/src/game/trading.rs
+@@ -131,11 +131,10 @@
+     }
+     /// `RandomSequences` as `random_sequences.dat` (not on a server's guest).
+     pub(super) fn save_random_sequences(&mut self) {
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             self.remote.is_some()
+                 || (self.rand_sequences.ids().is_empty() && !horizon_client::save::cut_active())
+-        } {
++        }) {
+             return;
+         }
+         let tag = horizon_world::nbt::Tag::compound([
+diff --git a/crates/horizon-client/src/game/wandering_trader.rs b/crates/horizon-client/src/game/wandering_trader.rs
+--- a/crates/horizon-client/src/game/wandering_trader.rs
++++ b/crates/horizon-client/src/game/wandering_trader.rs
+@@ -63,11 +63,10 @@
+         t.loaded = true;
+     }
+     pub(super) fn save_wandering_trader(&mut self) {
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             !self.creatures.trader.loaded
+                 || (!self.creatures.trader.dirty && !horizon_client::save::cut_active())
+-        } {
++        }) {
+             return;
+         }
+         let t = &self.creatures.trader;
+diff --git a/crates/horizon-client/src/lan/arrivals.rs b/crates/horizon-client/src/lan/arrivals.rs
+--- a/crates/horizon-client/src/lan/arrivals.rs
++++ b/crates/horizon-client/src/lan/arrivals.rs
+@@ -314,10 +314,7 @@
+         Err("that player has not finished joining")
+     } else if !g.left_reason.is_empty() {
+         Err("that player is leaving")
+-    } else if {
+-        let _e26_inline = horizon_core::tick_timers::scope(4);
+-        g.vehicle.is_some() && !group
+-    } {
++    } else if horizon_core::tick_timers::timed(4, || g.vehicle.is_some() && !group) {
+         Err("that player is riding")
+     } else if g.sleeping {
+         Err("that player is asleep")
+diff --git a/crates/horizon-client/src/lan/hub.rs b/crates/horizon-client/src/lan/hub.rs
+--- a/crates/horizon-client/src/lan/hub.rs
++++ b/crates/horizon-client/src/lan/hub.rs
+@@ -3031,12 +3031,11 @@
+                     (-1..=1).all(|dz| {
+                         (-1..=1).all(|dx| {
+                             let (x, z) = (c.x + dx, c.z + dz);
+-                            {
++                            ({
+                                 let _e26_inline = horizon_core::tick_timers::scope(5);
+                                 !horizon_core::tile_ownership::owns_chunk(x, z)
+                                     || world.chunks.contains_key(&(x, z))
+-                            }
+-                            || streaming.proto_sections(x, z).is_some()
++                            }) || streaming.proto_sections(x, z).is_some()
+                         })
+                     })
+                 })
+diff --git a/crates/horizon-client/src/lan/import.rs b/crates/horizon-client/src/lan/import.rs
+--- a/crates/horizon-client/src/lan/import.rs
++++ b/crates/horizon-client/src/lan/import.rs
+@@ -522,10 +522,9 @@
+         request.arrival.position
+     } && (level.root_vehicle.is_some() || tag.get("RootVehicle").is_some())
+     {
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             std::env::var_os("GOLIATH_STORE").is_some() && request.parts.len() == PARTS.len()
+-        } {
++        }) {
+             {
+                 let _e26_inline = horizon_core::tick_timers::scope(4);
+                 translate_root_vehicle(&mut tag, destination)?
+diff --git a/crates/horizon-client/src/save.rs b/crates/horizon-client/src/save.rs
+--- a/crates/horizon-client/src/save.rs
++++ b/crates/horizon-client/src/save.rs
+@@ -2534,10 +2534,9 @@
+     ) -> Result<()> {
+         let path = self.attachments_path();
+         let data = attachments.to_nbt();
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(2);
++        if horizon_core::tick_timers::timed(2, || {
+             !cut_active() && data.is_empty() && !path.exists()
+-        } {
++        }) {
+             return Ok(());
+         }
+         write_dat(
+diff --git a/crates/horizon-client/src/stopwatches.rs b/crates/horizon-client/src/stopwatches.rs
+--- a/crates/horizon-client/src/stopwatches.rs
++++ b/crates/horizon-client/src/stopwatches.rs
+@@ -57,10 +57,9 @@
+         s
+     }
+     pub fn save(&mut self, root: &Path) {
+-        if {
+-            let _e26_inline = horizon_core::tick_timers::scope(4);
++        if horizon_core::tick_timers::timed(4, || {
+             !save::cut_active() && !self.dirty && self.watches.is_empty()
+-        } {
++        }) {
+             return;
+         }
+         self.dirty = false;
+diff --git a/crates/horizon-core/src/tick_timers.rs b/crates/horizon-core/src/tick_timers.rs
+--- a/crates/horizon-core/src/tick_timers.rs
++++ b/crates/horizon-core/src/tick_timers.rs
+@@ -131,6 +131,16 @@
+ }
+ 
+ pub fn configure(enabled: bool) {
++    configure_recording(enabled);
++}
++
++#[inline]
++pub fn timed<T>(site: usize, compute: impl FnOnce() -> T) -> T {
++    let _scope = scope(site);
++    compute()
++}
++
++fn configure_recording(enabled: bool) {
+     STATE.with_borrow_mut(|s| {
+         s.enabled = enabled;
+         s.running = enabled;

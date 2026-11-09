@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""Derive every patch hunk and timer placement from diff lines and Rust syntax."""
+import argparse
+import difflib
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import re
+import subprocess
+from tree_sitter import Language, Parser
+import tree_sitter_rust
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon-tiles'
+LOCAL = ROOT / '.local/evidence/E26'
+DATA = ROOT / 'docs/experiments/data/E26'
+PARSER = Parser(Language(tree_sitter_rust.language()))
+
+
+def git(*args):
+    return subprocess.check_output(['git', *args], cwd=SOURCE, stderr=subprocess.DEVNULL)
+
+
+def hunks(path):
+    result = []
+    name = None
+    current = None
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if line.startswith('diff --git '):
+            name = line.split(' b/', 1)[1]
+            current = None
+        elif line.startswith('@@ '):
+            match = re.match(r'@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)', line)
+            if not match:
+                raise RuntimeError('unparsed hunk')
+            current = dict(id=path.name + ':' + str(number), patch='patches/' + path.name,
+                           patch_line=number, path=name, old_start=int(match[1]),
+                           old_count=int(match[2] or 1), new_start=int(match[3]),
+                           new_count=int(match[4] or 1), context=match[5].strip(), lines=[])
+            result.append(current)
+        elif current is not None and line[:1] in {' ', '+', '-'}:
+            current['lines'].append(line)
+    return result
+
+
+def walk(node):
+    yield node
+    for child in node.named_children:
+        yield from walk(child)
+
+
+def is_test(node):
+    current = node
+    while current is not None:
+        previous = current.prev_named_sibling
+        while previous is not None and previous.type in {'attribute_item', 'line_comment', 'block_comment'}:
+            if b'cfg(test)' in previous.text or previous.text in {b'#[test]', b'#[ignore]'}:
+                return True
+            previous = previous.prev_named_sibling
+        current = current.parent
+    return False
+
+
+def bucket(path, name='', code=''):
+    if 'tile_ownership' in path or path.endswith(('world.rs', 'collisions.rs', 'chunk_map.rs', 'mobs.rs')):
+        return 0
+    if path.endswith('/authority.rs') or '/cluster/lease' in path:
+        return 1
+    if name == 'tile_warm_generation':
+        return 3
+    if '/tile_cut' in path or path.endswith(('/save.rs', '/block_entities.rs', '/streaming.rs')):
+        return 2
+    if 'e11_measure' in path:
+        return 7
+    if path.endswith('/status.rs'):
+        return 6
+    if 'observer' in code or path.endswith('/hub.rs'):
+        return 5
+    return 4
+
+
+def provenance():
+    proof = json.loads((DATA / 'e26-final09-source.json').read_text())
+    selected = {row['path']: row for row in proof['patches']}
+    patches = [ROOT / row['path'] for row in proof['patches']]
+    all_paths = sorted(ROOT.glob('patches/horizon-*.patch'))
+    extras = [p for p in all_paths if re.match(r'horizon-(10|11)-', p.name)]
+    records = [row for path in patches + extras for row in hunks(path)]
+    contents = {}
+    for patch in patches:
+        ignored = selected[str(patch.relative_to(ROOT))].get('apply_options', [])
+        excluded = {word.split('=', 1)[1] for word in ignored if word.startswith('--exclude=')}
+        shifts = {}
+        for hunk in [row for row in records if row['patch'] == str(patch.relative_to(ROOT))]:
+            name = hunk['path']
+            if name in excluded:
+                hunk['selection'] = 'excluded adapted handler; horizon-08 supplies the final handler'
+                continue
+            hunk['selection'] = 'selected'
+            if name not in contents:
+                try:
+                    contents[name] = [(line, None) for line in git('show', proof['pin'] + ':' + name).decode().splitlines()]
+                except subprocess.CalledProcessError:
+                    contents[name] = []
+            old = [line[1:] for line in hunk['lines'] if line[:1] in {' ', '-'}]
+            start = (hunk['old_start'] - 1 if hunk['old_count'] else hunk['old_start']) + shifts.get(name, 0)
+            if [line for line, origin in contents[name][start:start + len(old)]] != old:
+                actual = [line for line, origin in contents[name]]
+                matches = [at for at in range(len(actual) - len(old) + 1) if actual[at:at + len(old)] == old]
+                matches.sort(key=lambda at: abs(at - start))
+                if not matches or len(matches) > 1 and abs(matches[0] - start) == abs(matches[1] - start):
+                    raise RuntimeError('diff context missing or ambiguous: ' + hunk['id'])
+                start = matches[0]
+            hunk['applied_line'] = start + 1
+            replacement = []
+            cursor = start
+            for line in hunk['lines']:
+                if line.startswith(' '):
+                    replacement.append(contents[name][cursor]); cursor += 1
+                elif line.startswith('-'):
+                    cursor += 1
+                elif line.startswith('+'):
+                    replacement.append((line[1:], hunk['id']))
+            contents[name][start:start + len(old)] = replacement
+            shifts[name] = shifts.get(name, 0) + len(replacement) - len(old)
+    for hunk in records:
+        hunk.setdefault('selection', 'not in FINAL-09; candidate patch 10 or 11')
+    return records, contents
+
+
+def generate():
+    records, contents = provenance()
+    classifications = {row['id']: [] for row in records}
+    changes = {}
+    placements = []
+    for name, version in contents.items():
+        if not name.endswith('.rs') or name.startswith('crates/horizon-bots/') or '/tests/' in name or '/examples/' in name:
+            for origin in {origin for line, origin in version if origin}:
+                classifications[origin].append(dict(kind='test-only' if '/tests/' in name else 'off-thread fixture driver' if 'horizon-bots' in name or '/examples/' in name else 'declaration only', path=name))
+            continue
+        current = (SOURCE / name).read_text()
+        if '_e26_site' in current or '_e26_inline' in current:
+            raise RuntimeError('instrumentation already present; apply the recorded diagnostic patches instead')
+        lines = current.splitlines(keepends=True)
+        original = [line for line, origin in version]
+        mapping = {}
+        for block in difflib.SequenceMatcher(a=original, b=[line.rstrip('\n') for line in lines], autojunk=False).get_matching_blocks():
+            for offset in range(block.size):
+                mapping[block.b + offset] = version[block.a + offset][1]
+        raw = current.encode()
+        tree = PARSER.parse(raw)
+        known_errors = [node.text for node in walk(tree.root_node) if node.type == 'ERROR' or node.is_missing]
+        nodes = list(walk(tree.root_node))
+        functions = [node for node in nodes if node.type == 'function_item' and node.child_by_field_name('body')]
+        edits = []
+        for fn in functions:
+            origins = {mapping.get(line) for line in range(fn.start_point.row, fn.end_point.row + 1)} - {None}
+            if not origins:
+                continue
+            symbol = fn.child_by_field_name('name').text.decode()
+            if is_test(fn):
+                for origin in origins:
+                    classifications[origin].append(dict(kind='test-only', path=name, line=fn.start_point.row + 1))
+                continue
+            body = fn.child_by_field_name('body')
+            # New functions have no upstream work to separate. Their callers may be
+            # workers too, but the recorder is enabled only on the selected main.
+            added_function = all(mapping.get(line) for line in range(fn.start_point.row, fn.end_point.row + 1)
+                                 if lines[line].strip())
+            if added_function:
+                site = bucket(name, symbol)
+                at = body.start_byte + 1
+                edits.append((at, at, f'\n        let _e26_site = horizon_core::tick_timers::scope({site});'))
+                if name.startswith('crates/horizon-core/'):
+                    edits[-1] = (at, at, edits[-1][2].replace('horizon_core::', 'crate::'))
+                placements.append(dict(path=name, line=fn.start_point.row + 1, function=symbol, bucket=site, kind='new-function', origins=sorted(origins)))
+                for origin in origins:
+                    classifications[origin].append(placements[-1])
+                continue
+            # Existing functions: select only changed expressions, never a whole
+            # simulation/pacing function merely because one call was added to it.
+            expressions = [node for node in walk(body) if (node.type.endswith('_expression') or node.type == 'macro_invocation')
+                           and node.type not in {'closure_expression', 'reference_expression', 'range_expression'}
+                           and node.parent is not None and node.parent.type != 'field_expression'
+                           and not (node.parent.type == 'call_expression' and node.parent.child_by_field_name('function') == node)
+                           and not any(child.type == 'function_item' for child in walk(node))]
+            chosen = []
+            added_rows = {line for line in range(body.start_point.row, body.end_point.row + 1)
+                          if mapping.get(line) and lines[line].strip() and not lines[line].lstrip().startswith(('//', '#'))}
+            for line in sorted(added_rows):
+                if any(node.start_point.row <= line <= node.end_point.row for node in chosen):
+                    continue
+                candidates = [node for node in expressions if node.start_point.row <= line <= node.end_point.row]
+                if not candidates:
+                    continue
+                full = [node for node in candidates if all(mapping.get(row) for row in range(node.start_point.row, node.end_point.row + 1))]
+                # Prefer the largest entirely added expression. Otherwise the
+                # smallest mixed expression gives a conservative local upper bound.
+                node = max(full, key=lambda n:n.end_byte-n.start_byte) if full else min(candidates, key=lambda n:n.end_byte-n.start_byte)
+                if any(not (node.end_byte <= old.start_byte or old.end_byte <= node.start_byte) for old in chosen):
+                    continue
+                # The wait-loop wrapper already labels upstream-only pacing. Its
+                # control/warm calls are measured in their own function scopes.
+                if symbol == 'wait_for_next_server_tick_with':
+                    continue
+                chosen.append(node)
+                site = bucket(name, symbol, node.text.decode())
+                own = sorted({mapping.get(row) for row in range(node.start_point.row, node.end_point.row + 1)} - {None})
+                prefix = 'crate::' if name.startswith('crates/horizon-core/') else 'horizon_core::'
+                replacement = '{ let _e26_inline = ' + prefix + f'tick_timers::scope({site}); ' + node.text.decode() + ' }'
+                edits.append((node.start_byte, node.end_byte, replacement))
+                entry = dict(path=name, line=node.start_point.row + 1, function=symbol, bucket=site,
+                             kind='added-expression' if full else 'local-upper-bound', origins=own)
+                placements.append(entry)
+                for origin in own:
+                    classifications[origin].append(entry)
+        for start, end, value in sorted(edits, reverse=True):
+            raw = raw[:start] + value.encode() + raw[end:]
+        changed = raw.decode()
+        if changed != current:
+            errors = [node.text for node in walk(PARSER.parse(raw).root_node) if node.type == 'ERROR' or node.is_missing]
+            if errors != known_errors:
+                raise RuntimeError('invalid generated Rust: ' + name)
+            changes[name] = changed
+        # Every surviving line is accounted for, including non-executable data.
+        for number, origin in mapping.items():
+            if origin is None:
+                continue
+            owners = [fn for fn in functions if fn.start_point.row <= number <= fn.end_point.row]
+            if not owners:
+                classifications[origin].append(dict(kind='declaration only; no runtime instruction', path=name, line=number + 1))
+    for row in records:
+        row['coverage'] = classifications[row['id']]
+        row.pop('lines')
+        if row['selection'] != 'selected':
+            row['verdict'] = 'not selected'
+        elif row['coverage']:
+            row['verdict'] = 'mapped; scope audit required'
+        else:
+            row['verdict'] = 'unproven or superseded; inspect'
+    DATA.mkdir(parents=True, exist_ok=True)
+    raw_export = json.dumps(changes).encode()
+    (LOCAL / 'e26-instrumented-source.json.gz').write_bytes(gzip.compress(raw_export, mtime=0))
+    (LOCAL / 'e26-instrumented-source-hash.json').write_text(json.dumps(dict(
+        raw_bytes=len(raw_export),decompressed_sha256=hashlib.sha256(raw_export).hexdigest()))+'\n')
+    result = dict(kind='E26-mechanical-diff-hunk-coverage', hunks=len(records), placements=placements,
+                  rows=records, completeness='pending individual audit')
+    (DATA / 'e26-hunk-coverage.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(dict(hunks=len(records), placements=len(placements), files=len(changes),
+                         unresolved=[row['id'] for row in records if row['verdict'].startswith('unproven')])))
+
+
+def emit(name):
+    changes = json.loads(gzip.decompress((LOCAL / 'e26-instrumented-source.json.gz').read_bytes()))
+    path = SOURCE / name
+    old = path.read_text()
+    new = changes[name]
+    print('*** Begin Patch')
+    if old != new:
+        print('*** Update File: ' + str(path))
+        for line in list(difflib.unified_diff(old.splitlines(), new.splitlines(), n=3))[2:]:
+            print('@@' if line.startswith('@@') else line)
+    print('*** End Patch')
+
+
+def table():
+    path = DATA / 'e26-hunk-coverage.json'
+    result = json.loads(path.read_text())
+    manual = {
+        'e2-horizon-input-trace.patch:23': 'Signature only. The trace predicate and body have an inline timer.',
+        'horizon-01-tile-cut.patch:1979': 'Direct pacing-loop timer 4, nested warm timer 3 and upstream pump timer 8. Sleep is paused explicitly.',
+        'horizon-01-tile-cut.patch:2242': 'Visibility only. Calls during cut encoding remain inside cut timer 2.',
+        'horizon-03-cluster.patch:485': 'Removed fields. No surviving runtime instruction.',
+        'horizon-03-cluster.patch:495': 'Field declaration. The final Arc representation replaces this field in patch 5; construction is inside cut timer 2.',
+        'horizon-03-cluster.patch:512': 'Removed initializers. No surviving runtime instruction.',
+        'horizon-03-cluster.patch:600': 'Removed validation. No surviving runtime instruction.',
+        'horizon-05-m2.patch:58': 'Call replaced by the authority-guarded call in patch 6. The full warm callee has exclusive timer 3.',
+        'horizon-05-m2.patch:867': 'Visibility only. No new runtime instruction.',
+        'horizon-05-m2.patch:876': 'Visibility only. No new runtime instruction.',
+    }
+    labels = ['ownership','lease','cut state','warming','control/transfer','observer control',
+              'status','digest/samples','upstream pacing','upstream work','diagnostic',
+              'reader tracking','reader chunks','mixed upper bound','cut enqueue','planted cost']
+    rows = []
+    for row in result['rows']:
+        sites = sorted({entry['bucket'] for entry in row['coverage'] if 'bucket' in entry})
+        exclusions = sorted({entry['kind'] for entry in row['coverage'] if 'bucket' not in entry})
+        if row['id'] in manual:
+            explanation = manual[row['id']]
+        elif row['selection'] != 'selected':
+            explanation = row['selection']
+        elif sites:
+            explanation = '; '.join(str(site) + ' ' + labels[site] for site in sites)
+            if any(entry.get('kind') == 'local-upper-bound' for entry in row['coverage']):
+                explanation += '; includes a labelled local upper bound'
+        else:
+            explanation = '; '.join(exclusions)
+        if not explanation:
+            raise RuntimeError('hunk has no accounting row: ' + row['id'])
+        row['accounting'] = explanation
+        row['verdict'] = 'accounted in ledger'
+        rows.append('| `' + row['id'] + '` | `' + row['path'] + '` | ' + explanation.replace('|','/') + ' |')
+    result['completeness'] = 'Every diff hunk has a row. Runtime and overhead validation are pending.'
+    result['startup_window'] = 'Recording is enabled only after full fixture startup, completed joins, 256 pig spawns and 30 seconds of warmup.'
+    result['reader_supplement'] = 'Reader-only entity loops and chunk delivery have timers 11 and 12. Shared encoder work with reader batches uses conservative timer 13.'
+    result['removed_call_wrappers'] = 'E2 changed only a bool argument at two upstream movement calls. These calls are not charged as added gameplay work; the new trace predicate is timed separately.'
+    path.write_text(json.dumps(result, indent=2) + '\n')
+    heading = ['# E26. Mechanical hunk coverage', '',
+               'Generated from every diff hunk in the selected stack, plus the unselected patches 10 and 11.',
+               'Each hunk has one row. Runtime acceptance and timer overhead remain separate gates.', '',
+               '| Hunk | Source | Timer or exclusion |', '| --- | --- | --- |']
+    (DATA / 'e26-hunk-coverage.md').write_text('\n'.join(heading + rows) + '\n')
+    print(json.dumps(dict(hunks=result['hunks'], rows=len(rows), coverage='complete ledger; runtime validation pending')))
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['generate', 'emit', 'table'])
+    parser.add_argument('path', nargs='?')
+    args = parser.parse_args()
+    if args.action == 'generate':
+        generate()
+    elif args.action == 'table':
+        table()
+    else:
+        emit(args.path)

@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Run the native thread-clock calibration in an exclusive measurement window."""
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import time
+import e11_support as support
+from e18_process import ProcessSampler
+
+ROOT=support.ROOT
+DATA=ROOT/'docs/experiments/data/E26'
+LOCAL=ROOT/'.local/evidence/E26'
+
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--bins',type=Path,required=True)
+    args=parser.parse_args()
+    if not args.name.startswith(('e26-','repro-')) or '/' in args.name:raise RuntimeError('scoped fresh name required')
+    target=DATA/(args.name+'.json')
+    if target.exists():raise RuntimeError('calibration already exists')
+    binary=args.bins.resolve()/'e26_clock_probe'
+    identity=sha(binary)
+    result=dict(kind='E26-clock-window',status='preflight',binary_sha256=identity)
+    held=False
+    monitor=None
+    began=time.monotonic()
+    try:
+        subprocess.run([str(ROOT/'.local/bin/host-window'),'quiet','E26',args.name],check=True);held=True
+        deadline=time.monotonic()+180
+        while os.getloadavg()[0]>4:
+            if time.monotonic()>deadline:raise RuntimeError('start load did not settle below four')
+            time.sleep(1)
+        result['load_start']=os.getloadavg()
+        result['window_start']=subprocess.check_output([str(ROOT/'.local/bin/host-window'),'status'],text=True)
+        monitor=ProcessSampler(observer=True).start()
+        raw_path=LOCAL/(args.name+'-stdout.json')
+        with raw_path.open('x') as stream:
+            child=subprocess.Popen([str(binary)],cwd=ROOT,stdout=stream,stderr=subprocess.STDOUT)
+            monitor.register('clock-probe',child.pid)
+            monitor.capture('joined');monitor.capture('steady-first')
+            exit_code=child.wait(timeout=120)
+        monitor.capture('steady-last')
+        if exit_code:raise RuntimeError('clock probe failed')
+        result['calibration']=json.loads(raw_path.read_text())
+        result.update(status='complete',probe_exit=exit_code)
+    except BaseException as error:
+        result.update(status='failed',error=str(error));raise
+    finally:
+        if monitor:
+            monitor.stop();report=monitor.report()
+            report['outside_process_names']={pid:'outside' for pid in report['outside_process_names']}
+            for phase in report['phases'].values():
+                if phase:
+                    for row in phase['outside']:row['name']='outside'
+            result['processes']=report
+            phases=[report['phases'][name] for name in ['steady','whole_cell']]
+            result['noise_valid']=not monitor.error and all(phase and phase['no_outside_process_above_half_core'] for phase in phases)
+        if held:
+            result['window_end']=subprocess.check_output([str(ROOT/'.local/bin/host-window'),'status'],text=True)
+            subprocess.run([str(ROOT/'.local/bin/host-window'),'release','E26'],check=True)
+        result['seconds_including_queue']=time.monotonic()-began
+        support.save(target,result)
+        if sha(binary)!=identity:raise RuntimeError('clock probe binary changed')
+    print(json.dumps(dict(status=result['status'],noise_valid=result.get('noise_valid'),calibration=result.get('calibration')),indent=2))
+
+
+if __name__=='__main__':
+    with (LOCAL/'operation.lock').open('a') as operation:
+        fcntl.flock(operation,fcntl.LOCK_EX)
+        main()

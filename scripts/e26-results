@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Recompute E26 timer partitions, overhead comparisons and raw-byte identities."""
+import argparse
+import gzip
+import hashlib
+import json
+import math
+from pathlib import Path
+import statistics
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E26'
+OURS = {0,1,2,3,4,5,6,7,11,12,13,14,15}
+
+
+def read(path):
+    raw = gzip.decompress(path.read_bytes()) if path.suffix == '.gz' else path.read_bytes()
+    return json.loads(raw), hashlib.sha256(raw).hexdigest()
+
+
+def percentile(values, fraction):
+    return sorted(values)[math.ceil(len(values)*fraction)-1] if values else None
+
+
+def timers(cell):
+    sample = cell['e26_timers']
+    chosen = cell['e26_selection']['tile']
+    low = cell['game_time_before'][chosen]['tick']
+    high = cell['game_time_after'][chosen]['tick']
+    rows = [row for row in sample['rows'] if row['sequence'] > 1 and low < row['tick'] <= high]
+    if not rows or sample['dropped']:
+        raise RuntimeError('missing or dropped direct timer rows')
+    if any(sum(row['ns']) != row['busy_ns'] or row['busy_ns'] <= 0 for row in rows):
+        raise RuntimeError('timer partition does not equal busy time')
+    sequences = [row['sequence'] for row in rows]
+    if sequences != list(range(sequences[0], sequences[-1]+1)):
+        raise RuntimeError('direct timer sequence has a gap')
+    total = sum(row['busy_ns'] for row in rows)
+    waits = sum(row.get('pacing_wait_ns',0) for row in rows)
+    workers = sum(row.get('worker_wait_ns',0) for row in rows)
+    if any(row.get('worker_wait_ns',0) > row.get('pacing_wait_ns',0) for row in rows):
+        raise RuntimeError('worker wait is not a subset of pacing wait')
+    costs = [sum(row['ns'][i] for row in rows) for i in range(16)]
+    calls = [sum(row['calls'][i] for row in rows) for i in range(16)]
+    added = sum(costs[i] for i in OURS)
+    result = dict(ticks=len(rows), first_tick=rows[0]['tick'], last_tick=rows[-1]['tick'],
+                  busy_seconds=total/1e9, pacing_wait_seconds=waits/1e9,
+                  busy_plus_pacing_seconds=(total+waits)/1e9, added_seconds=added/1e9,
+                  worker_wait_seconds=workers/1e9, pacing_sleep_seconds=(waits-workers)/1e9,
+                  added_fraction=added/total, accounting='exclusive elapsed-time partition; explicit sleep excluded; local and shared upper bounds retained',
+                  categories={label:dict(seconds=costs[i]/1e9, fraction=costs[i]/total, calls=calls[i])
+                              for i,label in enumerate(sample['labels'])},
+                  per_tick_added_fraction_p50=percentile([sum(row['ns'][i] for i in OURS)/row['busy_ns'] for row in rows], .5),
+                  per_tick_added_fraction_p99=percentile([sum(row['ns'][i] for i in OURS)/row['busy_ns'] for row in rows], .99),
+                  arithmetic='passed', dropped=sample['dropped'])
+    for field, values in {
+        'busy':[row['busy_ns']/1e6 for row in rows],
+        'pacing_wait':[row.get('pacing_wait_ns',0)/1e6 for row in rows],
+        'worker_wait':[row.get('worker_wait_ns',0)/1e6 for row in rows],
+        'pacing_sleep':[(row.get('pacing_wait_ns',0)-row.get('worker_wait_ns',0))/1e6 for row in rows],
+    }.items():
+        result[field+'_per_tick_ms'] = dict(p50=percentile(values,.5),p99=percentile(values,.99),
+            maximum=max(values),nonzero_ticks=sum(value>0 for value in values))
+    result['pacing_wait_location'] = 'after the previous raw E11 tick interval, before the following tick; assigned to the following busy row'
+    result['worker_wait_raw_tick_p99'] = dict(contribution_ms=0,
+        method='source ordering: wait_for_next_server_tick_with -> pump_chunks -> Streaming::wait runs after e11_ticked; no time is subtracted from raw ticks',
+        causality='worker wait can follow reader or prewarm chunk demand; its cause is not attributed and it is not added to the additions fraction')
+    pulses = [row['ns'][15]/1000 for row in rows]
+    if any(row['calls'][15] for row in rows):
+        once = all(row['calls'][15] == 1 for row in rows)
+        median = statistics.median(pulses)
+        result['planted'] = dict(expected_us=200, tolerance_us=[200,220], once_per_tick=once,
+            p50_us=median, p95_us=percentile(pulses,.95), p99_us=percentile(pulses,.99),
+            measured_fraction=added/total,
+            fraction_without_known_pulse=(added-costs[15])/(total-costs[15]),
+            expected_fraction_increase=(added/total)-(added-costs[15])/(total-costs[15]),
+            pass_control=once and 200 <= median <= 220)
+    return result
+
+
+def row(path):
+    raw, digest = read(path)
+    cells = list(raw.get('cells',{}).values())
+    result = dict(path=str(path.relative_to(ROOT)), decompressed_sha256=digest,
+                  arm=raw.get('e26_arm'), status=raw.get('status'))
+    if len(cells) != 1 or cells[0].get('status') != 'complete':
+        result['valid'] = False
+        result['reason'] = raw.get('error', 'cell incomplete')
+        return result
+    cell = cells[0]
+    steady = cell['processes']['phases']['steady']
+    chosen = cell['e26_selection']['tile']
+    main = cell['tile_thread_cpu'][chosen]['main']
+    result.update(valid=cell['noise_valid'] and cell['load_start'][0] <= 4
+                  and raw.get('adapter_unchanged_during_cell') is True
+                  and raw.get('shared_harness_unchanged_during_cell') is True
+                  and raw.get('host_window_verified') is True
+                  and all(value.get('main') for value in cell['tile_thread_cpu'].values()),
+                  harness_sha256=raw.get('harness_sha256'),adapter_sha256=raw.get('adapter_sha256'),
+                  executed_kernel_sha256=raw.get('executed_kernel',{}).get('sha256'),
+                  selected=chosen, capacity_pass=cell['diagnostic_pass'], failures=cell['diagnostic_failures'],
+                  server_cores=steady['server_cores'],
+                  mean_tile_cores=sum(steady['fixture']['tile-'+label]['cores'] for label in 'abcd')/4,
+                  selected_tile_cores=steady['fixture']['tile-'+chosen]['cores'],
+                  proxy_cores=steady['fixture']['proxy']['cores'],
+                  main_cores=main['cores'] if main else None,
+                  per_tile_main_cores={label:value['main']['cores'] if value['main'] else None
+                                       for label,value in cell['tile_thread_cpu'].items()},
+                  per_tile_cores={label:steady['fixture']['tile-'+label]['cores'] for label in 'abcd'},
+                  threads={name:sum(thread['cores'] for thread in cell['tile_thread_cpu'][chosen]['threads'] if thread['name']==name)
+                           for name in ['main','e6-cut-writer','goliath-lease']},
+                  selected_p50_ms=cell['e26_tick_quantiles'][chosen]['p50_ms'],
+                  selected_p99_ms=cell['e26_tick_quantiles'][chosen]['p99_ms'],
+                  all_tile_quantiles=cell['e26_tick_quantiles'],
+                  minimum_tps=min(cell['game_time_tps'].values()),
+                  digest_records=sum(len(batch.get('digests',[])) for batch in cell['tick_samples'].values()),
+                  maximum_outside_cores=steady['outside_max_process_cores'],
+                  server_stops=cell['limiter_window']['servers'],
+                  bot_stops=cell['limiter_window']['bots'],
+                  populations={phase:{label:{key:state[key] for key in ['real','placed','held','readers','chunks','population']}
+                                     for label,state in cell[phase].items()} for phase in ['before','after']})
+    if 'e26_timers' in cell:
+        result['timers'] = timers(cell)
+    return result
+
+
+def compare(rows):
+    arms = {arm:[record for record in rows if record['arm']==arm and record.get('valid')] for arm in ['A','B']}
+    fields = ['server_cores','mean_tile_cores','selected_tile_cores','main_cores','selected_p50_ms','selected_p99_ms']
+    result = dict(counts={arm:len(records) for arm,records in arms.items()}, method='fixed balanced order; descriptive within-arm range, medians and mean shift; four rows per arm are not a confidence interval', metrics={})
+    for field in fields:
+        values = {arm:[record[field] for record in records] for arm,records in arms.items()}
+        if not all(values.values()):
+            continue
+        summary = {arm:dict(mean=statistics.mean(v), median=statistics.median(v), minimum=min(v), maximum=max(v), range=max(v)-min(v)) for arm,v in values.items()}
+        delta = summary['B']['mean']-summary['A']['mean']
+        noise = max(summary['A']['range'],summary['B']['range'])
+        result['metrics'][field] = dict(arms=summary, mean_B_minus_A=delta, observed_noise_range=noise,
+                                       shift_inside_observed_noise=abs(delta)<=noise)
+    result['complete_fixed_AB'] = result['counts']=={'A':4,'B':4}
+    observed = [record for arm in arms.values() for record in arm]
+    result['same_harness'] = bool(observed) and all(
+        record.get(field)==observed[0].get(field) for record in observed
+        for field in ['harness_sha256','adapter_sha256','executed_kernel_sha256'])
+    result['complete_fixed_AB'] = result['complete_fixed_AB'] and result['same_harness']
+    ordered = [record for record in rows if record['arm'] in {'A','B'}]
+    result['observed_order'] = [record['arm'] for record in ordered]
+    result['fixed_order_matches'] = result['observed_order']==['A','B','B','A','B','A','A','B']
+    result['complete_fixed_AB'] = result['complete_fixed_AB'] and result['fixed_order_matches']
+    result['pairs'] = []
+    for index in range(0,len(ordered)-1,2):
+        pair = ordered[index:index+2]
+        if {record['arm'] for record in pair}!={'A','B'} or not all(record.get('valid') for record in pair):
+            result['pairs'].append(dict(pair=index//2+1,eligible=False,paths=[record['path'] for record in pair]))
+            continue
+        a = next(record for record in pair if record['arm']=='A')
+        b = next(record for record in pair if record['arm']=='B')
+        active = b['selected']
+        result['pairs'].append(dict(pair=index//2+1,eligible=True,A=a['path'],B=b['path'],
+            B_minus_A={field:b[field]-a[field] for field in fields},
+            B_active_tile=active,
+            active_tile_main_B_minus_same_A_tile=b['main_cores']-a['per_tile_main_cores'][active],
+            active_tile_process_B_minus_same_A_tile=b['selected_tile_cores']-a['per_tile_cores'][active]))
+    result['verdict'] = 'unproven' if not result['complete_fixed_AB'] else 'inspect perturbation and coverage before acceptance'
+    return result
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('names', nargs='+')
+    parser.add_argument('--out', default='e26-summary.json')
+    args = parser.parse_args()
+    if not args.out.startswith(('e26-','repro-')) or '/' in args.out:
+        raise RuntimeError('scoped output name required')
+    rows = []
+    for name in args.names:
+        path = DATA / (name+'.json')
+        if not path.exists():
+            path = path.with_suffix('.json.gz')
+        rows.append(row(path))
+    result = dict(rows=rows, comparison=compare(rows))
+    (DATA/args.out).write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2))

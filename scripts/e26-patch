@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Export the diagnostic delta and prove it on the pinned FINAL-09 tree."""
+import argparse
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon-tiles'
+LOCAL = ROOT / '.local/evidence/E26'
+DATA = ROOT / 'docs/experiments/data/E26'
+PATCH = ROOT / 'patches/horizon-14-tick-timers.patch'
+NUMBER = 14
+AFTER = None
+
+
+def base_index():
+    return f'patch{AFTER}-proof-index' if AFTER else 'final09-index'
+
+
+def git(*args, index='final09-index'):
+    return subprocess.check_output(['git', *map(str,args)], cwd=SOURCE,
+        env=dict(os.environ, GIT_OPTIONAL_LOCKS='0', GIT_INDEX_FILE=str(LOCAL/index)),
+        stderr=subprocess.DEVNULL)
+
+
+def contents():
+    proof = json.loads((DATA / 'e26-final09-source.json').read_text())
+    paths = sorted(set(proof['files']) | {'crates/horizon-core/src/tick_timers.rs',
+                                        'crates/horizon-client/src/game/commands/pregen.rs'})
+    result = {}
+    for name in paths:
+        raw = (SOURCE / name).read_text()
+        if name == 'crates/horizon-client/Cargo.toml':
+            raw = raw.replace('../../../../evidence/E26/original-internal/crates/goliath-store',
+                              '../../../../../crates/goliath-store')
+        result[name] = raw
+    return proof, result
+
+
+def emit():
+    if PATCH.exists():
+        raise RuntimeError('never overwrite an existing diagnostic patch')
+    proof, files = contents()
+    chunks = []
+    for name,new in files.items():
+        try:
+            old = git('show', ':' + name, index=base_index()).decode()
+        except subprocess.CalledProcessError:
+            old = ''
+        if old == new:
+            continue
+        chunks.append(f'diff --git a/{name} b/{name}\n')
+        if not old:
+            chunks.append('new file mode 100644\n')
+        chunks.extend(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
+                       fromfile='a/' + name if old else '/dev/null', tofile='b/' + name))
+    patch = ''.join(chunks)
+    print('*** Begin Patch')
+    print('*** Add File: ' + str(PATCH))
+    for line in patch.splitlines():
+        print('+' + line)
+    print('*** End Patch')
+
+
+def check():
+    proof, files = contents()
+    base = json.loads((DATA / f'e26-patch{AFTER}-proof.json').read_text())['tree'] if AFTER else proof['tree']
+    index = f'patch{NUMBER}-proof-index'
+    git('read-tree', base, index=index)
+    git('apply', '--cached', '--check', PATCH, index=index)
+    git('apply', '--cached', PATCH, index=index)
+    mismatches = [name for name,expected in files.items()
+                  if git('show', ':'+name, index=index).decode() != expected]
+    if mismatches:
+        raise RuntimeError('source mismatch: ' + str(mismatches))
+    result = dict(kind='E26-diagnostic-patch-proof', pin=proof['pin'],
+                  final09_tree=proof['tree'], base_tree=base, after_patch=AFTER,
+                  patch=str(PATCH.relative_to(ROOT)),
+                  patch_sha256=hashlib.sha256(PATCH.read_bytes()).hexdigest(),
+                  tree=git('write-tree', index=index).decode().strip(),
+                  files={name:hashlib.sha256(text.encode()).hexdigest() for name,text in files.items()},
+                  clean_apply='passed', source_equality='passed',
+                  build_overlay=dict(path='crates/horizon-client/Cargo.toml',
+                      reason='Link the original frozen dependency export without changing E24 source.',
+                      expected_sha256=hashlib.sha256(files['crates/horizon-client/Cargo.toml'].encode()).hexdigest(),
+                      build_sha256=hashlib.sha256((SOURCE/'crates/horizon-client/Cargo.toml').read_bytes()).hexdigest()))
+    (DATA / f'e26-patch{NUMBER}-proof.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(dict(clean_apply='passed', source_equality='passed', files=len(files), patch_sha256=result['patch_sha256'])))
+
+
+def recover(name):
+    proof = json.loads((DATA / 'e26-patch14-proof.json').read_text())
+    if name not in proof['files']:
+        raise RuntimeError('recovery path outside the diagnostic proof')
+    new = git('show', ':' + name, index='patch14-proof-index').decode()
+    if hashlib.sha256(new.encode()).hexdigest() != proof['files'][name]:
+        raise RuntimeError('recorded diagnostic tree changed')
+    if name == 'crates/horizon-client/Cargo.toml':
+        new = new.replace('../../../../../crates/goliath-store',
+                          '../../../../evidence/E26/original-internal/crates/goliath-store')
+    path = SOURCE / name
+    old = path.read_text()
+    print('*** Begin Patch')
+    if old != new:
+        print('*** Update File: ' + str(path))
+        for line in list(difflib.unified_diff(old.splitlines(), new.splitlines(), n=3))[2:]:
+            print('@@' if line.startswith('@@') else line)
+    print('*** End Patch')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['emit','check','recover'])
+    parser.add_argument('path', nargs='?')
+    parser.add_argument('--number', type=int, default=14)
+    parser.add_argument('--after', type=int)
+    args = parser.parse_args()
+    NUMBER, AFTER = args.number, args.after
+    if NUMBER == 15:
+        PATCH = ROOT / 'patches/horizon-15-tick-timer-conditions.patch'
+    elif NUMBER == 16:
+        PATCH = ROOT / 'patches/horizon-16-reader-inbox-timers.patch'
+    elif NUMBER == 17:
+        PATCH = ROOT / 'patches/horizon-17-tick-busy-waits.patch'
+    elif NUMBER == 18:
+        PATCH = ROOT / 'patches/horizon-18-tick-wait-detail.patch'
+    elif NUMBER != 14:
+        raise RuntimeError('this exporter owns diagnostic patches 14 through 18 only')
+    if args.action == 'recover':
+        recover(args.path)
+    else:
+        emit() if args.action == 'emit' else check()

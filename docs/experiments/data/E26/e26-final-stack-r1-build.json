@@ -1,0 +1,131 @@
+{
+  "kind": "E26-final-tile-native-release",
+  "status": "complete",
+  "profile": "release",
+  "incremental": false,
+  "lto": "thin",
+  "codegen_units": 1,
+  "one_build_marker": false,
+  "source_proof": {
+    "path": "docs/experiments/data/E26/e26-final-warm-r1-source.json",
+    "sha256": "58024b943f6fa5a6bfcf87190ff80c2d38146d6130b04ea5554d77e5aa8b2509"
+  },
+  "base_snapshot": {
+    "path": ".local/bin/goliath-e24/lease-fixed-r2",
+    "build_sha256": "550cf8a78d61092a25a058ab5ece62e3b0a4329eba6617ee4880f6bb6dbdf771"
+  },
+  "commands": [
+    {
+      "label": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "test_results": [],
+      "reused_from": "e26-final-warm-r1"
+    },
+    {
+      "label": "lease-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "game::dedicated::cluster::lease::"
+      ],
+      "exit": 0,
+      "test_results": [
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 1251 filtered out; finished in 0.00s"
+      ],
+      "reused_from": "e26-final-warm-r1"
+    },
+    {
+      "label": "warm-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "game::dedicated::tile_cut::tests::"
+      ],
+      "exit": 0,
+      "test_results": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1261 filtered out; finished in 0.00s"
+      ],
+      "reused_from": "e26-final-warm-r1"
+    },
+    {
+      "label": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "test_results": [],
+      "reused_from": "e26-final-warm-r1"
+    },
+    {
+      "label": "release",
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "--no-default-features",
+        "-p",
+        "horizon-client",
+        "--bin",
+        "horizon-client"
+      ],
+      "exit": 0,
+      "test_results": [],
+      "reused_from": "e26-final-warm-r1"
+    }
+  ],
+  "matched_proxy": {
+    "path": ".local/bin/meridian-e25/e25-reactor1-matched-r2",
+    "binary_sha256": "80f8953a201a51a0cae84341080af0bd70e08586ad608475b3092b2c30d3c378",
+    "build_sha256": "fe72bacba1c70c813a1ac95dcb32f02c18965663bffbd2d946c68f5027ada1b9",
+    "cargo_lock_sha256": "fbdcf24e84e611791abbd164ea31e4156424b65aea52f747bcdf209ccefee7d6"
+  },
+  "no_new_cargo_commands": true,
+  "gate_reuse": {
+    "record": "docs/experiments/data/E26/e26-final-warm-r1-build.json",
+    "record_sha256": "86766cb73f0cf5d5ec60258e81b75999022885f58059f0a4ef922d2ae692ee81",
+    "log": ".local/evidence/E26/e26-final-warm-r1-serial.log",
+    "log_sha256": "7fe2f867b134ca0a719cd24ad2955449a4a1e777de9db666ba4a06e30ba68d65",
+    "retained_chain_one_marker": true,
+    "reason": "All retained gates completed; transport reporting failed before snapshot creation."
+  },
+  "directory": ".local/bin/horizon-e26/e26-final-stack-r1",
+  "binaries": {
+    "horizon-client": "9c3d0d0cab89e3bf474e73042854a7af9b7ac18baa60ba3a4391dbe8fc8f2f99",
+    "meridian": "80f8953a201a51a0cae84341080af0bd70e08586ad608475b3092b2c30d3c378",
+    "goliath-store": "9636fa6d8089b071be241437e79eb2942a07dc756039b394e73cc8f705e26d0e",
+    "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+    "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d",
+    "e4-client": "e9f85501d0e40ad223ae203d2f3e682c2b59d396f4eb00fbba163b817d8f0025"
+  },
+  "acceptance": "Candidate only. Runtime, capacity and review acceptance are separate.",
+  "seconds_including_queue": 0.27950387497548945
+}
