@@ -462,3 +462,18 @@ do not replace the accepted measurement stack or qualify an availability fix.
   authority. Every other reply, including stale fence and expired lease, stays an error
   that stops the tile as before. Tests cover the refused login, a registered one beside
   it, and every other store fault.
+
+- `meridian-13-manager-park.patch`: E30's candidate on Meridian
+  `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`, after the reactor-1 stack ending at
+  `meridian-06-io-pool.patch`. It does not need or include patches 07 to 12.
+  A terrain manager that has no reader, wants none and saw no reset now waits
+  for a change instead of polling every 20 ms. The session wakes it when the
+  position leaves its chunk column, on a server placement or its
+  acknowledgement, on a new active backend, on a terrain reset, radius or first
+  position, and when the session ends. It looks again after 250 ms regardless.
+  A manager near a wall keeps the 20 ms loop, and tile maps not aligned to 16
+  blocks keep it always. `E30_TERRAIN_POLL=1` restores the fixed poll in the
+  same binary. Thread count, authority, leases and the wall trigger are
+  unchanged. `scripts/boat-gates reactor-2` passes: 1,107 tests, nine of them
+  new. No release binary exists and no cell has run, so no saving is claimed.
+  See [E30](../docs/experiments/E30-proxy-cost.md).

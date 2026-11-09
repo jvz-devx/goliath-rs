@@ -15,6 +15,7 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / 'docs/experiments/data/E28'
 WORK = ROOT / '.local/boat-gates'
+REACTOR_2 = ROOT / 'docs/experiments/data/E30/reactor-2-inputs.json'
 
 
 def digest(path):
@@ -41,14 +42,18 @@ def plan(stack, source):
     commands = []
     source.run = lambda label, directory, command: commands.append(
         (label, directory, source.fast_gate(command))) or 0
-    if stack in ['proxy', 'root']:
-        source.build(stack)
+    if stack in ['proxy', 'reactor-2', 'root']:
+        source.build('proxy' if stack == 'reactor-2' else stack)
         commands = [row for row in commands if '--profile' not in row[2]
                     or row[2][1] != 'build']
-        if stack == 'proxy':
+        if stack in ['proxy', 'reactor-2']:
             historical = json.loads((ROOT / 'docs/experiments/data/E18/reactor-1-build.json').read_text())
             commands.insert(1, ('proxy-scoped-fmt', '.local/src/meridian',
                                 historical['gates']['commands'][0]['command']))
+        if stack == 'reactor-2':
+            # Reactor-1's gate set, then the gates the E30 inputs add for the changed files.
+            commands += [(row['label'], '.local/src/meridian', row['command'])
+                         for row in json.loads(REACTOR_2.read_text())['gates']]
     else:
         source.gates(stack)
     return commands
@@ -56,7 +61,7 @@ def plan(stack, source):
 
 def reconstruct(stack, source):
     plain = stack == 'plain-09'
-    proxy = stack == 'proxy'
+    proxy = stack in ['proxy', 'reactor-2']
     directory = 'meridian' if proxy else 'horizon' if plain else 'horizon-tiles'
     bundle = 'final' if proxy or stack == 'final-r2' else stack
     record = json.loads((DATA / ('build-' + bundle + '.json')).read_text())
@@ -66,6 +71,12 @@ def reconstruct(stack, source):
         record['projects']['horizon']['patches'] = record['projects']['horizon']['patches'] + inputs['patches']
         record['projects']['horizon']['source_files'] = dict(record['projects']['horizon']['source_files'],
                                                              **inputs['changed_source_files'])
+    if stack == 'reactor-2':
+        # Reactor-1's pinned stack plus the E30 patch; the proxy bundle itself is unchanged.
+        inputs = json.loads(REACTOR_2.read_text())
+        record['projects']['meridian']['patches'] = record['projects']['meridian']['patches'] + inputs['patches']
+        record['projects']['meridian']['source_files'] = dict(record['projects']['meridian']['source_files'],
+                                                              **inputs['changed_source_files'])
     # Root sync intentionally excludes .git. Internal inputs are the synced
     # crate/config files, not a Git inventory inside the sandbox.
     inputs = [ROOT / name for name in ['Cargo.toml', 'Cargo.lock', 'clippy.toml']]
@@ -171,6 +182,8 @@ def execute(stack, commands, destination):
     expected = json.loads((DATA / 'build-verification.json').read_text())['native_tests_passed']
     if stack == 'final-r2':
         expected = dict(expected, **json.loads((DATA / 'final-r2-inputs.json').read_text())['expected_tests'])
+    if stack == 'reactor-2':
+        expected = dict(expected, **json.loads(REACTOR_2.read_text())['expected_tests'])
     rows = []
     for label, directory, command in commands:
         if '--release' in command or command[:2] == ['cargo', 'build']:
@@ -207,7 +220,7 @@ def execute(stack, commands, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('stack', choices=['plain-09', 'final', 'final-r2', 'final-lite', 'final-stamps', 'reactor-1', 'proxy', 'root'])
+    parser.add_argument('stack', choices=['plain-09', 'final', 'final-r2', 'final-lite', 'final-stamps', 'reactor-1', 'reactor-2', 'proxy', 'root'])
     parser.add_argument('--plan', action='store_true', help='print commands without resetting or building')
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--output', type=Path, help='JSON under .local/boat-gates; defaults to a unique run name')

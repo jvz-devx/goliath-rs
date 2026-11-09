@@ -1,0 +1,295 @@
+{
+  "schema_version": 1,
+  "stack": "reactor-2",
+  "status": "passed",
+  "profile": "fast",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "recipe_sha256": "f5576a76729dd6e55ac257b8fbe5f2b0a8e3f6406403319eb8062fb59798bcb1",
+  "runner_sha256": "7407fffa32edaf95e1630bc8d21894badd248dfa13590c1c02eee5e9cdd31712",
+  "disposition_sha256": "e54b2b89df118d9964f8073258dd5148053de808f382e25dce4be9215042d01c",
+  "gates": [
+    {
+      "label": "proxy-fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "cwd": ".local/src/meridian",
+      "exit": 1,
+      "seconds": 0.691,
+      "status": "accepted-toolchain-lint",
+      "test_results": [],
+      "passed_tests": 0,
+      "expected_tests": null,
+      "log": ".local/boat-gates/reactor-2-20261109T211113Z-proxy-fmt.log",
+      "log_sha256": "5604a6fc6d8af40d6ba2a8a5dfa96391700c5b70440e7a7144f5297d6f901818"
+    },
+    {
+      "label": "proxy-scoped-fmt",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "crates/meridian-handoff/src/drain.rs",
+        "crates/meridian-handoff/src/lib.rs",
+        "crates/meridian-handoff/src/session.rs",
+        "crates/meridian-handoff/src/session/reactive.rs",
+        "crates/meridian-handoff/src/switch.rs",
+        "crates/meridian-handoff/src/terrain.rs",
+        "crates/meridian-handoff/src/tests/mod.rs",
+        "crates/meridian-handoff/src/tests/reactive.rs",
+        "crates/meridian-handoff/src/transport.rs",
+        "crates/meridian-net/src/io_pool.rs",
+        "crates/meridian-net/src/io_pool/tasks.rs",
+        "crates/meridian-net/src/io_pool/tests.rs",
+        "crates/meridian-net/src/lib.rs",
+        "crates/meridian-proxy/src/io_runtime.rs",
+        "crates/meridian-proxy/src/main.rs",
+        "crates/meridian-proxy/src/session.rs"
+      ],
+      "cwd": ".local/src/meridian",
+      "exit": 0,
+      "seconds": 0.432,
+      "status": "passed",
+      "test_results": [],
+      "passed_tests": 0,
+      "expected_tests": null,
+      "log": ".local/boat-gates/reactor-2-20261109T211113Z-proxy-scoped-fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "proxy-clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--profile",
+        "fast",
+        "-p",
+        "meridian-handoff",
+        "-p",
+        "meridian-proxy",
+        "-p",
+        "meridian-sidecar",
+        "-p",
+        "meridian-net",
+        "--all-targets",
+        "--message-format=json",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": ".local/src/meridian",
+      "exit": 101,
+      "seconds": 0.706,
+      "status": "accepted-toolchain-lint",
+      "test_results": [],
+      "passed_tests": 0,
+      "expected_tests": null,
+      "log": ".local/boat-gates/reactor-2-20261109T211113Z-proxy-clippy.log",
+      "log_sha256": "ddb2271aaa2d5b4bcb0756a151a43ce65793af0718f89a104c22f6a40e52c5fd"
+    },
+    {
+      "label": "proxy-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--profile",
+        "fast",
+        "-p",
+        "meridian-config",
+        "-p",
+        "meridian-ghost",
+        "-p",
+        "meridian-handoff",
+        "-p",
+        "meridian-proxy",
+        "-p",
+        "meridian-sidecar",
+        "-p",
+        "meridian-net",
+        "--",
+        "--skip",
+        "serve::tests::the_listener_queues_a_large_burst"
+      ],
+      "cwd": ".local/src/meridian",
+      "exit": 0,
+      "seconds": 18.862,
+      "status": "passed",
+      "test_results": [
+        "test result: ok. 202 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+        "test result: ok. 102 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.12s",
+        "test result: ok. 104 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.81s",
+        "test result: ok. 565 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 10.70s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s",
+        "test result: ok. 99 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.56s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "passed_tests": 1107,
+      "expected_tests": 1107,
+      "log": ".local/boat-gates/reactor-2-20261109T211113Z-proxy-tests.log",
+      "log_sha256": "4a58586e487383e5b5f3c895faff48968c5190307fc4c39df4c3a1ae02b49128"
+    },
+    {
+      "label": "reactor-2-fmt",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "crates/meridian-handoff/src/session.rs",
+        "crates/meridian-handoff/src/terrain.rs",
+        "crates/meridian-handoff/src/tests/mod.rs",
+        "crates/meridian-handoff/src/tests/terrain_wake.rs",
+        "crates/meridian-proxy/src/terrain.rs"
+      ],
+      "cwd": ".local/src/meridian",
+      "exit": 0,
+      "seconds": 0.064,
+      "status": "passed",
+      "test_results": [],
+      "passed_tests": 0,
+      "expected_tests": null,
+      "log": ".local/boat-gates/reactor-2-20261109T211113Z-reactor-2-fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "reactor-2-clippy-changed",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--profile",
+        "fast",
+        "-p",
+        "meridian-handoff",
+        "-p",
+        "meridian-proxy",
+        "--all-targets",
+        "--message-format=json",
+        "--",
+        "-D",
+        "warnings",
+        "-A",
+        "deprecated"
+      ],
+      "cwd": ".local/src/meridian",
+      "exit": 0,
+      "seconds": 4.385,
+      "status": "passed",
+      "test_results": [],
+      "passed_tests": 0,
+      "expected_tests": null,
+      "log": ".local/boat-gates/reactor-2-20261109T211113Z-reactor-2-clippy-changed.log",
+      "log_sha256": "f90b18c9070937017dc6a6f4a27e65849a93f9e96985fbd8e012c3bb9509a60e"
+    },
+    {
+      "label": "reactor-2-park-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--profile",
+        "fast",
+        "-p",
+        "meridian-handoff",
+        "-p",
+        "meridian-proxy",
+        "--",
+        "tests::terrain_wake::",
+        "terrain::tests::"
+      ],
+      "cwd": ".local/src/meridian",
+      "exit": 0,
+      "seconds": 0.213,
+      "status": "passed",
+      "test_results": [
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 94 filtered out; finished in 0.05s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 561 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "passed_tests": 13,
+      "expected_tests": 13,
+      "log": ".local/boat-gates/reactor-2-20261109T211113Z-reactor-2-park-tests.log",
+      "log_sha256": "a14e641d817a76b506f98ace540a76b0f063fa497a76553c9f719bbea0c2140a"
+    }
+  ],
+  "resources_manifest_sha256": "9d61607283b04dbd38416093b74ed4a1d9b8616332940d716e4dea4d1a979aeb",
+  "source": {
+    "directory": ".local/src/meridian",
+    "pin": "902dcf195e0a8bbd3f39a5f560684af00e64bf5d",
+    "patches": [
+      {
+        "path": "patches/e2-meridian-client.patch",
+        "sha256": "76153e124f7dfd30acffe95207c92c3df852c03875a71bc887bfd087a53e55b4",
+        "apply_options": [],
+        "check_exit": 0
+      },
+      {
+        "path": "patches/meridian-01-wall-trigger.patch",
+        "sha256": "87468885e90981666b3df2a478f648774f50fdc42d72216a8439c781610b17c0",
+        "apply_options": [],
+        "check_exit": 0
+      },
+      {
+        "path": "patches/meridian-02-fast-crossing.patch",
+        "sha256": "16f3d8b789a74580567d4be88932d4a6162228ea27209371d5d199c013a145c1",
+        "apply_options": [],
+        "check_exit": 0
+      },
+      {
+        "path": "patches/meridian-03-cluster.patch",
+        "sha256": "e22565803765a3d286fdd9ba1a9a12955f35f6d938948d9e96856bd3269ce864",
+        "apply_options": [],
+        "check_exit": 0
+      },
+      {
+        "path": "patches/meridian-04-m2.patch",
+        "sha256": "d7587b8c786534ade48d38b5cf6779a93d7144efabc0a1d93c0bcfc18dab5e96",
+        "apply_options": [],
+        "check_exit": 0
+      },
+      {
+        "path": "patches/meridian-05-proxy-cost.patch",
+        "sha256": "ce9c62dddb7b0312c16a0aca10dc15831e6487a48a8252f523e7edb9a89585cf",
+        "apply_options": [],
+        "check_exit": 0
+      },
+      {
+        "path": "patches/meridian-06-io-pool.patch",
+        "sha256": "449d295afc62d3b577c6a1afdee6d21349b4377475519ff9e170ca0d0268e9aa",
+        "apply_options": [],
+        "check_exit": 0
+      },
+      {
+        "path": "patches/meridian-13-manager-park.patch",
+        "sha256": "94e89066bf8d20ec8b6eb7b591cd578cdbd4a620b2c979ff9e3e48b0781735c9",
+        "apply_options": [],
+        "check_exit": 0
+      }
+    ],
+    "compiled_sources_match_e28": true,
+    "internal_sources_match_e28": false,
+    "internal_source_differences": {
+      "crates/goliath-store/src/main.rs": {
+        "worktree": "215cbd3514095dab8cb4e05306b6102d73c511f4482e6535ae12b3cdaf3de400",
+        "e28": "2e8c8aae1830e92a22ad1464af7d583b80bebb3c2e7fb26987d199bcb91c2c17"
+      }
+    },
+    "internal_sources_sha256": "3c115cdcce660ce9cbdb20cf4c70404dd7a1e38217357558791cab4fcfa6463e",
+    "unchanged_source_mtimes_restored": 270,
+    "compiled_sources_sha256": "5aa877ce6a989ac63657dc9982309ef36a0998cf439e38c415cb7eca452ea966"
+  },
+  "seconds": 25.49
+}

@@ -1,0 +1,96 @@
+{
+  "kind": "E30-reactor-2-gate-inputs",
+  "schema_version": 1,
+  "base_bundle": "final",
+  "base_stack": "reactor-1",
+  "note": "Reactor-1's pinned Meridian stack plus meridian-13-manager-park, so remote gates can reconstruct reactor-2. No binary is frozen from it yet.",
+  "patches": [
+    {
+      "path": "patches/meridian-13-manager-park.patch",
+      "sha256": "94e89066bf8d20ec8b6eb7b591cd578cdbd4a620b2c979ff9e3e48b0781735c9",
+      "apply_options": []
+    }
+  ],
+  "changed_source_files": {
+    "crates/meridian-handoff/src/session.rs": "9fee3e7b256218d3236d54e838bff2be1a261bc4e3f8226c1273235bd64d0a18",
+    "crates/meridian-handoff/src/terrain.rs": "3f9580bbbd7db52bbf1e7136278efc209e3bb97f45a0208c518904f48068b804",
+    "crates/meridian-handoff/src/tests/mod.rs": "cae3fb520b4d67c6f28487c996742ea7ca92ff840c8ffe770c58af092419ba14",
+    "crates/meridian-handoff/src/tests/terrain_wake.rs": "4bd4d13b25557aba077fc440b501acc1ffe26439b234ff3eaeb657d89630281e",
+    "crates/meridian-proxy/src/terrain.rs": "76316ca30cfa0be3f1ea0c099f38d8ac86eb688ce1fc45ff1782fcea088109cc"
+  },
+  "gates": [
+    {
+      "label": "reactor-2-fmt",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--check",
+        "crates/meridian-handoff/src/session.rs",
+        "crates/meridian-handoff/src/terrain.rs",
+        "crates/meridian-handoff/src/tests/mod.rs",
+        "crates/meridian-handoff/src/tests/terrain_wake.rs",
+        "crates/meridian-proxy/src/terrain.rs"
+      ]
+    },
+    {
+      "label": "reactor-2-clippy-changed",
+      "command": [
+        "cargo",
+        "clippy",
+        "--locked",
+        "--profile",
+        "fast",
+        "-p",
+        "meridian-handoff",
+        "-p",
+        "meridian-proxy",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings",
+        "-A",
+        "deprecated"
+      ]
+    },
+    {
+      "label": "reactor-2-park-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--profile",
+        "fast",
+        "-p",
+        "meridian-handoff",
+        "-p",
+        "meridian-proxy",
+        "--",
+        "tests::terrain_wake::",
+        "terrain::tests::"
+      ]
+    }
+  ],
+  "expected_tests": {
+    "proxy-tests": 1107,
+    "reactor-2-park-tests": 13
+  },
+  "new_tests": {
+    "meridian-handoff": [
+      "terrain::tests::a_position_wakes_the_manager_only_when_it_leaves_its_column",
+      "terrain::tests::only_the_first_server_position_is_a_changed_input",
+      "tests::terrain_wake::a_move_ends_the_wait_only_when_it_leaves_the_column",
+      "tests::terrain_wake::a_change_during_a_wait_ends_it_before_the_limit",
+      "tests::terrain_wake::a_server_placement_and_its_acknowledgement_each_end_the_wait",
+      "tests::terrain_wake::a_new_backend_and_the_end_of_the_session_each_end_the_wait"
+    ],
+    "meridian-proxy": [
+      "terrain::tests::a_manager_waits_only_with_no_reader_no_wish_and_no_reset",
+      "terrain::tests::with_aligned_tiles_nearness_is_the_same_across_a_column",
+      "terrain::tests::with_unaligned_tiles_nearness_can_change_inside_a_column"
+    ]
+  },
+  "gate_notes": {
+    "reactor-2-clippy-changed": "Reactor-1's proxy-clippy stops at the accepted fetch_update deprecation in meridian-net, before it reaches the two crates this patch changes. This gate allows only that lint class so Clippy lints both changed crates with every other warning denied."
+  }
+}

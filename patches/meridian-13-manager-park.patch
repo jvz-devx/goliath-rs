@@ -1,0 +1,534 @@
+diff --git a/crates/meridian-handoff/src/session.rs b/crates/meridian-handoff/src/session.rs
+index f25e36d..ad0a09a 100644
+--- a/crates/meridian-handoff/src/session.rs
++++ b/crates/meridian-handoff/src/session.rs
+@@ -136,6 +136,7 @@ struct FinishSession(Arc<Shared>);
+ impl Drop for FinishSession {
+     fn drop(&mut self) {
+         self.0.client_gone.store(true, Ordering::SeqCst);
++        self.0.terrain_wake.changed();
+         self.0.ended.store(true, Ordering::SeqCst);
+         self.0.client_closer.close();
+         if !self.0.switching.load(Ordering::SeqCst) {
+@@ -164,6 +165,8 @@ pub(crate) struct Shared {
+     /// player is (the proxy's counts, its metrics page, a login placing another player)
+     /// must not wait for that. Changed only with `down` held, after `down.backend`.
+     backend: Mutex<String>,
++    /// Ends a terrain manager's wait when one of its inputs changes.
++    pub(crate) terrain_wake: crate::terrain::Wake,
+     /// For tests: when set, a move off a lost backend waits on the receiver once the client
+     /// has been told to go back to the configuration phase, before it closes the lost
+     /// connection, and says on the sender when it has closed it, so that a test can let the
+@@ -369,6 +372,7 @@ impl Session {
+             pending: Mutex::new(None),
+             disconnected: AtomicBool::new(false),
+             backend: Mutex::new(String::new()),
++            terrain_wake: crate::terrain::Wake::default(),
+             #[cfg(test)]
+             moving_gate: Mutex::new(None),
+             #[cfg(test)]
+@@ -488,6 +492,7 @@ impl Session {
+             match event {
+                 Event::Client(end) => {
+                     shared.client_gone.store(true, Ordering::SeqCst);
++                    shared.terrain_wake.changed();
+                     first = Some(end);
+                     break;
+                 }
+@@ -540,6 +545,7 @@ impl Session {
+         }
+         *lock(&shared.events) = None;
+         shared.client_gone.store(true, Ordering::SeqCst);
++        shared.terrain_wake.changed();
+         let output = shared.down().writer.pending_output();
+         if let Some(output) = output {
+             // Never hold the down lock while a driver needs it to make progress.
+@@ -761,6 +767,7 @@ fn activate(shared: &Arc<Shared>) {
+         up.teleports = Teleports::default();
+         up.client_pose = None;
+     }
++    shared.terrain_wake.changed();
+     shared.disconnected.store(false, Ordering::SeqCst);
+     shared.reconnecting.store(false, Ordering::SeqCst);
+     if spawn_lane(shared, Arc::clone(&lane), reader).is_err() {
+@@ -962,6 +969,7 @@ impl Shared {
+     /// `down.backend` is set.
+     pub fn set_backend(&self, backend: &str) {
+         *lock(&self.backend) = backend.to_owned();
++        self.terrain_wake.changed();
+     }
+ 
+     pub fn up(&self) -> MutexGuard<'_, Up> {
+@@ -1129,8 +1137,11 @@ fn backend_packet(
+             let mut pose = up.client_pose.unwrap_or_default();
+             pose.placed(&position);
+             up.authoritative_pose = Some((position.teleport, pose));
++            shared.terrain_wake.changed();
++        }
++        if crate::terrain::initial(terrain, id, &payload) {
++            shared.terrain_wake.changed();
+         }
+-        crate::terrain::initial(terrain, id, &payload);
+         if crate::terrain::packet(id) {
+             // Lazy composition takes owned columns from the actual lane.
+             // Foreign columns still come only from their static owner's reader.
+@@ -1318,7 +1329,12 @@ impl ClientPackets {
+                     .unwrap_or_default()
+                     .sent_by_client(id, &payload)
+                 {
++                    let moved =
++                        crate::terrain::left_cell(up.client_pose.map(|old| old.at), pose.at);
+                     up.client_pose = Some(pose);
++                    if moved {
++                        shared.terrain_wake.changed();
++                    }
+                 }
+                 if id == s::ACCEPT_TELEPORTATION
+                     && let Ok(id) = Reader::new(&payload).varint()
+@@ -1327,6 +1343,7 @@ impl ClientPackets {
+                         .is_some_and(|(pending, _)| pending == id)
+                 {
+                     up.authoritative_pose = None;
++                    shared.terrain_wake.changed();
+                 }
+                 if id == s::ACCEPT_TELEPORTATION
+                     && up.identities.is_none()
+diff --git a/crates/meridian-handoff/src/terrain.rs b/crates/meridian-handoff/src/terrain.rs
+index 7f55f70..7d32bed 100644
+--- a/crates/meridian-handoff/src/terrain.rs
++++ b/crates/meridian-handoff/src/terrain.rs
+@@ -3,7 +3,7 @@ use crate::{
+     TargetBackend,
+     configure::configure,
+     prepare::Target,
+-    session::{Down, Lane, SessionHandle, Shared, add, encode},
++    session::{Down, Lane, SessionHandle, Shared, add, encode, lock},
+ };
+ use horizon_protocol::{
+     buf::Reader, connection::Closer, ids::play::clientbound as c, packets::play,
+@@ -14,12 +14,43 @@ use std::{
+     collections::{HashMap, HashSet, hash_map::DefaultHasher},
+     hash::{Hash, Hasher},
+     sync::{
+-        Arc, Mutex,
++        Arc, Condvar, Mutex,
+         atomic::{AtomicBool, AtomicU64, Ordering},
+     },
+     time::Duration,
+ };
+ 
++/// Wakes a waiting terrain manager when one of its inputs may have changed.
++///
++/// The manager reads the number before its inputs and waits on that value. A
++/// writer changes its input first and calls [`Wake::changed`] after, so a pass
++/// either read the change or its wait ends at once. This lock is taken last and
++/// never held while another is taken.
++#[derive(Default)]
++pub(crate) struct Wake {
++    generation: Mutex<u64>,
++    changed: Condvar,
++}
++impl Wake {
++    pub(crate) fn changed(&self) {
++        *lock(&self.generation) += 1;
++        self.changed.notify_all();
++    }
++}
++
++/// The column a position stands in. `None` when no column holds it.
++pub(crate) fn cell(at: [f64; 3]) -> Option<(i32, i32)> {
++    (at[0].is_finite() && at[2].is_finite())
++        .then(|| ((at[0].floor() as i32) >> 4, (at[2].floor() as i32) >> 4))
++}
++
++/// Whether a new position can change what the terrain manager decides: it left
++/// the old one's column, or it stands in none.
++pub(crate) fn left_cell(old: Option<[f64; 3]>, new: [f64; 3]) -> bool {
++    let new = cell(new);
++    new.is_none() || old.and_then(cell) != new
++}
++
+ /// Static column ownership. All entries use the same coordinate space.
+ #[derive(Clone)]
+ pub struct TerrainOwners {
+@@ -160,6 +191,21 @@ impl SessionHandle {
+             reader_columns: HashMap::new(),
+         });
+     }
++    /// A number that changes whenever the position's column, the active backend,
++    /// the view radius, a terrain reset or the end of the session may have changed.
++    /// Read it before those inputs, then pass it to [`Self::terrain_wait`].
++    pub fn terrain_generation(&self) -> u64 {
++        *lock(&self.0.terrain_wake.generation)
++    }
++    /// Waits until the number differs from `seen`, at most `limit`. True when it does.
++    pub fn terrain_wait(&self, seen: u64, limit: Duration) -> bool {
++        let wake = &self.0.terrain_wake;
++        let (generation, _) = wake
++            .changed
++            .wait_timeout_while(lock(&wake.generation), limit, |now| *now == seen)
++            .unwrap_or_else(|e| e.into_inner());
++        *generation != seen
++    }
+     pub fn terrain_radius(&self) -> i32 {
+         self.0
+             .down()
+@@ -523,7 +569,9 @@ pub(crate) fn relay(
+     Ok(())
+ }
+ 
+-pub(crate) fn initial(terrain: &mut Terrain, id: i32, payload: &[u8]) {
++/// True when a terrain manager input changed: a reset, the radius or the first position.
++pub(crate) fn initial(terrain: &mut Terrain, id: i32, payload: &[u8]) -> bool {
++    let mut changed = false;
+     if id == c::RESPAWN {
+         terrain.loaded.clear();
+         terrain.signatures.clear();
+@@ -531,17 +579,21 @@ pub(crate) fn initial(terrain: &mut Terrain, id: i32, payload: &[u8]) {
+         terrain.initial = None;
+         terrain.center = None;
+         terrain.reset = true;
++        changed = true;
+     }
+     if id == c::LOGIN {
+         if let Ok(play::Clientbound::Login(p)) = play::Clientbound::decode(id, payload) {
+             terrain.radius = p.chunk_radius;
++            changed = true;
+         }
+     } else if id == c::PLAYER_POSITION
+         && terrain.initial.is_none()
+         && let Ok(play::Clientbound::PlayerPosition(p)) = play::Clientbound::decode(id, payload)
+     {
+         terrain.initial = Some(p.position);
++        changed = true;
+     }
++    changed
+ }
+ 
+ #[cfg(test)]
+@@ -562,6 +614,49 @@ mod tests {
+         assert_eq!(owners.owner(-5, 0), None);
+     }
+     #[test]
++    fn a_position_wakes_the_manager_only_when_it_leaves_its_column() {
++        assert_eq!(cell([15.9, 70.0, -0.1]), Some((0, -1)));
++        assert!(left_cell(None, [3.0, 70.0, 3.0]));
++        assert!(!left_cell(Some([0.0, 70.0, 0.0]), [15.9, 90.0, 15.9]));
++        assert!(left_cell(Some([15.9, 70.0, 3.0]), [16.0, 70.0, 3.0]));
++        assert!(left_cell(Some([3.0, 70.0, 0.0]), [3.0, 70.0, -0.1]));
++        // A position in no column always wakes, so no decision rests on it.
++        assert!(left_cell(Some([3.0, 70.0, 3.0]), [f64::NAN, 70.0, 3.0]));
++        assert!(left_cell(
++            Some([f64::NAN, 70.0, 3.0]),
++            [f64::NAN, 70.0, 3.0]
++        ));
++        assert!(left_cell(
++            Some([f64::INFINITY, 70.0, 3.0]),
++            [3.0, 70.0, 3.0]
++        ));
++    }
++    #[test]
++    fn only_the_first_server_position_is_a_changed_input() {
++        let mut terrain = Terrain {
++            owners: TerrainOwners {
++                origin: [0, 0],
++                edge: 64,
++                entries: vec![[0, 0]],
++                backends: vec!["a".into()],
++            },
++            loaded: HashMap::new(),
++            signatures: HashMap::new(),
++            reset: false,
++            initial: None,
++            radius: 3,
++            center: None,
++            lazy: true,
++            reader_columns: HashMap::new(),
++        };
++        let (id, payload) =
++            meridian_testkit::held::packet(&meridian_testkit::held::position(1, 8.0));
++        assert!(initial(&mut terrain, id, &payload));
++        assert_eq!(terrain.initial, Some([8.0, 70.0, 8.0]));
++        assert!(!initial(&mut terrain, id, &payload));
++        assert!(!initial(&mut terrain, c::KEEP_ALIVE, &7u64.to_be_bytes()));
++    }
++    #[test]
+     fn entity_and_player_state_are_never_terrain() {
+         for id in [
+             c::ADD_ENTITY,
+diff --git a/crates/meridian-handoff/src/tests/mod.rs b/crates/meridian-handoff/src/tests/mod.rs
+index 42720f2..aef87b8 100644
+--- a/crates/meridian-handoff/src/tests/mod.rs
++++ b/crates/meridian-handoff/src/tests/mod.rs
+@@ -36,6 +36,7 @@ mod hostile;
+ mod reactive;
+ mod session;
+ mod switch;
++mod terrain_wake;
+ 
+ fn profile() -> Profile {
+     Profile {
+diff --git a/crates/meridian-handoff/src/tests/terrain_wake.rs b/crates/meridian-handoff/src/tests/terrain_wake.rs
+new file mode 100644
+index 0000000..0b9b97d
+--- /dev/null
++++ b/crates/meridian-handoff/src/tests/terrain_wake.rs
+@@ -0,0 +1,115 @@
++//! A waiting terrain manager is woken by each change of its inputs, and by nothing else.
++use super::*;
++
++const SHORT: Duration = Duration::from_millis(50);
++
++fn walk(player: &mut Connection, source: &mut Connection, x: f64, z: f64) {
++    player
++        .send(
++            &play::Serverbound::MovePlayerPos(play::MovePlayerPos {
++                x,
++                y: 71.0,
++                z,
++                flags: 1,
++            })
++            .encode(),
++        )
++        .unwrap();
++    // The session notes the pose before it forwards the packet.
++    expect(source, ps::MOVE_PLAYER_POS).unwrap();
++}
++
++#[test]
++fn a_move_ends_the_wait_only_when_it_leaves_the_column() {
++    let Bench {
++        handle,
++        run,
++        mut player,
++        mut source,
++    } = bench();
++    walk(&mut player, &mut source, 3.0, 3.0);
++    let seen = handle.terrain_generation();
++    walk(&mut player, &mut source, 15.5, 0.5);
++    walk(&mut player, &mut source, 0.5, 15.5);
++    assert_eq!(handle.terrain_generation(), seen);
++    assert!(!handle.terrain_wait(seen, SHORT));
++    walk(&mut player, &mut source, 16.0, 3.0);
++    assert!(handle.terrain_wait(seen, WAIT));
++    let seen = handle.terrain_generation();
++    walk(&mut player, &mut source, 16.0, -0.5);
++    assert!(handle.terrain_wait(seen, WAIT));
++    drop(player);
++    run.join().unwrap().unwrap();
++}
++
++#[test]
++fn a_change_during_a_wait_ends_it_before_the_limit() {
++    let Bench {
++        handle,
++        run,
++        mut player,
++        mut source,
++    } = bench();
++    walk(&mut player, &mut source, 3.0, 3.0);
++    let seen = handle.terrain_generation();
++    let waiter = {
++        let handle = handle.clone();
++        std::thread::spawn(move || {
++            let began = Instant::now();
++            (handle.terrain_wait(seen, WAIT * 4), began.elapsed())
++        })
++    };
++    std::thread::sleep(SHORT);
++    walk(&mut player, &mut source, 40.0, 3.0);
++    let (changed, waited) = waiter.join().unwrap();
++    assert!(changed);
++    assert!(waited < WAIT * 2, "the wait ran to {waited:?}");
++    drop(player);
++    run.join().unwrap().unwrap();
++}
++
++#[test]
++fn a_server_placement_and_its_acknowledgement_each_end_the_wait() {
++    let Bench {
++        handle,
++        run,
++        mut player,
++        mut source,
++    } = bench();
++    handle.compose_terrain(TerrainOwners {
++        origin: [0, 0],
++        edge: 512,
++        entries: vec![[0, 0]],
++        backends: vec!["source".into()],
++    });
++    let seen = handle.terrain_generation();
++    send_typed(&mut source, &position(7, 200.0));
++    expect(&mut player, pc::PLAYER_POSITION).unwrap();
++    assert!(handle.terrain_wait(seen, WAIT));
++    assert_eq!(handle.terrain_position(), Some([200.0, 70.0, 200.0]));
++    let seen = handle.terrain_generation();
++    send(&mut player, ps::ACCEPT_TELEPORTATION, &[7]);
++    expect(&mut source, ps::ACCEPT_TELEPORTATION).unwrap();
++    assert!(handle.terrain_wait(seen, WAIT));
++    drop(player);
++    run.join().unwrap().unwrap();
++}
++
++#[test]
++fn a_new_backend_and_the_end_of_the_session_each_end_the_wait() {
++    let Bench {
++        handle,
++        run,
++        player,
++        source: _source,
++    } = bench();
++    let seen = handle.terrain_generation();
++    handle.0.set_backend("target");
++    assert!(handle.terrain_wait(seen, WAIT));
++    let seen = handle.terrain_generation();
++    assert!(!handle.terrain_wait(seen, SHORT));
++    drop(player);
++    run.join().unwrap().unwrap();
++    assert!(handle.is_over());
++    assert!(handle.terrain_wait(seen, WAIT));
++}
+diff --git a/crates/meridian-proxy/src/terrain.rs b/crates/meridian-proxy/src/terrain.rs
+index 07f39b4..6df0144 100644
+--- a/crates/meridian-proxy/src/terrain.rs
++++ b/crates/meridian-proxy/src/terrain.rs
+@@ -7,6 +7,11 @@ use std::{
+     time::{Duration, Instant},
+ };
+ 
++/// The pause between two passes of a manager that has, or wants, a reader.
++const PASS: Duration = Duration::from_millis(20);
++/// How long a settled manager waits for a change before it looks again anyway.
++const SETTLED_WAIT: Duration = Duration::from_millis(250);
++
+ struct Live {
+     _reader: TerrainReader,
+     uuid: String,
+@@ -14,6 +19,13 @@ struct Live {
+     refreshed: Instant,
+ }
+ 
++/// Whether a pass can only repeat itself until an input changes: it had no reader,
++/// wanted none and saw no reset. Every decision of such a pass reads the position
++/// through its column alone, which holds only when the tiles are column-aligned.
++fn settled(aligned: bool, reset: bool, wanted: bool, live: usize) -> bool {
++    aligned && !reset && !wanted && live == 0
++}
++
+ fn near(position: [f64; 3], origin: [i32; 2], edge: i32, tile: [i32; 2], chunks: i32) -> bool {
+     let margin = f64::from(chunks) * 16.0;
+     [0, 1].into_iter().all(|axis| {
+@@ -62,9 +74,20 @@ pub(crate) fn start(
+                 let mut readers: Vec<Option<Live>> = (0..map.entries.len()).map(|_| None).collect();
+                 let mut retry_after: Vec<Option<Instant>> = vec![None; map.entries.len()];
+                 let eager = std::env::var_os("E18_TERRAIN_EAGER").is_some();
+-                while !handle.is_over() {
++                // `E30_TERRAIN_POLL` keeps the fixed 20 ms poll, for a matched comparison.
++                let aligned = map.origin.iter().all(|origin| origin % 16 == 0)
++                    && map.edge % 16 == 0
++                    && std::env::var_os("E30_TERRAIN_POLL").is_none();
++                loop {
++                    // Read before every input, the end of the session included, so a
++                    // change during this pass ends its wait.
++                    let seen = handle.terrain_generation();
++                    if handle.is_over() {
++                        break;
++                    }
++                    let began = Instant::now();
+                     let Some(position) = handle.terrain_position() else {
+-                        std::thread::sleep(Duration::from_millis(20));
++                        std::thread::sleep(PASS);
+                         continue;
+                     };
+                     let center = (
+@@ -77,6 +100,7 @@ pub(crate) fn start(
+                     let near_foreign = map.entries.iter().any(|tile| tile.backend != active
+                         && near(position, map.origin, map.edge, tile.index, radius+2));
+                     handle.terrain_center(position)?;
++                    let mut any_wanted = false;
+                     for (index, tile) in map.entries.iter().enumerate() {
+                         // The own reader exists only near a wall. It is prepared
+                         // before the source lane can be released at a crossing.
+@@ -87,6 +111,7 @@ pub(crate) fn start(
+                         } else {
+                             near(position, map.origin, map.edge, tile.index, margin)
+                         };
++                        any_wanted |= wanted;
+                         if !wanted {
+                             if let Some(live) = &readers[index]
+                                 && handle.retire_terrain_reader(index, &live._reader)? {
+@@ -155,7 +180,13 @@ pub(crate) fn start(
+                             live.refreshed = Instant::now();
+                         }
+                     }
+-                    std::thread::sleep(Duration::from_millis(20));
++                    let live = readers.iter().flatten().count();
++                    if !settled(aligned, reset, any_wanted, live) {
++                        std::thread::sleep(PASS);
++                    } else if handle.terrain_wait(seen, SETTLED_WAIT) {
++                        // A change is acted on no sooner than the poll would have.
++                        std::thread::sleep(PASS.saturating_sub(began.elapsed()));
++                    }
+                 }
+                 drop(readers);
+                 Ok(())
+@@ -171,7 +202,57 @@ pub(crate) fn start(
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::near;
++    use super::{near, settled};
++
++    #[test]
++    fn a_manager_waits_only_with_no_reader_no_wish_and_no_reset() {
++        assert!(settled(true, false, false, 0));
++        assert!(!settled(false, false, false, 0));
++        assert!(!settled(true, true, false, 0));
++        assert!(!settled(true, false, true, 0));
++        assert!(!settled(true, false, false, 1));
++    }
++
++    /// The wake is sent when the position leaves its column. That is enough only
++    /// if no decision changes inside a column.
++    #[test]
++    fn with_aligned_tiles_nearness_is_the_same_across_a_column() {
++        let steps = [0.0, 0.001, 7.5, 15.999];
++        for origin in [[0, 0], [-512, 1024], [16, -48]] {
++            for tile in [[0, 0], [-1, 0], [-1, -1], [1, 1]] {
++                for chunks in [3, 5, 7, 9] {
++                    for column_x in -40..40 {
++                        for column_z in [-33, -1, 0, 31] {
++                            let at = |dx: f64, dz: f64| {
++                                [
++                                    f64::from(column_x * 16) + dx,
++                                    70.0,
++                                    f64::from(column_z * 16) + dz,
++                                ]
++                            };
++                            let first = near(at(0.0, 0.0), origin, 512, tile, chunks);
++                            for dx in steps {
++                                for dz in steps {
++                                    assert_eq!(
++                                        near(at(dx, dz), origin, 512, tile, chunks),
++                                        first,
++                                        "origin {origin:?} tile {tile:?} column {column_x},{column_z}"
++                                    );
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn with_unaligned_tiles_nearness_can_change_inside_a_column() {
++        // The near edge is at block 8 - 5 * 16 = -72, inside column -5.
++        assert!(!near([-73.0, 2., 8.0], [8, 0], 512, [0, 0], 5));
++        assert!(near([-72.0, 2., 8.0], [8, 0], 512, [0, 0], 5));
++    }
+ 
+     #[test]
+     fn an_interior_needs_no_foreign_reader() {
