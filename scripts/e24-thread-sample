@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Minute-cadence, read-only thread names, stack regions and RSS for one owned proxy."""
+import argparse
+from collections import Counter
+import ctypes
+import gzip
+import json
+from pathlib import Path
+import subprocess
+import time
+
+import e11_support as support
+from e17_flat09_metrics import thread_ids,thread_usage
+
+ROOT = support.ROOT
+
+
+def owner(name):
+    path = ROOT/'.local/quiet-request'
+    try:return json.loads(path.read_text()).get('name')==name
+    except (FileNotFoundError,json.JSONDecodeError):return False
+
+
+def proxy(binary):
+    found = []
+    for line in subprocess.check_output(['ps','-axo','pid=,args='],text=True).splitlines():
+        parts = line.split(None,1)
+        if len(parts)==2 and parts[1].startswith(str(binary)+' ') and not parts[1].startswith(str(binary)+' --check '):
+            found.append(int(parts[0]))
+    if len(found)>1:raise RuntimeError('more than one matching fixture proxy')
+    return found[0] if found else None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--binary',type=Path,required=True)
+    parser.add_argument('--maximum-seconds',type=float,default=1500)
+    args = parser.parse_args()
+    binary = args.binary.resolve()
+    if not binary.is_relative_to(ROOT/'.local/bin'):raise ValueError('owned retained binary required')
+    folder = ROOT/'.local/evidence/E24'/args.name/'threads'
+    folder.mkdir(parents=True,exist_ok=False)
+    rows = []
+    began = time.monotonic()
+    pid = None
+    while owner(args.name) and time.monotonic()-began<args.maximum_seconds:
+        pid = proxy(binary)
+        if pid:break
+        time.sleep(.5)
+    if not pid:raise RuntimeError('owned proxy was not found')
+    origin = time.monotonic()
+    index = 0
+    while owner(args.name) and time.monotonic()-began<args.maximum_seconds and proxy(binary)==pid:
+        before = time.monotonic_ns()
+        info = support.TaskInfo()
+        if support.LIBPROC.proc_pidinfo(pid,4,0,ctypes.byref(info),ctypes.sizeof(info))!=ctypes.sizeof(info):break
+        identifiers = thread_ids(pid)
+        threads,disappeared = [],[]
+        for identity in identifiers:
+            try:threads.append(thread_usage(pid,identity))
+            except RuntimeError:disappeared.append(identity)
+        vm = folder/f'vmmap-{index:03d}.txt'
+        with vm.open('x') as output:
+            completed = subprocess.run(['vmmap','-summary',str(pid)],stdout=output,stderr=subprocess.STDOUT,timeout=20)
+        stacks = None
+        for line in vm.read_text().splitlines():
+            fields = line.split()
+            if fields and fields[0]=='Stack' and fields[1]!='Guard':
+                stacks = dict(virtual_size=fields[1],resident_size=fields[2],dirty_size=fields[3],regions=int(fields[-1]))
+        row = dict(pid=pid,elapsed_seconds=time.monotonic()-origin,before_monotonic_ns=before,
+            after_monotonic_ns=time.monotonic_ns(),wall_ns=time.time_ns(),rss_mib=info.rss/1048576,
+            task_threads=info.threads,native_ids=len(identifiers),named_threads=len(threads),
+            disappeared_ids=disappeared,thread_names=dict(Counter(thread['name'] or 'unnamed' for thread in threads)),
+            threads=threads,stack=stacks,vmmap_exit=completed.returncode,vmmap_path=str(vm.relative_to(ROOT)))
+        rows.append(row)
+        raw = (json.dumps(dict(kind='E24-minute-thread-and-stack-samples',rows=rows),indent=2)+'\n').encode()
+        target = folder/'samples.json'
+        if len(raw)>1_000_000:
+            target.with_suffix('.json.gz').write_bytes(gzip.compress(raw,mtime=0))
+            target.unlink(missing_ok=True)
+        else:target.write_bytes(raw)
+        print(json.dumps({key:row[key] for key in ['pid','elapsed_seconds','rss_mib','task_threads','native_ids','thread_names','stack']}),flush=True)
+        index += 1
+        due = origin+60*index
+        while owner(args.name) and time.monotonic()<due:
+            time.sleep(min(1,due-time.monotonic()))
+
+
+if __name__=='__main__':main()

@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Select the verified diagnostic base without replacing the original source backup."""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tarfile
+
+ROOT=Path(__file__).resolve().parent.parent
+SOURCE=ROOT/'.local/src/horizon'
+BACKUP=ROOT/'.local/evidence/E24/source-backup'
+ENV=dict(os.environ,GIT_OPTIONAL_LOCKS='0')
+
+
+def git(*args):return subprocess.check_output(['git',*map(str,args)],cwd=SOURCE,env=ENV)
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def index_identity():
+    index=Path(git('rev-parse','--path-format=absolute','--git-path','index').decode().strip())
+    comparisons={}
+    for args in [('ls-files','--stage','-z'),('ls-files','-v','-z'),('ls-files','--resolve-undo','-z')]:
+        current=git(*args)
+        saved=subprocess.check_output(['git',*args],cwd=SOURCE,
+            env=dict(ENV,GIT_INDEX_FILE=str(BACKUP/'original-index')))
+        if current!=saved:raise RuntimeError('logical index state changed: '+str(args))
+        comparisons[' '.join(args)]=hashlib.sha256(current).hexdigest()
+    return index,comparisons
+
+
+def activate(selection_name='fixed-lease-r1',overlay='diagnostic'):
+    record=json.loads((BACKUP/'identity.json').read_text())
+    index,index_proof=index_identity()
+    index_before=sha(index)
+    if git('rev-parse','HEAD').decode().strip()!=record['head']:raise RuntimeError('source HEAD changed')
+    if git('status','--porcelain=v1','-z')!=(BACKUP/'status.bin').read_bytes():raise RuntimeError('original dirty status changed')
+    for name,digest in record['all_files'].items():
+        if sha(SOURCE/name)!=digest:raise RuntimeError('original source changed: '+name)
+    target=ROOT/'.local/evidence/E24'/(selection_name+'-assembly.json')
+    if target.exists():raise RuntimeError('assembly record already exists')
+    saved=ROOT/'.local/evidence/E24'/(selection_name+'-pre-assembly-index')
+    if saved.exists():raise RuntimeError('pre-assembly index backup already exists')
+    shutil.copy2(index,saved)
+    for name in ['horizon-11-shared-observer.patch','horizon-10-warm-tick.patch']:
+        git('apply','--reverse','--check',ROOT/'patches'/name)
+        git('apply','--reverse',ROOT/'patches'/name)
+    proof=json.loads((BACKUP/'final09-proof.json').read_text())
+    for name,digest in proof['files'].items():
+        if sha(SOURCE/name)!=digest:raise RuntimeError('FINAL-09 byte mismatch: '+name)
+    diagnostic=ROOT/('patches/horizon-13-lease-raw-clock.patch' if overlay=='h13' else 'patches/horizon-12-lease-diagnostics-r2.patch')
+    frozen=json.loads((ROOT/'docs/experiments/data/E24'/('lease-fixed-r1-build.json' if overlay=='h13' else 'diagnostic-r3-build.json')).read_text())
+    if sha(diagnostic)!=frozen['source']['patch_sha256']:raise RuntimeError('frozen diagnostic overlay differs')
+    git('apply','--check',diagnostic)
+    git('apply',diagnostic)
+    if sha(index)!=index_before:raise RuntimeError('real index changed while selecting source')
+    target.write_text(json.dumps(dict(kind='E24-fixed-source-assembly',head=record['head'],
+        original_index_sha256=record['index_sha256'],pre_assembly_index_sha256=index_before,
+        logical_index_comparisons=index_proof,
+        index_note='Byte-level stat cache differs; staged entries, flags and resolve-undo state equal original backup. Both byte images retained.',
+        final09_byte_proof='passed',diagnostic_patch_sha256=sha(diagnostic),
+        fix_built=False),indent=2)+'\n')
+    print('Original source/index checked; FINAL-09 byte proof passed; diagnostic overlay selected. No build.')
+
+
+def restore():
+    record=json.loads((BACKUP/'identity.json').read_text())
+    added=set(git('ls-files','-o','--exclude-standard').decode().splitlines())-set(record['all_files'])
+    allowed={'crates/horizon-client/src/game/dedicated/cluster/lease/trace.rs',
+        'crates/horizon-client/src/game/dedicated/cluster/lease/clock.rs'}
+    if added-allowed:raise RuntimeError('unknown source additions prevent restoration: '+str(sorted(added-allowed)))
+    index,_=index_identity()
+    # Restore only after staged identities, flags and resolve-undo data match.
+    # The pre-assembly byte image is retained separately; original bytes win.
+    shutil.copy2(BACKUP/'original-index',index)
+    # These explicitly owned additions remain recoverable from the frozen patch.
+    for name in added:(SOURCE/name).unlink()
+    loader=importlib.machinery.SourceFileLoader('e24_restore_base',str(ROOT/'scripts/e24-source'))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    module.restore()
+
+
+if __name__=='__main__':
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action',choices=['activate','restore'])
+    parser.add_argument('--name',default='fixed-lease-r1')
+    parser.add_argument('--overlay',choices=['diagnostic','h13'],default='diagnostic')
+    args=parser.parse_args()
+    if args.action=='activate':activate(args.name,args.overlay)
+    else:restore()

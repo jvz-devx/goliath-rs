@@ -1,6 +1,7 @@
 //! Owns directory leases, opaque player records and durable retry receipts.
 
 use crate::codec::{Decoder, Encoder};
+use crate::receipts::{CAPACITY, Receipts};
 use goliath_model::{
     Epoch, Fence, Generation, LeaseGrant, OwnershipCas, PlayerId, ProcessId, Record, StoreError,
     StoreLease, TileId, accepts_fence,
@@ -85,6 +86,8 @@ pub enum Operation {
         after: Option<PlayerKey>,
     },
     Clock,
+    /// Live updates need a newer wall anchor, or the identical existing clock.
+    /// This ordering never grants or extends monotonic lease authority.
     SetClock {
         fence: Fence,
         clock: ClusterClock,
@@ -146,7 +149,7 @@ pub(crate) struct State {
     next_process: u64,
     tiles: BTreeMap<TileId, DirectoryEntry>,
     players: BTreeMap<PlayerId, Record<Blob>>,
-    receipts: BTreeMap<RequestId, (Command, Response)>,
+    receipts: Receipts,
     uuid_players: BTreeMap<PlayerKey, Record<Blob>>,
     clock: Option<ClusterClock>,
     leases: BTreeMap<TileId, StoreLease>,
@@ -163,6 +166,9 @@ pub(crate) enum Change {
     Clock(ClusterClock),
     Lease(DirectoryEntry, StoreLease),
 }
+
+#[cfg(test)]
+mod tests;
 
 impl State {
     fn current(&self, tile: TileId) -> Option<Fence> {
@@ -338,7 +344,20 @@ impl State {
                 ));
             }
             Operation::Clock => return Ok((Response::Clock(self.clock.clone()), None)),
-            Operation::SetClock { clock, .. } => (Response::Ok, Change::Clock(clock.clone())),
+            Operation::SetClock { clock, .. } => {
+                if self.now.is_some()
+                    && self.clock.as_ref().is_some_and(|current| {
+                        clock.unix_ms < current.unix_ms
+                            || (clock.unix_ms == current.unix_ms && clock != current)
+                    })
+                {
+                    return Err(StoreFault::RequestConflict);
+                }
+                // The wall anchor orders sky updates only. Lease authorization
+                // uses separate monotonic Instants. Historical replay preserves
+                // already-accepted clock writes instead of re-admitting them.
+                (Response::Ok, Change::Clock(clock.clone()))
+            }
             Operation::CreateUuid {
                 player,
                 owner,
@@ -519,7 +538,28 @@ impl State {
     }
 
     pub(crate) fn snapshot(&self) -> std::io::Result<Vec<u8>> {
-        let mut e = Encoder::default();
+        self.snapshot_into(Vec::new())
+    }
+
+    pub(crate) fn receipt_count(&self) -> usize {
+        self.receipts.len()
+    }
+
+    pub(crate) fn receipt_blob_bytes(&self) -> (usize, usize) {
+        self.receipts.blob_bytes()
+    }
+
+    pub(crate) fn player_blob_stats(&self) -> (usize, usize, usize, usize) {
+        let (mut bytes, mut capacity) = (0, 0);
+        for record in self.players.values().chain(self.uuid_players.values()) {
+            bytes += record.inventory.bytes.len();
+            capacity += record.inventory.bytes.capacity();
+        }
+        (self.players.len(), self.uuid_players.len(), bytes, capacity)
+    }
+
+    pub(crate) fn snapshot_into(&self, buffer: Vec<u8>) -> std::io::Result<Vec<u8>> {
+        let mut e = Encoder::reuse(buffer);
         e.u64(self.next_process);
         e.count(self.tiles.len())?;
         for entry in self.tiles.values() {
@@ -565,7 +605,13 @@ impl State {
             let player = PlayerId(d.index()?);
             state.players.insert(player, d.record()?);
         }
-        for _ in 0..d.count()? {
+        let receipt_count = d.count()?;
+        if receipt_count > CAPACITY {
+            return Err(crate::codec::invalid(
+                "snapshot retry history exceeds the bounded receipt window; explicit migration required",
+            ));
+        }
+        for _ in 0..receipt_count {
             let command = crate::codec::decode_command(d.bytes()?)?;
             let response = crate::codec::decode_response(d.bytes()?)?;
             state.receipts.insert(command.id, (command, response));

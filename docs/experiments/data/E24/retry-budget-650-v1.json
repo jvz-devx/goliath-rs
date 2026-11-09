@@ -1,0 +1,64 @@
+{
+  "kind": "E24-retry-window-budget",
+  "phase_count": 3,
+  "phase_names": [
+    "connect including reconnect",
+    "whole-frame write",
+    "whole-frame read"
+  ],
+  "timeout_ms": 3000,
+  "attempts": 3,
+  "retry_span_seconds": 27.0,
+  "margin": 4,
+  "traces": {
+    "650": {
+      "path": ".local/evidence/E24/diagnosis-r1/store-batches.csv.gz",
+      "sha256": "0445d0ac85a0acc75660eb515fa6092ec509581313e1fcab2ecc2820521d4f63",
+      "batches": 169522,
+      "maximum_batch_commands": 5,
+      "count_scope": "all commands, including reads and refusals; conservative upper bound on mutations",
+      "one_second_peaks": {
+        "start": {
+          "commands": 116,
+          "bounds_us": [
+            21963679,
+            22962078
+          ]
+        },
+        "end": {
+          "commands": 117,
+          "bounds_us": [
+            21963477,
+            22962081
+          ]
+        }
+      },
+      "retry_span_peaks": {
+        "start": {
+          "commands": 2570,
+          "bounds_us": [
+            14041235,
+            41032153
+          ]
+        },
+        "end": {
+          "commands": 2570,
+          "bounds_us": [
+            14041240,
+            41032156
+          ]
+        }
+      },
+      "boundary_accounting": "two additional maximum-sized serial batches",
+      "peak_mutation_rate_upper_per_second": 127,
+      "maximum_intervening_mutations_budget": 3429,
+      "required_receipts": 13717,
+      "capacity": 16384,
+      "effective_margin": 4.777777777777778,
+      "qualified_for_requested_margin": true
+    }
+  },
+  "required_1050_trace_present": false,
+  "qualified_650_and_1050": false,
+  "lifetime_scope": "one bounded Client call; arbitrary manual resubmission is covered by operation safety, not receipt accuracy"
+}

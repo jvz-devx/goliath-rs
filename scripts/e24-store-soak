@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Verify r2 receipt fill, snapshot ownership and accepted mutation-rate diagnostics."""
+import argparse
+import csv
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+from pathlib import Path
+import re
+
+ROOT=Path(__file__).resolve().parent.parent
+loader=importlib.machinery.SourceFileLoader('e24_mutation_intervals',str(ROOT/'scripts/e24-mutation-budget'))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+intervals=importlib.util.module_from_spec(spec);loader.exec_module(intervals)
+
+
+def raw(path):
+    if not path.exists():path=path.with_suffix(path.suffix+'.gz')
+    content=path.read_bytes()
+    return gzip.decompress(content) if path.suffix=='.gz' else content,path,hashlib.sha256(content).hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--planning-rate',type=int,default=72)
+    args=parser.parse_args()
+    folder=ROOT/'.local/evidence/E24'/args.name
+    origin_data,origin_path,origin_hash=raw(folder/'store-batches.origin.json')
+    origin=json.loads(origin_data)
+    native=re.fullmatch(r'Instant \{ tv_sec: (\d+), tv_nsec: (\d+) \}',origin['native_instant'])
+    if not native:raise RuntimeError('unknown nativeInstant trace format; do not infer alignment')
+    origin_ns=int(native[1])*1_000_000_000+int(native[2])
+    content,memory_path,memory_hash=raw(folder/'store-batches.memory.csv')
+    rows=[{key:int(value) if key!='event' else value for key,value in row.items()}
+        for row in csv.DictReader(io.StringIO(content.decode()))]
+    soak_data,soak_path,soak_hash=raw(folder/(args.name+'-soak.json.gz'))
+    soak=json.loads(soak_data)
+    first=min(soak['memory'],key=lambda row:abs(row['elapsed_seconds']-300))
+    five_ns=round(first['processes']['store']['at']*1e9)
+    full=next((row for row in rows if row['window_full_at_ns']>=0),None)
+    fill_ns=origin_ns+full['window_full_at_ns'] if full else None
+    lead=(five_ns-fill_ns)/1e9 if full else None
+    content,batch_path,batch_hash=raw(folder/'store-batches.csv')
+    batches=list(csv.DictReader(io.StringIO(content.decode())))
+    # Only the measured loaded interval, not checkpoint/recovery traffic.
+    begin=round(soak['memory'][0]['processes']['store']['at']*1e9)
+    end=round(soak['memory'][-1]['processes']['store']['at']*1e9)
+    actual=[]
+    for row in batches:
+        start=origin_ns+int(row['start_us'])*1000
+        finish=start+round(float(row['execute_ms'])*1e6)
+        if finish>=begin and start<=end and int(row['mutations']):
+            actual.append(dict(row,count=row['mutations']))
+    one=intervals.interval_peak(actual,1_000_000)
+    span=intervals.interval_peak(actual,27_000_000)
+    budget=max(27*one['commands'],span['commands'])
+    rate_ok=one['commands']<=args.planning_rate
+    capacity=max(row['receipts'] for row in rows)
+    ordered=all(b['accepted']>=a['accepted'] and b['snapshots_started']>=a['snapshots_started']
+        and b['snapshots_finished']>=a['snapshots_finished'] for a,b in zip(rows,rows[1:]))
+    singleton=all(row['snapshots_started']-row['snapshots_finished'] in [0,1]
+        and row['snapshots_started']-row['snapshots_finished']==row['in_flight'] for row in rows)
+    after_five=[row for row in rows if origin_ns+row['at_ns']>=five_ns]
+    result=dict(kind='E24-store-loaded-diagnostics',name=args.name,
+        capacity=capacity,window_filled=full is not None,
+        fill_after_loaded_start_seconds=(fill_ns-begin)/1e9 if full else None,
+        minute5_sample_seconds=first['elapsed_seconds'],fill_lead_before_minute5_seconds=lead,
+        fill_fragile=lead is None or lead<60,fragility_rule='a pass still counts, but less than60seconds beforeminute5 is explicitly fragile',
+        measured_peak_mutations_per_second_upper=one,measured_27second_mutations_upper=span,
+        retry_budget=budget,retention_margin=(capacity-1)/budget if budget else None,
+        planning_rate=args.planning_rate,planning_bound_exceeded=not rate_ok,
+        margin_at_least4=capacity>=4*budget+1,
+        singleton_snapshot_in_flight=singleton,counters_monotonic=ordered,
+        max_receipt_blob_bytes=max(row['receipt_blob_bytes'] for row in rows),
+        max_player_blob_bytes=max(row['player_blob_bytes'] for row in rows),
+        snapshot_capacity_after_minute5_range=[min(row['snapshot_capacity']for row in after_five),max(row['snapshot_capacity']for row in after_five)] if after_five else None,
+        snapshot_len_range=[min(row['snapshot_len']for row in rows),max(row['snapshot_len']for row in rows)],
+        snapshots_started=rows[-1]['snapshots_started'],snapshots_finished=rows[-1]['snapshots_finished'],
+        qualified=rate_ok and capacity>=4*budget+1 and singleton and ordered,
+        inputs={str(path.relative_to(ROOT)):digest for path,digest in
+            [(origin_path,origin_hash),(memory_path,memory_hash),(soak_path,soak_hash),(batch_path,batch_hash)]})
+    output=ROOT/'docs/experiments/data/E24'/(args.name+'-store-diagnostics.json')
+    if output.exists():raise RuntimeError('store diagnostics already frozen')
+    output.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2))
+    if not rate_ok:raise SystemExit('measured mutation rate exceeds planning bound; STOP and report, do not change capacity')
+
+
+if __name__=='__main__':main()

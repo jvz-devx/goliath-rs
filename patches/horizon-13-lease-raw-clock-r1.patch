@@ -1,0 +1,516 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1475,6 +1475,7 @@
+  "log",
+  "miniz_oxide 0.8.9",
+  "naga",
++ "nix",
+  "objc2 0.6.5",
+  "objc2-app-kit 0.3.2",
+  "objc2-foundation 0.3.2",
+diff --git a/crates/horizon-client/Cargo.toml b/crates/horizon-client/Cargo.toml
+--- a/crates/horizon-client/Cargo.toml
++++ b/crates/horizon-client/Cargo.toml
+@@ -98,6 +98,8 @@
+ wgpu = { version = "30.0.1", default-features = false, features = ["dx12"] }
+ 
+ [target.'cfg(target_os = "macos")'.dependencies]
++# Unadjusted continuous/uptime clock IDs through safe system-call wrappers.
++nix = { version = "=0.31.3", default-features = false, features = ["time"] }
+ # Splitscreen: a window filling a monitor goes over its menu bar (game/split/windows.rs
+ # `above_menu_bar`); all already in the tree through winit and wgpu.
+ objc2 = "0.6"
+diff --git a/crates/horizon-client/src/game/dedicated/cluster/lease.rs b/crates/horizon-client/src/game/dedicated/cluster/lease.rs
+--- a/crates/horizon-client/src/game/dedicated/cluster/lease.rs
++++ b/crates/horizon-client/src/game/dedicated/cluster/lease.rs
+@@ -8,13 +8,19 @@
+     sync::{Arc, Mutex, OnceLock},
+     time::{Duration, Instant},
+ };
++#[cfg(target_os = "macos")]
++mod clock;
+ mod trace;
++#[cfg(target_os = "macos")]
++use clock::Clock;
+ 
++#[cfg(not(target_os = "macos"))]
+ struct Clock {
+     before: Instant,
+     after: Instant,
+     continuous: Duration,
+ }
++#[cfg(not(target_os = "macos"))]
+ impl Clock {
+     fn new() -> Option<Self> {
+         let before = Instant::now();
+@@ -53,15 +59,10 @@
+     fn advancing(&mut self) -> Option<Instant> {
+         self.advance_with(Self::new()?)
+     }
+-}
+-#[cfg(target_os = "macos")]
+-fn continuous() -> Option<Duration> {
+-    // macOS clock_gettime(3): CLOCK_MONOTONIC advances during sleep, unlike uptime.
+-    let time = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+-    Some(Duration::new(
+-        u64::try_from(time.tv_sec).ok()?,
+-        u32::try_from(time.tv_nsec).ok()?,
+-    ))
++    #[cfg(test)]
++    fn invalidate(&mut self) {
++        self.continuous += Duration::from_secs(30);
++    }
+ }
+ #[cfg(target_os = "linux")]
+ fn continuous() -> Option<Duration> {
+@@ -85,6 +86,18 @@
+     fn note_stop(&mut self, cause: &'static str, now: Instant) {
+         if self.stopped_reason.is_none() {
+             self.stopped_reason = Some(cause);
++            #[cfg(target_os = "macos")]
++            self.clock.note_closure(
++                if self
++                    .keeper
++                    .deadline()
++                    .is_some_and(|deadline| now >= deadline)
++                {
++                    "keeper-deadline"
++                } else {
++                    cause
++                },
++            );
+             trace::record(
+                 "authority-stop",
+                 json!({"cause":cause,"now_ns":trace::at(now),
+@@ -137,8 +150,17 @@
+ pub(in crate::game::dedicated) fn authority_status() -> Value {
+     match AUTHORITY.get() {
+         Some(authority) => {
+-            json!({"ok":true,"leased":true,"authorized":authority.check(Duration::ZERO),"tile":authority.fence.tile.0,"process":authority.fence.process.0,"epoch":authority.fence.epoch.0,
+-            "token":format!("{}:{}",authority.fence.process.0,authority.fence.epoch.0)})
++            let authorized = authority.check(Duration::ZERO);
++            #[cfg(target_os = "macos")]
++            let clock = authority
++                .state
++                .lock()
++                .ok()
++                .map(|state| state.clock.telemetry());
++            #[cfg(not(target_os = "macos"))]
++            let clock = Value::Null;
++            json!({"ok":true,"leased":true,"authorized":authorized,"tile":authority.fence.tile.0,"process":authority.fence.process.0,"epoch":authority.fence.epoch.0,
++            "token":format!("{}:{}",authority.fence.process.0,authority.fence.epoch.0),"clock":clock})
+         }
+         None => json!({"ok":true,"leased":false}),
+     }
+@@ -232,7 +254,7 @@
+         .map_err(|_| "cluster lease already initialized")?;
+     let gate = Arc::clone(&authority);
+     horizon_core::authority::install(Arc::new(move |budget| gate.check(budget)))?;
+-    // Horizon owns this thread, not the store/model libraries. No keeper lock spans IO.
++    // Horizon owns this thread, not the store/model libraries. No keeper lock spans store IO.
+     std::thread::Builder::new()
+         .name("goliath-lease".into())
+         .spawn(move || {
+@@ -306,6 +328,8 @@
+                             break;
+                         }
+                         state.accepted_counter = grant.counter;
++                        #[cfg(target_os = "macos")]
++                        state.clock.report();
+                         trace::record("renew-installed", json!({"counter":ticket.counter(),
+                             "grant_counter":grant.counter,"sent_ns":trace::at(ticket.sent()),
+                             "reply_ns":trace::at(reply_at),"observe_ns":trace::at(now),
+@@ -336,6 +360,7 @@
+     use super::*;
+     use goliath_store::{Epoch, LeaseGrant, ProcessId};
+     fn granted(sent: Instant) -> Authority {
++        let clock = Clock::new().unwrap();
+         let fence = Fence {
+             tile: TileId(0),
+             process: ProcessId(1),
+@@ -356,7 +381,7 @@
+             fence,
+             state: Mutex::new(State {
+                 keeper,
+-                clock: Clock::new().unwrap(),
++                clock,
+                 stopped_reason: None,
+                 accepted_counter: 0,
+             }),
+@@ -380,7 +405,7 @@
+         let authority = granted(Instant::now());
+         {
+             let mut state = authority.state.lock().unwrap();
+-            state.clock.continuous += Duration::from_secs(30);
++            state.clock.invalidate();
+         }
+         assert!(!authority.check(Duration::ZERO));
+         {
+@@ -390,6 +415,7 @@
+         assert!(!authority.check(Duration::ZERO));
+     }
+     #[test]
++    #[cfg(not(target_os = "macos"))]
+     fn suspend_is_detected_without_wall_clock_or_real_sleep() {
+         let now = Instant::now();
+         let mut before = Clock {
+diff --git a/crates/horizon-client/src/game/dedicated/cluster/lease/clock.rs b/crates/horizon-client/src/game/dedicated/cluster/lease/clock.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client/src/game/dedicated/cluster/lease/clock.rs
+@@ -0,0 +1,343 @@
++//! Claim-wide Darwin raw-clock suspension bounds and bounded diagnostic counters.
++
++use nix::time::{ClockId, clock_gettime};
++use serde_json::{Value, json};
++use std::{
++    collections::BTreeMap,
++    time::{Duration, Instant},
++};
++
++const ALLOWANCE: i128 = 1_000;
++const BASELINE_WIDTH: Duration = Duration::from_nanos(500);
++const BASELINE_ATTEMPTS: usize = 3;
++const RESAMPLES: usize = 3;
++const ATTEMPTS: usize = RESAMPLES + 1;
++const HISTOGRAM_LIMIT: usize = 16_384;
++
++#[derive(Clone, Copy)]
++struct Triple {
++    before: Duration,
++    continuous: Duration,
++    after: Duration,
++}
++impl Triple {
++    fn telemetry(self) -> Value {
++        json!({"uptime_before_ns":self.before.as_nanos(),"continuous_raw_ns":self.continuous.as_nanos(),
++            "uptime_after_ns":self.after.as_nanos(),"width_ns":self.width().map(|width|width.as_nanos())})
++    }
++    fn width(self) -> Option<Duration> {
++        self.after.checked_sub(self.before)
++    }
++    fn interval(self) -> (i128, i128) {
++        (
++            self.continuous.as_nanos() as i128 - self.after.as_nanos() as i128,
++            self.continuous.as_nanos() as i128 - self.before.as_nanos() as i128,
++        )
++    }
++}
++
++fn native(id: ClockId) -> Option<Duration> {
++    let value = clock_gettime(id).ok()?;
++    let seconds = u64::try_from(value.tv_sec()).ok()?;
++    let nanos = u32::try_from(value.tv_nsec()).ok()?;
++    (nanos < 1_000_000_000).then(|| Duration::new(seconds, nanos))
++}
++fn triple_with(mut source: impl FnMut(ClockId) -> Option<Duration>) -> Option<Triple> {
++    let uptime = ClockId::from_raw(nix::libc::CLOCK_UPTIME_RAW);
++    Some(Triple {
++        before: source(uptime)?,
++        continuous: source(ClockId::from_raw(nix::libc::CLOCK_MONOTONIC_RAW))?,
++        after: source(uptime)?,
++    })
++}
++fn sample() -> Option<Triple> {
++    triple_with(native)
++}
++
++#[derive(Default)]
++struct Statistics {
++    checks: u64,
++    reads: u64,
++    inconclusive: u64,
++    resamples: u64,
++    baseline_attempts: u64,
++    dropped_widths: u64,
++    widths: BTreeMap<u64, u64>,
++    closures: BTreeMap<&'static str, u64>,
++}
++impl Statistics {
++    fn observe(&mut self, sample: Triple) -> Option<()> {
++        self.reads += 1;
++        let width = u64::try_from(sample.width()?.as_nanos()).ok()?;
++        if self.widths.contains_key(&width) || self.widths.len() < HISTOGRAM_LIMIT {
++            *self.widths.entry(width).or_default() += 1;
++        } else {
++            self.dropped_widths += 1;
++        }
++        Some(())
++    }
++}
++
++pub(super) struct Clock {
++    anchor: Triple,
++    previous: Triple,
++    statistics: Statistics,
++    failure: Option<&'static str>,
++    last_report: Instant,
++}
++impl Clock {
++    pub(super) fn new() -> Option<Self> {
++        Self::capture(sample)
++    }
++    fn capture(mut source: impl FnMut() -> Option<Triple>) -> Option<Self> {
++        let mut statistics = Statistics::default();
++        for _ in 0..BASELINE_ATTEMPTS {
++            statistics.baseline_attempts += 1;
++            let value = source()?;
++            statistics.observe(value)?;
++            if value.width()? <= BASELINE_WIDTH {
++                super::trace::record(
++                    "clock-baseline",
++                    json!({"width_ns":value.width()?.as_nanos(),
++                    "uptime_before_ns":value.before.as_nanos(),"continuous_raw_ns":value.continuous.as_nanos(),
++                    "uptime_after_ns":value.after.as_nanos(),"attempts":statistics.baseline_attempts}),
++                );
++                return Some(Self {
++                    anchor: value,
++                    previous: value,
++                    statistics,
++                    failure: None,
++                    last_report: Instant::now(),
++                });
++            }
++        }
++        super::trace::record(
++            "clock-baseline-refused",
++            json!({"attempts":BASELINE_ATTEMPTS,"width_limit_ns":BASELINE_WIDTH.as_nanos()}),
++        );
++        None
++    }
++    fn fail(&mut self, cause: &'static str, next: Option<Triple>) -> Option<()> {
++        self.failure = Some(cause);
++        super::trace::record(
++            "clock-anomaly",
++            json!({"reason":cause,"clock_pair":"MONOTONIC_RAW/UPTIME_RAW",
++                "baseline":self.anchor.telemetry(),"previous":self.previous.telemetry(),
++                "next":next.map(Triple::telemetry),"checks":self.statistics.checks,
++                "inconclusive_reads":self.statistics.inconclusive,"resamples":self.statistics.resamples}),
++        );
++        None
++    }
++    fn advance_with(&mut self, mut source: impl FnMut() -> Option<Triple>) -> Option<()> {
++        self.statistics.checks += 1;
++        if self.failure.is_some() {
++            return None;
++        }
++        for attempt in 0..ATTEMPTS {
++            if attempt > 0 {
++                self.statistics.resamples += 1;
++            }
++            let Some(value) = source() else {
++                return self.fail("read-failure", None);
++            };
++            if self.statistics.observe(value).is_none()
++                || value.before < self.previous.after
++                || value.continuous < self.previous.continuous
++            {
++                return self.fail("reversal-or-invalid-read", Some(value));
++            }
++            let (a, b) = self.anchor.interval();
++            let (c, d) = value.interval();
++            let (lower, upper) = (c - b, d - a);
++            if lower > ALLOWANCE || upper < -ALLOWANCE {
++                return self.fail("offset-out-of-range", Some(value));
++            }
++            self.previous = value;
++            // The WHOLE uncertainty interval must fit. Wide brackets cannot
++            // conceal sleep. Neither accepted checks nor renewals rebase.
++            if lower >= -ALLOWANCE && upper <= ALLOWANCE {
++                return Some(());
++            }
++            self.statistics.inconclusive += 1;
++        }
++        self.fail("resamples-exhausted", Some(self.previous))
++    }
++    pub(super) fn advancing(&mut self) -> Option<Instant> {
++        self.advance_with(sample)?;
++        // Deadline readers see time AFTER resampling. No diagnostic IO is
++        // inserted between the accepted raw read and this deadline time.
++        Some(Instant::now())
++    }
++    pub(super) fn report(&mut self) {
++        if self.last_report.elapsed() >= Duration::from_secs(30) {
++            super::trace::record("clock-metrics", self.telemetry());
++            self.last_report = Instant::now();
++        }
++    }
++    pub(super) fn note_closure(&mut self, fallback: &'static str) {
++        let cause = self.failure.unwrap_or(fallback);
++        *self.statistics.closures.entry(cause).or_default() += 1;
++        super::trace::record("clock-metrics", self.telemetry());
++    }
++    pub(super) fn telemetry(&self) -> Value {
++        json!({"schema":"E24-claim-raw-clock-v1","allowance_ns":ALLOWANCE,
++            "baseline_width_limit_ns":BASELINE_WIDTH.as_nanos(),"attempt_limit":ATTEMPTS,"resample_limit":RESAMPLES,
++            "baseline_width_ns":self.anchor.width().map(|d|d.as_nanos()),
++            "baseline":self.anchor.telemetry(),
++            "checks":self.statistics.checks,"triple_reads":self.statistics.reads,
++            "inconclusive_reads":self.statistics.inconclusive,"resamples":self.statistics.resamples,
++            "baseline_attempts":self.statistics.baseline_attempts,"closures_by_cause":self.statistics.closures,
++            "width_histogram_ns":self.statistics.widths,"dropped_widths":self.statistics.dropped_widths,
++            "failure":self.failure})
++    }
++    #[cfg(test)]
++    pub(super) fn invalidate(&mut self) {
++        self.previous.continuous += Duration::from_secs(30);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn value(u: u64, c: u64, width: u64) -> Triple {
++        Triple {
++            before: Duration::from_nanos(u),
++            continuous: Duration::from_nanos(c),
++            after: Duration::from_nanos(u + width),
++        }
++    }
++    fn clock() -> Clock {
++        Clock::capture(|| Some(value(0, 10, 20))).unwrap()
++    }
++
++    #[test]
++    fn real_suspension_latches_even_with_unexpired_uptime_authority() {
++        let mut clock = clock();
++        assert!(
++            clock
++                .advance_with(|| Some(value(1_000, 100_001_010, 20)))
++                .is_none()
++        );
++        assert_eq!(clock.failure, Some("offset-out-of-range"));
++        assert!(
++            clock
++                .advance_with(|| Some(value(2_000, 2_010, 20)))
++                .is_none()
++        );
++    }
++    #[test]
++    fn adjusted_steps_are_not_authority_inputs() {
++        for adjusted in [21_000i128, -21_000, 1_000_000_000, -1_000_000_000] {
++            let mut clock = clock();
++            let mut uptime = 1_000_000_001_000;
++            let mut source = |id: ClockId| {
++                if id.as_raw() == nix::libc::CLOCK_MONOTONIC {
++                    return Some(Duration::from_nanos(
++                        (1_000_000_001_010i128 + adjusted) as u64,
++                    ));
++                }
++                let result = Duration::from_nanos(uptime);
++                uptime += 10;
++                Some(result)
++            };
++            let current = triple_with(&mut source).unwrap();
++            assert!(clock.advance_with(|| Some(current)).is_some());
++        }
++    }
++    #[test]
++    fn small_suspensions_accumulate_across_successful_checks() {
++        let mut clock = clock();
++        for i in 1..=3 {
++            assert!(
++                clock
++                    .advance_with(|| Some(value(i * 10_000, i * 10_000 + 10 + i * 250, 20)))
++                    .is_some()
++            );
++        }
++        assert!(
++            clock
++                .advance_with(|| Some(value(40_000, 41_260, 20)))
++                .is_none()
++        );
++        assert_eq!(clock.failure, Some("offset-out-of-range"));
++    }
++    #[test]
++    fn long_awake_time_does_not_grow_tolerance_or_move_baseline() {
++        let mut clock = clock();
++        assert!(
++            clock
++                .advance_with(|| Some(value(3_600_000_000_000, 3_600_000_000_010, 20)))
++                .is_some()
++        );
++        assert_eq!(clock.anchor.before, Duration::ZERO);
++        assert!(
++            clock
++                .advance_with(|| Some(value(3_600_000_010_000, 3_600_000_012_010, 20)))
++                .is_none()
++        );
++    }
++    #[test]
++    fn exact_allowance_is_inclusive_without_accumulating_another_allowance() {
++        let mut clock = Clock::capture(|| Some(value(0, 0, 0))).unwrap();
++        assert!(
++            clock
++                .advance_with(|| Some(value(10_000, 11_000, 0)))
++                .is_some()
++        );
++        assert!(
++            clock
++                .advance_with(|| Some(value(20_000, 21_001, 0)))
++                .is_none()
++        );
++        assert_eq!(clock.failure, Some("offset-out-of-range"));
++    }
++    #[test]
++    fn sigstop_between_triple_reads_resamples_without_latching() {
++        let mut clock = clock();
++        let mut samples = [
++            value(1000, 1_001_010, 1_000_020),
++            value(1_002_000, 1_002_010, 20),
++        ]
++        .into_iter();
++        assert!(clock.advance_with(|| samples.next()).is_some());
++        assert_eq!(clock.statistics.inconclusive, 1);
++        assert_eq!(clock.statistics.resamples, 1);
++        assert!(clock.failure.is_none());
++    }
++    #[test]
++    fn a_wide_bracket_does_not_mask_sleep_and_exhaustion_closes() {
++        let mut clock = clock();
++        let mut base = 1000;
++        assert!(
++            clock
++                .advance_with(|| {
++                    base += 10_000;
++                    Some(value(base, base + 5010, 10_000))
++                })
++                .is_none()
++        );
++        assert_eq!(clock.failure, Some("resamples-exhausted"));
++        assert_eq!(clock.statistics.resamples, 3);
++    }
++    #[test]
++    fn baseline_retake_is_bounded_and_requires_a_narrow_read() {
++        let mut samples = [value(0, 5010, 10_020), value(20_000, 20_010, 20)].into_iter();
++        let clock = Clock::capture(|| samples.next()).unwrap();
++        assert_eq!(clock.statistics.baseline_attempts, 2);
++        assert!(Clock::capture(|| Some(value(0, 5010, 10_020))).is_none());
++    }
++    #[test]
++    fn read_failure_and_reversal_close_and_histogram_is_bounded() {
++        let mut clock = clock();
++        assert!(clock.advance_with(|| None).is_none());
++        assert_eq!(clock.failure, Some("read-failure"));
++        let mut clock = Clock::capture(|| Some(value(1000, 1010, 20))).unwrap();
++        assert!(clock.advance_with(|| Some(value(900, 910, 20))).is_none());
++        let mut statistics = Statistics::default();
++        for width in 0..=HISTOGRAM_LIMIT as u64 {
++            statistics.observe(value(0, 0, width)).unwrap();
++        }
++        assert_eq!(statistics.widths.len(), HISTOGRAM_LIMIT);
++        assert_eq!(statistics.dropped_widths, 1);
++    }
++}
+diff --git a/crates/horizon-client/src/game/dedicated/cluster/lease/trace.rs b/crates/horizon-client/src/game/dedicated/cluster/lease/trace.rs
+--- a/crates/horizon-client/src/game/dedicated/cluster/lease/trace.rs
++++ b/crates/horizon-client/src/game/dedicated/cluster/lease/trace.rs
+@@ -58,6 +58,7 @@
+     }
+ }
+ 
++#[cfg(not(target_os = "macos"))]
+ pub(super) fn clock(reason: &str, previous: &super::Clock, next: &super::Clock) {
+     record(
+         "clock-anomaly",

@@ -20,20 +20,29 @@
 //! leases, legacy Claim and Heartbeat cannot bypass them. Upgrading a live
 //! legacy holder is refused. Stop and release it before the first leased claim.
 //! Lease grants, counters and drain state share the existing durable journal.
+//!
+//! Retry receipts retain the latest 9,216 accepted mutations in FIFO order.
+//! A matching eligible retry in that window returns its original response.
+//! After eviction the operation is evaluated again, still fenced and guarded.
+//! Unknown results are never evidence that a mutation aborted. Caller-driven
+//! resubmissions beyond one bounded Client call may lose an accurate receipt.
 
 mod client;
 mod codec;
 mod durable;
 mod engine;
 mod journal;
+mod receipts;
 mod state;
+
+pub const RECEIPT_CAPACITY: usize = receipts::CAPACITY;
 
 pub use client::{CallTiming, Client, request_id};
 pub use codec::{read_request, read_response, write_request, write_response};
 pub use durable::SyncMode;
-pub use engine::Engine;
+pub use engine::{Engine, StoreResources};
 pub use goliath_model::{Epoch, Fence, Generation, OwnershipCas, ProcessId, Record, TileId};
-pub use goliath_model::{LeaseGrant, LeaseKeeper, LeaseRequest};
+pub use goliath_model::{LeaseGrant, LeaseKeeper, LeaseRequest, RenewalAction, RenewalSchedule};
 pub use journal::{Compaction, CompactionReady};
 pub use state::{
     Blob, ClusterClock, Command, DirectoryEntry, Operation, PlayerKey, RequestId, Response,

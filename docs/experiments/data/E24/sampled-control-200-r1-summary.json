@@ -1,0 +1,768 @@
+{
+  "kind": "E24-step1-diagnostic",
+  "error": null,
+  "seconds": 110.86065225000493,
+  "players": 200,
+  "rate_calibration_only": false,
+  "heap_diagnostic": true,
+  "heap_started": true,
+  "heap_dumped": true,
+  "observed_authority_latch": false,
+  "availability": {
+    "kind": "frozen-executable-harness-availability",
+    "store_trace_enabled": true,
+    "executables_changed": false,
+    "lease_rules_changed": false,
+    "per_renewal_tile_trace": false,
+    "per_renewal_note": "not exposed by frozen engine; separate investigation if expiry recurs",
+    "origin_bracket": {
+      "store_pid": 36987,
+      "spawn_before_monotonic_ns": 176807947050458,
+      "spawn_before_wall_ns": 1794167754755463000,
+      "popen_return_monotonic_ns": 176807948414250,
+      "listen_observed_monotonic_ns": 176808204278875,
+      "listen_observed_wall_ns": 1794167755012712000,
+      "origin_bracket_width_ms": 257.228417
+    },
+    "events_dropped": 0,
+    "collection_scope": "trace harvest and signal serialization after the CPU span; limiter records were memory-only",
+    "overhead_scope": "existing store tracing enabled identically in both arms; its work remains in measured store CPU",
+    "harness_sha256": "1bec801f3bea03f6aa8fe48100e84245d42bbba76b8d613a298ef763ef60ece3",
+    "store_batches": {
+      "rows": 3485,
+      "time_scope": "store-relative Instant microseconds; startup origin is separately bracketed, not exact",
+      "incomplete_tail_bytes": 0,
+      "gap_threshold_ms": 200,
+      "gap_note": "batch spacing can be idle time; it is not by itself a stall",
+      "maxima_ms": {
+        "admission_max_ms": 0.221458,
+        "queue_max_ms": 6.630833,
+        "execute_ms": 9.638041,
+        "barrier_ms": 9.60025,
+        "maintain_ms": 3.804792,
+        "background_ms": 27.86575
+      },
+      "gaps_over_200ms": [
+        {
+          "index": 7,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 247.823,
+          "context": [
+            {
+              "start_us": 1244015.0,
+              "count": 1.0,
+              "admission_max_ms": 0.0015,
+              "queue_max_ms": 0.016208,
+              "queue_mean_ms": 0.016208,
+              "collect_ms": 8.3e-05,
+              "execute_ms": 0.000292,
+              "barrier_ms": 0.0,
+              "dispatch_ms": 0.00125,
+              "maintain_ms": 4.1e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1491838.0,
+              "count": 1.0,
+              "admission_max_ms": 0.009,
+              "queue_max_ms": 0.011125,
+              "queue_mean_ms": 0.011125,
+              "collect_ms": 0.000625,
+              "execute_ms": 4.839083,
+              "barrier_ms": 4.808958,
+              "dispatch_ms": 0.008458,
+              "maintain_ms": 0.000333,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1757698.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007,
+              "queue_max_ms": 0.008083,
+              "queue_mean_ms": 0.008083,
+              "collect_ms": 0.000417,
+              "execute_ms": 4.138708,
+              "barrier_ms": 4.120583,
+              "dispatch_ms": 0.002083,
+              "maintain_ms": 0.000125,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 8,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 265.86,
+          "context": [
+            {
+              "start_us": 1491838.0,
+              "count": 1.0,
+              "admission_max_ms": 0.009,
+              "queue_max_ms": 0.011125,
+              "queue_mean_ms": 0.011125,
+              "collect_ms": 0.000625,
+              "execute_ms": 4.839083,
+              "barrier_ms": 4.808958,
+              "dispatch_ms": 0.008458,
+              "maintain_ms": 0.000333,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1757698.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007,
+              "queue_max_ms": 0.008083,
+              "queue_mean_ms": 0.008083,
+              "collect_ms": 0.000417,
+              "execute_ms": 4.138708,
+              "barrier_ms": 4.120583,
+              "dispatch_ms": 0.002083,
+              "maintain_ms": 0.000125,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1857930.0,
+              "count": 1.0,
+              "admission_max_ms": 0.044208,
+              "queue_max_ms": 0.018208,
+              "queue_mean_ms": 0.018208,
+              "collect_ms": 0.000708,
+              "execute_ms": 0.002667,
+              "barrier_ms": 0.0,
+              "dispatch_ms": 0.001416,
+              "maintain_ms": 0.000167,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 904,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 201.194,
+          "context": [
+            {
+              "start_us": 21785986.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007,
+              "queue_max_ms": 0.004209,
+              "queue_mean_ms": 0.004209,
+              "collect_ms": 0.00025,
+              "execute_ms": 3.197083,
+              "barrier_ms": 3.184,
+              "dispatch_ms": 0.001916,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 21987180.0,
+              "count": 1.0,
+              "admission_max_ms": 0.009208,
+              "queue_max_ms": 0.00825,
+              "queue_mean_ms": 0.00825,
+              "collect_ms": 0.000333,
+              "execute_ms": 4.047584,
+              "barrier_ms": 4.023291,
+              "dispatch_ms": 0.002959,
+              "maintain_ms": 0.0,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 22000777.0,
+              "count": 1.0,
+              "admission_max_ms": 0.012,
+              "queue_max_ms": 0.012125,
+              "queue_mean_ms": 0.012125,
+              "collect_ms": 0.000708,
+              "execute_ms": 3.251708,
+              "barrier_ms": 3.204583,
+              "dispatch_ms": 0.004959,
+              "maintain_ms": 4.1e-05,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 944,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 203.915,
+          "context": [
+            {
+              "start_us": 23080092.0,
+              "count": 1.0,
+              "admission_max_ms": 0.008166,
+              "queue_max_ms": 0.005375,
+              "queue_mean_ms": 0.005375,
+              "collect_ms": 0.000125,
+              "execute_ms": 4.064209,
+              "barrier_ms": 4.048875,
+              "dispatch_ms": 0.004,
+              "maintain_ms": 0.0,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 23284007.0,
+              "count": 1.0,
+              "admission_max_ms": 0.008917,
+              "queue_max_ms": 0.007708,
+              "queue_mean_ms": 0.007708,
+              "collect_ms": 0.000417,
+              "execute_ms": 3.556833,
+              "barrier_ms": 3.53275,
+              "dispatch_ms": 0.003208,
+              "maintain_ms": 0.0,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 23300394.0,
+              "count": 1.0,
+              "admission_max_ms": 0.009792,
+              "queue_max_ms": 0.010166,
+              "queue_mean_ms": 0.010166,
+              "collect_ms": 0.000541,
+              "execute_ms": 3.207667,
+              "barrier_ms": 3.177167,
+              "dispatch_ms": 0.002458,
+              "maintain_ms": 0.0,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 971,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 207.753,
+          "context": [
+            {
+              "start_us": 23853710.0,
+              "count": 1.0,
+              "admission_max_ms": 0.009708,
+              "queue_max_ms": 0.006917,
+              "queue_mean_ms": 0.006917,
+              "collect_ms": 0.000375,
+              "execute_ms": 3.432,
+              "barrier_ms": 3.391,
+              "dispatch_ms": 0.002083,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 24061463.0,
+              "count": 1.0,
+              "admission_max_ms": 0.010917,
+              "queue_max_ms": 0.091083,
+              "queue_mean_ms": 0.091083,
+              "collect_ms": 0.001833,
+              "execute_ms": 3.946209,
+              "barrier_ms": 3.871125,
+              "dispatch_ms": 0.004167,
+              "maintain_ms": 0.00025,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 24079804.0,
+              "count": 1.0,
+              "admission_max_ms": 0.022875,
+              "queue_max_ms": 0.013625,
+              "queue_mean_ms": 0.013625,
+              "collect_ms": 0.0005,
+              "execute_ms": 3.517916,
+              "barrier_ms": 3.501875,
+              "dispatch_ms": 0.003125,
+              "maintain_ms": 0.00025,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 975,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 203.061,
+          "context": [
+            {
+              "start_us": 24114336.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007666,
+              "queue_max_ms": 0.004042,
+              "queue_mean_ms": 0.004042,
+              "collect_ms": 8.3e-05,
+              "execute_ms": 2.862542,
+              "barrier_ms": 2.851375,
+              "dispatch_ms": 0.002417,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 24317397.0,
+              "count": 1.0,
+              "admission_max_ms": 0.008334,
+              "queue_max_ms": 0.008541,
+              "queue_mean_ms": 0.008541,
+              "collect_ms": 0.000416,
+              "execute_ms": 4.099334,
+              "barrier_ms": 4.074708,
+              "dispatch_ms": 0.009042,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 24336968.0,
+              "count": 1.0,
+              "admission_max_ms": 0.008458,
+              "queue_max_ms": 0.010292,
+              "queue_mean_ms": 0.010292,
+              "collect_ms": 0.000292,
+              "execute_ms": 4.192458,
+              "barrier_ms": 4.171417,
+              "dispatch_ms": 0.002458,
+              "maintain_ms": 0.000208,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 978,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 206.132,
+          "context": [
+            {
+              "start_us": 24373821.0,
+              "count": 2.0,
+              "admission_max_ms": 0.008583,
+              "queue_max_ms": 0.012875,
+              "queue_mean_ms": 0.012791,
+              "collect_ms": 0.006792,
+              "execute_ms": 3.297792,
+              "barrier_ms": 3.275792,
+              "dispatch_ms": 0.002959,
+              "maintain_ms": 8.3e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 24579953.0,
+              "count": 1.0,
+              "admission_max_ms": 0.017,
+              "queue_max_ms": 0.010541,
+              "queue_mean_ms": 0.010541,
+              "collect_ms": 0.000541,
+              "execute_ms": 3.407084,
+              "barrier_ms": 3.350042,
+              "dispatch_ms": 0.003042,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 24600373.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007334,
+              "queue_max_ms": 0.007708,
+              "queue_mean_ms": 0.007708,
+              "collect_ms": 0.00025,
+              "execute_ms": 3.933042,
+              "barrier_ms": 3.912333,
+              "dispatch_ms": 0.00225,
+              "maintain_ms": 4.1e-05,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 996,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 206.432,
+          "context": [
+            {
+              "start_us": 24895789.0,
+              "count": 1.0,
+              "admission_max_ms": 0.008291,
+              "queue_max_ms": 0.007459,
+              "queue_mean_ms": 0.007459,
+              "collect_ms": 0.000459,
+              "execute_ms": 3.654125,
+              "barrier_ms": 3.631791,
+              "dispatch_ms": 0.001959,
+              "maintain_ms": 0.0,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 25102221.0,
+              "count": 1.0,
+              "admission_max_ms": 0.006208,
+              "queue_max_ms": 0.009583,
+              "queue_mean_ms": 0.009583,
+              "collect_ms": 0.000625,
+              "execute_ms": 3.830625,
+              "barrier_ms": 3.808083,
+              "dispatch_ms": 0.002417,
+              "maintain_ms": 0.000125,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 25118462.0,
+              "count": 1.0,
+              "admission_max_ms": 0.008416,
+              "queue_max_ms": 0.005084,
+              "queue_mean_ms": 0.005084,
+              "collect_ms": 0.000334,
+              "execute_ms": 3.465041,
+              "barrier_ms": 3.448417,
+              "dispatch_ms": 0.002125,
+              "maintain_ms": 0.000209,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 1000,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 207.715,
+          "context": [
+            {
+              "start_us": 25154667.0,
+              "count": 1.0,
+              "admission_max_ms": 0.008125,
+              "queue_max_ms": 0.005791,
+              "queue_mean_ms": 0.005791,
+              "collect_ms": 0.000458,
+              "execute_ms": 3.220042,
+              "barrier_ms": 3.201,
+              "dispatch_ms": 0.001916,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 25362382.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007416,
+              "queue_max_ms": 0.010125,
+              "queue_mean_ms": 0.010125,
+              "collect_ms": 0.000625,
+              "execute_ms": 3.925292,
+              "barrier_ms": 3.9055,
+              "dispatch_ms": 0.003542,
+              "maintain_ms": 0.000166,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 25382445.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007875,
+              "queue_max_ms": 0.006125,
+              "queue_mean_ms": 0.006125,
+              "collect_ms": 0.000458,
+              "execute_ms": 3.525584,
+              "barrier_ms": 3.506917,
+              "dispatch_ms": 0.00175,
+              "maintain_ms": 0.000167,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 1004,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 207.787,
+          "context": [
+            {
+              "start_us": 25413117.0,
+              "count": 1.0,
+              "admission_max_ms": 0.006792,
+              "queue_max_ms": 0.007583,
+              "queue_mean_ms": 0.007583,
+              "collect_ms": 0.000167,
+              "execute_ms": 5.789125,
+              "barrier_ms": 5.758959,
+              "dispatch_ms": 0.001792,
+              "maintain_ms": 4.1e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 25620904.0,
+              "count": 1.0,
+              "admission_max_ms": 0.009167,
+              "queue_max_ms": 0.006625,
+              "queue_mean_ms": 0.006625,
+              "collect_ms": 0.000583,
+              "execute_ms": 3.755958,
+              "barrier_ms": 3.733167,
+              "dispatch_ms": 0.001959,
+              "maintain_ms": 0.00025,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 25638761.0,
+              "count": 1.0,
+              "admission_max_ms": 0.008584,
+              "queue_max_ms": 0.0065,
+              "queue_mean_ms": 0.0065,
+              "collect_ms": 0.000334,
+              "execute_ms": 3.862375,
+              "barrier_ms": 3.839042,
+              "dispatch_ms": 0.001542,
+              "maintain_ms": 0.000292,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 1671,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 201.815,
+          "context": [
+            {
+              "start_us": 47486958.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007583,
+              "queue_max_ms": 0.008792,
+              "queue_mean_ms": 0.008792,
+              "collect_ms": 0.000375,
+              "execute_ms": 3.168292,
+              "barrier_ms": 3.148584,
+              "dispatch_ms": 0.002625,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 47688773.0,
+              "count": 1.0,
+              "admission_max_ms": 0.009208,
+              "queue_max_ms": 0.009417,
+              "queue_mean_ms": 0.009417,
+              "collect_ms": 0.000667,
+              "execute_ms": 4.638125,
+              "barrier_ms": 4.616125,
+              "dispatch_ms": 0.003208,
+              "maintain_ms": 3.728583,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 47697258.0,
+              "count": 1.0,
+              "admission_max_ms": 0.008167,
+              "queue_max_ms": 2.8805,
+              "queue_mean_ms": 2.8805,
+              "collect_ms": 0.000792,
+              "execute_ms": 3.911167,
+              "barrier_ms": 3.602958,
+              "dispatch_ms": 0.0045,
+              "maintain_ms": 0.000125,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 1675,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 200.63,
+          "context": [
+            {
+              "start_us": 47749023.0,
+              "count": 1.0,
+              "admission_max_ms": 0.006875,
+              "queue_max_ms": 0.02025,
+              "queue_mean_ms": 0.02025,
+              "collect_ms": 0.010583,
+              "execute_ms": 3.054042,
+              "barrier_ms": 3.03675,
+              "dispatch_ms": 0.005083,
+              "maintain_ms": 0.000125,
+              "background_ms": 22.018375
+            },
+            {
+              "start_us": 47949653.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007125,
+              "queue_max_ms": 0.010542,
+              "queue_mean_ms": 0.010542,
+              "collect_ms": 0.000625,
+              "execute_ms": 4.079833,
+              "barrier_ms": 4.064208,
+              "dispatch_ms": 0.007083,
+              "maintain_ms": 0.00025,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 47954638.0,
+              "count": 1.0,
+              "admission_max_ms": 0.00425,
+              "queue_max_ms": 0.005583,
+              "queue_mean_ms": 0.005583,
+              "collect_ms": 0.000333,
+              "execute_ms": 2.992,
+              "barrier_ms": 2.982083,
+              "dispatch_ms": 0.002917,
+              "maintain_ms": 0.0,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 3481,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 205.043,
+          "context": [
+            {
+              "start_us": 108512338.0,
+              "count": 1.0,
+              "admission_max_ms": 0.009667,
+              "queue_max_ms": 0.00625,
+              "queue_mean_ms": 0.00625,
+              "collect_ms": 0.000459,
+              "execute_ms": 3.941833,
+              "barrier_ms": 3.928625,
+              "dispatch_ms": 0.002042,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 108717381.0,
+              "count": 1.0,
+              "admission_max_ms": 0.011375,
+              "queue_max_ms": 0.007625,
+              "queue_mean_ms": 0.007625,
+              "collect_ms": 0.0005,
+              "execute_ms": 4.018291,
+              "barrier_ms": 4.003833,
+              "dispatch_ms": 0.002792,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 108777149.0,
+              "count": 1.0,
+              "admission_max_ms": 0.009458,
+              "queue_max_ms": 0.008375,
+              "queue_mean_ms": 0.008375,
+              "collect_ms": 0.0005,
+              "execute_ms": 3.88,
+              "barrier_ms": 3.867959,
+              "dispatch_ms": 0.001916,
+              "maintain_ms": 0.0,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 3484,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 264.469,
+          "context": [
+            {
+              "start_us": 108976385.0,
+              "count": 1.0,
+              "admission_max_ms": 0.030375,
+              "queue_max_ms": 0.021625,
+              "queue_mean_ms": 0.021625,
+              "collect_ms": 0.001083,
+              "execute_ms": 5.314667,
+              "barrier_ms": 5.271375,
+              "dispatch_ms": 0.005,
+              "maintain_ms": 0.0,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 109240854.0,
+              "count": 1.0,
+              "admission_max_ms": 0.027166,
+              "queue_max_ms": 0.025875,
+              "queue_mean_ms": 0.025875,
+              "collect_ms": 0.002333,
+              "execute_ms": 5.297125,
+              "barrier_ms": 5.231875,
+              "dispatch_ms": 0.005,
+              "maintain_ms": 0.000416,
+              "background_ms": 0.0
+            }
+          ]
+        }
+      ],
+      "path": ".local/evidence/E24/sampled-control-200-r1/sampled-control-200-r1-store-batches.csv.gz",
+      "sha256": "114cb0e7b04cc0ab7d0198f910dd9a8d9fb5d903dcdea6354e5102bfb261b74f"
+    },
+    "store_connections": {
+      "path": ".local/evidence/E24/sampled-control-200-r1/sampled-control-200-r1-store-connections.csv.gz",
+      "sha256": "08887a2d456455ec9e78b93853d2c3b44bc1d747c7c2480ac26346daf194909d"
+    },
+    "limiter_signals": {
+      "path": ".local/evidence/E24/sampled-control-200-r1/sampled-control-200-r1-limiter-signals.json.gz",
+      "sha256": "d00bf08f9811407ef9549c770ae9d821b78708fa9477e08089cd6f094dbee3d3",
+      "count": 5,
+      "roles": {
+        "36987": "store",
+        "36988": "tile-a",
+        "37020": "tile-b",
+        "37022": "tile-c",
+        "37055": "tile-d"
+      },
+      "scope": "exact successful/failed per-PID kill-call brackets from limiter threads, including final limiter resumes"
+    },
+    "complete": true,
+    "lease_expiry_observed": false,
+    "expiry_events": []
+  },
+  "binaries_unchanged": true,
+  "cleanup_errors": [],
+  "evidence": {
+    ".local/evidence/E24/sampled-control-200-r1/cleanup-errors.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+    ".local/evidence/E24/sampled-control-200-r1/environment.json": "96ea150d1a3279cc3c51b2cd93ec9ab45fba07bf501223ce1b407c858729278b",
+    ".local/evidence/E24/sampled-control-200-r1/executed-availability.py": "1bec801f3bea03f6aa8fe48100e84245d42bbba76b8d613a298ef763ef60ece3",
+    ".local/evidence/E24/sampled-control-200-r1/executed-cell.py": "44313698c3bbd1dab8197ab2f7cb4a1eba2aa4b4244ab97013d715133c012e76",
+    ".local/evidence/E24/sampled-control-200-r1/heap-samples.json": "dc505468316212afab379521bfa4aed82759140e2458cdee801634a9084fff2e",
+    ".local/evidence/E24/sampled-control-200-r1/native-1a267a2676c7d192.json.gz": "ceae5c8ffac20a15409aa55de7407b0889a954da8ec4f164f8de9604c9d78b42",
+    ".local/evidence/E24/sampled-control-200-r1/native-61ac30631b6198c2.json.gz": "23305505ee35a144ead577eb643da7c2ab80b25baeec99e50140570f1a6fa05d",
+    ".local/evidence/E24/sampled-control-200-r1/native-635da7e44e7efee7.json.gz": "a3cf8c80bad5acac370a7a8cc32bd89d0f21c54a6c3f6c9f0ce29c8ce4b32fb9",
+    ".local/evidence/E24/sampled-control-200-r1/native-783feac6646db818.json.gz": "51cc447ffdbc4b183d7b935cfaf6e802119e91bf6e401f86e80a60a70dec30cc",
+    ".local/evidence/E24/sampled-control-200-r1/native-9a82d11b725983af.json.gz": "04277ff2a5393592bbdab5574932e772f7300850de2e2b92cc4b1b62c76397f3",
+    ".local/evidence/E24/sampled-control-200-r1/native-b222c2e50650a069.json.gz": "00410053e5085a276ea04417eaaf356c55cc0911ccba6a2cdd0fd5fe42368a2a",
+    ".local/evidence/E24/sampled-control-200-r1/native-d60811f9b18f36a6.json.gz": "bbdd67e4dd0ae6154b3fed90c3f86831cf116f6325ae65a8725766e03a1925e6",
+    ".local/evidence/E24/sampled-control-200-r1/native-eaa380b3884ec233.json.gz": "30df53cf1fcd20d990df94ff2cc7f53cb33cd1fd897f55f662120a926686ad7f",
+    ".local/evidence/E24/sampled-control-200-r1/native-f560cd0208f35dd4.json.gz": "734f061f2e451566ce6070310f3a02d670708b10c1712931529b2508f338f8c1",
+    ".local/evidence/E24/sampled-control-200-r1/native-logs.json.gz": "49ed40b41e292a16d745e49066eb745e8a47f4268f9c52ab57dd8b637ad01ca5",
+    ".local/evidence/E24/sampled-control-200-r1/partial-ticks.json.gz": "f36cfcc48555fd2cdf5d4a8e004054775d451ca63c9658ec8981863bb26638d7",
+    ".local/evidence/E24/sampled-control-200-r1/process-memory.json.gz": "2996396d6f46be5c31720606a64a16a3e0f7825aaa7c217e8428276471302a73",
+    ".local/evidence/E24/sampled-control-200-r1/proxy-heap.json": "9e7391dcd403fe18329db56ed2943082d126878cfa87533ac41df357e53cbfa6",
+    ".local/evidence/E24/sampled-control-200-r1/sampled-control-200-r1-availability.json": "9e27c668f796bb21a6c999c3219cd80ca82068f8942693b9f56c1cecc187c944",
+    ".local/evidence/E24/sampled-control-200-r1/sampled-control-200-r1-limiter-signals.json.gz": "d00bf08f9811407ef9549c770ae9d821b78708fa9477e08089cd6f094dbee3d3",
+    ".local/evidence/E24/sampled-control-200-r1/sampled-control-200-r1-store-batches.csv.gz": "114cb0e7b04cc0ab7d0198f910dd9a8d9fb5d903dcdea6354e5102bfb261b74f",
+    ".local/evidence/E24/sampled-control-200-r1/sampled-control-200-r1-store-connections.csv.gz": "08887a2d456455ec9e78b93853d2c3b44bc1d747c7c2480ac26346daf194909d",
+    ".local/evidence/E24/sampled-control-200-r1/sampled-control-200-r1.json.gz": "b94874509cd81b79c912d6d307e950f5baae93b780c988e27f204d5ea0e65ce7",
+    ".local/evidence/E24/sampled-control-200-r1/store-batches.connections.csv": "c840b55f82ff36db57dfe8672ddb5f1caaad9163d4bd7344f291ea8c0df17acb",
+    ".local/evidence/E24/sampled-control-200-r1/store-batches.csv": "b4e73f1ff9ba3cb93ca5518f36c60e9bb8d021bebd1a92c5e2dd7dccd690505a",
+    ".local/evidence/E24/sampled-control-200-r1/tiles/tile-0-36988-client.csv": "d06de44edc5951c44abcfc31ca3ab27d6e3d8d5cb3659ee324da0285a4bc4bc1",
+    ".local/evidence/E24/sampled-control-200-r1/tiles/tile-0-36988-lease.jsonl": "ec5a64b32874f0e12e5ec09d4ec7d4424be6da96d0ccab445193e53c9dbd9b28",
+    ".local/evidence/E24/sampled-control-200-r1/tiles/tile-1-37020-client.csv": "87f4e821722c4dec4781af2c6aa5e82e049588e5de0ac9213acb41c674e62f5d",
+    ".local/evidence/E24/sampled-control-200-r1/tiles/tile-1-37020-lease.jsonl": "205a4ecdc66ad94aa168e01e49a264c49c73f54f0deeb453e47e7cf55649949f",
+    ".local/evidence/E24/sampled-control-200-r1/tiles/tile-2-37022-client.csv": "0711c6c568a33f8ff9c6de460a53282f82874c6172aabdbd98c307b59289c6ed",
+    ".local/evidence/E24/sampled-control-200-r1/tiles/tile-2-37022-lease.jsonl": "0dc47e82da8aed57345d76a012add3ab63271af15243c9dedd98b68ef219acc7",
+    ".local/evidence/E24/sampled-control-200-r1/tiles/tile-3-37055-client.csv": "ac4e1ec66e1fe2d80536dff9a35727dc8018313437c16efa80f893a64f8ecf6a",
+    ".local/evidence/E24/sampled-control-200-r1/tiles/tile-3-37055-lease.jsonl": "2810927c4c512924629822d54da44a2cec3257744bf574d06e134e29d3ccbee5"
+  },
+  "interpretation": "diagnostic instrumentation, not capacity qualification"
+}

@@ -1,0 +1,740 @@
+diff --git a/crates/goliath-store/src/codec.rs b/crates/goliath-store/src/codec.rs
+--- a/crates/goliath-store/src/codec.rs
++++ b/crates/goliath-store/src/codec.rs
+@@ -21,6 +21,10 @@
+ pub(crate) struct Encoder(Vec<u8>);
+ 
+ impl Encoder {
++    pub(crate) fn reuse(mut bytes: Vec<u8>) -> Self {
++        bytes.clear();
++        Self(bytes)
++    }
+     pub(crate) fn uuid(&mut self, key: PlayerKey) {
+         self.0.extend(key.0.to_le_bytes());
+     }
+diff --git a/crates/goliath-store/src/engine.rs b/crates/goliath-store/src/engine.rs
+--- a/crates/goliath-store/src/engine.rs
++++ b/crates/goliath-store/src/engine.rs
+@@ -16,11 +16,75 @@
+     compact_every: u64,
+     failed: bool,
+     compaction_in_flight: bool,
++    snapshot_buffer: Vec<u8>,
+     #[cfg(feature = "fault-injection")]
+     early_ack: bool,
+ }
+ 
++/// Sampled ownership sizes, not allocator RSS. Blob counters exclude map nodes.
++pub struct StoreResources {
++    pub accepted: u64,
++    pub receipts: usize,
++    pub receipt_blob_bytes: usize,
++    pub receipt_blob_capacity_bytes: usize,
++    pub receipt_inline_bytes: usize,
++    pub players: usize,
++    pub uuid_players: usize,
++    pub player_blob_bytes: usize,
++    pub player_blob_capacity_bytes: usize,
++    pub snapshot_len: usize,
++    pub snapshot_capacity: usize,
++    pub in_flight: bool,
++}
++
+ impl Engine {
++    pub fn accepted_count(&self) -> u64 {
++        self.sequence
++    }
++
++    pub fn receipt_count(&self) -> usize {
++        self.state.receipt_count()
++    }
++
++    pub fn resources(&self) -> StoreResources {
++        let (bytes, capacity) = self.state.receipt_blob_bytes();
++        let (players, uuid_players, player_blob_bytes, player_blob_capacity_bytes) =
++            self.state.player_blob_stats();
++        StoreResources {
++            accepted: self.sequence,
++            receipts: self.receipt_count(),
++            receipt_blob_bytes: bytes,
++            receipt_blob_capacity_bytes: capacity,
++            receipt_inline_bytes: self.receipt_count() * std::mem::size_of::<(Command, Response)>(),
++            players,
++            uuid_players,
++            player_blob_bytes,
++            player_blob_capacity_bytes,
++            snapshot_len: self.snapshot_buffer.len(),
++            snapshot_capacity: self.snapshot_buffer.capacity(),
++            in_flight: self.compaction_in_flight,
++        }
++    }
++
++    pub fn last_barrier_span(&self) -> Option<(Instant, Instant)> {
++        self.journal.last_barrier_span
++    }
++
++    fn capture_snapshot(&mut self) -> io::Result<Vec<u8>> {
++        let buffer = std::mem::take(&mut self.snapshot_buffer);
++        if buffer.capacity() == 0 {
++            self.state.snapshot()
++        } else {
++            self.state.snapshot_into(buffer)
++        }
++    }
++
++    fn compact_now(&mut self) -> io::Result<()> {
++        let snapshot = self.capture_snapshot()?;
++        let result = self.journal.compact(self.sequence, &snapshot);
++        self.snapshot_buffer = snapshot;
++        result
++    }
+     /// Duration of the last batch's journal barrier, excluding encoding and append.
+     pub fn last_barrier_duration(&self) -> Duration {
+         self.journal.last_barrier
+@@ -68,15 +132,14 @@
+             compact_every,
+             failed: false,
+             compaction_in_flight: false,
++            snapshot_buffer: Vec::new(),
+             #[cfg(feature = "fault-injection")]
+             early_ack: false,
+         };
+         // Finish an interrupted rotation from recovered state, before serving.
+         // Never consolidate overlapping log files by copying their bytes.
+         if engine.journal.has_rotation()? {
+-            engine
+-                .journal
+-                .compact(engine.sequence, &engine.state.snapshot()?)?;
++            engine.compact_now()?;
+             engine.since_compaction = 0;
+         }
+         // Historical commands replay without today's deadlines. Only after all
+@@ -165,8 +228,7 @@
+         }
+         self.journal.append_batch(&records)?;
+         if commands.iter().any(|c| c.operation == Operation::Compact) {
+-            self.journal
+-                .compact(self.sequence, &self.state.snapshot()?)?;
++            self.compact_now()?;
+             self.since_compaction = 0;
+         }
+         Ok(responses)
+@@ -182,10 +244,7 @@
+             return Err(io::Error::other("background compaction still in flight"));
+         }
+         if self.compact_every != 0 && self.since_compaction >= self.compact_every {
+-            let result = self
+-                .state
+-                .snapshot()
+-                .and_then(|snapshot| self.journal.compact(self.sequence, &snapshot));
++            let result = self.compact_now();
+             if result.is_err() {
+                 self.failed = true;
+             }
+@@ -208,8 +267,7 @@
+             return Ok(None);
+         }
+         let result = self
+-            .state
+-            .snapshot()
++            .capture_snapshot()
+             .and_then(|snapshot| self.journal.rotate(self.sequence, snapshot));
+         match result {
+             Ok(work) => {
+@@ -232,10 +290,16 @@
+         }
+         let result = result.and_then(|ready| self.journal.complete_compaction(ready));
+         self.compaction_in_flight = false;
+-        if result.is_err() {
+-            self.failed = true;
+-        }
+-        result
++        match result {
++            Ok(buffer) => {
++                self.snapshot_buffer = buffer;
++                Ok(())
++            }
++            Err(error) => {
++                self.failed = true;
++                Err(error)
++            }
++        }
+     }
+ }
+ 
+@@ -250,6 +314,48 @@
+     use std::sync::atomic::{AtomicU64, Ordering};
+ 
+     static NEXT: AtomicU64 = AtomicU64::new(0);
++
++    #[test]
++    fn completed_snapshot_allocation_is_reused_by_the_next_compaction() {
++        let path = directory();
++        let mut engine = Engine::open(&path, SyncMode::Full, 1).unwrap();
++        engine.snapshot_buffer = Vec::with_capacity(256 * 1024);
++        let original = engine.snapshot_buffer.as_ptr();
++        let response = engine
++            .execute_batch(&[Command {
++                id: RequestId(1),
++                operation: Operation::Claim(TileId(0)),
++            }])
++            .unwrap();
++        let Response::Claimed(fence) = response[0] else {
++            panic!("claim expected")
++        };
++        for command in [
++            None,
++            Some(Command {
++                id: RequestId(2),
++                operation: Operation::Heartbeat { fence, counter: 1 },
++            }),
++        ] {
++            if let Some(command) = command {
++                engine.execute_batch(&[command]).unwrap();
++            }
++            let work = engine.begin_maintenance().unwrap().unwrap();
++            assert_eq!(work.snapshot_usage().1, 256 * 1024);
++            assert!(engine.resources().in_flight);
++            engine
++                .complete_maintenance(Ok(work.run().unwrap()))
++                .unwrap();
++            assert_eq!(engine.snapshot_buffer.as_ptr(), original);
++            assert_eq!(engine.resources().snapshot_capacity, 256 * 1024);
++            assert!(!engine.resources().in_flight);
++        }
++        let expected = engine.state.snapshot().unwrap();
++        let stored = fs::read(path.join("snapshot")).unwrap();
++        assert_eq!(&stored[32..], expected);
++        drop(engine);
++        fs::remove_dir_all(path).unwrap();
++    }
+ 
+     fn directory() -> std::path::PathBuf {
+         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+diff --git a/crates/goliath-store/src/journal.rs b/crates/goliath-store/src/journal.rs
+--- a/crates/goliath-store/src/journal.rs
++++ b/crates/goliath-store/src/journal.rs
+@@ -13,6 +13,7 @@
+ 
+ pub(crate) struct Journal {
+     pub(crate) last_barrier: Duration,
++    pub(crate) last_barrier_span: Option<(Instant, Instant)>,
+     directory: PathBuf,
+     log: File,
+     prepared: Option<File>,
+@@ -46,9 +47,13 @@
+ pub struct CompactionReady {
+     directory: PathBuf,
+     next: File,
++    snapshot: Vec<u8>,
+ }
+ 
+ impl Compaction {
++    pub fn snapshot_usage(&self) -> (usize, usize) {
++        (self.snapshot.len(), self.snapshot.capacity())
++    }
+     pub fn run(self) -> io::Result<CompactionReady> {
+         install_snapshot(&self.directory, self.mode, self.sequence, &self.snapshot)?;
+         fs::remove_file(self.directory.join("journal.previous"))?;
+@@ -57,6 +62,7 @@
+         Ok(CompactionReady {
+             directory: self.directory,
+             next,
++            snapshot: self.snapshot,
+         })
+     }
+ }
+@@ -75,7 +81,7 @@
+ ) -> io::Result<()> {
+     let next_path = directory.join("snapshot.next");
+     let mut next = File::create(&next_path)?;
+-    next.write_all(&frame(sequence, snapshot)?)?;
++    write_frame(&mut next, sequence, snapshot)?;
+     mode.sync(&next)?;
+     fs::rename(&next_path, directory.join("snapshot"))?;
+     sync_directory(directory, mode)
+@@ -108,6 +114,26 @@
+     record.extend((!checksum).to_le_bytes());
+     record.extend(bytes);
+     Ok(record)
++}
++
++/// Snapshot-only streamed representation, byte-compatible with `frame`.
++/// The destination is private until the original sync/rename sequence completes.
++fn write_frame(writer: &mut impl Write, sequence: u64, bytes: &[u8]) -> io::Result<()> {
++    let len = u32::try_from(bytes.len()).map_err(|_| invalid("record too large"))?;
++    let checksum = crc(sequence
++        .to_le_bytes()
++        .into_iter()
++        .chain(len.to_le_bytes())
++        .chain(bytes.iter().copied()));
++    let mut header = [0u8; HEADER];
++    header[..8].copy_from_slice(MAGIC);
++    header[8..16].copy_from_slice(&sequence.to_le_bytes());
++    header[16..20].copy_from_slice(&len.to_le_bytes());
++    header[20..24].copy_from_slice(&(!len).to_le_bytes());
++    header[24..28].copy_from_slice(&checksum.to_le_bytes());
++    header[28..32].copy_from_slice(&(!checksum).to_le_bytes());
++    writer.write_all(&header)?;
++    writer.write_all(bytes)
+ }
+ 
+ fn parse(bytes: &[u8], bounded: bool) -> Option<(u64, &[u8], usize)> {
+@@ -226,6 +252,7 @@
+         Ok((
+             Self {
+                 last_barrier: Duration::ZERO,
++                last_barrier_span: None,
+                 directory: directory.to_path_buf(),
+                 log,
+                 prepared,
+@@ -246,6 +273,7 @@
+ 
+     pub(crate) fn append_batch(&mut self, records: &[(u64, Vec<u8>)]) -> io::Result<()> {
+         self.last_barrier = Duration::ZERO;
++        self.last_barrier_span = None;
+         if records.is_empty() {
+             return Ok(());
+         }
+@@ -274,7 +302,9 @@
+         }
+         let barrier_start = Instant::now();
+         self.mode.sync(&self.log)?;
+-        self.last_barrier = barrier_start.elapsed();
++        let barrier_end = Instant::now();
++        self.last_barrier = barrier_end.duration_since(barrier_start);
++        self.last_barrier_span = Some((barrier_start, barrier_end));
+         #[cfg(test)]
+         {
+             self.barriers += 1;
+@@ -321,12 +351,12 @@
+         })
+     }
+ 
+-    pub(crate) fn complete_compaction(&mut self, ready: CompactionReady) -> io::Result<()> {
++    pub(crate) fn complete_compaction(&mut self, ready: CompactionReady) -> io::Result<Vec<u8>> {
+         if ready.directory != self.directory || self.prepared.is_some() {
+             return Err(invalid("wrong compaction completion"));
+         }
+         self.prepared = Some(ready.next);
+-        Ok(())
++        Ok(ready.snapshot)
+     }
+ }
+ 
+@@ -335,6 +365,74 @@
+     //! Owns checksum coverage of every record byte.
+ 
+     use super::*;
++
++    #[test]
++    fn streamed_snapshot_is_byte_identical_to_the_original_full_frame() {
++        for length in [0, 1, 1023, 1024 * 1024] {
++            let payload: Vec<_> = (0..length).map(|index| (index % 251) as u8).collect();
++            for sequence in [0, 7, u64::MAX] {
++                let expected = frame(sequence, &payload).unwrap();
++                let mut streamed = Vec::new();
++                write_frame(&mut streamed, sequence, &payload).unwrap();
++                assert_eq!(streamed, expected);
++            }
++        }
++    }
++
++    #[test]
++    fn recovery_ignores_a_crash_after_header_or_after_synced_write_before_rename() {
++        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
++            "../../.local/runs/e24-stream-crash-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
++        ));
++        let (mut journal, _) = Journal::open(&path, SyncMode::Full, |_| Ok(())).unwrap();
++        journal.compact(7, b"old committed snapshot").unwrap();
++        drop(journal);
++        struct HeaderOnly {
++            file: File,
++            left: usize,
++        }
++        impl Write for HeaderOnly {
++            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++                if self.left == 0 {
++                    return Err(io::Error::other("injected crash after header"));
++                }
++                let count = bytes.len().min(self.left);
++                let written = self.file.write(&bytes[..count])?;
++                self.left -= written;
++                Ok(written)
++            }
++            fn flush(&mut self) -> io::Result<()> {
++                self.file.flush()
++            }
++        }
++        let mut interrupted = HeaderOnly {
++            file: File::create(path.join("snapshot.next")).unwrap(),
++            left: HEADER,
++        };
++        assert!(write_frame(&mut interrupted, 8, b"new uncommitted snapshot").is_err());
++        SyncMode::Full.sync(&interrupted.file).unwrap();
++        drop(interrupted);
++        let (journal, recovered) = Journal::open(&path, SyncMode::Full, |_| Ok(())).unwrap();
++        assert_eq!(
++            recovered.snapshot,
++            Some((7, b"old committed snapshot".to_vec()))
++        );
++        drop(journal);
++        let mut next = File::create(path.join("snapshot.next")).unwrap();
++        write_frame(&mut next, 8, b"new fully written but not renamed").unwrap();
++        SyncMode::Full.sync(&next).unwrap();
++        drop(next);
++        let (journal, recovered) = Journal::open(&path, SyncMode::Full, |_| Ok(())).unwrap();
++        assert_eq!(
++            recovered.snapshot,
++            Some((7, b"old committed snapshot".to_vec()))
++        );
++        drop(journal);
++        fs::remove_dir_all(path).unwrap();
++    }
+ 
+     #[test]
+     fn every_header_payload_and_checksum_byte_is_protected() {
+diff --git a/crates/goliath-store/src/lib.rs b/crates/goliath-store/src/lib.rs
+--- a/crates/goliath-store/src/lib.rs
++++ b/crates/goliath-store/src/lib.rs
+@@ -21,7 +21,7 @@
+ //! legacy holder is refused. Stop and release it before the first leased claim.
+ //! Lease grants, counters and drain state share the existing durable journal.
+ //!
+-//! Retry receipts retain the latest 20,480 accepted mutations in FIFO order.
++//! Retry receipts retain the latest 9,216 accepted mutations in FIFO order.
+ //! A matching eligible retry in that window returns its original response.
+ //! After eviction the operation is evaluated again, still fenced and guarded.
+ //! Unknown results are never evidence that a mutation aborted. Caller-driven
+@@ -35,10 +35,12 @@
+ mod receipts;
+ mod state;
+ 
++pub const RECEIPT_CAPACITY: usize = receipts::CAPACITY;
++
+ pub use client::{CallTiming, Client, request_id};
+ pub use codec::{read_request, read_response, write_request, write_response};
+ pub use durable::SyncMode;
+-pub use engine::Engine;
++pub use engine::{Engine, StoreResources};
+ pub use goliath_model::{Epoch, Fence, Generation, OwnershipCas, ProcessId, Record, TileId};
+ pub use goliath_model::{LeaseGrant, LeaseKeeper, LeaseRequest, RenewalAction, RenewalSchedule};
+ pub use journal::{Compaction, CompactionReady};
+diff --git a/crates/goliath-store/src/main.rs b/crates/goliath-store/src/main.rs
+--- a/crates/goliath-store/src/main.rs
++++ b/crates/goliath-store/src/main.rs
+@@ -10,7 +10,7 @@
+ use std::path::PathBuf;
+ use std::sync::atomic::{AtomicUsize, Ordering};
+ use std::sync::{Arc, Mutex, mpsc};
+-use std::time::{Duration, Instant};
++use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+ 
+ fn main() -> Result<(), Box<dyn Error>> {
+     let mut directory = None;
+@@ -91,7 +91,7 @@
+     if let Some(trace) = &mut trace {
+         writeln!(
+             trace,
+-            "start_us,count,admission_max_ms,queue_max_ms,queue_mean_ms,collect_ms,execute_ms,barrier_ms,dispatch_ms,maintain_ms,background_ms"
++            "start_us,count,admission_max_ms,queue_max_ms,queue_mean_ms,collect_ms,execute_ms,barrier_ms,dispatch_ms,maintain_ms,background_ms,mutations,accepted_sequence,receipt_count"
+         )?;
+     }
+     let connection_trace = std::env::var_os("GOLIATH_STORE_TRACE")
+@@ -104,13 +104,47 @@
+             Ok(Arc::new(Mutex::new(file)))
+         })
+         .transpose()?;
++    let wall_before = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+     let origin = Instant::now();
++    let wall_after = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
++    let mut request_trace = std::env::var_os("GOLIATH_STORE_TRACE")
++        .map(|path| File::create(PathBuf::from(path).with_extension("requests.csv")))
++        .transpose()?;
++    let mut memory_trace = std::env::var_os("GOLIATH_STORE_TRACE")
++        .map(|path| File::create(PathBuf::from(path).with_extension("memory.csv")))
++        .transpose()?;
++    if let Some(file) = &mut request_trace {
++        writeln!(
++            file,
++            "request_id,batch_id,accepted_ns,received_ns,batch_start_ns,batch_end_ns,barrier_start_ns,barrier_end_ns,dispatched_ns,mutations"
++        )?;
++    }
++    if let Some(file) = &mut memory_trace {
++        writeln!(
++            file,
++            "at_ns,event,accepted,receipts,receipt_blob_bytes,receipt_blob_capacity_bytes,receipt_inline_bytes,players,uuid_players,player_blob_bytes,player_blob_capacity_bytes,snapshot_len,snapshot_capacity,in_flight,window_full_at_ns,snapshots_started,snapshots_finished"
++        )?;
++    }
++    if let Some(path) = std::env::var_os("GOLIATH_STORE_TRACE") {
++        let mut file = File::create(PathBuf::from(path).with_extension("origin.json"))?;
++        writeln!(
++            file,
++            "{{\"native_instant\":\"{origin:?}\",\"wall_before_ns\":{wall_before},\"wall_after_ns\":{wall_after}}}"
++        )?;
++    }
+     // Bounded queue and batch cap bound speculative memory. The binary owns
+     // this worker and every connection thread, not the persistence library.
+     let (sender, receiver) = mpsc::sync_channel::<Pending>(1024);
+     std::thread::spawn(move || {
+         let mut compaction: Option<std::thread::JoinHandle<(CompactionReady, Duration)>> = None;
++        let mut snapshot_usage = None;
++        let mut last_memory = origin;
++        let mut filled = None;
++        let mut batch_id = 0u64;
++        let (mut snapshots_started, mut snapshots_finished) = (0u64, 0u64);
+         while let Ok(first) = receiver.recv() {
++            batch_id += 1;
++            let mut snapshot_event = None;
+             let mut batch = vec![first];
+             let collect_start = Instant::now();
+             let deadline = Instant::now() + batch_window;
+@@ -127,9 +161,9 @@
+                 }
+             }
+             let commands: Vec<_> = batch.iter().map(|p| p.command.clone()).collect();
++            let explicit_compact = commands.iter().any(|c| c.operation == Operation::Compact);
+             let mut background = Duration::ZERO;
+-            if (compaction.as_ref().is_some_and(|work| work.is_finished())
+-                || commands.iter().any(|c| c.operation == Operation::Compact))
++            if (compaction.as_ref().is_some_and(|work| work.is_finished()) || explicit_compact)
+                 && let Some(work) = compaction.take()
+             {
+                 let (ready, elapsed) = work.join().expect("compaction worker panicked");
+@@ -137,6 +171,9 @@
+                 engine
+                     .complete_maintenance(Ok(ready))
+                     .expect("compaction completion");
++                snapshot_usage = None;
++                snapshots_finished += 1;
++                snapshot_event = Some("snapshot-finished");
+             }
+             let execute_start = Instant::now();
+             let count = batch.len();
+@@ -155,6 +192,10 @@
+                 .map(|p| execute_start.duration_since(p.queued).as_secs_f64())
+                 .sum::<f64>()
+                 / count as f64;
++            let accepted_before = engine.accepted_count();
++            if explicit_compact {
++                snapshots_started += 1;
++            }
+             let responses = match engine.execute_batch(&commands) {
+                 Ok(responses) => responses,
+                 Err(error) => {
+@@ -162,16 +203,36 @@
+                     std::process::exit(1);
+                 }
+             };
+-            let execute = execute_start.elapsed();
++            let execute_end = Instant::now();
++            if explicit_compact {
++                snapshots_finished += 1;
++                snapshot_event = Some("snapshot-explicit");
++            }
++            let execute = execute_end.duration_since(execute_start);
++            let mutations = engine.accepted_count() - accepted_before;
+             let barrier = engine.last_barrier_duration();
++            let barrier_span = engine.last_barrier_span();
+             let dispatch_start = Instant::now();
++            let mut request_rows = Vec::new();
+             for (pending, response) in batch.into_iter().zip(responses) {
+-                let _ = pending.reply.send((response, Instant::now()));
++                let dispatched = Instant::now();
++                if request_trace.is_some() {
++                    request_rows.push((
++                        pending.command.id.0,
++                        pending.accepted,
++                        pending.queued,
++                        dispatched,
++                    ));
++                }
++                let _ = pending.reply.send((response, dispatched));
+             }
+             let dispatch = dispatch_start.elapsed();
+             let maintain_start = Instant::now();
+             match engine.begin_maintenance() {
+                 Ok(Some(work)) => {
++                    snapshot_usage = Some(work.snapshot_usage());
++                    snapshots_started += 1;
++                    snapshot_event = Some("snapshot-started");
+                     compaction = Some(std::thread::spawn(move || {
+                         let begin = Instant::now();
+                         let ready = work.run().unwrap_or_else(|error| {
+@@ -191,7 +252,7 @@
+                 let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+                 let _ = writeln!(
+                     trace,
+-                    "{},{count},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
++                    "{},{count},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{mutations},{},{}",
+                     execute_start.duration_since(origin).as_micros(),
+                     ms(admission),
+                     ms(queue),
+@@ -201,8 +262,72 @@
+                     ms(barrier),
+                     ms(dispatch),
+                     ms(maintain_start.elapsed()),
+-                    ms(background)
++                    ms(background),
++                    engine.accepted_count(),
++                    engine.receipt_count()
+                 );
++            }
++            if let Some(file) = &mut request_trace {
++                let at = |time: Instant| time.duration_since(origin).as_nanos();
++                let span = barrier_span
++                    .map(|(a, b)| (at(a) as i128, at(b) as i128))
++                    .unwrap_or((-1, -1));
++                for (id, accepted, received, dispatched) in request_rows {
++                    let _ = writeln!(
++                        file,
++                        "{id},{batch_id},{},{},{},{},{},{},{},{mutations}",
++                        at(accepted),
++                        at(received),
++                        at(execute_start),
++                        at(execute_end),
++                        span.0,
++                        span.1,
++                        at(dispatched)
++                    );
++                }
++            }
++            let first_full =
++                filled.is_none() && engine.receipt_count() == goliath_store::RECEIPT_CAPACITY;
++            if first_full {
++                filled = Some(Instant::now());
++            }
++            if first_full
++                || snapshot_event.is_some()
++                || last_memory.elapsed() >= Duration::from_secs(1)
++            {
++                if let Some(file) = &mut memory_trace {
++                    let stats = engine.resources();
++                    let usage =
++                        snapshot_usage.unwrap_or((stats.snapshot_len, stats.snapshot_capacity));
++                    let now = Instant::now();
++                    let full = filled
++                        .map(|time| time.duration_since(origin).as_nanos() as i128)
++                        .unwrap_or(-1);
++                    let event = if first_full {
++                        "window-full"
++                    } else {
++                        snapshot_event.unwrap_or("sample")
++                    };
++                    let _ = writeln!(
++                        file,
++                        "{},{event},{},{},{},{},{},{},{},{},{},{},{},{},{},{snapshots_started},{snapshots_finished}",
++                        now.duration_since(origin).as_nanos(),
++                        stats.accepted,
++                        stats.receipts,
++                        stats.receipt_blob_bytes,
++                        stats.receipt_blob_capacity_bytes,
++                        stats.receipt_inline_bytes,
++                        stats.players,
++                        stats.uuid_players,
++                        stats.player_blob_bytes,
++                        stats.player_blob_capacity_bytes,
++                        usage.0,
++                        usage.1,
++                        u8::from(stats.in_flight),
++                        full
++                    );
++                }
++                last_memory = Instant::now();
+             }
+         }
+     });
+diff --git a/crates/goliath-store/src/receipts.rs b/crates/goliath-store/src/receipts.rs
+--- a/crates/goliath-store/src/receipts.rs
++++ b/crates/goliath-store/src/receipts.rs
+@@ -4,7 +4,7 @@
+ use std::collections::{BTreeMap, VecDeque};
+ 
+ /// Qualified measured-rate budget at 650 and 1,050 players, not an all-time retry promise.
+-pub(crate) const CAPACITY: usize = 20_480;
++pub(crate) const CAPACITY: usize = 9_216;
+ 
+ #[derive(Default)]
+ pub(crate) struct Receipts {
+@@ -13,6 +13,29 @@
+ }
+ 
+ impl Receipts {
++    /// Blob heap only, excluding map/enum overhead. Sample outside the hot path.
++    pub(crate) fn blob_bytes(&self) -> (usize, usize) {
++        let mut len = 0;
++        let mut capacity = 0;
++        for (command, response) in self.entries.values() {
++            let blob = match &command.operation {
++                crate::Operation::Create { blob, .. }
++                | crate::Operation::Commit { blob, .. }
++                | crate::Operation::CreateUuid { blob, .. }
++                | crate::Operation::CommitUuid { blob, .. } => Some(blob),
++                _ => None,
++            };
++            if let Some(blob) = blob {
++                len += blob.bytes.len();
++                capacity += blob.bytes.capacity();
++            }
++            if let Response::Player(Some(record)) = response {
++                len += record.inventory.bytes.len();
++                capacity += record.inventory.bytes.capacity();
++            }
++        }
++        (len, capacity)
++    }
+     pub(crate) fn len(&self) -> usize {
+         self.entries.len()
+     }
+diff --git a/crates/goliath-store/src/state.rs b/crates/goliath-store/src/state.rs
+--- a/crates/goliath-store/src/state.rs
++++ b/crates/goliath-store/src/state.rs
+@@ -538,7 +538,28 @@
+     }
+ 
+     pub(crate) fn snapshot(&self) -> std::io::Result<Vec<u8>> {
+-        let mut e = Encoder::default();
++        self.snapshot_into(Vec::new())
++    }
++
++    pub(crate) fn receipt_count(&self) -> usize {
++        self.receipts.len()
++    }
++
++    pub(crate) fn receipt_blob_bytes(&self) -> (usize, usize) {
++        self.receipts.blob_bytes()
++    }
++
++    pub(crate) fn player_blob_stats(&self) -> (usize, usize, usize, usize) {
++        let (mut bytes, mut capacity) = (0, 0);
++        for record in self.players.values().chain(self.uuid_players.values()) {
++            bytes += record.inventory.bytes.len();
++            capacity += record.inventory.bytes.capacity();
++        }
++        (self.players.len(), self.uuid_players.len(), bytes, capacity)
++    }
++
++    pub(crate) fn snapshot_into(&self, buffer: Vec<u8>) -> std::io::Result<Vec<u8>> {
++        let mut e = Encoder::reuse(buffer);
+         e.u64(self.next_process);
+         e.count(self.tiles.len())?;
+         for entry in self.tiles.values() {
+diff --git a/crates/goliath-store/src/state/tests.rs b/crates/goliath-store/src/state/tests.rs
+--- a/crates/goliath-store/src/state/tests.rs
++++ b/crates/goliath-store/src/state/tests.rs
+@@ -97,9 +97,9 @@
+     );
+     let accepted = execute(&mut state, &original);
+     let next_process = state.next_process;
+-    // Includes the higher start/end peak and two whole boundary batches.
+-    // Treat every command as a mutation. Both-load calibration gives 154/s.
+-    let maximum_intervening = 27 * 154;
++    // Whole execution-interval overlap bounds the barrier-bearing batches.
++    // The overloaded peak61/s plus20/s cadence headroom gives81mutations/s.
++    let maximum_intervening = 27 * 81;
+     for n in 0..maximum_intervening {
+         execute(
+             &mut state,

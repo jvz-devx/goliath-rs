@@ -1,0 +1,153 @@
+diff --git a/crates/meridian-proxy/src/main.rs b/crates/meridian-proxy/src/main.rs
+--- a/crates/meridian-proxy/src/main.rs
++++ b/crates/meridian-proxy/src/main.rs
+@@ -1,5 +1,10 @@
+ //! The Meridian proxy.
+ mod access;
++#[cfg(feature = "e24-heap")]
++mod heap_profile;
++#[cfg(feature = "e24-heap")]
++#[global_allocator]
++static E24_ALLOCATOR: goliath_alloc::Allocator = goliath_alloc::Allocator;
+ mod args;
+ mod balance;
+ mod commands;
+@@ -104,6 +109,14 @@
+ }
+ 
+ fn run(config: Config, path: PathBuf) -> ExitCode {
++    #[cfg(feature = "e24-heap")]
++    let _heap = match heap_profile::initialize() {
++        Ok(guard) => guard,
++        Err(error) => {
++            eprintln!("E24 heap initialization failed: {error}");
++            return ExitCode::FAILURE;
++        }
++    };
+     let stop = Arc::new(AtomicBool::new(false));
+     {
+         let stop = Arc::clone(&stop);
+diff --git a/crates/meridian-proxy/src/console.rs b/crates/meridian-proxy/src/console.rs
+--- a/crates/meridian-proxy/src/console.rs
++++ b/crates/meridian-proxy/src/console.rs
+@@ -43,6 +43,26 @@
+     pub fn builtin() -> Self {
+         let mut commands = Commands { list: Vec::new() };
+         for command in [
++            #[cfg(feature = "e24-heap")]
++            command(
++                "e24-heap",
++                "e24-heap [start|dump]",
++                "starts the one-shot heap capture, reads counters or freezes its live profile",
++                |_, _, args| {
++                    if args.len() > 1
++                        || args
++                            .first()
++                            .is_some_and(|word| !matches!(*word, "start" | "dump"))
++                    {
++                        return Err("usage: e24-heap [start|dump]".into());
++                    }
++                    let action = args.first().copied().unwrap_or("sample");
++                    Ok(vec![format!(
++                        "E24_HEAP {}",
++                        crate::heap_profile::snapshot(action)?
++                    )])
++                },
++            ),
+             command(
+                 "e18-path",
+                 "e18-path [reset]",
+diff --git a/crates/meridian-proxy/Cargo.toml b/crates/meridian-proxy/Cargo.toml
+--- a/crates/meridian-proxy/Cargo.toml
++++ b/crates/meridian-proxy/Cargo.toml
+@@ -11,7 +11,11 @@
+ name = "meridian"
+ path = "src/main.rs"
+ 
++[features]
++e24-heap = ["dep:goliath-alloc"]
++
+ [dependencies]
++goliath-alloc = { path = "../../../../../crates/goliath-alloc", optional = true }
+ goliath-store = { path = "../../../../../crates/goliath-store" }
+ ctrlc = "3.4"
+ horizon-protocol.workspace = true
+diff --git a/crates/meridian-proxy/src/heap_profile.rs b/crates/meridian-proxy/src/heap_profile.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-proxy/src/heap_profile.rs
+@@ -0,0 +1,74 @@
++//! Owns E24 allocation-counter snapshots and sparse retained-stack output.
++use serde_json::{Value, json};
++use std::{
++    fs::{File, OpenOptions},
++    io::{BufWriter, Write},
++    path::PathBuf,
++    sync::OnceLock,
++    time::Instant,
++};
++
++static START: OnceLock<Instant> = OnceLock::new();
++static OUTPUT: OnceLock<PathBuf> = OnceLock::new();
++pub(crate) struct Guard;
++
++pub(crate) fn initialize() -> Result<Guard, String> {
++    let Some(path) = std::env::var_os("E24_HEAP_FILE") else {
++        return Ok(Guard);
++    };
++    let path = PathBuf::from(path);
++    if !path.is_absolute() {
++        return Err("E24_HEAP_FILE needs an absolute fresh path".into());
++    }
++    OpenOptions::new()
++        .write(true)
++        .create_new(true)
++        .open(&path)
++        .map_err(|e| e.to_string())?;
++    OUTPUT
++        .set(path)
++        .map_err(|_| "heap output already initialized")?;
++    Ok(Guard)
++}
++
++pub(crate) fn snapshot(action: &str) -> Result<Value, String> {
++    let path = OUTPUT.get().ok_or("heap output is not configured")?;
++    if action == "start" {
++        goliath_alloc::start_capture(2048, 4096).map_err(str::to_owned)?;
++        START
++            .set(Instant::now())
++            .map_err(|_| "capture is one-shot")?;
++    }
++    let counts = goliath_alloc::counts();
++    let elapsed = START.get().ok_or("capture has not started")?.elapsed();
++    let dump = action == "dump";
++    let mut output = json!({"kind":"E24-proxy-sampled-heap","dumped":dump,
++        "elapsed_ms":elapsed.as_millis(),"file":path,
++        "total_blocks":counts.allocations,"total_bytes":counts.allocated_bytes,
++        "freed_blocks":counts.deallocations,"freed_bytes":counts.deallocated_bytes,
++        "live_blocks":counts.live_blocks,"live_bytes":counts.live_bytes,"maximum_bytes":counts.peak_bytes,
++        "sessions_alive":meridian_handoff::sessions_alive(),
++        "scope":"all requested Rust allocation bytes since process start; sparse stacks since explicit capture start; not RSS"});
++    if dump {
++        let capture = goliath_alloc::stop_capture().map_err(str::to_owned)?;
++        let samples: Vec<_> = capture.samples.into_iter().map(|sample|json!({
++            "bytes":sample.bytes,"age_ms":sample.age.as_millis(),"period":sample.period,"stack":sample.stack
++        })).collect();
++        output["sample_count"] = json!(samples.len());
++        output["sampler_failed"] = json!(capture.sampler_failed);
++        output["dropped_samples"] = json!(capture.dropped_samples);
++        output["missed_tls_callbacks"] = json!(capture.missed_tls_callbacks);
++        let document =
++            json!({"format":"E24-sampled-heap-v1","statistics":output,"samples":samples});
++        let mut writer = BufWriter::new(File::create(path).map_err(|e| e.to_string())?);
++        serde_json::to_writer(&mut writer, &document).map_err(|e| e.to_string())?;
++        writer.flush().map_err(|e| e.to_string())?;
++    }
++    Ok(output)
++}
++
++impl Drop for Guard {
++    fn drop(&mut self) {
++        let _ = snapshot("dump");
++    }
++}

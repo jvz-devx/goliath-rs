@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Read loaded clock widths and closure counters from fixed-tile endpoint snapshots."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+
+
+def read(path):
+    content=path.read_bytes()
+    return json.loads(gzip.decompress(content) if path.suffix=='.gz' else content)
+
+
+def distribution(histogram):
+    histogram=sorted((int(width),amount) for width,amount in histogram.items() if amount)
+    total=sum(count for _,count in histogram)
+    if not total:return None
+    def quantile(numerator,denominator):
+        rank=(total*numerator+denominator-1)//denominator
+        count=0
+        for width,amount in histogram:
+            count+=amount
+            if count>=rank:return width
+        raise ValueError('incomplete histogram')
+    return dict(p50=quantile(50,100),p99=quantile(99,100),p99_99=quantile(9999,10000),max=histogram[-1][0])
+
+
+def tile_result(first,last):
+    if any(row.get('schema')!='E24-claim-raw-clock-v1' for row in [first,last]):raise ValueError('clock schema differs')
+    histogram={width:last['width_histogram_ns'].get(width,0)-first['width_histogram_ns'].get(width,0)
+        for width in set(first['width_histogram_ns'])|set(last['width_histogram_ns'])}
+    if any(count<0 for count in histogram.values()):raise ValueError('histogram reset or process replacement')
+    deltas={key:last[key]-first[key] for key in ['checks','triple_reads','inconclusive_reads','resamples']}
+    if any(count<0 for count in deltas.values()):raise ValueError('clock counters reset')
+    complete=sum(histogram.values())==deltas['triple_reads'] and first['dropped_widths']==last['dropped_widths']==0
+    baseline_same=first['baseline']==last['baseline']
+    policy=all(row['allowance_ns']==1000 and row['baseline_width_limit_ns']==500 and row['resample_limit']==3
+        and row['attempt_limit']==4 and row['baseline_width_ns']<=500 for row in [first,last])
+    closures=last['closures_by_cause']
+    valid=bool(complete and baseline_same and policy and not any(closures.values()) and last['failure'] is None)
+    return dict(valid=valid,loaded_counts=deltas,baseline_unchanged=baseline_same,policy_unchanged=policy,
+        histogram_complete=complete,width_distribution_ns=distribution(histogram),
+        wider_than_1000_ns=sum(count for width,count in histogram.items() if int(width)>1000),
+        wider_than_2000_ns=sum(count for width,count in histogram.items() if int(width)>2000),
+        widths_1500_to_2500_ns={width:histogram[width] for width in sorted(histogram,key=int) if 1500<=int(width)<=2500 and histogram[width]},
+        closures_by_cause=closures,failure=last['failure'],dropped_widths=last['dropped_widths'])
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--partial',action='store_true',help='failed run: use latest matching-baseline raw metrics per tile')
+    parser.add_argument('--output',type=Path)
+    args=parser.parse_args()
+    path=ROOT/'.local/evidence/E24'/args.name/'clock-endpoints.json'
+    if not path.exists():path=path.with_suffix('.json.gz')
+    data=read(path)
+    metrics_inputs={}
+    if args.partial:
+        first=data['first']
+        if not first:raise RuntimeError('initial loaded clock snapshot missing')
+        cutoff=None;all_metrics=[]
+        for trace in path.parent.joinpath('tiles').glob('*-lease.jsonl*'):
+            content=trace.read_bytes();content=gzip.decompress(content) if trace.suffix=='.gz' else content
+            for line in content.splitlines():
+                row=json.loads(line)
+                if row['event']=='authority-stop':cutoff=min(cutoff or row['wall_ns'],row['wall_ns'])
+                if row['event']=='clock-metrics':all_metrics.append((row,trace))
+        last=dict(at=None,mark='partial-failure',tiles={})
+        for label,initial in first['tiles'].items():
+            found=[(row,trace) for row,trace in all_metrics if row['data'].get('baseline')==initial['baseline']
+                and (cutoff is None or row['wall_ns']<=cutoff)]
+            if not found:raise RuntimeError('matching partial metrics absent: '+label)
+            row,trace=max(found,key=lambda value:value[0]['at_ns'])
+            last['tiles'][label]=row['data']
+            metrics_inputs[label]=dict(path=str(trace.relative_to(ROOT)),sha256=hashlib.sha256(trace.read_bytes()).hexdigest(),
+                at_ns=row['at_ns'],wall_ns=row['wall_ns'])
+        data['last']=last
+    if not data['first'] or not data['last'] or (not args.partial and data['last']['mark']!='steady-last'):raise RuntimeError('loaded clock endpoints incomplete')
+    first,last=data['first'],data['last']
+    if set(first['tiles'])!=set(last['tiles']):raise ValueError('tile set changed')
+    result=dict(kind='E24-loaded-clock-readback',name=args.name,partial=args.partial,
+        seconds=None if args.partial else last['at']-first['at'],partial_metrics_inputs=metrics_inputs,
+        tiles={name:tile_result(first['tiles'][name],last['tiles'][name]) for name in first['tiles']},
+        input=dict(path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(path.read_bytes()).hexdigest()),
+        near_2us_definition='1500 through2500ns, inclusive; raw counts reported, never used to enlarge allowance')
+    result['all_valid']=all(row['valid'] for row in result['tiles'].values())
+    result['raw_clock_guard_pass']=all(not row['failure'] and not row['dropped_widths']
+        and not any(count for cause,count in row['closures_by_cause'].items() if cause!='keeper-deadline') for row in result['tiles'].values())
+    output=args.output or ROOT/'docs/experiments/data/E24'/(args.name+('-partial-clocks.json' if args.partial else '-loaded-clocks.json'))
+    if output.exists():raise RuntimeError('loaded readback already exists')
+    output.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2))
+
+
+if __name__=='__main__':main()

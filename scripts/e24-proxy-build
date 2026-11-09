@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""Build heap-only or client-refresh variants from frozen reactor-1 source, then restore."""
+import argparse
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tarfile
+import time
+import tomllib
+
+from e14_snapshot_support import validate_snapshot
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT/'.local/src/meridian'
+EVIDENCE = ROOT/'.local/evidence/E24'
+DATA = ROOT/'docs/experiments/data/E24'
+BASE = ROOT/'.local/bin/meridian-e18/reactor-1'
+REFERENCE = ROOT/'.local/bin/goliath-e24/diagnostic-r3'
+PATCH = ROOT/'patches/meridian-09-heap-diagnostics-r5.patch'
+
+
+def known_listener_limit(text,test_results):
+    summary = text.rsplit('\nfailures:\n',1)[-1].split('\ntest result:',1)[0].strip()
+    return summary=='serve::tests::the_listener_queues_a_large_burst' and any('562 passed; 1 failed;' in line for line in test_results)
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def git(*args,env=None):
+    return subprocess.check_output(['git',*map(str,args)],cwd=SOURCE,env=env)
+
+
+def dependencies():
+    canonical = json.loads((BASE/'canonical.json').read_text())['internal_crates']
+    folder = EVIDENCE/'proxy-original-dependencies'
+    names = [name for name in canonical['files'] if name in ['Cargo.toml','Cargo.lock','clippy.toml']
+        or name.startswith(('crates/goliath-store/','crates/goliath-model/'))]
+    for name in names:
+        expected = canonical['files'][name]
+        path = folder/name
+        if path.exists():
+            if sha(path)!=expected:raise RuntimeError('archived dependency changed: '+name)
+            continue
+        content = None
+        for revision in ['HEAD',canonical['goliath_rs_commit']]:
+            candidate = subprocess.run(['git','show',revision+':'+name],cwd=ROOT,capture_output=True)
+            if candidate.returncode==0 and hashlib.sha256(candidate.stdout).hexdigest()==expected:
+                content = candidate.stdout
+                break
+        if content is None:
+            raise RuntimeError('dependency revision does not reproduce frozen source: '+name)
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(content)
+    return {name:sha(folder/name) for name in names}
+
+
+def backup(folder):
+    folder.mkdir(parents=True,exist_ok=False)
+    status = git('status','--porcelain=v1','-z')
+    index = Path(git('rev-parse','--path-format=absolute','--git-path','index').decode().strip())
+    shutil.copy2(index,folder/'index')
+    (folder/'status.bin').write_bytes(status)
+    names = sorted(set(git('ls-files','-c','-o','--exclude-standard','-z').decode().split('\0'))-{''})
+    files = {name:sha(SOURCE/name) for name in names if (SOURCE/name).is_file()}
+    with tarfile.open(folder/'source.tar.gz','x:gz') as archive:
+        for name in files:archive.add(SOURCE/name,arcname=name,recursive=False)
+    result = dict(files=files,index_path=str(index),index_sha256=sha(index))
+    (folder/'identity.json').write_text(json.dumps(result,indent=2)+'\n')
+    return result
+
+
+def restore(folder,original,selected):
+    for name,expected in selected.items():
+        if name!='Cargo.lock' and sha(SOURCE/name)!=expected:
+            raise RuntimeError('source changed during build, refusing restoration: '+name)
+    with tarfile.open(folder/'source.tar.gz','r:gz') as archive:
+        archive.extractall(SOURCE,filter='data')
+    for name in set(selected)-set(original['files']):
+        (SOURCE/name).unlink()
+    for name,expected in original['files'].items():
+        if sha(SOURCE/name)!=expected:raise RuntimeError('source restoration differs: '+name)
+    # No staging operation belongs to this build. Refuse a changed entry table.
+    index = Path(original['index_path'])
+    saved_env = dict(os.environ,GIT_INDEX_FILE=str(folder/'index'))
+    if git('ls-files','--stage','-z')!=git('ls-files','--stage','-z',env=saved_env):
+        raise RuntimeError('real index entries changed during build')
+    if git('status','--porcelain=v1','-z')!=(folder/'status.bin').read_bytes():
+        raise RuntimeError('restored dirty status differs')
+    shutil.copy2(folder/'index',index)
+    if sha(index)!=original['index_sha256']:raise RuntimeError('index bytes not restored')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--kind',choices=['heap','client-refresh'],required=True)
+    parser.add_argument('--reuse-release-from',help='reuse a successful release gate on the same frozen inputs after a later gate failed')
+    parser.add_argument('--release-sha256',help='required expected artifact hash when reusing a release')
+    parser.add_argument('--reuse-gates-from',help='reuse completed matching verification commands on the same frozen source')
+    parser.add_argument('--accept-known-listener-limit',action='store_true',help='diagnostic only: preserve the one frozen backlog test failure without calling the suite passing')
+    args = parser.parse_args()
+    if not re.fullmatch('[A-Za-z0-9_-]+',args.name):raise ValueError('fresh simple name required')
+    if (ROOT/'.local/quiet-request').exists():raise RuntimeError('no build during a quiet window')
+    output = DATA/(args.name+'-proxy-build.json')
+    target = ROOT/'.local/bin/goliath-e24'/args.name
+    if output.exists() or target.exists():raise RuntimeError('build name exists')
+    DATA.mkdir(parents=True,exist_ok=True)
+    manifest = json.loads((BASE/'candidate.json').read_text())
+    frozen = manifest['projects']['meridian']
+    frozen_env = dict(os.environ,GIT_INDEX_FILE=str(EVIDENCE/'proxy-frozen/index'))
+    originals = dependencies() if args.kind=='heap' else None
+    saved = EVIDENCE/(args.name+'-source-backup')
+    original = backup(saved)
+    selected = {}
+    result = dict(kind='E24-proxy-'+args.kind,status='running',profile='release',incremental=False,
+        original_dependencies=originals,commands=[],source_restored=False)
+    if args.kind=='heap':
+        result['diagnostic_allocator_source'] = {str(path.relative_to(ROOT)):sha(path)
+            for path in sorted((ROOT/'crates/goliath-alloc').rglob('*')) if path.is_file()}
+    prior = None
+    prior_gates = None
+    if args.reuse_release_from:
+        prior = json.loads((DATA/(args.reuse_release_from+'-proxy-build.json')).read_text())
+        if prior['kind']!=result['kind'] or prior['original_dependencies']!=originals or not prior['source_restored']:
+            raise RuntimeError('release reuse requires matching restored inputs')
+        result['release_reused_from'] = args.reuse_release_from
+        if not args.release_sha256 or sha(SOURCE/'target/release/meridian')!=args.release_sha256:
+            raise RuntimeError('the retained release artifact does not match its expected hash')
+        result['release_binary_sha256'] = args.release_sha256
+    if args.reuse_gates_from:
+        prior_gates = json.loads((DATA/(args.reuse_gates_from+'-proxy-build.json')).read_text())
+        if prior_gates['kind']!=result['kind'] or prior_gates['original_dependencies']!=originals or not prior_gates['source_restored']:
+            raise RuntimeError('gate reuse requires matching restored inputs')
+    settings = {k:v for k,v in os.environ.items() if k not in ['CI','CARGO_TARGET_DIR'] and not k.startswith('CARGO_PROFILE_')}
+    settings.update(CARGO_INCREMENTAL='0',CARGO_BUILD_JOBS='6',CARGO_PROFILE_RELEASE_LTO='thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',
+        CARGO_PROFILE_RELEASE_DEBUG='1' if args.kind=='heap' else '0')
+    try:
+        for name,expected in frozen['source_files'].items():
+            content = git('show',':'+name,env=frozen_env)
+            if hashlib.sha256(content).hexdigest()!=expected:raise RuntimeError('frozen input differs: '+name)
+            path = SOURCE/name
+            path.parent.mkdir(parents=True,exist_ok=True)
+            path.write_bytes(content)
+            selected[name] = expected
+        if args.kind=='heap':
+            git('apply','--check',PATCH)
+            git('apply',PATCH)
+            for name in ['crates/meridian-proxy/src/main.rs','crates/meridian-proxy/src/console.rs',
+                'crates/meridian-proxy/src/heap_profile.rs','crates/meridian-proxy/Cargo.toml']:
+                selected[name] = sha(SOURCE/name)
+            cargo = SOURCE/'crates/meridian-proxy/Cargo.toml'
+            text = cargo.read_text().replace('path = "../../../../../crates/goliath-store"',
+                'path = "../../../../../.local/evidence/E24/proxy-original-dependencies/crates/goliath-store"')
+            cargo.write_text(text)
+            selected[str(cargo.relative_to(SOURCE))] = sha(cargo)
+            result['patch_sha256'] = sha(PATCH)
+            if prior_gates and prior_gates.get('patch_sha256')!=result['patch_sha256']:
+                raise RuntimeError('cannot reuse verification from a different diagnostic overlay')
+        original_packages = {(p['name'],p['version'],p.get('source')) for p in tomllib.loads((SOURCE/'Cargo.lock').read_text())['package']}
+        features = ['--features','e24-heap'] if args.kind=='heap' else []
+        commands = [
+            ('release',['cargo','build','--release','-p','meridian-proxy','--bin','meridian',*features]),
+            ('fmt',['rustfmt','--edition','2024','--check','--config','skip_children=true',
+                'crates/meridian-proxy/src/main.rs','crates/meridian-proxy/src/console.rs',
+                *(['crates/meridian-proxy/src/heap_profile.rs'] if args.kind=='heap' else [])]),
+            ('clippy',['cargo','clippy','--locked','--release','-p','meridian-proxy','--bin','meridian',*features,'--','-D','warnings']),
+            ('tests',['cargo','test','--locked','--release','-p','meridian-proxy','--bin','meridian',*features])]
+        for label,command in commands:
+            if label=='release' and prior:
+                matching = [row for row in prior['commands'] if row['label']=='release' and row['command']==command and row['exit']==0]
+                if len(matching)!=1 or prior.get('patch_sha256')!=result.get('patch_sha256'):
+                    raise RuntimeError('no matching successful release gate')
+                # Resolver-only metadata restores the lock; it does not compile.
+                metadata = EVIDENCE/(args.name+'-metadata.log')
+                with metadata.open('x') as stream:
+                    subprocess.run(['cargo','metadata','--offline','--format-version','1',*features],cwd=SOURCE,env=settings,stdout=stream,stderr=subprocess.STDOUT,check=True)
+                result['commands'].append(dict(matching[0],reused_from=args.reuse_release_from))
+                continue
+            if prior_gates:
+                matching = [row for row in prior_gates['commands'] if row['label']==label and row['command']==command]
+                if matching and matching[0]['exit']==0:
+                    result['commands'].append(dict(matching[0],reused_from=args.reuse_gates_from))
+                    continue
+                if matching and label=='tests' and args.accept_known_listener_limit and args.kind=='heap':
+                    row = matching[0]
+                    text = (ROOT/row['log']).read_text()
+                    if not known_listener_limit(text,row['test_results']):
+                        raise RuntimeError('failure is not the one known listener limit')
+                    result['commands'].append(dict(row,reused_from=args.reuse_gates_from,known_baseline_limit=True))
+                    result['verification_limits'] = ['unchanged listener burst test failed at 128 queued sockets on this host; 562 other tests passed; no test removed or skipped']
+                    continue
+            if (ROOT/'.local/quiet-request').exists():raise RuntimeError('quiet request appeared before '+label)
+            log = EVIDENCE/(args.name+'-'+label+'.log')
+            print('E24_PROXY_GATE '+label,flush=True)
+            began = time.monotonic()
+            with log.open('x') as stream:
+                completed = subprocess.run(command,cwd=SOURCE,env=settings,stdout=stream,stderr=subprocess.STDOUT)
+            text = log.read_text(errors='replace')
+            row = dict(label=label,command=command,exit=completed.returncode,seconds=time.monotonic()-began,
+                log=str(log.relative_to(ROOT)),test_results=re.findall(r'test result: .*',text))
+            result['commands'].append(row)
+            if label=='release' and completed.returncode==0:
+                result['release_binary_sha256'] = sha(SOURCE/'target/release/meridian')
+                result['release_source_files'] = {name:sha(SOURCE/name) for name in selected}
+                result['release_source_files']['Cargo.lock'] = sha(SOURCE/'Cargo.lock')
+                shutil.copy2(SOURCE/'Cargo.lock',EVIDENCE/(args.name+'-compiled-Cargo.lock'))
+            output.write_text(json.dumps(result,indent=2)+'\n')
+            print(json.dumps(row),flush=True)
+            if completed.returncode and label=='tests' and args.accept_known_listener_limit and args.kind=='heap' and known_listener_limit(text,row['test_results']):
+                result['verification_limits'] = ['unchanged listener burst test failed at 128 queued sockets on this host; 562 other tests passed; no test removed or skipped']
+            elif completed.returncode:
+                print('\n'.join(text.splitlines()[-60:]),flush=True)
+                raise RuntimeError('proxy gate failed: '+label)
+        packages = {(p['name'],p['version'],p.get('source')) for p in tomllib.loads((SOURCE/'Cargo.lock').read_text())['package']}
+        if not original_packages<=packages:raise RuntimeError('existing locked packages drifted')
+        result['added_packages'] = sorted(packages-original_packages,key=str)
+        if prior:
+            release_row = next(row for row in prior['commands'] if row['label']=='release')
+            expected_additions = set(re.findall(r'Adding ([\w-]+) v([\w.+-]+)',(ROOT/release_row['log']).read_text()))
+            actual_additions = {(name,version) for name,version,_ in packages-original_packages}
+            if actual_additions!=expected_additions:
+                raise RuntimeError('reconstructed lock differs from the recorded release package resolution')
+            if sha(SOURCE/'target/release/meridian')!=args.release_sha256:
+                raise RuntimeError('retained release artifact changed during verification')
+        result['compiled_files'] = {name:sha(SOURCE/name) for name in selected}
+        result['compiled_files']['Cargo.lock'] = sha(SOURCE/'Cargo.lock')
+        if args.kind=='heap':
+            smoke = EVIDENCE/(args.name+'-nonrun-heap.json')
+            if smoke.exists():raise RuntimeError('non-serving smoke path already exists')
+            checked = subprocess.run([SOURCE/'target/release/meridian','--version'],env=dict(settings,E24_HEAP_FILE=str(smoke)),capture_output=True,text=True)
+            if checked.returncode or smoke.exists():raise RuntimeError('non-serving command incorrectly started heap profiling')
+            result['non_serving_command_starts_no_profiler'] = True
+        retained_lock = EVIDENCE/(args.name+'-compiled-Cargo.lock')
+        if not retained_lock.exists():shutil.copy2(SOURCE/'Cargo.lock',retained_lock)
+        result['compiled_lockfile'] = dict(path=str(retained_lock.relative_to(ROOT)),sha256=sha(retained_lock))
+        if prior:
+            result['release_binary_sha256'] = sha(SOURCE/'target/release/meridian')
+            result['release_reuse_basis'] = 'identical frozen source, immutable heap patch, original dependency hashes and successful restored release gate'
+        target.mkdir(parents=True)
+        for name in ['horizon-client','goliath-store','meridian-sidecar','horizon-bots','e4-client','LEASES','cluster-launcher.py']:
+            shutil.copy2(REFERENCE/name,target/name)
+        shutil.copy2(SOURCE/'target/release/meridian',target/'meridian')
+        binaries = {name:sha(target/name) for name in ['horizon-client','goliath-store','meridian','meridian-sidecar','horizon-bots','e4-client']}
+        for name in ['canonical.json','candidate.json','FINAL.json']:
+            record = json.loads((REFERENCE/name).read_text())
+            record['binaries'] = binaries if name!='FINAL.json' else {binary:dict(path=str((target/binary).relative_to(ROOT)),sha256=binaries[binary]) for binary in record['binaries']}
+            record.update(kind='E24-'+args.kind+'-not-capacity-accepted',e24_proxy_source=result['compiled_files'],e24_original_dependencies=originals)
+            if args.kind=='heap':
+                project = record.get('projects',{}).get('meridian')
+                if project:
+                    project['patches'].append(dict(path=str(PATCH.relative_to(ROOT)),sha256=sha(PATCH)))
+            if name=='FINAL.json':
+                record['validation'] = dict(diagnostic_only=True,verification_limits=result.get('verification_limits',[]),capacity='unverified')
+            (target/name).write_text(json.dumps(record,indent=2)+'\n')
+        required = ['horizon-client','goliath-store','meridian','meridian-sidecar','e4-client']
+        (target/'manifest.json').write_text(json.dumps({name:binaries[name] for name in required},indent=2)+'\n')
+        validate_snapshot(target)
+        result.update(status='complete',binaries=binaries,directory=str(target.relative_to(ROOT)))
+    except BaseException as error:
+        result.update(status='failed',error=str(error))
+        raise
+    finally:
+        restore(saved,original,selected)
+        result['source_restored'] = True
+        output.write_text(json.dumps(result,indent=2)+'\n')
+        if result['status']=='complete':shutil.copy2(output,target/'build.json')
+
+
+if __name__=='__main__':main()

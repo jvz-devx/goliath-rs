@@ -1,0 +1,57 @@
+{
+  "status": "passed",
+  "commands": [
+    {
+      "label": "fmt",
+      "command": [
+        "$REPO/.local/bin/host-window",
+        "build",
+        "E24",
+        "--",
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ],
+      "exit": 0,
+      "seconds": 0.09945070900721475,
+      "log": ".local/evidence/E24/memory-r2-root-fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "clippy",
+      "command": [
+        "$REPO/.local/bin/host-window",
+        "build",
+        "E24",
+        "--",
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 0.23403891597990878,
+      "log": ".local/evidence/E24/memory-r2-root-clippy.log",
+      "sha256": "a133da29eb7e2b06ed3242d74dd42aec281dc9862446264c4439dc054cbbded0"
+    },
+    {
+      "label": "test",
+      "command": [
+        "$REPO/.local/bin/host-window",
+        "build",
+        "E24",
+        "--",
+        "just",
+        "test"
+      ],
+      "exit": 0,
+      "seconds": 5.7778115419787355,
+      "log": ".local/evidence/E24/memory-r2-root-test.log",
+      "sha256": "13109b64c9b6b25698bb4f992635caaf5d699decace75cd3e0089a7680f15cdb"
+    }
+  ]
+}

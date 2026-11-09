@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Read retained Darwin clock brackets without treating sampled drift as an OS guarantee."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+NAMES = ['monotonic','monotonic_raw','uptime_raw']
+
+
+def offset_interval(read):
+    return read['value_ns']-read['instant_after_ns'],read['value_ns']-read['instant_before_ns']
+
+
+def describe(rows,name):
+    intervals = [offset_interval(row['next'][name]) for row in rows]
+    x = [(row['next'][name]['instant_before_ns']+row['next'][name]['instant_after_ns'])/2 for row in rows]
+    origin = sum(intervals[0])/2
+    y = [sum(value)/2-origin for value in intervals]
+    center_x,center_y = sum(x)/len(x),sum(y)/len(y)
+    denominator = sum((value-center_x)**2 for value in x)
+    slope = sum((a-center_x)*(b-center_y) for a,b in zip(x,y))/denominator if denominator else None
+    lower,upper = max(value[0] for value in intervals),min(value[1] for value in intervals)
+    elapsed=x[-1]-x[0]
+    change_bounds=[intervals[-1][0]-intervals[0][1],intervals[-1][1]-intervals[0][0]]
+    widths=sorted(b-a for a,b in intervals)
+    return dict(fixed_offset_intersection_lower_ns=lower,fixed_offset_intersection_upper_ns=upper,
+        fixed_offset_is_consistent=lower<=upper,intersection_width_ns=upper-lower if lower<=upper else None,
+        first_to_last_offset_change_ns=y[-1],linear_slope_ppm=slope*1e6 if slope is not None else None,
+        first_to_last_change_interval_ns=change_bounds,
+        first_to_last_rate_interval_ppm=[value/elapsed*1e6 for value in change_bounds] if elapsed else None,
+        retained_read_brackets_ns=dict(maximum=max(widths),p99=widths[int(.99*(len(widths)-1))],
+            above_1000=sum(value>1000 for value in widths)),
+        points=[dict(elapsed_seconds=row['elapsed_ns']/1e9,offset_change_ns=amount,
+            lower_change_ns=bounds[0]-origin,upper_change_ns=bounds[1]-origin)
+            for row,amount,bounds in zip(rows,y,intervals)])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--allow-partial',action='store_true')
+    args=parser.parse_args()
+    path=ROOT/'.local/evidence/E24'/args.name/'clock.jsonl'
+    if not path.exists():path=path.with_suffix('.jsonl.gz')
+    content=path.read_bytes()
+    data=gzip.decompress(content) if path.suffix=='.gz' else content
+    records=[json.loads(line) for line in data.splitlines()]
+    complete=records[-1]['kind']=='complete'
+    if not complete and not args.allow_partial:raise RuntimeError('probe has not completed')
+    rows=[row for row in records if 'next'in row]
+    rejected=[row for row in rows if row['kind']=='rejection']
+    summary=dict(kind='E24-four-clock-bracket-readback',name=args.name,complete=complete,
+        elapsed_seconds=records[-1]['elapsed_ns']/1e9,sample_pairs=records[-1]['samples'],
+        rejected_totals=dict(zip(NAMES,records[-1]['reject_totals'])),
+        retained_bracket_rows=len(rows),clocks={name:describe(rows,name) for name in NAMES},
+        rejections=rejected,input=dict(path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(content).hexdigest()),
+        limits=['fixed-offset intersections describe retained read brackets, not unrecorded absolute offsets',
+            'all consecutive reads were checked, but only rejections and periodic rows were retained',
+            'a measured jitter or drift bound is not a universal OS guarantee',
+            'no time adjustment, host suspension or clock-setting operation was injected',
+            'the original latch proves checker rejection; attribution of an individual jump needs separate evidence'])
+    if args.output.exists():raise RuntimeError('analysis output already exists')
+    args.output.write_text(json.dumps(summary,indent=2)+'\n')
+    print(json.dumps({key:summary[key] for key in ['complete','elapsed_seconds','sample_pairs','rejected_totals']}))
+    for name,row in summary['clocks'].items():
+        print(name,json.dumps({key:row[key] for key in ['fixed_offset_is_consistent','intersection_width_ns','first_to_last_offset_change_ns','linear_slope_ppm']}))
+
+
+if __name__=='__main__':main()

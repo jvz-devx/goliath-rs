@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Prune uncited full game-output payloads, retaining structured traces and archive indexes."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+
+ROOT=Path(__file__).resolve().parent.parent
+OWNED=ROOT/'.local/evidence/E24'
+
+
+def digest(path):
+    result=hashlib.sha256()
+    with path.open('rb') as source:
+        while chunk:=source.read(1024*1024):result.update(chunk)
+    return result.hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--plan',type=Path)
+    parser.add_argument('--apply',type=Path)
+    args=parser.parse_args()
+    if bool(args.plan)==bool(args.apply):raise ValueError('choose plan or apply')
+    if args.plan:
+        if args.plan.exists():raise RuntimeError('prune plan already exists')
+        candidates=[]
+        for name in ['diagnosis-r1-native','diagnosis-r1-anticheat-native']:
+            for path in (OWNED/name).glob('*.json.gz'):
+                if path.stat().st_size>1_000_000:candidates.append(path)
+        for name in ['sampled-650-r1','native-650-r1','rate-1050-r1','soak-fixed-r1','soak-fixed-r2']:
+            for path in (OWNED/name).glob('native-*.json.gz'):
+                if re.fullmatch(r'native-[0-9a-f]{16}\.json\.gz',path.name):candidates.append(path)
+        rows=[]
+        for path in sorted(set(candidates)):
+            if path.is_symlink() or not path.resolve().is_relative_to(OWNED):raise RuntimeError('unowned prune target')
+            rows.append(dict(path=str(path.relative_to(ROOT)),bytes=path.stat().st_size,sha256=digest(path),
+                reason='uncited full stdout/anticheat body; structured lease/client/store/limiter/PS traces and failure excerpts remain'))
+        record=dict(kind='E24-curated-evidence-prune',files=rows,bytes=sum(row['bytes']for row in rows),
+            preserves='all structured timing, authority, memory, environment, source/build proofs and frozen executable bundles',
+            removed_payloads_recoverable=False)
+        args.plan.write_text(json.dumps(record,indent=2)+'\n')
+        print(json.dumps(dict(files=len(rows),bytes=record['bytes'],plan=str(args.plan))))
+        return
+    record=json.loads(args.apply.read_text())
+    completion=args.apply.with_name(args.apply.stem+'-completed.json')
+    if completion.exists():raise RuntimeError('prune already applied')
+    for row in record['files']:
+        path=ROOT/row['path']
+        if path.is_symlink() or not path.resolve().is_relative_to(OWNED) or digest(path)!=row['sha256']:
+            raise RuntimeError('prune target changed: '+row['path'])
+    for row in record['files']:(ROOT/row['path']).unlink()
+    completion.write_text(json.dumps(dict(plan=str(args.apply),files_removed=len(record['files']),bytes_removed=record['bytes'],recoverable=False),indent=2)+'\n')
+    print(completion.read_text())
+
+
+if __name__=='__main__':main()

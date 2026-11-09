@@ -1,0 +1,278 @@
+{
+  "kind": "E24-step1-diagnostic",
+  "error": "proxy not listening",
+  "seconds": 15.615541042003315,
+  "players": 200,
+  "rate_calibration_only": false,
+  "heap_diagnostic": true,
+  "heap_dumped": false,
+  "observed_authority_latch": false,
+  "availability": {
+    "kind": "frozen-executable-harness-availability",
+    "store_trace_enabled": true,
+    "executables_changed": false,
+    "lease_rules_changed": false,
+    "per_renewal_tile_trace": false,
+    "per_renewal_note": "not exposed by frozen engine; separate investigation if expiry recurs",
+    "origin_bracket": {
+      "store_pid": 57236,
+      "spawn_before_monotonic_ns": 174672243617166,
+      "spawn_before_wall_ns": 1794165619038621000,
+      "popen_return_monotonic_ns": 174672244922375,
+      "listen_observed_monotonic_ns": 174672536847375,
+      "listen_observed_wall_ns": 1794165619331872000,
+      "origin_bracket_width_ms": 293.230209
+    },
+    "events_dropped": 0,
+    "collection_scope": "trace harvest and signal serialization after the CPU span; limiter records were memory-only",
+    "overhead_scope": "existing store tracing enabled identically in both arms; its work remains in measured store CPU",
+    "harness_sha256": "1bec801f3bea03f6aa8fe48100e84245d42bbba76b8d613a298ef763ef60ece3",
+    "store_batches": {
+      "rows": 217,
+      "time_scope": "store-relative Instant microseconds; startup origin is separately bracketed, not exact",
+      "incomplete_tail_bytes": 0,
+      "gap_threshold_ms": 200,
+      "gap_note": "batch spacing can be idle time; it is not by itself a stall",
+      "maxima_ms": {
+        "admission_max_ms": 0.046708,
+        "queue_max_ms": 5.26975,
+        "execute_ms": 7.453458,
+        "barrier_ms": 7.419958,
+        "maintain_ms": 0.002458,
+        "background_ms": 0.0
+      },
+      "gaps_over_200ms": [
+        {
+          "index": 7,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 243.969,
+          "context": [
+            {
+              "start_us": 1110404.0,
+              "count": 1.0,
+              "admission_max_ms": 0.001916,
+              "queue_max_ms": 0.017209,
+              "queue_mean_ms": 0.017209,
+              "collect_ms": 8.4e-05,
+              "execute_ms": 0.000333,
+              "barrier_ms": 0.0,
+              "dispatch_ms": 0.000583,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1354373.0,
+              "count": 1.0,
+              "admission_max_ms": 0.00625,
+              "queue_max_ms": 0.010625,
+              "queue_mean_ms": 0.010625,
+              "collect_ms": 0.000709,
+              "execute_ms": 3.987,
+              "barrier_ms": 3.965125,
+              "dispatch_ms": 0.006917,
+              "maintain_ms": 0.000584,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1610061.0,
+              "count": 1.0,
+              "admission_max_ms": 0.006084,
+              "queue_max_ms": 0.00775,
+              "queue_mean_ms": 0.00775,
+              "collect_ms": 0.000834,
+              "execute_ms": 3.967083,
+              "barrier_ms": 3.949791,
+              "dispatch_ms": 0.002458,
+              "maintain_ms": 0.000166,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 8,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 255.688,
+          "context": [
+            {
+              "start_us": 1354373.0,
+              "count": 1.0,
+              "admission_max_ms": 0.00625,
+              "queue_max_ms": 0.010625,
+              "queue_mean_ms": 0.010625,
+              "collect_ms": 0.000709,
+              "execute_ms": 3.987,
+              "barrier_ms": 3.965125,
+              "dispatch_ms": 0.006917,
+              "maintain_ms": 0.000584,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1610061.0,
+              "count": 1.0,
+              "admission_max_ms": 0.006084,
+              "queue_max_ms": 0.00775,
+              "queue_mean_ms": 0.00775,
+              "collect_ms": 0.000834,
+              "execute_ms": 3.967083,
+              "barrier_ms": 3.949791,
+              "dispatch_ms": 0.002458,
+              "maintain_ms": 0.000166,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1774500.0,
+              "count": 1.0,
+              "admission_max_ms": 0.040416,
+              "queue_max_ms": 0.016959,
+              "queue_mean_ms": 0.016959,
+              "collect_ms": 0.000417,
+              "execute_ms": 0.00225,
+              "barrier_ms": 0.0,
+              "dispatch_ms": 0.001125,
+              "maintain_ms": 0.000125,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 214,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 233.484,
+          "context": [
+            {
+              "start_us": 14499451.0,
+              "count": 1.0,
+              "admission_max_ms": 0.015417,
+              "queue_max_ms": 0.0065,
+              "queue_mean_ms": 0.0065,
+              "collect_ms": 0.000667,
+              "execute_ms": 4.070833,
+              "barrier_ms": 4.05325,
+              "dispatch_ms": 0.003416,
+              "maintain_ms": 8.3e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 14732935.0,
+              "count": 1.0,
+              "admission_max_ms": 0.012833,
+              "queue_max_ms": 0.01,
+              "queue_mean_ms": 0.01,
+              "collect_ms": 0.00075,
+              "execute_ms": 3.840708,
+              "barrier_ms": 3.81475,
+              "dispatch_ms": 0.002667,
+              "maintain_ms": 0.000125,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 14761300.0,
+              "count": 1.0,
+              "admission_max_ms": 0.011541,
+              "queue_max_ms": 0.007834,
+              "queue_mean_ms": 0.007834,
+              "collect_ms": 0.000459,
+              "execute_ms": 3.381875,
+              "barrier_ms": 3.35875,
+              "dispatch_ms": 0.002666,
+              "maintain_ms": 8.4e-05,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 216,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 264.745,
+          "context": [
+            {
+              "start_us": 14761300.0,
+              "count": 1.0,
+              "admission_max_ms": 0.011541,
+              "queue_max_ms": 0.007834,
+              "queue_mean_ms": 0.007834,
+              "collect_ms": 0.000459,
+              "execute_ms": 3.381875,
+              "barrier_ms": 3.35875,
+              "dispatch_ms": 0.002666,
+              "maintain_ms": 8.4e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 15026045.0,
+              "count": 1.0,
+              "admission_max_ms": 0.02275,
+              "queue_max_ms": 0.019542,
+              "queue_mean_ms": 0.019542,
+              "collect_ms": 0.001417,
+              "execute_ms": 5.312625,
+              "barrier_ms": 5.273834,
+              "dispatch_ms": 0.0035,
+              "maintain_ms": 0.000417,
+              "background_ms": 0.0
+            }
+          ]
+        }
+      ],
+      "path": ".local/evidence/E24/heap-control-200-r1/heap-control-200-r1-store-batches.csv.gz",
+      "sha256": "13d25b57e3a487cc57a11b4633d3e0852132364a74b78b097150957311c2a387"
+    },
+    "store_connections": {
+      "path": ".local/evidence/E24/heap-control-200-r1/heap-control-200-r1-store-connections.csv.gz",
+      "sha256": "319377dcf86c5c608b4cdb13e67a8da1a0172df994476bca9c06d92821b7aa90"
+    },
+    "limiter_signals": {
+      "path": ".local/evidence/E24/heap-control-200-r1/heap-control-200-r1-limiter-signals.json.gz",
+      "sha256": "e412d554ec0fc06cd25b40f5d20de9227994c21efe7fa5750778e23ed9dab820",
+      "count": 0,
+      "roles": {
+        "57236": "store",
+        "57237": "tile-a",
+        "57279": "tile-b",
+        "57320": "tile-c",
+        "57321": "tile-d"
+      },
+      "scope": "exact successful/failed per-PID kill-call brackets from limiter threads, including final limiter resumes"
+    },
+    "complete": true,
+    "lease_expiry_observed": false,
+    "expiry_events": []
+  },
+  "binaries_unchanged": true,
+  "cleanup_errors": [],
+  "evidence": {
+    ".local/evidence/E24/heap-control-200-r1/cleanup-errors.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+    ".local/evidence/E24/heap-control-200-r1/executed-availability.py": "1bec801f3bea03f6aa8fe48100e84245d42bbba76b8d613a298ef763ef60ece3",
+    ".local/evidence/E24/heap-control-200-r1/executed-cell.py": "44313698c3bbd1dab8197ab2f7cb4a1eba2aa4b4244ab97013d715133c012e76",
+    ".local/evidence/E24/heap-control-200-r1/heap-control-200-r1-200-failure-native.json.gz": "387216c81b0e46316ed36876762b728b746163164be3543d1f45c764ca68da73",
+    ".local/evidence/E24/heap-control-200-r1/heap-control-200-r1-availability.json": "00a3f842df07b8d8239e52f7da32df7a282a2a8673ff051b1e50bc1d84869eb5",
+    ".local/evidence/E24/heap-control-200-r1/heap-control-200-r1-limiter-signals.json.gz": "e412d554ec0fc06cd25b40f5d20de9227994c21efe7fa5750778e23ed9dab820",
+    ".local/evidence/E24/heap-control-200-r1/heap-control-200-r1-store-batches.csv.gz": "13d25b57e3a487cc57a11b4633d3e0852132364a74b78b097150957311c2a387",
+    ".local/evidence/E24/heap-control-200-r1/heap-control-200-r1-store-connections.csv.gz": "319377dcf86c5c608b4cdb13e67a8da1a0172df994476bca9c06d92821b7aa90",
+    ".local/evidence/E24/heap-control-200-r1/heap-control-200-r1.json": "8ea346bf615de6b714b0295a72e2d64bfd004f74df55a4920b58f5060ee13a1a",
+    ".local/evidence/E24/heap-control-200-r1/heap-dump-error.json": "3090eff681c0c8641be14d6133a303866569dc97ff8509111d793e84b4c9d87c",
+    ".local/evidence/E24/heap-control-200-r1/native-logs.json.gz": "f7dcb49dc70b43acb4800d5b91b79bd76d17e863a6c2a649b62cb4195cc854d7",
+    ".local/evidence/E24/heap-control-200-r1/partial-ticks.json.gz": "f36cfcc48555fd2cdf5d4a8e004054775d451ca63c9658ec8981863bb26638d7",
+    ".local/evidence/E24/heap-control-200-r1/process-memory.json.gz": "029ac1ef2bb96aa9fa0166f8f60604b79b92f7fb5cd41a374f80171306cf1b52",
+    ".local/evidence/E24/heap-control-200-r1/proxy-heap.json": "33c17f7d1b420077de27eb5dd3529a5e0de43a09381d6c8d344b04575f3b79d0",
+    ".local/evidence/E24/heap-control-200-r1/store-batches.connections.csv": "78d19bada838cdb7abd51b4098b9f7a41fe618bd8a600208262baaa49e3459c7",
+    ".local/evidence/E24/heap-control-200-r1/store-batches.csv": "7c59202fdf63e8054cc155a6b5feb08b93593223eb589f3a71d8c68aa04738dd",
+    ".local/evidence/E24/heap-control-200-r1/tiles/tile-0-57237-client.csv": "c6cc00fbad9312f9c1cac095fa902cbe1572c8713f1622a670dd16e4f9170d22",
+    ".local/evidence/E24/heap-control-200-r1/tiles/tile-0-57237-lease.jsonl": "96c11c227ffd51b5d5507174646a2f9555a04a762e8630384b0b5fff28ee01ba",
+    ".local/evidence/E24/heap-control-200-r1/tiles/tile-1-57279-client.csv": "9273823a96f6b806be8d0652c4acf0870488800ce064ab4364bd22aa51756c3e",
+    ".local/evidence/E24/heap-control-200-r1/tiles/tile-1-57279-lease.jsonl": "ae728564567916693d4719868bfa3e37f160633d0b92fcda81efd0ab1688b073",
+    ".local/evidence/E24/heap-control-200-r1/tiles/tile-2-57320-client.csv": "d1fa8734346a23177c1fa22d82278458500364d14ec50ef33a6c5a916e9f7ffa",
+    ".local/evidence/E24/heap-control-200-r1/tiles/tile-2-57320-lease.jsonl": "7614edf18dbd8c4db644bb1b4c3794ddb7cf220be63089191106ec406008a043",
+    ".local/evidence/E24/heap-control-200-r1/tiles/tile-3-57321-client.csv": "0a78462885917d9ed6e07da5a99f478800ba234c68a6d6180d70ef8a9de812c1",
+    ".local/evidence/E24/heap-control-200-r1/tiles/tile-3-57321-lease.jsonl": "f2de0f56694ef0ad89c0487755cb73966f2e92296406e3aa27aedb8ddbfa4972"
+  },
+  "interpretation": "diagnostic instrumentation, not capacity qualification"
+}

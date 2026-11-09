@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""Freeze identical gated bytes with a self-contained FINAL-09 plus H13 source proof."""
+import argparse
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+from e14_snapshot_support import validate_snapshot
+
+ROOT=Path(__file__).resolve().parent.parent
+SOURCE=ROOT/'.local/src/horizon'
+DATA=ROOT/'docs/experiments/data/E24'
+EVIDENCE=ROOT/'.local/evidence/E24'
+
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--build',required=True)
+    parser.add_argument('--name',required=True)
+    args=parser.parse_args()
+    previous_path=DATA/(args.build+'-build.json')
+    previous=json.loads(previous_path.read_text())
+    if previous['status']!='complete' or any(row['exit'] for row in previous['commands']):raise RuntimeError('successful complete gates required')
+    target=ROOT/'.local/bin/goliath-e24'/args.name
+    output=DATA/(args.name+'-build.json')
+    patch=ROOT/'patches/horizon-13-lease-raw-clock.patch'
+    if target.exists() or output.exists() or patch.exists():raise RuntimeError('new publication identity required')
+    old_directory=ROOT/previous['directory']
+    before=validate_snapshot(old_directory)
+    files=previous['source']['files']
+    for name,digest in files.items():
+        if sha(SOURCE/name)!=digest:raise RuntimeError('compiled source differs: '+name)
+    for name,digest in previous['source']['internal_files'].items():
+        if sha(ROOT/name)!=digest:raise RuntimeError('compiled internal source differs: '+name)
+    index=EVIDENCE/(args.name+'-final09-index')
+    shutil.copy2(EVIDENCE/'source-backup/final09-index',index)
+    env=dict(os.environ,GIT_INDEX_FILE=str(index),GIT_OPTIONAL_LOCKS='0')
+    def git(*a):return subprocess.check_output(['git',*a],cwd=SOURCE,env=env)
+    parts=[]
+    for name in sorted(files):
+        completed=subprocess.run(['git','show',':'+name],cwd=SOURCE,env=env,capture_output=True)
+        old=completed.stdout.decode() if completed.returncode==0 else ''
+        new=(SOURCE/name).read_text()
+        parts.append(f'diff --git a/{name} b/{name}\n')
+        if completed.returncode:parts.append('new file mode 100644\n')
+        parts.extend(difflib.unified_diff(old.splitlines(keepends=True),new.splitlines(keepends=True),
+            fromfile='a/'+name if old else '/dev/null',tofile='b/'+name))
+    patch.write_text(''.join(parts))
+    git('apply','--cached','--check',str(patch));git('apply','--cached',str(patch))
+    for name,digest in files.items():
+        if hashlib.sha256(git('show',':'+name)).hexdigest()!=digest:raise RuntimeError('FINAL-09+H13 byte proof differs: '+name)
+    source=dict(previous['source'],patch=str(patch.relative_to(ROOT)),patch_sha256=sha(patch),
+        base='FINAL-09, without separate patch12',byte_proof='FINAL-09 plus self-contained H13 equals all gated source files')
+    record=dict(previous,kind='E24-fixed-tile-store-publication',directory=str(target.relative_to(ROOT)),source=source,
+        reused_complete_build=dict(path=str(previous_path.relative_to(ROOT)),sha256=sha(previous_path)),
+        no_recompile='identical compiled/gated source and executable bytes; source patch is rebased to FINAL-09 only')
+    record['gate_logs']={row['log']:sha(ROOT/row['log']) for row in previous['commands']}
+    target.mkdir(parents=True)
+    for name in ['horizon-client','goliath-store','meridian','meridian-sidecar','horizon-bots','e4-client','LEASES','cluster-launcher.py','manifest.json']:
+        shutil.copy2(old_directory/name,target/name)
+    for name in ['canonical.json','candidate.json','FINAL.json']:
+        value=json.loads((old_directory/name).read_text())
+        value.update(kind='E24-fixed-tile-store-awaiting-soak-and-M3',e24_source=source)
+        project=value.get('projects',{}).get('horizon')
+        if project:
+            project['patches']=[row for row in project['patches'] if not Path(row['path']).name.startswith(('horizon-12-','horizon-13-'))]
+            project['patches'].append(dict(path=str(patch.relative_to(ROOT)),sha256=sha(patch)))
+        if name=='FINAL.json':
+            value['binaries']={binary:dict(path=str((target/binary).relative_to(ROOT)),sha256=row['sha256']) for binary,row in value['binaries'].items()}
+            if 'candidate_sha256'in value:value['candidate_sha256']=sha(target/'candidate.json')
+        elif name=='candidate.json' and 'canonical_sha256'in value:value['canonical_sha256']=sha(target/'canonical.json')
+        (target/name).write_text(json.dumps(value,indent=2)+'\n')
+    after=validate_snapshot(target)
+    if before['binaries']!=after['binaries']:raise RuntimeError('publication changed executable bytes')
+    (target/'source-proof.json').write_text(json.dumps(source,indent=2)+'\n')
+    output.write_text(json.dumps(record,indent=2)+'\n')
+    shutil.copy2(output,target/'build.json')
+    print(json.dumps(dict(directory=str(target.relative_to(ROOT)),binaries=record['binaries'],patch_sha256=sha(patch)),indent=2))
+
+
+if __name__=='__main__':main()

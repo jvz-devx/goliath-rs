@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Prepare a diagnostic-only heap overlay without touching the Meridian checkout."""
+import difflib
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT/'.local/src/meridian'
+FOLDER = ROOT/'.local/evidence/E24/proxy-profile-overlay'
+PATCH = ROOT/'patches/meridian-09-heap-diagnostics-r5.patch'
+
+
+def main():
+    manifest = json.loads((ROOT/'.local/bin/meridian-e18/reactor-1/candidate.json').read_text())
+    env = dict(os.environ,GIT_INDEX_FILE=str(ROOT/'.local/evidence/E24/proxy-frozen/index'))
+    def original(name):
+        data = subprocess.check_output(['git','show',':'+name],cwd=SOURCE,env=env)
+        if hashlib.sha256(data).hexdigest()!=manifest['projects']['meridian']['source_files'][name]:
+            raise RuntimeError('frozen proxy source differs: '+name)
+        return data.decode()
+    main_path = 'crates/meridian-proxy/src/main.rs'
+    console_path = 'crates/meridian-proxy/src/console.rs'
+    cargo_path = 'crates/meridian-proxy/Cargo.toml'
+    heap_path = 'crates/meridian-proxy/src/heap_profile.rs'
+    before = {path:original(path) for path in [main_path,console_path,cargo_path]}
+    after = dict(before)
+    after[main_path] = after[main_path].replace('mod access;','mod access;\n#[cfg(feature = "e24-heap")]\nmod heap_profile;\n#[cfg(feature = "e24-heap")]\n#[global_allocator]\nstatic E24_ALLOCATOR: goliath_alloc::Allocator = goliath_alloc::Allocator;',1)
+    after[main_path] = after[main_path].replace('fn run(config: Config, path: PathBuf) -> ExitCode {','''fn run(config: Config, path: PathBuf) -> ExitCode {
+    #[cfg(feature = "e24-heap")]
+    let _heap = match heap_profile::initialize() {
+        Ok(guard) => guard,
+        Err(error) => { eprintln!("E24 heap initialization failed: {error}"); return ExitCode::FAILURE; }
+    };''',1)
+    after[console_path] = after[console_path].replace('for command in [','''for command in [
+            #[cfg(feature = "e24-heap")]
+            command("e24-heap", "e24-heap [start|dump]", "starts the one-shot heap capture, reads counters or freezes its live profile", |_, _, args| {
+                if args.len() > 1 || args.first().is_some_and(|word| !matches!(*word,"start"|"dump")) { return Err("usage: e24-heap [start|dump]".into()); }
+                let action = args.first().copied().unwrap_or("sample");
+                Ok(vec![format!("E24_HEAP {}", crate::heap_profile::snapshot(action)?)])
+            }),''',1)
+    after[cargo_path] = after[cargo_path].replace('[dependencies]','[features]\ne24-heap = ["dep:goliath-alloc"]\n\n[dependencies]\ngoliath-alloc = { path = "../../../../../crates/goliath-alloc", optional = true }',1)
+    before[heap_path] = ''
+    after[heap_path] = (FOLDER/'heap_profile.rs').read_text()
+    for name,content in list(after.items()):
+        if name.endswith('.rs'):
+            after[name] = subprocess.check_output(['rustfmt','--edition','2024','--emit','stdout','--config','skip_children=true'],
+                input=content.encode(),cwd=FOLDER).decode()
+    parts = []
+    for name,content in after.items():
+        target = FOLDER/name
+        target.parent.mkdir(parents=True,exist_ok=True)
+        target.write_text(content)
+        parts.append(f'diff --git a/{name} b/{name}\n')
+        if not before[name]:parts.append('new file mode 100644\n')
+        parts.extend(difflib.unified_diff(before[name].splitlines(keepends=True),content.splitlines(keepends=True),
+            fromfile='a/'+name if before[name] else '/dev/null',tofile='b/'+name))
+    if PATCH.exists():raise RuntimeError('heap patch already exists')
+    PATCH.write_text(''.join(parts))
+    print(json.dumps(dict(patch=str(PATCH.relative_to(ROOT)),sha256=hashlib.sha256(PATCH.read_bytes()).hexdigest(),
+        profiling_only=True,meridian_checkout_changed=False)))
+
+
+if __name__ == '__main__':main()

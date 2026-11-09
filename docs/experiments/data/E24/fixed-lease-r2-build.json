@@ -1,0 +1,34 @@
+{
+  "kind": "E24-raw-clock-fixed-build",
+  "status": "failed",
+  "profile": "release",
+  "incremental": false,
+  "probe": {
+    "path": "docs/experiments/data/E24/clock-pair-enhanced-r1-readback.json",
+    "sha256": "985a6654120ecdb1f9f1da9adef8a19eed6367b7f77621de33622aac5d19e071"
+  },
+  "commands": [
+    {
+      "label": "resolve-clock-dependency",
+      "command": [
+        "$REPO/.local/bin/host-window",
+        "build",
+        "E24",
+        "--",
+        "cargo",
+        "metadata",
+        "--offline",
+        "--format-version",
+        "1",
+        "--no-default-features",
+        "--filter-platform",
+        "aarch64-apple-darwin"
+      ],
+      "exit": 101,
+      "seconds": 75.24605474999407,
+      "log": ".local/evidence/E24/fixed-lease-r2-resolve-clock-dependency.log",
+      "test_results": []
+    }
+  ],
+  "error": "gate failed: resolve-clock-dependency"
+}

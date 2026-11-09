@@ -16,22 +16,90 @@ pub struct Engine {
     compact_every: u64,
     failed: bool,
     compaction_in_flight: bool,
+    snapshot_buffer: Vec<u8>,
     #[cfg(feature = "fault-injection")]
     early_ack: bool,
 }
 
+/// Sampled ownership sizes, not allocator RSS. Blob counters exclude map nodes.
+pub struct StoreResources {
+    pub accepted: u64,
+    pub receipts: usize,
+    pub receipt_blob_bytes: usize,
+    pub receipt_blob_capacity_bytes: usize,
+    pub receipt_inline_bytes: usize,
+    pub players: usize,
+    pub uuid_players: usize,
+    pub player_blob_bytes: usize,
+    pub player_blob_capacity_bytes: usize,
+    pub snapshot_len: usize,
+    pub snapshot_capacity: usize,
+    pub in_flight: bool,
+}
+
 impl Engine {
+    pub fn accepted_count(&self) -> u64 {
+        self.sequence
+    }
+
+    pub fn receipt_count(&self) -> usize {
+        self.state.receipt_count()
+    }
+
+    pub fn resources(&self) -> StoreResources {
+        let (bytes, capacity) = self.state.receipt_blob_bytes();
+        let (players, uuid_players, player_blob_bytes, player_blob_capacity_bytes) =
+            self.state.player_blob_stats();
+        StoreResources {
+            accepted: self.sequence,
+            receipts: self.receipt_count(),
+            receipt_blob_bytes: bytes,
+            receipt_blob_capacity_bytes: capacity,
+            receipt_inline_bytes: self.receipt_count() * std::mem::size_of::<(Command, Response)>(),
+            players,
+            uuid_players,
+            player_blob_bytes,
+            player_blob_capacity_bytes,
+            snapshot_len: self.snapshot_buffer.len(),
+            snapshot_capacity: self.snapshot_buffer.capacity(),
+            in_flight: self.compaction_in_flight,
+        }
+    }
+
+    pub fn last_barrier_span(&self) -> Option<(Instant, Instant)> {
+        self.journal.last_barrier_span
+    }
+
+    fn capture_snapshot(&mut self) -> io::Result<Vec<u8>> {
+        let buffer = std::mem::take(&mut self.snapshot_buffer);
+        if buffer.capacity() == 0 {
+            self.state.snapshot()
+        } else {
+            self.state.snapshot_into(buffer)
+        }
+    }
+
+    fn compact_now(&mut self) -> io::Result<()> {
+        let snapshot = self.capture_snapshot()?;
+        let result = self.journal.compact(self.sequence, &snapshot);
+        self.snapshot_buffer = snapshot;
+        result
+    }
     /// Duration of the last batch's journal barrier, excluding encoding and append.
     pub fn last_barrier_duration(&self) -> Duration {
         self.journal.last_barrier
     }
 
     pub fn open(directory: &Path, mode: SyncMode, compact_every: u64) -> io::Result<Self> {
-        let (journal, recovery) = Journal::open(directory, mode)?;
-        let (mut state, mut sequence) = match recovery.snapshot {
-            Some((sequence, bytes)) => (State::restore(&bytes)?, sequence),
-            None => (State::default(), 0),
-        };
+        let mut state = State::default();
+        let (journal, recovery) = Journal::open(directory, mode, |snapshot| {
+            state = match snapshot {
+                Some(bytes) => State::restore(bytes)?,
+                None => State::default(),
+            };
+            Ok(())
+        })?;
+        let mut sequence = recovery.snapshot.map_or(0, |(sequence, _)| sequence);
         let mut previous = None;
         let mut since_compaction = 0;
         for (record_sequence, bytes) in recovery.records {
@@ -64,15 +132,14 @@ impl Engine {
             compact_every,
             failed: false,
             compaction_in_flight: false,
+            snapshot_buffer: Vec::new(),
             #[cfg(feature = "fault-injection")]
             early_ack: false,
         };
         // Finish an interrupted rotation from recovered state, before serving.
         // Never consolidate overlapping log files by copying their bytes.
         if engine.journal.has_rotation()? {
-            engine
-                .journal
-                .compact(engine.sequence, &engine.state.snapshot()?)?;
+            engine.compact_now()?;
             engine.since_compaction = 0;
         }
         // Historical commands replay without today's deadlines. Only after all
@@ -161,8 +228,7 @@ impl Engine {
         }
         self.journal.append_batch(&records)?;
         if commands.iter().any(|c| c.operation == Operation::Compact) {
-            self.journal
-                .compact(self.sequence, &self.state.snapshot()?)?;
+            self.compact_now()?;
             self.since_compaction = 0;
         }
         Ok(responses)
@@ -178,10 +244,7 @@ impl Engine {
             return Err(io::Error::other("background compaction still in flight"));
         }
         if self.compact_every != 0 && self.since_compaction >= self.compact_every {
-            let result = self
-                .state
-                .snapshot()
-                .and_then(|snapshot| self.journal.compact(self.sequence, &snapshot));
+            let result = self.compact_now();
             if result.is_err() {
                 self.failed = true;
             }
@@ -204,8 +267,7 @@ impl Engine {
             return Ok(None);
         }
         let result = self
-            .state
-            .snapshot()
+            .capture_snapshot()
             .and_then(|snapshot| self.journal.rotate(self.sequence, snapshot));
         match result {
             Ok(work) => {
@@ -228,10 +290,16 @@ impl Engine {
         }
         let result = result.and_then(|ready| self.journal.complete_compaction(ready));
         self.compaction_in_flight = false;
-        if result.is_err() {
-            self.failed = true;
+        match result {
+            Ok(buffer) => {
+                self.snapshot_buffer = buffer;
+                Ok(())
+            }
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
         }
-        result
     }
 }
 
@@ -246,6 +314,48 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn completed_snapshot_allocation_is_reused_by_the_next_compaction() {
+        let path = directory();
+        let mut engine = Engine::open(&path, SyncMode::Full, 1).unwrap();
+        engine.snapshot_buffer = Vec::with_capacity(256 * 1024);
+        let original = engine.snapshot_buffer.as_ptr();
+        let response = engine
+            .execute_batch(&[Command {
+                id: RequestId(1),
+                operation: Operation::Claim(TileId(0)),
+            }])
+            .unwrap();
+        let Response::Claimed(fence) = response[0] else {
+            panic!("claim expected")
+        };
+        for command in [
+            None,
+            Some(Command {
+                id: RequestId(2),
+                operation: Operation::Heartbeat { fence, counter: 1 },
+            }),
+        ] {
+            if let Some(command) = command {
+                engine.execute_batch(&[command]).unwrap();
+            }
+            let work = engine.begin_maintenance().unwrap().unwrap();
+            assert_eq!(work.snapshot_usage().1, 256 * 1024);
+            assert!(engine.resources().in_flight);
+            engine
+                .complete_maintenance(Ok(work.run().unwrap()))
+                .unwrap();
+            assert_eq!(engine.snapshot_buffer.as_ptr(), original);
+            assert_eq!(engine.resources().snapshot_capacity, 256 * 1024);
+            assert!(!engine.resources().in_flight);
+        }
+        let expected = engine.state.snapshot().unwrap();
+        let stored = fs::read(path.join("snapshot")).unwrap();
+        assert_eq!(&stored[32..], expected);
+        drop(engine);
+        fs::remove_dir_all(path).unwrap();
+    }
 
     fn directory() -> std::path::PathBuf {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
@@ -513,5 +623,175 @@ mod tests {
         fs::write(path.join("journal.previous"), prefix).unwrap();
         assert!(Engine::open(&path, SyncMode::Full, 0).is_err());
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn e24_receipt_fifo_survives_journal_sync_and_background_compaction() {
+        use crate::receipts::CAPACITY;
+        for mode in 0..3 {
+            let path = directory();
+            let mut engine = Engine::open(&path, SyncMode::Full, u64::from(mode == 2)).unwrap();
+            let original = Command {
+                id: RequestId(u128::MAX),
+                operation: Operation::Claim(TileId(3)),
+            };
+            let accepted = engine
+                .execute_batch(std::slice::from_ref(&original))
+                .unwrap()
+                .pop()
+                .unwrap();
+            let fillers: Vec<_> = (0..CAPACITY - 1)
+                .map(|n| Command {
+                    id: RequestId(1_000_000 - n as u128),
+                    operation: Operation::Claim(TileId(2)),
+                })
+                .collect();
+            engine.execute_batch(&fillers).unwrap();
+            if mode == 1 {
+                engine
+                    .execute_batch(&[Command {
+                        id: RequestId(0),
+                        operation: Operation::Compact,
+                    }])
+                    .unwrap();
+            } else if mode == 2 {
+                let work = engine.begin_maintenance().unwrap().unwrap();
+                engine.complete_maintenance(work.run()).unwrap();
+            }
+            drop(engine);
+            let mut recovered = Engine::open(&path, SyncMode::Full, 0).unwrap();
+            let sequence = recovered.sequence;
+            assert_eq!(recovered.execute(&original).unwrap(), accepted);
+            assert_eq!(recovered.sequence, sequence);
+            recovered
+                .execute(&Command {
+                    id: RequestId(2_000_000),
+                    operation: Operation::Claim(TileId(2)),
+                })
+                .unwrap();
+            drop(recovered);
+            let mut recovered = Engine::open(&path, SyncMode::Full, 0).unwrap();
+            let sequence = recovered.sequence;
+            assert_ne!(recovered.execute(&original).unwrap(), accepted);
+            assert_eq!(recovered.sequence, sequence + 1);
+            drop(recovered);
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn e24_clock_guard_does_not_reject_already_accepted_journal_history() {
+        use crate::ClusterClock;
+        let path = directory();
+        let mut engine = Engine::open(&path, SyncMode::Full, 0).unwrap();
+        let fence = Fence {
+            tile: TileId(0),
+            process: ProcessId(1),
+            epoch: Epoch(1),
+        };
+        let sky = |unix_ms| ClusterClock {
+            unix_ms,
+            game_tick: 5,
+            day_tick: 9,
+            raining: false,
+            thundering: false,
+        };
+        let commands = [
+            Command {
+                id: RequestId(1),
+                operation: Operation::Claim(TileId(0)),
+            },
+            Command {
+                id: RequestId(2),
+                operation: Operation::SetClock {
+                    fence,
+                    clock: sky(20),
+                },
+            },
+            Command {
+                id: RequestId(3),
+                operation: Operation::SetClock {
+                    fence,
+                    clock: sky(10),
+                },
+            },
+        ];
+        let records: Vec<_> = commands
+            .iter()
+            .enumerate()
+            .map(|(n, command)| ((n + 1) as u64, encode_command(command).unwrap()))
+            .collect();
+        engine.journal.append_batch(&records).unwrap();
+        drop(engine);
+        let mut recovered = Engine::open(&path, SyncMode::Full, 0).unwrap();
+        assert_eq!(
+            recovered
+                .execute(&Command {
+                    id: RequestId(0),
+                    operation: Operation::Clock
+                })
+                .unwrap(),
+            Response::Clock(Some(sky(10)))
+        );
+        assert_eq!(
+            recovered
+                .execute(&Command {
+                    id: RequestId(4),
+                    operation: Operation::SetClock {
+                        fence,
+                        clock: sky(9)
+                    }
+                })
+                .unwrap(),
+            Response::Fault(StoreFault::RequestConflict)
+        );
+        drop(recovered);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn e24_unsupported_snapshot_does_not_repair_or_modify_legacy_files() {
+        use crate::codec::Encoder;
+        use crate::receipts::CAPACITY;
+        for missing_auxiliary in [false, true] {
+            let path = directory();
+            let mut engine = Engine::open(&path, SyncMode::Full, 0).unwrap();
+            let mut snapshot = Encoder::default();
+            snapshot.u64(0);
+            snapshot.count(0).unwrap();
+            snapshot.count(0).unwrap();
+            snapshot.count(CAPACITY + 1).unwrap();
+            for n in 0..CAPACITY + 1 {
+                let command = Command {
+                    id: RequestId((n + 1) as u128),
+                    operation: Operation::Claim(TileId(0)),
+                };
+                snapshot.bytes(&encode_command(&command).unwrap()).unwrap();
+                snapshot
+                    .bytes(&crate::codec::encode_response(&Response::Ok).unwrap())
+                    .unwrap();
+            }
+            engine.journal.compact(0, &snapshot.finish()).unwrap();
+            drop(engine);
+            fs::write(path.join("journal"), b"torn").unwrap();
+            if missing_auxiliary {
+                fs::remove_file(path.join("writer.lock")).unwrap();
+                fs::remove_file(path.join("journal.next")).unwrap();
+            }
+            let files = || -> std::collections::BTreeMap<_, _> {
+                fs::read_dir(&path)
+                    .unwrap()
+                    .map(|entry| {
+                        let entry = entry.unwrap();
+                        (entry.file_name(), fs::read(entry.path()).unwrap())
+                    })
+                    .collect()
+            };
+            let original = files();
+            let error = Engine::open(&path, SyncMode::Full, 0).err().unwrap();
+            assert!(error.to_string().contains("explicit migration"));
+            assert_eq!(files(), original);
+            fs::remove_dir_all(path).unwrap();
+        }
     }
 }

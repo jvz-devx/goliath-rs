@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Independently verify and optionally pack every r2 crash/matrix trial."""
+import argparse
+import base64
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+EVIDENCE=ROOT/'.local/evidence/E24'
+
+
+def load(name,path):
+    loader=importlib.machinery.SourceFileLoader(name,str(path));spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module);return module
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--campaign-data',required=True);parser.add_argument('--campaign',required=True)
+    parser.add_argument('--matrix-data',required=True);parser.add_argument('--matrix',required=True)
+    parser.add_argument('--name',required=True);parser.add_argument('--pack',action='store_true');args=parser.parse_args()
+    folder=EVIDENCE/args.campaign_data;matrix_folder=EVIDENCE/args.matrix_data
+    checker=load('e24_final_campaign_check',ROOT/'scripts/m3-check');checker.DATA=folder
+    campaign=checker.campaign(args.campaign)
+    if campaign['crossings']!=1000 or any(n not in [66,67]for row in campaign['coverage'].values()for n in row.values()):
+        raise ValueError('1000-seed phase/victim coverage differs')
+    matrix_kernel=load('e24_final_matrix_check',ROOT/'scripts/e24-m3')
+    matrix=json.loads((matrix_folder/(args.matrix+'-matrix.json')).read_text())
+    matrix_check=matrix_kernel.check_matrix(matrix_folder,matrix,campaign['binaries'])
+    windows=[]
+    for base in [folder,matrix_folder]:
+        for path in sorted(base.glob('*-window/window.json')):
+            record=json.loads(path.read_text())
+            if record.get('exit') or not record.get('outside_noise_valid') or not record.get('binaries_unchanged'):
+                raise ValueError('window failure/noise/binary-change: '+str(path))
+            if record['seconds']>=1800:raise ValueError('M3 window reached thirty minutes')
+            if record['binaries']!=campaign['binaries']:raise ValueError('window mixed binaries')
+            windows.append(dict(path=str(path.relative_to(ROOT)),seconds=record['seconds'],
+                outside_maximum_cores=record['outside_maximum_cores'],sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+    outcome=json.loads((folder/(args.campaign+'-campaign.json')).read_text())
+    paths=sorted({folder/f'{row.get("evidence_name",args.campaign)}-{row["seed"]}.json'for row in outcome['trials']})
+    archive=folder/'campaign-trials.jsonl.gz'
+    archive_info=None
+    if args.pack:
+        if archive.exists():raise ValueError('trial archive already exists')
+        with archive.open('xb') as raw,gzip.GzipFile(filename='',mode='wb',fileobj=raw,mtime=0) as packed:
+            for path in paths:
+                content=path.read_bytes()
+                row=dict(file=path.name,result=json.loads(content),raw_sha256=hashlib.sha256(content).hexdigest(),
+                    raw_base64=base64.b64encode(content).decode())
+                packed.write((json.dumps(row,separators=(',',':'))+'\n').encode())
+        verified=[]
+        with gzip.open(archive,'rt') as source:
+            for line in source:
+                row=json.loads(line);content=base64.b64decode(row['raw_base64'])
+                path=folder/row['file']
+                if content!=path.read_bytes() or hashlib.sha256(content).hexdigest()!=row['raw_sha256'] or json.loads(content)!=row['result']:
+                    raise ValueError('trial archive round-trip differs')
+                verified.append(path)
+        if set(verified)!=set(paths):raise ValueError('trial archive coverage differs')
+        (folder/'campaign-trials-index.json').write_text(json.dumps(dict(files=[path.name for path in paths]),indent=2)+'\n')
+        for path in paths:path.unlink()
+        if checker.campaign(args.campaign)!=campaign:raise ValueError('independent check differs after packing')
+        archive_info=dict(path=str(archive.relative_to(ROOT)),sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+            trials=len(paths),original_bytes_recoverable=True,roundtrip='byte-identical')
+    result=dict(kind='E24-fixed-M3-independent-summary',verdict='passed',campaign=campaign,matrix=matrix_check,
+        duplicates=0,missing=0,stale_files=0,windows=windows,trial_archive=archive_info,
+        scope='1000originalE13crash kernels plus12partition and6stale-login cases, unchanged named-item accounting')
+    output=ROOT/'docs/experiments/data/E24'/(args.name+'.json')
+    if output.exists():raise RuntimeError('M3 summary already exists')
+    output.write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
+
+
+if __name__=='__main__':main()

@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Independently verify exhaustive raw-pair coverage and the conditional build gate."""
+import argparse
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+loader=importlib.machinery.SourceFileLoader('e24_clock_base',str(ROOT/'scripts/e24-clock-analyse'))
+spec=importlib.util.spec_from_loader(loader.name,loader)
+base=importlib.util.module_from_spec(spec)
+loader.exec_module(base)
+
+
+def verify_histogram(raw):
+    histogram=raw['width_histogram_ns_count']
+    if not histogram or any(width<0 or count<=0 for width,count in histogram):raise ValueError('invalid histogram')
+    if sorted(dict(histogram).items())!=[tuple(row) for row in histogram]:raise ValueError('unordered/duplicate histogram')
+    count=sum(amount for _,amount in histogram)
+    if count!=raw['triples']:raise ValueError('histogram does not cover every triple')
+    def quantile(numerator,denominator):
+        rank=(count*numerator+denominator-1)//denominator
+        running=0
+        for width,amount in histogram:
+            running+=amount
+            if running>=rank:return width
+        raise ValueError('histogram quantile missing')
+    distribution=dict(p50=quantile(50,100),p99=quantile(99,100),p99_99=quantile(9999,10000),max=histogram[-1][0])
+    if distribution!=raw['width_distribution_ns']:raise ValueError('reported distribution differs')
+    for threshold,field in [(1000,'wider_than_1000_ns'),(2000,'wider_than_2000_ns')]:
+        if sum(amount for width,amount in histogram if width>threshold)!=raw[field]:raise ValueError('wide count differs')
+    if raw['narrowest']['width_ns']!=histogram[0][0]:raise ValueError('narrowest triple differs')
+    return distribution
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--output',type=Path,required=True)
+    args=parser.parse_args()
+    folder=ROOT/'.local/evidence/E24'/args.name
+    path=folder/'clock.jsonl'
+    if not path.exists():path=path.with_suffix('.jsonl.gz')
+    content=path.read_bytes()
+    records=[json.loads(line) for line in (gzip.decompress(content) if path.suffix=='.gz' else content).splitlines()]
+    last=records[-1]
+    if last['kind']!='complete' or last['schema']!='E24-exhaustive-clock-probe-v2':raise RuntimeError('complete enhanced probe required')
+    window_path=folder/'window.json'
+    window=json.loads(window_path.read_text())
+    raw=last['raw_pair']
+    distribution=verify_histogram(raw)
+    if last['samples']!=raw['triples']:raise ValueError('sample coverage differs')
+    consistent=raw['intersection_lower_ns']<=raw['intersection_upper_ns']
+    if consistent!=raw['fixed_offset_is_consistent']:raise ValueError('intersection flag differs')
+    if any(row['raw_pair']['intersection_lower_ns']>row['raw_pair']['intersection_upper_ns'] for row in records):
+        consistent=False
+    condition1=bool(consistent and last['elapsed_ns']>=1_200_000_000_000 and window['exit']==0)
+    baseline=raw['baseline']
+    baseline_narrow=bool(baseline and baseline['width_ns']<=500)
+    three_resamples_supported=raw['longest_consecutive_fixed_baseline_inconclusive']<=3
+    result=dict(kind='E24-enhanced-clock-probe-readback',name=args.name,complete=True,
+        elapsed_seconds=last['elapsed_ns']/1e9,sample_pairs=last['samples'],
+        condition1_met=condition1,baseline_limit_ns=500,baseline_narrow=baseline_narrow,
+        allowance_ns=1000,resample_limit=3,triple_attempt_limit=4,
+        three_resamples_supported_by_unloaded_trace=three_resamples_supported,
+        conditional_fix_build_ready=condition1 and baseline_narrow and three_resamples_supported and raw['fixed_baseline_definite_offset']==0,
+        raw_pair=raw,independently_verified_width_distribution_ns=distribution,
+        rejected_totals=dict(zip(base.NAMES,last['reject_totals'])),
+        clocks={name:base.describe([row for row in records if 'next'in row],name) for name in base.NAMES},
+        rejections=[row for row in records if row['kind']=='rejection'],
+        inputs={str(item.relative_to(ROOT)):hashlib.sha256(item.read_bytes()).hexdigest() for item in [path,window_path,folder/'source.rs',folder/'window-script.py']},
+        limits=['no clock setting or host suspension was injected',
+            'the histogram and fixed-offset intersection cover every triple, not merely retained periodic rows',
+            'unloaded widths do not replace the required loaded-tile distribution and closure telemetry',
+            'a fixed offset does not prove the OS origin of the earlier21us discrepancy',
+            'a closure caused by exhausted resampling is a soak failure; allowance cannot be widened without approval'])
+    if args.output.exists():raise RuntimeError('readback already exists')
+    args.output.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps({key:result[key] for key in ['elapsed_seconds','sample_pairs','condition1_met','baseline_narrow','conditional_fix_build_ready','independently_verified_width_distribution_ns']}))
+    print(json.dumps({key:raw[key] for key in ['intersection_lower_ns','intersection_upper_ns','wider_than_1000_ns','wider_than_2000_ns','longest_consecutive_wider_than_2000_ns','longest_consecutive_fixed_baseline_inconclusive']}))
+
+
+if __name__=='__main__':main()

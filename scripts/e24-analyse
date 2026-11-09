@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Reconstruct E24 renewal, deadline, clock and limiter events without assuming a cause."""
+import argparse
+import csv
+import gzip
+import hashlib
+import io
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def raw(path):
+    data = path.read_bytes()
+    return gzip.decompress(data) if path.suffix == '.gz' else data
+
+
+def rows(path):
+    return [json.loads(line) for line in raw(path).splitlines() if line.strip()]
+
+
+def clock_failure(data):
+    maximum = data['next_after_ns']-data['previous_before_ns']
+    minimum = max(0,data['next_before_ns']-data['previous_after_ns'])
+    elapsed = data['next_continuous_ns']-data['previous_continuous_ns']
+    slack = maximum//500+1000
+    return dict(maximum_ns=maximum,minimum_ns=minimum,continuous_elapsed_ns=elapsed,slack_ns=slack,
+        too_far_ahead_ns=elapsed-maximum-slack,too_far_behind_ns=minimum-elapsed-slack,
+        rejected=elapsed>maximum+slack or elapsed+slack<minimum)
+
+
+def client_summary(path):
+    events = list(csv.DictReader(io.StringIO(raw(path).decode())))
+    waiting,acquired,lock_wait,held,released = {},{},[],[],set()
+    for row in events:
+        key = row['request_id']
+        now = int(row['wall_ns'])
+        if row['event'] == 'call-waiting':
+            waiting[key] = now
+        elif row['event'] == 'lock-acquired':
+            acquired[key] = now
+            if key in waiting:
+                lock_wait.append((now-waiting[key])/1e6)
+        elif row['event'] == 'lock-releasing' and key in acquired:
+            released.add(key)
+            held.append((now-acquired[key])/1e6)
+    return dict(events=len(events),calls=len(waiting),maximum_lock_wait_ms=max(lock_wait,default=None),
+        maximum_lock_held_ms=max(held,default=None),operation_names=sorted({r['operation'] for r in events}),
+        pending_ids=sorted(set(acquired)-released),
+        tail=events[-18:])
+
+
+def phase_noise(report,first,last):
+    samples = report.get('samples',[])
+    left = next((row for row in samples if row['mark']==first),None)
+    right = next((row for row in reversed(samples) if row['mark']==last),None)
+    if not left or not right or right['at']<=left['at']:
+        return None
+    seconds = right['at']-left['at']
+    totals = {}
+    # Each delta belongs to the interval ending at that row. Exclude the first boundary.
+    for row in samples:
+        if left['at']<row['at']<=right['at']:
+            for pid,amount in row['outside_cpu_s_delta'].items():
+                totals[pid] = totals.get(pid,0)+amount
+    return dict(seconds=seconds,first=first,last=last,
+        maximum_outside_process_cores=max((amount/seconds for amount in totals.values()),default=0),
+        outside_processes=[dict(pid=pid,name='outside',cpu_s=amount,cores=amount/seconds)
+            for pid,amount in sorted(totals.items(),key=lambda row:row[1],reverse=True)],
+        valid=all(amount/seconds<=.5 for amount in totals.values()) and not report.get('error'))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--output',type=Path)
+    args = parser.parse_args()
+    folder = ROOT/'.local/evidence/E24'/args.name
+    result = dict(kind='E24-causal-readback',name=args.name,tiles={})
+    cell_path = next((path for path in [folder/(args.name+'.json'),folder/(args.name+'.json.gz')] if path.exists()),None)
+    if cell_path:
+        cell = json.loads(raw(cell_path)).get('cells',{}).get('650',{})
+        report = cell.get('processes',{})
+        endpoint = 'steady-last' if any(row.get('mark')=='steady-last' for row in report.get('samples',[])) else 'failure-before-cleanup'
+        result['window'] = dict(status=cell.get('status'),error=cell.get('error'),load_start=cell.get('load_start'),
+            original_noise_valid=cell.get('noise_valid'),
+            whole_noise=phase_noise(report,'cell-start',endpoint),steady_noise=phase_noise(report,'steady-first',endpoint),
+            retained_bot_samples=len(cell.get('bot_samples',[])),server_cap_roles=cell.get('server_cap_roles'),
+            limiter_whole_cell=cell.get('limiter_whole_cell'))
+    signals_path = next(folder.glob('*-limiter-signals.json.gz'),None)
+    signal_data = json.loads(raw(signals_path)) if signals_path else dict(events=[])
+    for path in sorted((folder/'tiles').glob('*-lease.jsonl*')):
+        events = rows(path)
+        stops = [row for row in events if row['event']=='authority-stop']
+        anomalies = [dict(row,**({'bracket':clock_failure(row['data'])}
+            if row['data']['reason']=='outside-bracket' else {}))
+            for row in events if row['event']=='clock-anomaly']
+        replies = [row for row in events if row['event']=='renew-reply']
+        installed = [row for row in events if row['event']=='renew-installed']
+        tickets = [row for row in events if row['event']=='renew-ticket']
+        pids = [row['data']['pid'] for row in events if row['event']=='trace-start']
+        pid = pids[0] if pids else None
+        first_stop = stops[0] if stops else None
+        context = [row for row in events if first_stop and first_stop['at_ns']-2_000_000_000<=row['at_ns']<=first_stop['at_ns']+50_000_000]
+        near_signals = [row for row in signal_data['events'] if row['pid']==pid and first_stop
+            and first_stop['wall_ns']-2_000_000_000<=row['wall_before_ns']<=first_stop['wall_ns']+50_000_000]
+        result['tiles'][path.name] = dict(pid=pid,records=len(events),first_stop=first_stop,
+            clock_anomalies=anomalies,clock_anomaly_count=len(anomalies),renewal_replies=len(replies),renewal_installs=len(installed),
+            maximum_reply_ms=max(((row['data']['reply_ns']-row['data']['sent_ns'])/1e6 for row in replies),default=None),
+            minimum_ticket_deadline_slack_ms=min(((row['data']['deadline_ns']-row['data']['sent_ns'])/1e6 for row in tickets),default=None),
+            minimum_installed_old_deadline_slack_ms=min(((row['data']['previous_deadline_ns']-row['data']['observe_ns'])/1e6 for row in installed),default=None),
+            recent_event_chain=context,nearby_limiter_signal_call_brackets=near_signals)
+    result['clients'] = {path.name:client_summary(path) for path in sorted((folder/'tiles').glob('*-client.csv*'))}
+    store_path = next(folder.glob('store-batches.csv*'),None)
+    if store_path:
+        batches = [{key:float(value) for key,value in row.items()} for row in csv.DictReader(io.StringIO(raw(store_path).decode()))]
+        result['store'] = dict(batches=len(batches),
+            maximum_start_gap_ms=max(((b['start_us']-a['start_us'])/1000 for a,b in zip(batches,batches[1:])),default=None),
+            maxima_ms={key:max(row[key] for row in batches) for key in ['execute_ms','barrier_ms','maintain_ms','background_ms']})
+    result['evidence'] = {str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(folder.rglob('*')) if path.is_file()}
+    output = args.output or ROOT/'docs/experiments/data/E24'/(args.name+'-causal-readback.json')
+    if output.exists():
+        raise RuntimeError('analysis already exists; use --output with a new name')
+    output.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(tiles={name:dict(first_stop=row['first_stop'],clock_anomaly_count=row['clock_anomaly_count'],
+        maximum_reply_ms=row['maximum_reply_ms']) for name,row in result['tiles'].items()},store=result.get('store')),indent=2))
+
+
+if __name__ == '__main__':
+    main()

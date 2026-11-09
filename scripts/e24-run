@@ -1,0 +1,388 @@
+#!/usr/bin/env python3
+"""650-player FINAL-09 diagnostic window with unchanged D9 movement and CPU limiter."""
+import argparse
+import ast
+import base64
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+import e11_support as support
+from e24_mutation_watch import MutationWatch
+from e14_snapshot_support import validate_snapshot
+
+ROOT = support.ROOT
+DATA = ROOT/'docs/experiments/data/E24'
+EVIDENCE = ROOT/'.local/evidence/E24'
+
+
+def load(name,path):
+    loader = importlib.machinery.SourceFileLoader(name,str(path))
+    spec = importlib.util.spec_from_loader(name,loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def save(path,value):
+    raw = support.sanitize(json.dumps(value,indent=2,allow_nan=False)).encode()+b'\n'
+    path = Path(path)
+    if len(raw)>1_000_000 or path.suffix == '.gz':
+        path = path if path.suffix == '.gz' else path.with_suffix(path.suffix+'.gz')
+        path.write_bytes(gzip.compress(raw,mtime=0))
+    else:
+        path.write_bytes(raw)
+    return path
+
+
+def authority_stops(folder):
+    result = []
+    for path in sorted((folder/'tiles').glob('*-lease.jsonl*')):
+        opener = gzip.open if path.suffix=='.gz' else open
+        with opener(path,'rt') as source:
+            for line in source:
+                if line.strip():
+                    row = json.loads(line)
+                    if row.get('event')=='authority-stop':
+                        result.append(dict(path=str(path.relative_to(folder)),**row))
+    return result
+
+
+class Retarget(ast.NodeTransformer):
+    def visit_Constant(self,node):
+        if isinstance(node.value,str):
+            return ast.copy_location(ast.Constant(node.value.replace('E22','E24')),node)
+        return node
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--bins',type=Path,required=True)
+    parser.add_argument('--host-released',action='store_true',required=True)
+    parser.add_argument('--seconds',type=float,default=2700)
+    parser.add_argument('--players',type=int,default=650,choices=[200,650,1050])
+    parser.add_argument('--heap',action='store_true',help='explicitly instrumented proxy heap diagnostic, never capacity acceptance')
+    parser.add_argument('--clock-telemetry',action='store_true',help='require fixed-tile raw-clock counters and retain loaded endpoints')
+    parser.add_argument('--soak-audit',action='store_true',help='retain E23 cargo, ownership and all-tile checkpoint/recovery audit')
+    parser.add_argument('--planning-mutation-rate',type=int)
+    args = parser.parse_args()
+    if not all(c.isalnum() or c in '-_' for c in args.name) or not args.name:
+        raise ValueError('simple fresh attempt name required')
+    if not 1 <= args.seconds <= 2700:
+        raise ValueError('at most one 45-minute diagnostic window')
+    if args.soak_audit and (args.players!=650 or args.seconds!=1800 or not args.clock_telemetry):
+        raise ValueError('fixed soak is 650 players for1800seconds with clock telemetry')
+    bins = args.bins.resolve()
+    identity_before = validate_snapshot(bins)
+    DATA.mkdir(parents=True,exist_ok=True)
+    folder = EVIDENCE/args.name
+    folder.mkdir(parents=True,exist_ok=False)
+    target = folder/(args.name+'.json')
+    if (DATA/(args.name+'-summary.json')).exists():
+        raise RuntimeError('attempt already exists')
+    request = ROOT/'.local/quiet-request'
+    if request.exists():
+        raise RuntimeError('another quiet request exists')
+    acquisition = time.monotonic()+600
+    while os.getloadavg()[0]>4:
+        if time.monotonic()>acquisition:
+            raise TimeoutError('load did not settle below four before reservation')
+        time.sleep(1)
+    identity = json.dumps(dict(owner='E24',name=args.name,pid=os.getpid(),wall_ns=time.time_ns()))+'\n'
+    with request.open('x') as output:
+        output.write(identity)
+    os.environ['E23_QUIET_IDENTITY'] = identity
+    os.environ['GOLIATH_LEASE_TRACE_DIR'] = str(folder/'tiles')
+    if args.heap:
+        os.environ['E24_HEAP_FILE'] = str(folder/'proxy-heap.json')
+    began = time.monotonic()
+    # Preserve the executed AST adapter. The final 30 seconds are reserved for cleanup.
+    e23 = load('e24_ast_base',ROOT/'scripts/e23-cell')
+    class Adapter(e23.Adapt):
+        def visit_If(self,node):
+            if args.players==1050 and any(isinstance(item,ast.Constant) and isinstance(item.value,str)
+                and '975 did not pass the diagnostic gates' in item.value for item in ast.walk(node)):
+                # Explicitly approved rate calibration, never capacity qualification.
+                return ast.copy_location(ast.Pass(),node)
+            return super().visit_If(node)
+
+        def visit_Constant(self,node):
+            if node.value == '900':
+                return ast.copy_location(ast.Constant('3300'),node)
+            if isinstance(node.value,str):
+                return ast.copy_location(ast.Constant(node.value.replace('E20-D9-','E24-D9-')),node)
+            return node
+    tree = ast.fix_missing_locations(Adapter().visit(ast.parse((ROOT/'scripts/e20-frontier').read_text())))
+    executed = ast.unparse(tree)+'\n'
+    (folder/'executed-cell.py').write_text(executed)
+    ns = dict(__name__='e24_d9_base',__file__=str(ROOT/'scripts/e20-frontier'),E23_WINDOW_SECONDS=2700 if args.seconds>1200 else 1500)
+    exec(compile(tree,str(folder/'executed-cell.py'),'exec'),ns)
+    ns['DATA'] = folder
+    availability_tree = ast.fix_missing_locations(Retarget().visit(ast.parse((ROOT/'scripts/e22_availability.py').read_text())))
+    availability_source = ast.unparse(availability_tree)+'\n'
+    (folder/'executed-availability.py').write_text(availability_source)
+    scope = dict(__name__='e24_availability',__file__=str(folder/'executed-availability.py'))
+    exec(compile(availability_tree,str(folder/'executed-availability.py'),'exec'),scope)
+    scope['DATA'] = folder
+    scope['MAX_EVENTS'] = 2_000_000
+    trace = scope['Availability'](args.name)
+    trace.store_trace = folder/'store-batches.csv'
+    mutation_watch=MutationWatch(trace.store_trace,args.planning_mutation_rate) if args.planning_mutation_rate else None
+    os.environ['GOLIATH_STORE_TRACE'] = str(trace.store_trace)
+    native = ns['counters']
+    holder, memories, ticks, cleanup_errors = {},[],{},[]
+    ns['e23_native_counter']=native
+    soak=None
+    if args.soak_audit:
+        observer=load('e24_soak_observer',ROOT/'scripts/e23_observe.py')
+        observer.DATA=folder
+        observer.EVIDENCE=EVIDENCE
+        def saved_soak(path,value):
+            # Preserve observations, not E23's superseded all-process verdict.
+            value.pop('verdict',None)
+            value.update(kind='E24-soak-evidence',proxy_rss_judged=False,
+                memory_pass_scope='every production process except the explicitly unjudged proxy; helpers reported separately')
+            for role,row in value.get('minute5_to30',{}).items():
+                if role=='proxy':row.pop('under_10_percent',None)
+            return save(path,value)
+        observer.save=saved_soak
+        soak=observer.Soak(args.name,ns,holder)
+    heap_samples = []
+    clock_endpoints = {'first':None,'last':None}
+    clock_counts = []
+    heap_started = [False]
+    heap_dumped = [False]
+    final_draining = [False]
+    last_heap_sample = [0.0]
+    last_drain = [0.0]
+    original_load = ns['load']
+
+    def loaded(name,path):
+        module = original_load(name,path)
+        if Path(path).name == 'e18-proxy':
+            module.os = trace.os_proxy
+            module.TrackedBudget = trace.budget(module.TrackedBudget)
+        if Path(path).name == 'e17-m4':
+            original_factory = module.cluster_module
+            def factory(selected):
+                result = original_factory(selected)
+                popen = result.subprocess.Popen
+                result.subprocess = scope['Proxy'](result.subprocess,Popen=lambda *a,**kw:trace.store_popen(popen,*a,**kw))
+                tile_start,tile_stop,cluster_init = result.Tile.start,result.Tile.stop,result.Cluster.__init__
+                original_ask = result.Tile.ask
+                cluster_stop = result.Cluster.stop
+                def start(tile):
+                    previous = tile.cluster.tile_env
+                    tile.cluster.tile_env = dict(previous,GOLIATH_LEASE_TRACE_DIR=str(folder/'tiles'))
+                    try:
+                        value = tile_start(tile)
+                    finally:
+                        tile.cluster.tile_env = previous
+                    trace.register('tile-'+tile.label,tile.server.process.pid)
+                    if not list((folder/'tiles').glob(f'tile-{tile.index}-{tile.server.process.pid}-lease.jsonl')):
+                        raise RuntimeError('tile started without required renewal telemetry')
+                    return value
+                def stop(tile,*a,**kw):
+                    try:
+                        return tile_stop(tile,*a,**kw)
+                    except BaseException as error:
+                        cleanup_errors.append(dict(tile=tile.label,error=str(error)))
+                    finally:
+                        if hasattr(tile,'server'):
+                            tile.server.stop()
+                def asked(tile,command):
+                    response = original_ask(tile,command)
+                    if command=='e11-samples' and final_draining[0]:
+                        previous = ticks.pop(tile.label,[])
+                        return dict(response,
+                            ticks=[tick for batch in previous for tick in batch['ticks']]+response['ticks'],
+                            digests=[digest for batch in previous for digest in batch['digests']]+response['digests'],
+                            dropped=sum(batch['dropped'] for batch in previous)+response['dropped'])
+                    return response
+                def initialize(instance,*a,**kw):
+                    holder['instance'] = instance
+                    value = cluster_init(instance,*a,**kw)
+                    save(folder/'environment.json',dict(uname=list(os.uname()),load_start=os.getloadavg(),
+                        binary_directory=str(bins),lease_ms=1000,margin_ms=100,renewal_ms=250,
+                        server_core_cap=4,bot_core_cap=1,
+                        tile_environment={name:{key:value for key,value in tile.env.items()
+                            if key.startswith(('GOLIATH_','HORIZON_TILE','HORIZON_E3_','HORIZON_E11_'))}
+                            for name,tile in instance.tiles.items()}))
+                    return value
+                def stop_cluster(instance):
+                    try:
+                        return cluster_stop(instance)
+                    finally:
+                        logs = {}
+                        archive = load('e24_native_stream',ROOT/'scripts/e24-native-logs')
+                        for path in sorted(instance.root.rglob('*')):
+                            if path.is_file() and path.suffix in ['.log','.jsonl']:
+                                original = str(path.relative_to(instance.root))
+                                if path.stat().st_size>1_000_000:
+                                    target = folder/('native-'+hashlib.sha256(original.encode()).hexdigest()[:16]+'.json.gz')
+                                    logs[original] = archive.pack_file(path,target,original)
+                                    continue
+                                content = path.read_bytes()
+                                logs[original] = dict(
+                                    sha256=hashlib.sha256(content).hexdigest(),bytes=len(content),
+                                    base64=base64.b64encode(content).decode())
+                        save(folder/'native-logs.json.gz',dict(encoding='base64-or-archive',files=logs))
+                result.Tile.start,result.Tile.stop,result.Tile.ask,result.Cluster.__init__,result.Cluster.stop = start,stop,asked,initialize,stop_cluster
+                if soak:result=soak.cluster(result)
+                return result
+            module.cluster_module = factory
+        return module
+    ns['load'] = loaded
+    sampler_base=trace.sampler(ns['ProcessSampler'])
+    class Sampler(sampler_base):
+        def __init__(self,*a,**kw):
+            super().__init__(*a,**kw)
+            holder['monitor']=self
+    ns['ProcessSampler']=Sampler
+    calls = [0]
+    def clock_point(instance,mark):
+        point=dict(at=time.monotonic(),mark=mark,tiles={})
+        for name,tile in instance.tiles.items():
+            reply=tile.ask('cluster-authority')
+            data=reply.get('clock')
+            if not data or data.get('schema')!='E24-claim-raw-clock-v1':
+                raise RuntimeError('fixed clock telemetry missing on tile '+name)
+            point['tiles'][name]=data
+        if clock_endpoints['first'] is None:clock_endpoints['first']=point
+        clock_endpoints['last']=point
+        clock_counts.append(dict(at=point['at'],mark=mark,tiles={name:{key:data[key] for key in
+            ['checks','triple_reads','inconclusive_reads','resamples','closures_by_cause','dropped_widths','failure']}
+            for name,data in point['tiles'].items()}))
+        return point
+    def heap_snapshot(instance,dump=False,start=False):
+        path = instance.root/'proxy.log'
+        offset = path.stat().st_size
+        instance.proxy.send('e24-heap'+(' dump' if dump else ' start' if start else ''))
+        def reply():
+            with path.open('rb') as stream:
+                stream.seek(offset)
+                content = stream.read()
+            for line in content[:content.rfind(b'\n')+1].decode(errors='replace').splitlines():
+                if 'E24_HEAP ' in line:
+                    return json.loads(line.split('E24_HEAP ',1)[1])
+            if instance.proxy.process.poll() is not None:
+                raise RuntimeError('profile proxy exited before heap response')
+        value = support.wait(reply,120 if dump else 30,'heap console response missing')
+        if start:heap_started[0] = True
+        heap_samples.append(dict(at=time.monotonic(),dump=dump,statistics=value))
+        if dump:
+            heap_dumped[0] = True
+        save(folder/'heap-samples.json',heap_samples)
+        return value
+
+    def counter(pid):
+        value = native(pid)
+        calls[0] += 1
+        instance = holder.get('instance')
+        if calls[0]>=2 and instance:
+            if mutation_watch:mutation_watch.sample()
+            if args.clock_telemetry and clock_endpoints['first'] is None:
+                clock_point(instance,'steady-first')
+            processes = {'proxy':instance.proxy.process.pid,'store':instance.store_process.pid,
+                **{'tile-'+name:tile.server.process.pid for name,tile in instance.tiles.items()},
+                **{'sidecar-'+str(i):c.process.pid for i,c in enumerate(instance.sidecars)}}
+            memories.append(dict(at=time.monotonic(),processes={role:native(other) for role,other in processes.items()}))
+            if args.heap and value['at']-last_heap_sample[0]>=60:
+                heap_snapshot(instance,start=not heap_started[0])
+                last_heap_sample[0] = value['at']
+            if soak:soak.sample(value)
+            for name,tile in instance.tiles.items():
+                reply = tile.ask('cluster-authority')
+                if reply.get('authorized') is False:
+                    trace.expiry_events.append(dict(role='tile-'+name,scope='authority-control',wall_ns=time.time_ns(),reply=reply))
+                    raise RuntimeError('E24 observed local authority latch on tile '+name)
+            if value['at']-last_drain[0]>=60:
+                for name,tile in instance.tiles.items():
+                    batch = tile.ask('e11-samples')
+                    ticks.setdefault(name,[]).append(batch)
+                last_drain[0] = value['at']
+        return value
+    ns['counters'] = counter
+    original_failure = ns['failure_evidence']
+    def failure(*a,**kw):
+        if args.heap and heap_started[0] and not heap_dumped[0] and holder.get('instance'):
+            try:
+                heap_snapshot(holder['instance'],True)
+            except BaseException as error:
+                save(folder/'heap-dump-error.json',dict(error=str(error)))
+        captured = original_failure(*a,**kw)
+        save(folder/'partial-ticks.json.gz',ticks)
+        save(folder/'process-memory.json.gz',memories)
+        return captured
+    ns['failure_evidence'] = failure
+    sys.argv = ['e20-frontier','--name',args.name,'--counts',str(args.players),'--bins',str(bins),
+        '--no-other-agents','--warmup','30','--seconds',str(args.seconds)]
+    error = None
+    try:
+        old_times = ns['game_times']
+        time_calls = [0]
+        def timed(instance):
+            time_calls[0] += 1
+            if time_calls[0]>=2:
+                final_draining[0] = True
+                if args.heap and heap_started[0] and not heap_dumped[0]:
+                    heap_snapshot(instance,True)
+            value=soak.times(instance,old_times) if soak else old_times(instance)
+            if args.clock_telemetry and time_calls[0]>=2:
+                clock_point(instance,'steady-last')
+            return value
+        ns['game_times'] = timed
+        ns['main']()
+    except BaseException as caught:
+        error = str(caught)
+        print('E24 diagnostic stopped: '+error,flush=True)
+    finally:
+        try:
+            captured = trace.finish(target)
+            save(folder/'partial-ticks.json.gz',ticks)
+            save(folder/'process-memory.json.gz',memories)
+            save(folder/'cleanup-errors.json',cleanup_errors)
+            if args.clock_telemetry:
+                save(folder/'clock-endpoints.json',clock_endpoints)
+                save(folder/'clock-counts.json',clock_counts)
+            if soak:soak.finish()
+            if mutation_watch:save(folder/'mutation-rate-watch.json',mutation_watch.report())
+            for path in sorted(folder.rglob('*')):
+                if path.is_file() and path.suffix != '.gz' and path.stat().st_size>1_000_000:
+                    raw = path.read_bytes()
+                    compressed = path.with_suffix(path.suffix+'.gz')
+                    compressed.write_bytes(gzip.compress(raw,mtime=0))
+                    if gzip.decompress(compressed.read_bytes()) != raw:
+                        raise RuntimeError('trace compression differs')
+                    path.unlink()
+            unchanged = validate_snapshot(bins) == identity_before
+            stops = authority_stops(folder)
+            summary = dict(kind='E24-step1-diagnostic',error=error,seconds=time.monotonic()-began,players=args.players,
+                rate_calibration_only=args.players==1050,
+                heap_diagnostic=args.heap,heap_started=heap_started[0],heap_dumped=heap_dumped[0],
+                observed_authority_latch=bool(trace.expiry_events or stops),authority_stop_events=stops,availability=captured,
+                binaries_unchanged=unchanged,cleanup_errors=cleanup_errors,
+                evidence={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in sorted(folder.rglob('*')) if path.is_file()},
+                interpretation='diagnostic instrumentation, not capacity qualification')
+            save(DATA/(args.name+'-summary.json'),summary)
+        finally:
+            if request.exists() and request.read_text() == identity:
+                request.unlink()
+            if target.exists() and target.stat().st_size>1_000_000:
+                raw = target.read_bytes()
+                target.with_suffix('.json.gz').write_bytes(gzip.compress(raw,mtime=0))
+                target.unlink()
+    if error:
+        raise SystemExit(1)
+
+
+if __name__ == '__main__':
+    main()

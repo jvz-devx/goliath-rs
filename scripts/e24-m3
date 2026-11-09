@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""Run the unchanged E13 fault kernels in bounded, coordinator-owned E24 windows."""
+import argparse
+import ast
+import atexit
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT=Path(__file__).resolve().parent.parent
+EVIDENCE=ROOT/'.local/evidence/E24'
+
+
+def process_audit(sampler):
+    rows=sampler.rows
+    elapsed=rows[-1]['at']-rows[0]['at']
+    outside={}
+    for old,new in zip(rows,rows[1:]):
+        owned=set(old['owned'])|set(new['owned'])
+        for pid,value in new['processes'].items():
+            if pid in owned:continue
+            previous=old['processes'].get(pid)
+            prior=previous['cpu_s'] if previous and previous['parent']==value['parent'] else 0
+            delta=max(0,value['cpu_s']-prior)
+            outside[pid]=outside.get(pid,0)+delta
+    maximum=max((value/elapsed for value in outside.values()),default=0)
+    return dict(seconds=elapsed,maximum_outside_process_cores=maximum,
+        valid=not sampler.error and maximum<=.5,error=sampler.error,
+        outside=[dict(pid=pid,name='outside',cpu_s=value,cores=value/elapsed)
+            for pid,value in sorted(outside.items(),key=lambda item:item[1],reverse=True)],
+        samples=rows,scope='one-second process CPU, owned descendant tree, outside names redacted before retention')
+
+
+def load(name,path):
+    loader=importlib.machinery.SourceFileLoader(name,str(path))
+    spec=importlib.util.spec_from_loader(name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module)
+    return module
+
+
+def simple(value):
+    if not value or any(not(c.isalnum() or c in '-_') for c in value):raise ValueError('simple fresh name required')
+    return value
+
+
+def check_matrix(folder,outcome,binaries):
+    if outcome['status']!='complete' or len(outcome['rows'])!=18:raise ValueError('partition/stale matrix incomplete')
+    counts={'partition':0,'stale-login':0}
+    for planned in outcome['rows']:
+        row=json.loads((folder/f'{planned["name"]}-{planned["seed"]}.json').read_text())
+        if planned['exit'] or row['status']!='complete' or row['case']!=planned['case'] or row['seed']!=planned['seed']:
+            raise ValueError('matrix result differs from fixed plan')
+        if row['binaries']!=binaries or not row['binaries_unchanged'] or not row['run_directory_removed']:
+            raise ValueError('matrix binary identity or cleanup failed')
+        if not row.get('e24_read_only_process_observation',{}).get('old_tile_alive_after_test') or not row['replacement_running']:
+            raise ValueError('refusal attributed to a dead process')
+        if row['case']=='partition':
+            for key in ['queued_cut_after_replacement','new_cut_while_partitioned','new_cut_after_heal','stale_placement']:
+                if row[key].get('ok') is True:raise ValueError('stale side effect accepted')
+            if row['delayed_cas']!=row['replayed_cas'] or row['delayed_cas']!='010501':raise ValueError('stale CAS not fenced')
+            if row['player_after']!={'generation':0,'owner':0} or row['isolated_status'] is not None or not row['stale_fence_file_unchanged']:
+                raise ValueError('partition ownership or live-process invariant failed')
+        else:
+            if row['placed_by_old_process'] or row['old_fence']==row['replacement_fence']:raise ValueError('stale returning login placed')
+        counts[row['case']]+=1
+    if counts!={'partition':12,'stale-login':6}:raise ValueError('matrix coverage differs')
+    return dict(counts=counts,stale_side_effects_accepted=0,old_processes_alive=True,binaries=binaries)
+
+
+class WindowBoundary(ast.NodeTransformer):
+    def __init__(self):self.outer=self.inner=0
+    def visit_While(self,node):
+        text=ast.unparse(node.test)
+        if text=='pending or (next_index < len(plan) and (not failed))':
+            node.test=ast.parse('pending or (next_index < len(plan) and not failed and not e24_expired())',mode='eval').body
+            self.outer+=1
+        elif text=='len(pending) < args.jobs and next_index < len(plan) and (not failed)':
+            node.test=ast.parse('len(pending) < args.jobs and next_index < len(plan) and not failed and not e24_expired()',mode='eval').body
+            self.inner+=1
+        return self.generic_visit(node)
+
+
+def main():
+    parser=argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--bins',type=Path,default=Path(os.environ.get('GOLIATH_BIN_DIR','.local/bin/goliath-e24/lease-fixed-r2')))
+    parser.add_argument('--data-name',default=os.environ.get('E24_M3_DATA_NAME'))
+    parser.add_argument('--window-name',default=os.environ.get('E24_M3_WINDOW_NAME'))
+    parser.add_argument('--budget-seconds',type=int,default=1200)
+    options,remaining=parser.parse_known_args()
+    if not remaining or '--name' not in remaining:raise ValueError('E13 case and --name required')
+    case=remaining[0]
+    name=simple(remaining[remaining.index('--name')+1])
+    data_name=simple(options.data_name or name)
+    window_name=simple(options.window_name or name)
+    if not 1<=options.budget_seconds<=1200:raise ValueError('at most20minutes of new trial admissions per window')
+    child=bool(os.environ.get('E24_M3_MANAGER_PID'))
+    bins=options.bins.resolve()
+    os.environ.update(GOLIATH_BIN_DIR=str(bins),E24_M3_DATA_NAME=data_name,E24_M3_WINDOW_NAME=window_name)
+    from e14_snapshot_support import validate_snapshot
+    identity=validate_snapshot(bins)
+    folder=EVIDENCE/data_name
+    folder.mkdir(parents=True,exist_ok=True)
+    request=ROOT/'.local/quiet-request'
+    metadata={}
+    owned_identity=None
+    started=time.monotonic()
+    monitor=None
+    finalized=False
+    if not child:
+        window=folder/(window_name+'-window')
+        if window.exists():raise RuntimeError('M3 window identity already exists')
+        if request.exists() and json.loads(request.read_text()).get('owner')=='E24':
+            raise RuntimeError('another owned E24 measurement is active')
+        def emergency_release():
+            if finalized:return
+            if request.exists() and (owned_identity is None or request.read_text()!=owned_identity):return
+            if monitor:
+                try:monitor.stop()
+                except Exception:pass
+            window.mkdir(exist_ok=True)
+            metadata.update(exit=1,status='driver-failed-before-finalization',seconds=time.monotonic()-started)
+            if not (window/'window.json').exists():(window/'window.json').write_text(json.dumps(metadata,indent=2)+'\n')
+            if request.exists() and request.read_text()==owned_identity:request.unlink()
+            owner=ROOT/'.local/host/quiet/owner'
+            if owner.exists() and owner.read_text().splitlines()[0]=='E24':
+                subprocess.run([ROOT/'.local/bin/host-window','release','E24'],check=False)
+        atexit.register(emergency_release)
+        subprocess.run([ROOT/'.local/bin/host-window','quiet','E24','bounded M3 '+window_name],check=True)
+        marker_wait=time.monotonic()+30
+        while request.exists():
+            if json.loads(request.read_text()).get('owner')=='E24':raise RuntimeError('different E24 marker after acquisition')
+            if time.monotonic()>marker_wait:
+                subprocess.run([ROOT/'.local/bin/host-window','release','E24'],check=False)
+                raise RuntimeError('foreign quiet marker remained after coordinator grant')
+            time.sleep(.2)
+        until=time.monotonic()+600
+        while os.getloadavg()[0]>4:
+            if time.monotonic()>until:raise RuntimeError('M3 start load did not settle below four')
+            time.sleep(1)
+        window.mkdir(exist_ok=False)
+        owned_identity=json.dumps(dict(owner='E24',name=window_name,pid=os.getpid(),wall_ns=time.time_ns()))+'\n'
+        with request.open('x') as output:output.write(owned_identity)
+        started=time.monotonic()
+        os.environ.update(E24_M3_IDENTITY=owned_identity,E24_M3_MANAGER_PID=str(os.getpid()),
+            E24_M3_DEADLINE=str(time.monotonic()+options.budget_seconds))
+        metadata=dict(kind='E24-bounded-M3-window',case=case,name=name,window=window_name,
+            started_wall_ns=time.time_ns(),load_start=os.getloadavg(),binaries=identity['binaries'],
+            maximum_trial_admission_seconds=options.budget_seconds,
+            canonical_kernel_sha256=hashlib.sha256((ROOT/'scripts/m3-chaos').read_bytes()).hexdigest(),
+            driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+        from e18_process import ProcessSampler
+        class Sampler(ProcessSampler):
+            def capture(self,mark=None):
+                row=super().capture(mark)
+                owned={os.getpid()}
+                while True:
+                    updated=owned|{pid for pid,value in row['processes'].items() if value['parent'] in owned}
+                    if updated==owned:break
+                    owned=updated
+                row['owned']=sorted(owned)
+                for pid,value in row['processes'].items():
+                    if pid not in owned:value['name']='outside'
+                return row
+        monitor=Sampler(observer=True).start()
+    def guard():
+        if not request.exists() or request.read_text()!=os.environ['E24_M3_IDENTITY']:
+            raise RuntimeError('owned M3 quiet request lost')
+        owner=ROOT/'.local/host/quiet/owner'
+        if not owner.exists() or owner.read_text().splitlines()[0]!='E24':raise RuntimeError('M3 coordinator ownership lost')
+    guard()
+    support=load('m3_chaos_support',ROOT/'scripts/m3_chaos_support.py')
+    sys.modules['m3_chaos_support']=support
+    support.DATA=folder
+    original_init=support.cluster.Cluster.__init__
+    def cluster_init(instance,*args,**kwargs):
+        kwargs['tile_env']=dict(kwargs.get('tile_env') or {},GOLIATH_LEASE_TRACE_DIR=os.environ['GOLIATH_LEASE_TRACE_DIR'])
+        return original_init(instance,*args,**kwargs)
+    support.cluster.Cluster.__init__=cluster_init
+    seed=int(remaining[remaining.index('--seed')+1]) if '--seed'in remaining else 0
+    if case not in ['campaign','matrix']:
+        trace=folder/'traces'/f'{name}-{seed}'
+        trace.mkdir(parents=True,exist_ok=False)
+        os.environ['GOLIATH_LEASE_TRACE_DIR']=str(trace)
+        os.environ['GOLIATH_STORE_TRACE']=str(trace/'store-batches.csv')
+    transform=WindowBoundary()
+    tree=ast.fix_missing_locations(transform.visit(ast.parse((ROOT/'scripts/m3-chaos').read_text())))
+    if (transform.outer,transform.inner)!=(1,1):raise RuntimeError('canonical campaign loop shape changed')
+    ns=dict(__name__='e24_m3_kernel',__file__=str(Path(__file__).resolve()),
+        e24_expired=lambda:time.monotonic()>=float(os.environ['E24_M3_DEADLINE']))
+    exec(compile(tree,str(ROOT/'scripts/m3-chaos'),'exec'),ns)
+    class LoggedChildren:
+        def __getattr__(self,key):return getattr(subprocess,key)
+        def run(self,command,*args,**kwargs):
+            if isinstance(command,list) and 'crossing'in command and str(Path(__file__).resolve()) in command:
+                trial_seed=command[command.index('--seed')+1]
+                log=folder/(name+'-'+trial_seed+'-driver.log')
+                with log.open('x') as stream:
+                    return subprocess.run(command,*args,stdout=stream,stderr=subprocess.STDOUT,**kwargs)
+            return subprocess.run(command,*args,**kwargs)
+    ns['subprocess']=LoggedChildren()
+    ns['quiet_window']=guard
+    def reserve(seed):
+        guard()
+        return tempfile.TemporaryDirectory(prefix=f'E24-M3-{seed}-',dir=support.cluster.RUNS)
+    ns['reserve_run']=reserve
+    original_save=support.save
+    outcome={}
+    observed_cleanup={}
+    if case in ['partition','stale-login']:
+        key=case.replace('-','_')
+        original_case=ns[key]
+        def observed_case(instance,*a,**kw):
+            old_tile=instance.tiles['a']
+            try:return original_case(instance,*a,**kw)
+            finally:observed_cleanup['old_tile_alive_after_test']=old_tile.server.process.poll() is None
+        ns[key]=observed_case
+    def saved(filename,value):
+        if filename==name+'-campaign.json':
+            if value['status']!='complete' and all(row['status']=='complete' for row in value['trials']) and ns['e24_expired']():
+                value.update(status='paused-window',reason='trial admission budget ended; every in-flight trial completed')
+            outcome.update(value)
+        if case in ['partition','stale-login'] and filename==f'{name}-{seed}.json':
+            value['e24_read_only_process_observation']=observed_cleanup
+        original_save(filename,value)
+    ns['save']=saved
+    if '--resume-from'in remaining:
+        previous=remaining[remaining.index('--resume-from')+1]
+        old=json.loads((folder/(previous+'-campaign.json')).read_text())
+        if old['status']!='paused-window' or any(row['status']!='complete' for row in old['trials']):
+            raise RuntimeError('only a clean window-boundary pause may resume, never failed seeds')
+    if not child:
+        (window/'executed-kernel.py').write_text(ast.unparse(tree)+'\n')
+    sys.argv=[str(Path(__file__)),*remaining]
+    exit_code=1
+    try:
+        if case=='matrix':
+            plan=[dict(case='partition',seed=seed,victim=victim)
+                for seed in [13001,30001,30002,30003,30004,30005] for victim in ['source','target']]
+            plan += [dict(case='stale-login',seed=seed) for seed in [13801,30101,30102,30103,30104,30105]]
+            for index,row in enumerate(plan):
+                row['name']=f'{name}-{index:02d}-{row["case"]}'
+                row['status']='not-run'
+            ledger=folder/(name+'-matrix.json')
+            if ledger.exists():raise RuntimeError('matrix already exists')
+            outcome.update(status='running',rows=plan)
+            ledger.write_text(json.dumps(outcome,indent=2)+'\n')
+            for row in plan:
+                guard()
+                if ns['e24_expired']():
+                    outcome['status']='paused-window';break
+                command=[sys.executable,'-B',str(Path(__file__).resolve()),row['case'],'--seed',str(row['seed']),'--name',row['name']]
+                if 'victim'in row:command += ['--victim',row['victim']]
+                if '--resources'in remaining:command += ['--resources',remaining[remaining.index('--resources')+1]]
+                row['command']=command
+                with (folder/(row['name']+'-driver.log')).open('x') as stream:
+                    completed=subprocess.run(command,stdout=stream,stderr=subprocess.STDOUT)
+                row.update(exit=completed.returncode,status='complete' if completed.returncode==0 else 'failed')
+                ledger.write_text(json.dumps(outcome,indent=2)+'\n')
+                print(json.dumps(row),flush=True)
+                if completed.returncode:outcome['status']='failed';break
+            else:outcome['status']='complete'
+            ledger.write_text(json.dumps(outcome,indent=2)+'\n')
+            exit_code=0 if outcome['status']=='complete' else 1
+        else:exit_code=ns['main']()
+        if outcome.get('status')=='paused-window':exit_code=0
+        if outcome.get('status')=='complete' and case=='campaign':
+            checker=load('e24_m3_independent',ROOT/'scripts/m3-check')
+            checker.DATA=folder
+            metadata['independent_check']=checker.campaign(name)
+        if outcome.get('status')=='complete' and case=='matrix':
+            metadata['independent_check']=check_matrix(folder,outcome,identity['binaries'])
+        return exit_code
+    except BaseException as error:
+        exit_code=1
+        metadata['driver_error']=repr(error)
+        raise
+    finally:
+        if not child:
+            monitor.capture('cell-end');monitor.stop()
+            audit=process_audit(monitor)
+            (window/'processes.json.gz').write_bytes(gzip.compress((json.dumps(audit,indent=2)+'\n').encode(),mtime=0))
+            metadata.update(exit=exit_code,seconds=time.monotonic()-started,outcome=outcome.get('status'),
+                binaries_unchanged=validate_snapshot(bins)==identity,finished_wall_ns=time.time_ns(),
+                outside_noise_valid=audit['valid'],outside_maximum_cores=audit['maximum_outside_process_cores'])
+            (window/'window.json').write_text(json.dumps(metadata,indent=2)+'\n')
+            if request.exists() and request.read_text()==owned_identity:request.unlink()
+            subprocess.run([ROOT/'.local/bin/host-window','release','E24'],check=True)
+            finalized=True
+
+
+if __name__=='__main__':raise SystemExit(main())

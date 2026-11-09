@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Reserve one enhanced read-only clock window, retaining exhaustive summary inputs."""
+import argparse
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import time
+
+ROOT=Path(__file__).resolve().parent.parent
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--seconds',type=int,default=1200)
+    args=parser.parse_args()
+    if not args.name or any(not (c.isalnum() or c in '-_') for c in args.name):
+        raise ValueError('fresh simple name required')
+    if not 1<=args.seconds<=1500:raise ValueError('window must remain under thirty minutes')
+    load=os.getloadavg()
+    if load[0]>4:raise RuntimeError('start load exceeds four')
+    binary=ROOT/'.local/bin/goliath-e24/e24-clock-probe-enhanced-r1'
+    source=ROOT/'scripts/e24-clock-probe-enhanced.rs'
+    inputs=[binary,source,Path(__file__).resolve()]
+    hashes={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in inputs}
+    request=ROOT/'.local/quiet-request'
+    folder=ROOT/'.local/evidence/E24'/args.name
+    identity=json.dumps(dict(owner='E24',name=args.name,pid=os.getpid(),wall_ns=time.time_ns()))+'\n'
+    with request.open('x') as output:output.write(identity)
+    try:
+        folder.mkdir(exist_ok=False)
+        shutil.copyfile(source,folder/'source.rs')
+        shutil.copyfile(Path(__file__),folder/'window-script.py')
+        record=dict(kind='E24-exhaustive-clock-window',command=[str(binary),str(args.seconds)],
+            load_start=load,wall_start_ns=time.time_ns(),monotonic_start_ns=time.monotonic_ns(),identities=hashes)
+        with (folder/'clock.jsonl').open('x') as output,(folder/'stderr.txt').open('x') as error:
+            record['exit']=subprocess.run(record['command'],stdout=output,stderr=error,timeout=args.seconds+15).returncode
+        record.update(wall_end_ns=time.time_ns(),monotonic_end_ns=time.monotonic_ns())
+        for path in folder.iterdir():
+            if path.is_file() and path.stat().st_size>1_000_000:
+                content=path.read_bytes()
+                compressed=gzip.compress(content,mtime=0)
+                if gzip.decompress(compressed)!=content:raise RuntimeError('evidence compression differs')
+                path.with_suffix(path.suffix+'.gz').write_bytes(compressed)
+                path.unlink()
+        (folder/'window.json').write_text(json.dumps(record,indent=2)+'\n')
+        print(json.dumps(record,indent=2),flush=True)
+    finally:
+        if request.exists() and request.read_text()==identity:request.unlink()
+
+
+if __name__=='__main__':main()

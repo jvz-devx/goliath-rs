@@ -3,6 +3,107 @@
 use goliath_model::{Epoch, Fence, LeaseKeeper, ProcessId, StoreLease, TileId};
 use std::time::{Duration, Instant, SystemTime};
 
+#[test]
+fn renewal_cadence_replays_the_failed_call_without_post_call_sleep() {
+    use goliath_model::{RenewalAction, RenewalSchedule};
+    let start = Instant::now();
+    let at = |us| start + Duration::from_micros(us);
+    let mut keeper = LeaseKeeper::new(TileId(0), 1000, Duration::from_millis(100)).unwrap();
+    let claim = keeper.request(at(0)).unwrap();
+    let mut store = StoreLease::new(1000, at(0)).unwrap();
+    assert!(keeper.observe(claim, store.grant(fence()), at(25_756)));
+    let mut cadence =
+        RenewalSchedule::new(at(0), Duration::from_millis(250), Duration::from_millis(50)).unwrap();
+    assert_eq!(
+        cadence.advance(at(280_652), keeper.deadline().unwrap()),
+        RenewalAction::SendBefore(at(850_000))
+    );
+    let lost = keeper.request(at(280_652)).unwrap();
+    assert!(store.renew(lost.counter(), at(280_660)));
+    // Socket timeout is observed only after the joint process STOP ends.
+    assert!(keeper.may_act(at(716_315)));
+    assert_eq!(
+        cadence.advance(at(716_315), keeper.deadline().unwrap()),
+        RenewalAction::SendBefore(at(850_000))
+    );
+    let next = keeper.request(at(716_315)).unwrap();
+    assert!(store.renew(next.counter(), at(720_315)));
+    assert!(keeper.observe(next, store.grant(fence()), at(721_315)));
+    assert_eq!(keeper.deadline(), Some(at(1_616_315)));
+    assert!(keeper.may_act(at(950_000)));
+    assert_eq!(
+        cadence.advance(at(721_315), keeper.deadline().unwrap()),
+        RenewalAction::WaitUntil(at(966_315))
+    );
+}
+
+#[test]
+fn a_stop_beyond_the_deadline_still_latches_and_cannot_revive() {
+    use goliath_model::{RenewalAction, RenewalSchedule};
+    let start = Instant::now();
+    let at = |ms| start + Duration::from_millis(ms);
+    let mut keeper = LeaseKeeper::new(TileId(0), 1000, Duration::from_millis(100)).unwrap();
+    let claim = keeper.request(at(0)).unwrap();
+    let mut store = StoreLease::new(1000, at(0)).unwrap();
+    assert!(keeper.observe(claim, store.grant(fence()), at(1)));
+    let mut cadence =
+        RenewalSchedule::new(at(0), Duration::from_millis(250), Duration::from_millis(50)).unwrap();
+    assert!(matches!(
+        cadence.advance(at(250), keeper.deadline().unwrap()),
+        RenewalAction::SendBefore(_)
+    ));
+    let renewal = keeper.request(at(250)).unwrap();
+    assert!(store.renew(renewal.counter(), at(251)));
+    assert_eq!(
+        cadence.advance(at(1200), keeper.deadline().unwrap()),
+        RenewalAction::Expired
+    );
+    assert!(!keeper.observe(renewal, store.grant(fence()), at(1200)));
+    assert!(!keeper.may_act(at(500)));
+}
+
+#[test]
+fn immediate_failures_do_not_burst_and_slow_success_does_not_add_sleep() {
+    use goliath_model::{RenewalAction, RenewalSchedule};
+    let start = Instant::now();
+    let at = |ms| start + Duration::from_millis(ms);
+    let mut cadence =
+        RenewalSchedule::new(at(0), Duration::from_millis(250), Duration::from_millis(50)).unwrap();
+    let mut sent = Vec::new();
+    for ms in 0..5000 {
+        if matches!(
+            cadence.advance(at(ms), at(5000)),
+            RenewalAction::SendBefore(_)
+        ) {
+            sent.push(ms);
+        }
+    }
+    for left in 0..4000 {
+        assert!(
+            sent.iter()
+                .filter(|&&ms| left <= ms && ms < left + 1000)
+                .count()
+                <= 4
+        );
+    }
+    assert!(sent.windows(2).all(|pair| pair[1] - pair[0] >= 250));
+    let mut slow =
+        RenewalSchedule::new(at(0), Duration::from_millis(250), Duration::from_millis(50)).unwrap();
+    assert!(matches!(
+        slow.advance(at(250), at(900)),
+        RenewalAction::SendBefore(_)
+    ));
+    // A successful435ms call is overdue, not followed by another250ms sleep.
+    assert!(matches!(
+        slow.advance(at(685), at(1150)),
+        RenewalAction::SendBefore(_)
+    ));
+    assert_eq!(
+        slow.advance(at(690), at(1150)),
+        RenewalAction::WaitUntil(at(935))
+    );
+}
+
 fn fence() -> Fence {
     Fence {
         tile: TileId(0),

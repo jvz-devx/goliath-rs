@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Run one serial root gate set through host coordination, retaining actual exits."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import time
+
+ROOT=Path(__file__).resolve().parent.parent
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--name',required=True);args=parser.parse_args()
+    if not re.fullmatch('[A-Za-z0-9_-]+',args.name):raise ValueError('fresh simple gate name required')
+    output=ROOT/'docs/experiments/data/E24'/(args.name+'-gates.json')
+    if output.exists():raise RuntimeError('gate record already exists')
+    env=dict(os.environ,CARGO_INCREMENTAL='0',GIT_OPTIONAL_LOCKS='0')
+    env.pop('CARGO_TARGET_DIR',None)
+    record=dict(status='running',commands=[])
+    for label,command in [('fmt',['cargo','fmt','--all','--check']),('clippy',['cargo','clippy','--workspace','--all-targets','--','-D','warnings']),('test',['just','test'])]:
+        actual=[str(ROOT/'.local/bin/host-window'),'build','E24','--',*command]
+        path=ROOT/'.local/evidence/E24'/(args.name+'-'+label+'.log')
+        began=time.monotonic();print('E24_ROOT_GATE '+label,flush=True)
+        with path.open('x') as log:completed=subprocess.run(actual,cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT)
+        row=dict(label=label,command=actual,exit=completed.returncode,seconds=time.monotonic()-began,
+            log=str(path.relative_to(ROOT)),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        record['commands'].append(row);output.write_text(json.dumps(record,indent=2)+'\n');print(json.dumps(row),flush=True)
+        if completed.returncode:
+            record['status']='failed';output.write_text(json.dumps(record,indent=2)+'\n')
+            print(path.read_text()[-6000:],flush=True);raise SystemExit(1)
+    record['status']='passed';output.write_text(json.dumps(record,indent=2)+'\n')
+
+
+if __name__=='__main__':main()

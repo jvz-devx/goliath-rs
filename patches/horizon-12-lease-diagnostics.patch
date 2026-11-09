@@ -1,0 +1,275 @@
+diff --git a/crates/horizon-client/src/game/dedicated/cluster/lease.rs b/crates/horizon-client/src/game/dedicated/cluster/lease.rs
+--- a/crates/horizon-client/src/game/dedicated/cluster/lease.rs
++++ b/crates/horizon-client/src/game/dedicated/cluster/lease.rs
+@@ -8,6 +8,7 @@
+     sync::{Arc, Mutex, OnceLock},
+     time::{Duration, Instant},
+ };
++mod trace;
+ 
+ struct Clock {
+     before: Instant,
+@@ -28,14 +29,21 @@
+     fn advance_with(&mut self, next: Self) -> Option<Instant> {
+         // Bracket the continuous-clock read. A scheduling pause between reads widens
+         // the interval, rather than being mistaken for a suspended uptime clock.
+-        let maximum = next.after.checked_duration_since(self.before)?;
++        let Some(maximum) = next.after.checked_duration_since(self.before) else {
++            trace::clock("instant-reversed", self, &next);
++            return None;
++        };
+         let minimum = next
+             .before
+             .checked_duration_since(self.after)
+             .unwrap_or_default();
+-        let elapsed = next.continuous.checked_sub(self.continuous)?;
++        let Some(elapsed) = next.continuous.checked_sub(self.continuous) else {
++            trace::clock("continuous-reversed", self, &next);
++            return None;
++        };
+         let slack = maximum / 500 + Duration::from_micros(1);
+         if elapsed > maximum.checked_add(slack)? || elapsed.checked_add(slack)? < minimum {
++            trace::clock("outside-bracket", self, &next);
+             return None;
+         }
+         let after = next.after;
+@@ -70,6 +78,21 @@
+ struct State {
+     keeper: LeaseKeeper,
+     clock: Clock,
++    stopped_reason: Option<&'static str>,
++    accepted_counter: u64,
++}
++impl State {
++    fn note_stop(&mut self, cause: &'static str, now: Instant) {
++        if self.stopped_reason.is_none() {
++            self.stopped_reason = Some(cause);
++            trace::record(
++                "authority-stop",
++                json!({"cause":cause,"now_ns":trace::at(now),
++                "deadline_ns":self.keeper.deadline().and_then(trace::at),
++                "accepted_counter":self.accepted_counter}),
++            );
++        }
++    }
+ }
+ struct Authority {
+     state: Mutex<State>,
+@@ -83,10 +106,15 @@
+             return false;
+         };
+         let Some(now) = state.clock.advancing() else {
++            state.note_stop("action-clock-anomaly", Instant::now());
+             state.keeper.stop();
+             return false;
+         };
+-        state.keeper.may_act(now)
++        let allowed = state.keeper.may_act(now);
++        if !allowed {
++            state.note_stop("action-may-act-false", now);
++        }
++        allowed
+             && state
+                 .keeper
+                 .deadline()
+@@ -140,7 +168,10 @@
+             "lease configuration cannot provide the clock margin and bounded IO window".into(),
+         );
+     }
+-    let client = Client::new(address, Duration::from_millis(200), 1)?;
++    let mut client = Client::new(address, Duration::from_millis(200), 1)?;
++    if let Some(file) = trace::initialize(tile.0)? {
++        client.trace_calls_to(file)?;
++    }
+     if let Response::Directory(entries) = client.execute(Operation::Directory)?
+         && let Some(old) = entries
+             .iter()
+@@ -182,8 +213,18 @@
+         }
+     };
+     let fence = keeper.fence().ok_or("lease claim returned no fence")?;
++    trace::record(
++        "claim-installed",
++        json!({"deadline_ns":keeper.deadline().and_then(trace::at),
++        "lease_ms":lease_ms,"margin_ms":margin.as_millis(),"counter":0}),
++    );
+     let authority = Arc::new(Authority {
+-        state: Mutex::new(State { keeper, clock }),
++        state: Mutex::new(State {
++            keeper,
++            clock,
++            stopped_reason: None,
++            accepted_counter: 0,
++        }),
+         fence,
+     });
+     AUTHORITY
+@@ -197,18 +238,26 @@
+         .spawn(move || {
+             let period = Duration::from_millis((lease_ms / 4).max(1));
+             loop {
++                let sleep_start = Instant::now();
+                 std::thread::sleep(period);
++                trace::record("renew-woke", json!({"sleep_start_ns":trace::at(sleep_start),
++                    "period_ns":period.as_nanos()}));
+                 let ticket = {
+                     let Ok(mut state) = authority.state.lock() else {
+                         break;
+                     };
+                     let Some(now) = state.clock.advancing() else {
++                        state.note_stop("renew-before-clock-anomaly", Instant::now());
+                         state.keeper.stop();
+                         break;
+                     };
+                     let Some(ticket) = state.keeper.request(now) else {
++                        state.note_stop("renew-request-refused", now);
+                         break;
+                     };
++                    trace::record("renew-ticket", json!({"sent_ns":trace::at(ticket.sent()),
++                        "counter":ticket.counter(),"deadline_ns":state.keeper.deadline().and_then(trace::at),
++                        "accepted_counter":state.accepted_counter}));
+                     ticket
+                 };
+                 let command = Command {
+@@ -218,11 +267,18 @@
+                         counter: ticket.counter(),
+                     },
+                 };
++                trace::record("renew-send", json!({"request_id":command.id.0.to_string(),
++                    "counter":ticket.counter(),"sent_ns":trace::at(ticket.sent())}));
+                 let result = client.call(&command);
++                let reply_at = Instant::now();
++                trace::record("renew-reply", json!({"request_id":command.id.0.to_string(),
++                    "counter":ticket.counter(),"sent_ns":trace::at(ticket.sent()),
++                    "reply_ns":trace::at(reply_at),"result":format!("{result:?}")}));
+                 let Ok(mut state) = authority.state.lock() else {
+                     break;
+                 };
+                 let Some(now) = state.clock.advancing() else {
++                    state.note_stop("renew-after-clock-anomaly", Instant::now());
+                     state.keeper.stop();
+                     break;
+                 };
+@@ -230,6 +286,11 @@
+                     Ok(Response::Leased(grant)) => {
+                         let previous_deadline = state.keeper.deadline();
+                         if !state.keeper.observe(ticket, grant, now) {
++                            trace::record("renew-observe-refused", json!({"counter":ticket.counter(),
++                                "grant_counter":grant.counter,"observe_ns":trace::at(now),
++                                "previous_deadline_ns":previous_deadline.and_then(trace::at),
++                                "candidate_deadline_ns":trace::at(ticket.sent()+Duration::from_millis(lease_ms)-margin)}));
++                            state.note_stop("renew-observe-refused", now);
+                             state.keeper.stop();
+                             break;
+                         }
+@@ -239,16 +300,26 @@
+                             || previous_deadline
+                                 .is_some_and(|deadline| after.is_some_and(|now| now >= deadline))
+                         {
++                            state.note_stop(if after.is_none() { "renew-post-clock-anomaly" } else { "renew-post-old-deadline" },
++                                after.unwrap_or_else(Instant::now));
+                             state.keeper.stop();
+                             break;
+                         }
++                        state.accepted_counter = grant.counter;
++                        trace::record("renew-installed", json!({"counter":ticket.counter(),
++                            "grant_counter":grant.counter,"sent_ns":trace::at(ticket.sent()),
++                            "reply_ns":trace::at(reply_at),"observe_ns":trace::at(now),
++                            "previous_deadline_ns":previous_deadline.and_then(trace::at),
++                            "deadline_ns":state.keeper.deadline().and_then(trace::at)}));
+                     }
+                     Ok(_) => {
++                        state.note_stop("renew-store-refused", now);
+                         state.keeper.stop();
+                         break;
+                     }
+                     Err(_) => {
+                         if !state.keeper.may_act(now) {
++                            state.note_stop("renew-io-deadline", now);
+                             state.keeper.stop();
+                             break;
+                         }
+@@ -286,6 +357,8 @@
+             state: Mutex::new(State {
+                 keeper,
+                 clock: Clock::new().unwrap(),
++                stopped_reason: None,
++                accepted_counter: 0,
+             }),
+         }
+     }
+diff --git a/crates/horizon-client/src/game/dedicated/cluster/lease/trace.rs b/crates/horizon-client/src/game/dedicated/cluster/lease/trace.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/horizon-client/src/game/dedicated/cluster/lease/trace.rs
+@@ -0,0 +1,70 @@
++//! Optional E24 diagnostic records. Clocks here never grant authority.
++use serde_json::{Value, json};
++use std::{
++    fs::File,
++    io::Write,
++    sync::{Mutex, OnceLock},
++    time::{Instant, SystemTime, UNIX_EPOCH},
++};
++
++struct Trace {
++    origin: Instant,
++    file: Mutex<File>,
++}
++static TRACE: OnceLock<Trace> = OnceLock::new();
++
++pub(super) fn initialize(tile: usize) -> std::io::Result<Option<File>> {
++    let Some(directory) = std::env::var_os("GOLIATH_LEASE_TRACE_DIR") else {
++        return Ok(None);
++    };
++    let directory = std::path::PathBuf::from(directory);
++    std::fs::create_dir_all(&directory)?;
++    let prefix = format!("tile-{tile}-{}", std::process::id());
++    let file = File::create_new(directory.join(format!("{prefix}-lease.jsonl")))?;
++    let client = File::create_new(directory.join(format!("{prefix}-client.csv")))?;
++    TRACE
++        .set(Trace {
++            origin: Instant::now(),
++            file: Mutex::new(file),
++        })
++        .map_err(|_| std::io::Error::other("lease trace already initialized"))?;
++    record(
++        "trace-start",
++        json!({"tile":tile,"pid":std::process::id(),"client_handle":"claim-and-renew-only","payloads_recorded":false}),
++    );
++    Ok(Some(client))
++}
++
++pub(super) fn at(now: Instant) -> Option<i128> {
++    TRACE.get().map(|trace| {
++        now.checked_duration_since(trace.origin).map_or_else(
++            || -(trace.origin.duration_since(now).as_nanos() as i128),
++            |duration| duration.as_nanos() as i128,
++        )
++    })
++}
++
++pub(super) fn record(event: &str, data: Value) {
++    let Some(trace) = TRACE.get() else { return };
++    let now = Instant::now();
++    let wall_ns = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map_or(0, |d| d.as_nanos());
++    let row = json!({"event":event,"wall_ns":wall_ns,"at_ns":at(now),"data":data});
++    if let Ok(mut file) = trace.file.lock() {
++        if let Err(error) = writeln!(file, "{row}") {
++            eprintln!("lease diagnostic trace failed: {error}");
++        }
++    }
++}
++
++pub(super) fn clock(reason: &str, previous: &super::Clock, next: &super::Clock) {
++    record(
++        "clock-anomaly",
++        json!({"reason":reason,
++        "previous_before_ns":at(previous.before),"previous_after_ns":at(previous.after),
++        "previous_continuous_ns":previous.continuous.as_nanos(),
++        "next_before_ns":at(next.before),"next_after_ns":at(next.after),
++        "next_continuous_ns":next.continuous.as_nanos()}),
++    );
++}

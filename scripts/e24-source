@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Back up the owned patch-11 tree, select FINAL-09, and restore exact source bytes."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tarfile
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT / '.local/src/horizon'
+EVIDENCE = ROOT / '.local/evidence/E24/source-backup'
+PROOF = ROOT / 'docs/experiments/data/E22/stack-proof.json'
+
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def git(*args, **kwargs):
+    return subprocess.check_output(['git', *map(str, args)], cwd=SOURCE, **kwargs)
+
+
+def select():
+    if EVIDENCE.exists():
+        raise RuntimeError('backup already exists; never overwrite it')
+    proof = json.loads(PROOF.read_text())
+    actual = set(git('ls-files', '-m', '-o', '--exclude-standard').decode().splitlines())
+    if actual != set(proof['files']):
+        raise RuntimeError('dirty paths differ from patch-11 proof')
+    for path, digest in proof['files'].items():
+        if sha(SOURCE / path) != digest:
+            raise RuntimeError('patch-11 byte proof differs: ' + path)
+    EVIDENCE.mkdir(parents=True)
+    index = Path(git('rev-parse', '--path-format=absolute', '--git-path', 'index').decode().strip())
+    shutil.copy2(index, EVIDENCE / 'original-index')
+    status = git('status', '--porcelain=v1', '-z')
+    (EVIDENCE / 'status.bin').write_bytes(status)
+    names = sorted(set(git('ls-files', '-c', '-o', '--exclude-standard').decode().splitlines()))
+    with tarfile.open(EVIDENCE / 'source.tar.gz', 'x:gz') as archive:
+        for name in names:
+            if (SOURCE / name).is_file():
+                archive.add(SOURCE / name, arcname=name, recursive=False)
+    record = dict(head=git('rev-parse', 'HEAD').decode().strip(), index_sha256=sha(index),
+        proof_sha256=sha(PROOF), files=proof['files'], all_files={name:sha(SOURCE/name) for name in names if (SOURCE/name).is_file()},
+        source_archive_sha256=sha(EVIDENCE/'source.tar.gz'))
+    (EVIDENCE / 'identity.json').write_text(json.dumps(record, indent=2)+'\n')
+    # These are exactly the recorded, byte-proved deltas, not unrelated work.
+    for name in ['horizon-11-shared-observer.patch', 'horizon-10-warm-tick.patch']:
+        git('apply', '--reverse', '--check', ROOT/'patches'/name)
+        git('apply', '--reverse', ROOT/'patches'/name)
+    if sha(index) != record['index_sha256']:
+        raise RuntimeError('real index changed')
+    verify_final09()
+    print('Backed up patch-11 source and index; FINAL-09 source byte proof passed.')
+
+
+def verify_final09():
+    canonical = json.loads((ROOT/'.local/bin/meridian-e18/reactor-1/canonical.json').read_text())
+    index = EVIDENCE / 'final09-index'
+    env = dict(os.environ, GIT_INDEX_FILE=str(index))
+    git('read-tree', canonical['projects']['horizon']['pin'], env=env)
+    for row in canonical['projects']['horizon']['patches'] + canonical['measurement_patches']:
+        patch = ROOT / row['path']
+        if sha(patch) != row['sha256']:
+            raise RuntimeError('frozen patch hash differs: ' + row['path'])
+        git('apply', '--cached', *row.get('apply_options', []), patch, env=env)
+    names = set(git('diff', '--cached', '--name-only', env=env).decode().splitlines())
+    names.update(git('ls-files', '-m', '-o', '--exclude-standard').decode().splitlines())
+    for name in names:
+        if git('show', ':'+name, env=env) != (SOURCE/name).read_bytes():
+            raise RuntimeError('FINAL-09 source mismatch: ' + name)
+    (EVIDENCE/'final09-proof.json').write_text(json.dumps(dict(tree=git('write-tree',env=env).decode().strip(),
+        files={name:sha(SOURCE/name) for name in sorted(names)}, source_equality='passed'),indent=2)+'\n')
+
+
+def restore():
+    record = json.loads((EVIDENCE/'identity.json').read_text())
+    archive = EVIDENCE/'source.tar.gz'
+    if sha(archive) != record['source_archive_sha256']:
+        raise RuntimeError('backup archive changed')
+    # Refuse unknown additions. E24 additions are named explicitly in the source overlay.
+    added = set(git('ls-files','-o','--exclude-standard').decode().splitlines()) - set(record['all_files'])
+    allowed = {'crates/horizon-client/src/game/dedicated/cluster/lease/trace.rs'}
+    if added - allowed:
+        raise RuntimeError('unknown additions prevent restore: '+str(sorted(added-allowed)))
+    for name in added:
+        (SOURCE/name).unlink()
+    with tarfile.open(archive, 'r:gz') as bundle:
+        bundle.extractall(SOURCE, filter='data')
+    index = Path(git('rev-parse','--path-format=absolute','--git-path','index').decode().strip())
+    if sha(index) != record['index_sha256']:
+        raise RuntimeError('real index changed; investigate before restoring it')
+    for name, digest in record['all_files'].items():
+        if sha(SOURCE/name) != digest:
+            raise RuntimeError('restored source hash differs: '+name)
+    if git('status','--porcelain=v1','-z') != (EVIDENCE/'status.bin').read_bytes():
+        raise RuntimeError('restored status differs')
+    # Status may refresh only cached file metadata after the tar restoration.
+    # The entry identity was checked before restoration and no staging operation ran.
+    shutil.copy2(EVIDENCE/'original-index',index)
+    if sha(index) != record['index_sha256']:
+        raise RuntimeError('restored index bytes differ')
+    print('Exact source, real index and dirty status restored.')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['select','restore'])
+    args = parser.parse_args()
+    (select if args.action == 'select' else restore)()

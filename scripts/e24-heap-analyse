@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Attribute retained tracked heap allocations to their captured source stacks."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def read(path):
+    data = path.read_bytes()
+    return json.loads(gzip.decompress(data) if path.suffix=='.gz' else data)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    args = parser.parse_args()
+    folder = ROOT/'.local/evidence/E24'/args.name
+    path = folder/'proxy-heap.json'
+    if not path.exists():path = path.with_suffix('.json.gz')
+    profile = read(path)
+    frames = profile['ftbl']
+    sites = []
+    groups = {}
+    for point in profile['pps']:
+        stack = [frames[index] for index in point['fs']]
+        owned = [frame for frame in stack if 'meridian' in frame or 'horizon_protocol' in frame]
+        owner = owned[0] if owned else stack[0] if stack else 'missing stack'
+        row = dict(retained_bytes=point['eb'],retained_blocks=point['ebk'],
+            total_bytes=point['tb'],total_blocks=point['tbk'],maximum_live_bytes=point['mb'],
+            owner=owner,source_stack=owned,complete_stack=stack)
+        sites.append(row)
+        group = groups.setdefault(owner,dict(retained_bytes=0,retained_blocks=0,total_bytes=0,total_blocks=0))
+        for key in group:group[key] += row[key]
+    result = dict(kind='E24-retained-heap-attribution',name=args.name,
+        profile=dict(path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(path.read_bytes()).hexdigest()),
+        duration_seconds=profile['te']/1e6,
+        retained_bytes=sum(point['eb'] for point in profile['pps']),
+        retained_blocks=sum(point['ebk'] for point in profile['pps']),
+        total_allocated_bytes=sum(point['tb'] for point in profile['pps']),
+        top_retained_sites=sorted(sites,key=lambda row:row['retained_bytes'],reverse=True)[:30],
+        source_groups=[dict(owner=owner,**value) for owner,value in sorted(groups.items(),key=lambda row:row[1]['retained_bytes'],reverse=True)],
+        interpretation='tracked live heap at capture end, not RSS or an exact RSS decomposition',
+        lifetime_limit='pre-start allocations are ignored; pre-start reallocations are counted in full; no mid-run reset',
+        capacity_qualification=False)
+    target = ROOT/'docs/experiments/data/E24'/(args.name+'-heap-attribution.json')
+    if target.exists():raise RuntimeError('attribution already exists')
+    # Source symbols are useful, private executor paths are not public evidence.
+    text = json.dumps(result,indent=2).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME')+'\n'
+    target.write_text(text)
+    print(json.dumps(dict(duration_seconds=result['duration_seconds'],retained_bytes=result['retained_bytes'],
+        total_allocated_bytes=result['total_allocated_bytes'],top_groups=result['source_groups'][:8]),indent=2))
+
+
+if __name__=='__main__':main()

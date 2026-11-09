@@ -1,0 +1,110 @@
+{
+  "kind": "E24-retry-window-budget",
+  "phase_count": 3,
+  "phase_names": [
+    "connect including reconnect",
+    "whole-frame write",
+    "whole-frame read"
+  ],
+  "timeout_ms": 3000,
+  "attempts": 3,
+  "retry_span_seconds": 27.0,
+  "margin": 4,
+  "traces": {
+    "650": {
+      "path": ".local/evidence/E24/diagnosis-r1/store-batches.csv.gz",
+      "sha256": "0445d0ac85a0acc75660eb515fa6092ec509581313e1fcab2ecc2820521d4f63",
+      "batches": 169522,
+      "maximum_batch_commands": 5,
+      "count_scope": "all commands, including reads and refusals; conservative upper bound on mutations",
+      "one_second_peaks": {
+        "start": {
+          "commands": 116,
+          "bounds_us": [
+            21963679,
+            22962078
+          ]
+        },
+        "end": {
+          "commands": 117,
+          "bounds_us": [
+            21963477,
+            22962081
+          ]
+        }
+      },
+      "retry_span_peaks": {
+        "start": {
+          "commands": 2570,
+          "bounds_us": [
+            14041235,
+            41032153
+          ]
+        },
+        "end": {
+          "commands": 2570,
+          "bounds_us": [
+            14041240,
+            41032156
+          ]
+        }
+      },
+      "boundary_accounting": "two additional maximum-sized serial batches",
+      "peak_mutation_rate_upper_per_second": 127,
+      "maximum_intervening_mutations_budget": 3429,
+      "required_receipts": 13717,
+      "capacity": 20480,
+      "effective_margin": 5.9722951297754445,
+      "qualified_for_requested_margin": true
+    },
+    "1050": {
+      "path": ".local/evidence/E24/rate-1050-r1/store-batches.csv.gz",
+      "sha256": "79a5cbb9a73608165e2e54edea9712d1313407e3239e9a069bb0f215f552d447",
+      "batches": 29523,
+      "maximum_batch_commands": 6,
+      "count_scope": "all commands, including reads and refusals; conservative upper bound on mutations",
+      "one_second_peaks": {
+        "start": {
+          "commands": 142,
+          "bounds_us": [
+            27154995,
+            28154785
+          ]
+        },
+        "end": {
+          "commands": 142,
+          "bounds_us": [
+            27155000,
+            28154786
+          ]
+        }
+      },
+      "retry_span_peaks": {
+        "start": {
+          "commands": 3400,
+          "bounds_us": [
+            26436893,
+            53432181
+          ]
+        },
+        "end": {
+          "commands": 3401,
+          "bounds_us": [
+            26435230,
+            53432184
+          ]
+        }
+      },
+      "boundary_accounting": "two additional maximum-sized serial batches",
+      "peak_mutation_rate_upper_per_second": 154,
+      "maximum_intervening_mutations_budget": 4158,
+      "required_receipts": 16633,
+      "capacity": 20480,
+      "effective_margin": 4.925204425204425,
+      "qualified_for_requested_margin": true
+    }
+  },
+  "required_1050_trace_present": true,
+  "qualified_650_and_1050": true,
+  "lifetime_scope": "one bounded Client call; arbitrary manual resubmission is covered by operation safety, not receipt accuracy"
+}

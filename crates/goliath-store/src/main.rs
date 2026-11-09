@@ -10,7 +10,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut directory = None;
@@ -91,7 +91,7 @@ fn run(
     if let Some(trace) = &mut trace {
         writeln!(
             trace,
-            "start_us,count,admission_max_ms,queue_max_ms,queue_mean_ms,collect_ms,execute_ms,barrier_ms,dispatch_ms,maintain_ms,background_ms"
+            "start_us,count,admission_max_ms,queue_max_ms,queue_mean_ms,collect_ms,execute_ms,barrier_ms,dispatch_ms,maintain_ms,background_ms,mutations,accepted_sequence,receipt_count"
         )?;
     }
     let connection_trace = std::env::var_os("GOLIATH_STORE_TRACE")
@@ -104,13 +104,47 @@ fn run(
             Ok(Arc::new(Mutex::new(file)))
         })
         .transpose()?;
+    let wall_before = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let origin = Instant::now();
+    let wall_after = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let mut request_trace = std::env::var_os("GOLIATH_STORE_TRACE")
+        .map(|path| File::create(PathBuf::from(path).with_extension("requests.csv")))
+        .transpose()?;
+    let mut memory_trace = std::env::var_os("GOLIATH_STORE_TRACE")
+        .map(|path| File::create(PathBuf::from(path).with_extension("memory.csv")))
+        .transpose()?;
+    if let Some(file) = &mut request_trace {
+        writeln!(
+            file,
+            "request_id,batch_id,accepted_ns,received_ns,batch_start_ns,batch_end_ns,barrier_start_ns,barrier_end_ns,dispatched_ns,mutations"
+        )?;
+    }
+    if let Some(file) = &mut memory_trace {
+        writeln!(
+            file,
+            "at_ns,event,accepted,receipts,receipt_blob_bytes,receipt_blob_capacity_bytes,receipt_inline_bytes,players,uuid_players,player_blob_bytes,player_blob_capacity_bytes,snapshot_len,snapshot_capacity,in_flight,window_full_at_ns,snapshots_started,snapshots_finished"
+        )?;
+    }
+    if let Some(path) = std::env::var_os("GOLIATH_STORE_TRACE") {
+        let mut file = File::create(PathBuf::from(path).with_extension("origin.json"))?;
+        writeln!(
+            file,
+            "{{\"native_instant\":\"{origin:?}\",\"wall_before_ns\":{wall_before},\"wall_after_ns\":{wall_after}}}"
+        )?;
+    }
     // Bounded queue and batch cap bound speculative memory. The binary owns
     // this worker and every connection thread, not the persistence library.
     let (sender, receiver) = mpsc::sync_channel::<Pending>(1024);
     std::thread::spawn(move || {
         let mut compaction: Option<std::thread::JoinHandle<(CompactionReady, Duration)>> = None;
+        let mut snapshot_usage = None;
+        let mut last_memory = origin;
+        let mut filled = None;
+        let mut batch_id = 0u64;
+        let (mut snapshots_started, mut snapshots_finished) = (0u64, 0u64);
         while let Ok(first) = receiver.recv() {
+            batch_id += 1;
+            let mut snapshot_event = None;
             let mut batch = vec![first];
             let collect_start = Instant::now();
             let deadline = Instant::now() + batch_window;
@@ -127,9 +161,9 @@ fn run(
                 }
             }
             let commands: Vec<_> = batch.iter().map(|p| p.command.clone()).collect();
+            let explicit_compact = commands.iter().any(|c| c.operation == Operation::Compact);
             let mut background = Duration::ZERO;
-            if (compaction.as_ref().is_some_and(|work| work.is_finished())
-                || commands.iter().any(|c| c.operation == Operation::Compact))
+            if (compaction.as_ref().is_some_and(|work| work.is_finished()) || explicit_compact)
                 && let Some(work) = compaction.take()
             {
                 let (ready, elapsed) = work.join().expect("compaction worker panicked");
@@ -137,6 +171,9 @@ fn run(
                 engine
                     .complete_maintenance(Ok(ready))
                     .expect("compaction completion");
+                snapshot_usage = None;
+                snapshots_finished += 1;
+                snapshot_event = Some("snapshot-finished");
             }
             let execute_start = Instant::now();
             let count = batch.len();
@@ -155,6 +192,10 @@ fn run(
                 .map(|p| execute_start.duration_since(p.queued).as_secs_f64())
                 .sum::<f64>()
                 / count as f64;
+            let accepted_before = engine.accepted_count();
+            if explicit_compact {
+                snapshots_started += 1;
+            }
             let responses = match engine.execute_batch(&commands) {
                 Ok(responses) => responses,
                 Err(error) => {
@@ -162,16 +203,36 @@ fn run(
                     std::process::exit(1);
                 }
             };
-            let execute = execute_start.elapsed();
+            let execute_end = Instant::now();
+            if explicit_compact {
+                snapshots_finished += 1;
+                snapshot_event = Some("snapshot-explicit");
+            }
+            let execute = execute_end.duration_since(execute_start);
+            let mutations = engine.accepted_count() - accepted_before;
             let barrier = engine.last_barrier_duration();
+            let barrier_span = engine.last_barrier_span();
             let dispatch_start = Instant::now();
+            let mut request_rows = Vec::new();
             for (pending, response) in batch.into_iter().zip(responses) {
-                let _ = pending.reply.send((response, Instant::now()));
+                let dispatched = Instant::now();
+                if request_trace.is_some() {
+                    request_rows.push((
+                        pending.command.id.0,
+                        pending.accepted,
+                        pending.queued,
+                        dispatched,
+                    ));
+                }
+                let _ = pending.reply.send((response, dispatched));
             }
             let dispatch = dispatch_start.elapsed();
             let maintain_start = Instant::now();
             match engine.begin_maintenance() {
                 Ok(Some(work)) => {
+                    snapshot_usage = Some(work.snapshot_usage());
+                    snapshots_started += 1;
+                    snapshot_event = Some("snapshot-started");
                     compaction = Some(std::thread::spawn(move || {
                         let begin = Instant::now();
                         let ready = work.run().unwrap_or_else(|error| {
@@ -191,7 +252,7 @@ fn run(
                 let ms = |d: Duration| d.as_secs_f64() * 1000.0;
                 let _ = writeln!(
                     trace,
-                    "{},{count},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+                    "{},{count},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{mutations},{},{}",
                     execute_start.duration_since(origin).as_micros(),
                     ms(admission),
                     ms(queue),
@@ -201,8 +262,72 @@ fn run(
                     ms(barrier),
                     ms(dispatch),
                     ms(maintain_start.elapsed()),
-                    ms(background)
+                    ms(background),
+                    engine.accepted_count(),
+                    engine.receipt_count()
                 );
+            }
+            if let Some(file) = &mut request_trace {
+                let at = |time: Instant| time.duration_since(origin).as_nanos();
+                let span = barrier_span
+                    .map(|(a, b)| (at(a) as i128, at(b) as i128))
+                    .unwrap_or((-1, -1));
+                for (id, accepted, received, dispatched) in request_rows {
+                    let _ = writeln!(
+                        file,
+                        "{id},{batch_id},{},{},{},{},{},{},{},{mutations}",
+                        at(accepted),
+                        at(received),
+                        at(execute_start),
+                        at(execute_end),
+                        span.0,
+                        span.1,
+                        at(dispatched)
+                    );
+                }
+            }
+            let first_full =
+                filled.is_none() && engine.receipt_count() == goliath_store::RECEIPT_CAPACITY;
+            if first_full {
+                filled = Some(Instant::now());
+            }
+            if first_full
+                || snapshot_event.is_some()
+                || last_memory.elapsed() >= Duration::from_secs(1)
+            {
+                if let Some(file) = &mut memory_trace {
+                    let stats = engine.resources();
+                    let usage =
+                        snapshot_usage.unwrap_or((stats.snapshot_len, stats.snapshot_capacity));
+                    let now = Instant::now();
+                    let full = filled
+                        .map(|time| time.duration_since(origin).as_nanos() as i128)
+                        .unwrap_or(-1);
+                    let event = if first_full {
+                        "window-full"
+                    } else {
+                        snapshot_event.unwrap_or("sample")
+                    };
+                    let _ = writeln!(
+                        file,
+                        "{},{event},{},{},{},{},{},{},{},{},{},{},{},{},{},{snapshots_started},{snapshots_finished}",
+                        now.duration_since(origin).as_nanos(),
+                        stats.accepted,
+                        stats.receipts,
+                        stats.receipt_blob_bytes,
+                        stats.receipt_blob_capacity_bytes,
+                        stats.receipt_inline_bytes,
+                        stats.players,
+                        stats.uuid_players,
+                        stats.player_blob_bytes,
+                        stats.player_blob_capacity_bytes,
+                        usage.0,
+                        usage.1,
+                        u8::from(stats.in_flight),
+                        full
+                    );
+                }
+                last_memory = Instant::now();
             }
         }
     });

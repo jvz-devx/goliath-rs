@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Recompute fixed-soak ownership, cargo, clock closures and agreed RSS criteria."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E24'
+
+
+def read(path):
+    if not path.exists():path=path.with_suffix(path.suffix+'.gz')
+    raw=path.read_bytes()
+    return json.loads(gzip.decompress(raw) if path.suffix=='.gz' else raw),path
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    args=parser.parse_args()
+    folder=ROOT/'.local/evidence/E24'/args.name
+    raw,raw_path=read(folder/(args.name+'-soak.json.gz'))
+    measurement,cell_path=read(folder/(args.name+'.json'))
+    summary,summary_path=read(DATA/(args.name+'-summary.json'))
+    causal,causal_path=read(DATA/(args.name+'-causal-readback.json'))
+    clocks,clock_path=read(DATA/(args.name+'-loaded-clocks.json'))
+    cell=measurement['cells']['650']
+    memory=raw['memory']
+    first=min(memory,key=lambda row:abs(row['elapsed_seconds']-300))
+    last=min(memory,key=lambda row:abs(row['elapsed_seconds']-1800))
+    coverage=abs(first['elapsed_seconds']-300)<2 and abs(last['elapsed_seconds']-1800)<2
+    memories={}
+    for role,left in first['processes'].items():
+        right=last['processes'][role]
+        growth=right['rss_mb']/left['rss_mb']-1
+        judged=role!='proxy'
+        memories[role]=dict(from_seconds=first['elapsed_seconds'],to_seconds=last['elapsed_seconds'],
+            before_mib=left['rss_mb'],after_mib=right['rss_mb'],growth_fraction=growth,
+            judged=judged,under_10_percent=growth<.1 if judged else None)
+    violations=[];regressions=[];previous={}
+    for audit in raw['ownership_audits']:
+        acting={}
+        for tile,status in audit['snapshots'].items():
+            for actor in status['players']:
+                name=actor.get('name','')
+                if actor.get('terrain_reader') or not name.startswith('E17Bot'):continue
+                if actor.get('placed') and not any(actor.get(key) for key in ['held','frozen','released']):
+                    acting.setdefault(name,[]).append(tile)
+        for name,locations in acting.items():
+            generation=audit['generations'].get(name)
+            if generation:
+                if generation['before']!=generation['after']:continue
+                expected=list(audit['snapshots'])[generation['owner']]
+            else:expected=name[6].lower()
+            if locations!=[expected]:violations.append(dict(elapsed=audit['elapsed_seconds'],name=name,acting=locations,expected=expected))
+        for name,row in audit['generations'].items():
+            if row['before']<previous.get(name,0) or row['after']<row['before']:regressions.append(dict(name=name,elapsed=audit['elapsed_seconds']))
+            previous[name]=row['after']
+    recovery=raw.get('recovery') or {}
+    totals=recovery.get('totals',{})
+    cargo=bool(len(totals)==65 and all(amount==1 for amount in totals.values()) and not recovery.get('duplicates')
+        and not recovery.get('missing') and not recovery.get('stale_files') and recovery.get('pass_line_met'))
+    stops={name:row['first_stop'] for name,row in causal['tiles'].items() if row['first_stop']}
+    anomaly_count=sum(row['clock_anomaly_count'] for row in causal['tiles'].values())
+    populations=[sum(group['online'] for group in row['groups'].values()) for row in cell.get('bot_samples',[])]
+    population=bool(populations and min(populations)==max(populations)==650)
+    counts=[0]*30
+    for row in cell.get('activations_in_window',[]):
+        index=int((row['ns']-cell['start_ns'])/60_000_000_000)
+        if 0<=index<30:counts[index]+=1
+    continuous=all(counts)
+    noise=causal['window']['steady_noise']
+    memory_pass=coverage and len([row for row in memories.values() if row['judged']])==9 and all(row['under_10_percent'] for row in memories.values() if row['judged'])
+    passed=bool(cell['status']=='complete' and summary['binaries_unchanged'] and population and memory_pass and cargo
+        and not stops and not anomaly_count and clocks['all_valid'] and len(raw['ownership_audits'])>=29
+        and not violations and not regressions and continuous and noise['valid'])
+    result=dict(kind='E24-fixed-soak-readback',name=args.name,verdict='passed' if passed else 'failed',
+        runtime_status=cell['status'],runtime_error=summary.get('error'),binaries_unchanged=summary['binaries_unchanged'],
+        memory_endpoint_coverage=coverage,memory_pass=memory_pass,memory=memories,proxy_rss_judged=False,
+        clock_pass=clocks['all_valid'],authority_stops=stops,clock_anomalies=anomaly_count,
+        loaded_clock_readback=str(clock_path.relative_to(ROOT)),
+        ownership_audits=len(raw['ownership_audits']),owner_violations=violations,generation_regressions=regressions,
+        cargo_conserved=cargo,cargo_items=totals,recovery=recovery,
+        population=dict(samples=len(populations),minimum=min(populations) if populations else None,maximum=max(populations) if populations else None,passed=population),
+        activations_per_minute=counts,crossings_in_every_minute=continuous,
+        game_time_tps=cell.get('game_time_tps'),tick_summary=cell.get('tick_summary'),
+        capacity_diagnostic_pass=cell.get('diagnostic_pass'),capacity_diagnostic_failures=cell.get('diagnostic_failures'),
+        scope='1000/100 only; minute-spaced stable-generation acting-session audits and65named items after full checkpoint/recovery, not per-action tracing',
+        noise_valid=noise['valid'],outside_maximum_cores=noise['maximum_outside_process_cores'],
+        inputs={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [raw_path,cell_path,summary_path,causal_path,clock_path]})
+    output=DATA/(args.name+'-result.json')
+    if output.exists():raise RuntimeError('derived soak result already exists')
+    output.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps({key:result[key] for key in ['verdict','memory_pass','clock_pass','ownership_audits','owner_violations','cargo_conserved','crossings_in_every_minute','game_time_tps']}))
+    print(json.dumps(memories,indent=2))
+
+
+if __name__=='__main__':main()

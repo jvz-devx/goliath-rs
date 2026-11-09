@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Darwin clock offsets</title>
+<style>
+html,body{background:transparent;margin:0;color:var(--foreground);font-family:var(--font-sans)}
+#e24-clock-figure{position:relative;width:100%}
+#e24-clock-figure h2{font-size:16px;font-weight:500;margin:0 100px 8px 0}
+#e24-clock-figure .legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:8px 0}
+#e24-clock-figure button{font:inherit;color:var(--foreground);background:transparent;border:0;padding:4px 0;cursor:pointer}
+#e24-clock-figure button[aria-pressed=false]{opacity:.45}
+#e24-clock-figure .swatch{display:inline-block;width:18px;height:3px;vertical-align:middle;margin-right:6px}
+#e24-clock-figure svg{display:block;width:100%;height:220px;overflow:visible}
+#e24-clock-figure svg text{fill:var(--foreground);font:12px var(--font-sans)}
+#e24-clock-figure .axis path,#e24-clock-figure .axis line{stroke:var(--border)}
+#e24-clock-figure .tip{position:absolute;pointer-events:none;padding:8px;background:var(--popover);color:var(--popover-foreground);font:12px var(--font-mono);z-index:1;white-space:pre}
+#e24-clock-figure .note{font-size:12px;color:var(--muted-foreground);margin:8px 0 0}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+</head>
+<body>
+<figure id="e24-clock-figure" style="margin:0">
+<h2>Adjusted and raw clock offsets</h2>
+<div class="legend" aria-label="Clock series"></div>
+<div class="adjusted"></div>
+<div class="raw"></div>
+<div class="tip" role="tooltip" hidden></div>
+<figcaption class="note"></figcaption>
+</figure>
+<script>
+const evidence=__E24_CLOCK_DATA__;
+const root=document.getElementById('e24-clock-figure');
+const series=[
+ {key:'monotonic',label:'MONOTONIC',color:'var(--chart-1)',panel:'adjusted'},
+ {key:'monotonic_raw',label:'MONOTONIC_RAW',color:'var(--chart-2)',panel:'raw'},
+ {key:'uptime_raw',label:'UPTIME_RAW',color:'var(--chart-3)',panel:'raw',dash:'5 3'}
+];
+const visible=new Set(series.map(s=>s.key));
+const legend=d3.select(root).select('.legend');
+series.forEach(s=>{
+ const button=legend.append('button').attr('type','button').attr('aria-pressed','true');
+ button.append('span').attr('class','swatch').style('background',s.color);
+ button.append('span').text(s.label);
+ button.on('click',()=>{visible.has(s.key)?visible.delete(s.key):visible.add(s.key);button.attr('aria-pressed',visible.has(s.key));draw();});
+});
+root.querySelector('.note').textContent=`${(evidence.elapsed_seconds/60).toFixed(1)} minutes · ${(evidence.sample_pairs/1e9).toFixed(2)} billion consecutive comparisons · retained brackets shown · no clock settings changed`;
+function draw(){
+ for(const panel of ['adjusted','raw']){
+  const host=root.querySelector('.'+panel);host.replaceChildren();
+  const width=Math.max(280,host.getBoundingClientRect().width),height=220;
+  const margin={left:68,right:18,top:25,bottom:48};
+  const clocks=series.filter(s=>s.panel===panel),scale=panel==='adjusted'?1e6:1;
+  const points=clocks.flatMap(s=>evidence.clocks[s.key].points);
+  const domain=d3.extent(points.flatMap(p=>[p.lower_change_ns/scale,p.upper_change_ns/scale,0]));
+  const spread=Math.max(domain[1]-domain[0],panel==='adjusted'?.001:2);
+  const x=d3.scaleLinear().domain([0,evidence.elapsed_seconds/60]).range([margin.left+3,width-margin.right-3]);
+  const y=d3.scaleLinear().domain([domain[0]-spread*.12,domain[1]+spread*.12]).nice().range([height-margin.bottom-3,margin.top+3]);
+  const svg=d3.select(host).append('svg').attr('viewBox',`0 0 ${width} ${height}`).attr('role','img')
+    .attr('aria-label',panel==='adjusted'?'Adjusted-clock offset from Instant changes over time':'Both raw clocks retain their offset from Instant; nanosecond scale');
+  svg.append('rect').attr('data-chart-frame','').attr('x',margin.left).attr('y',margin.top)
+    .attr('width',width-margin.left-margin.right).attr('height',height-margin.top-margin.bottom)
+    .attr('fill','none').attr('stroke','var(--border)');
+  svg.append('g').attr('class','axis').attr('transform',`translate(0,${height-margin.bottom})`).call(d3.axisBottom(x).ticks(width<420?3:5));
+  svg.append('g').attr('class','axis').attr('transform',`translate(${margin.left},0)`).call(d3.axisLeft(y).ticks(4));
+  svg.append('text').attr('class','axis-title').attr('data-axis','y').attr('x',margin.left).attr('y',14)
+    .text(panel==='adjusted'?'MONOTONIC offset change, ms':'Raw-clock offset change, ns');
+  svg.append('text').attr('class','axis-title').attr('data-axis','x').attr('x',(width+margin.left-margin.right)/2)
+    .attr('y',height-8).attr('text-anchor','middle').text('Probe elapsed, minutes');
+  for(const s of clocks.filter(s=>visible.has(s.key))){
+   const data=evidence.clocks[s.key].points;
+   svg.append('path').datum(data).attr('fill',s.color).attr('opacity',.12)
+     .attr('d',d3.area().x(p=>x(p.elapsed_seconds/60)).y0(p=>y(p.lower_change_ns/scale)).y1(p=>y(p.upper_change_ns/scale)));
+   svg.append('path').datum(data).attr('fill','none').attr('stroke',s.color).attr('stroke-width',2)
+     .attr('stroke-dasharray',s.dash||null).attr('d',d3.line().x(p=>x(p.elapsed_seconds/60)).y(p=>y(p.offset_change_ns/scale)));
+  }
+  const guide=svg.append('line').attr('data-chart-hover-guide','').attr('y1',margin.top).attr('y2',height-margin.bottom)
+    .attr('stroke','var(--border)').attr('visibility','hidden');
+  const dots=svg.append('g');const tip=root.querySelector('.tip');
+  function hover(event){
+   const cursor=Math.max(x.range()[0],Math.min(x.range()[1],d3.pointer(event,svg.node())[0]));
+   const seconds=x.invert(cursor)*60;guide.attr('x1',cursor).attr('x2',cursor).attr('visibility','visible');dots.selectAll('*').remove();
+   const text=[`${(seconds/60).toFixed(2)} min`];
+   for(const s of clocks.filter(s=>visible.has(s.key))){
+    const data=evidence.clocks[s.key].points;const near=d3.bisector(p=>p.elapsed_seconds).center(data,seconds);
+    let a=data[near],b=data[near];if(a.elapsed_seconds<seconds&&near+1<data.length)b=data[near+1];
+    else if(a.elapsed_seconds>seconds&&near>0)a=data[near-1];
+    const ratio=a===b?0:(seconds-a.elapsed_seconds)/(b.elapsed_seconds-a.elapsed_seconds);
+    const value=(a.offset_change_ns+(b.offset_change_ns-a.offset_change_ns)*ratio)/scale;
+    dots.append('circle').attr('data-chart-hover-marker','').attr('cx',cursor).attr('cy',y(value)).attr('r',3).attr('fill',s.color);
+    text.push(`${s.label}: ${value.toFixed(3)} ${panel==='adjusted'?'ms':'ns'}`);
+   }
+   tip.textContent=text.join('\n');tip.hidden=false;
+   tip.style.left=Math.max(0,Math.min(width-250,cursor+12))+'px';tip.style.top=(host.offsetTop+margin.top+8)+'px';
+  }
+  svg.append('rect').attr('data-chart-hit','').attr('data-chart-hover-overlay','cross-series')
+   .attr('x',margin.left).attr('y',margin.top).attr('width',width-margin.left-margin.right).attr('height',height-margin.top-margin.bottom)
+   .attr('fill','transparent').on('pointermove',hover).on('pointerdown',hover).on('pointerleave',()=>{tip.hidden=true;guide.attr('visibility','hidden');dots.selectAll('*').remove();});
+ }
+}
+new ResizeObserver(draw).observe(root);draw();
+</script>
+</body>
+</html>

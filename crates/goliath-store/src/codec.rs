@@ -21,6 +21,10 @@ pub(crate) fn invalid(message: &str) -> io::Error {
 pub(crate) struct Encoder(Vec<u8>);
 
 impl Encoder {
+    pub(crate) fn reuse(mut bytes: Vec<u8>) -> Self {
+        bytes.clear();
+        Self(bytes)
+    }
     pub(crate) fn uuid(&mut self, key: PlayerKey) {
         self.0.extend(key.0.to_le_bytes());
     }
@@ -514,6 +518,10 @@ fn read_exact(stream: &mut TcpStream, mut bytes: &mut [u8], deadline: Instant) -
 
 fn read_frame(stream: &mut TcpStream, timeout: Duration) -> io::Result<Vec<u8>> {
     let deadline = Instant::now() + timeout;
+    read_frame_before(stream, deadline)
+}
+
+fn read_frame_before(stream: &mut TcpStream, deadline: Instant) -> io::Result<Vec<u8>> {
     let mut header = [0; 4];
     read_exact(stream, &mut header, deadline)?;
     let count = u32::from_le_bytes(header) as usize;
@@ -526,10 +534,13 @@ fn read_frame(stream: &mut TcpStream, timeout: Duration) -> io::Result<Vec<u8>> 
 }
 
 fn write_frame(stream: &mut TcpStream, bytes: &[u8], timeout: Duration) -> io::Result<()> {
+    write_frame_before(stream, bytes, Instant::now() + timeout)
+}
+
+fn write_frame_before(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> io::Result<()> {
     if bytes.len() > MAX_FRAME {
         return Err(invalid("frame exceeds 1 MiB"));
     }
-    let deadline = Instant::now() + timeout;
     let mut frame = Vec::with_capacity(bytes.len() + 4);
     frame.extend((bytes.len() as u32).to_le_bytes());
     frame.extend(bytes);
@@ -551,6 +562,21 @@ pub fn read_request(stream: &mut TcpStream, timeout: Duration) -> io::Result<Com
 }
 pub fn read_response(stream: &mut TcpStream, timeout: Duration) -> io::Result<Response> {
     decode_response(&read_frame(stream, timeout)?)
+}
+
+pub(crate) fn read_response_before(
+    stream: &mut TcpStream,
+    deadline: Instant,
+) -> io::Result<Response> {
+    decode_response(&read_frame_before(stream, deadline)?)
+}
+
+pub(crate) fn write_request_before(
+    stream: &mut TcpStream,
+    command: &Command,
+    deadline: Instant,
+) -> io::Result<()> {
+    write_frame_before(stream, &encode_command(command)?, deadline)
 }
 pub fn write_request(
     stream: &mut TcpStream,

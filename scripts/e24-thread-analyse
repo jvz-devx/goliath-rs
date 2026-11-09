@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Compare active thread/stack counts, retaining churn separately from accumulation."""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--output',type=Path,required=True)
+    args = parser.parse_args()
+    folder = ROOT/'.local/evidence/E24'/args.name/'threads'
+    path = folder/'samples.json'
+    if not path.exists():path = path.with_suffix('.json.gz')
+    content = path.read_bytes()
+    rows = json.loads(gzip.decompress(content) if path.suffix=='.gz' else content)['rows']
+    points = []
+    previous = set()
+    for row in rows:
+        names = row['thread_names']
+        identities = {thread['id'] for thread in row['threads']}
+        points.append(dict(elapsed_seconds=row['elapsed_seconds'],rss_mib=row['rss_mib'],
+            native_task_threads=row['task_threads'],native_thread_ids=row['native_ids'],
+            stack_regions=row['stack']['regions'],stack_resident=row['stack']['resident_size'],
+            players=sum(n for name,n in names.items() if name.startswith('player ')),
+            terrain_managers=names.get('terrain-manager',0),wall_workers=sum(n for name,n in names.items() if name.startswith('wall-')),
+            io_drivers=sum(n for name,n in names.items() if name.startswith('proxy-io-')),
+            control_workers=sum(n for name,n in names.items() if name.startswith('proxy-control-')),
+            newly_observed_ids=len(identities-previous) if previous else None,
+            gone_observed_ids=len(previous-identities) if previous else None))
+        previous = identities
+    result = dict(kind='E24-thread-stack-readback',name=args.name,points=points,
+        input=dict(path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(content).hexdigest()),
+        thread_count_range=[min(row['task_threads'] for row in rows),max(row['task_threads'] for row in rows)],
+        stack_region_range=[min(row['stack']['regions'] for row in rows),max(row['stack']['regions'] for row in rows)],
+        limits=['stack resident bytes are not mapping count','short-lived threads between samples are not counted as exact spawn totals',
+            'flat active count does not by itself attribute allocator residency'])
+    if args.output.exists():raise RuntimeError('thread analysis already exists')
+    args.output.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2))
+
+
+if __name__=='__main__':main()

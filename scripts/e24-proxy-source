@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Inspect exact reactor-1 source through a private index, without changing its checkout."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = ROOT/'.local/src/meridian'
+FOLDER = ROOT/'.local/evidence/E24/proxy-frozen'
+
+
+def main():
+    manifest = json.loads((ROOT/'.local/bin/meridian-e18/reactor-1/candidate.json').read_text())['projects']['meridian']
+    FOLDER.mkdir(parents=True,exist_ok=False)
+    env = dict(os.environ,GIT_INDEX_FILE=str(FOLDER/'index'))
+    def git(*args):
+        return subprocess.check_output(['git',*map(str,args)],cwd=SOURCE,env=env)
+    git('read-tree',manifest['pin'])
+    for row in manifest['patches']:
+        patch = ROOT/row['path']
+        if hashlib.sha256(patch.read_bytes()).hexdigest()!=row['sha256']:
+            raise RuntimeError('frozen proxy patch changed')
+        git('apply','--cached',patch)
+    selected = [name for name in manifest['source_files'] if name.endswith('.rs') and
+        (name.startswith(('crates/meridian-handoff/src/','crates/meridian-net/src/')) or
+            name in ['crates/meridian-proxy/src/terrain.rs','crates/meridian-proxy/src/session.rs'])]
+    files = {}
+    for name in selected:
+        content = git('show',':'+name)
+        digest = hashlib.sha256(content).hexdigest()
+        if digest!=manifest['source_files'][name]:
+            raise RuntimeError('frozen proxy source differs: '+name)
+        path = FOLDER/name
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(content)
+        files[name] = digest
+    (FOLDER/'identity.json').write_text(json.dumps(dict(pin=manifest['pin'],patches=manifest['patches'],
+        source_equality='passed',files=files,license='MIT, verified from the checked-out LICENSE',
+        worktree_and_real_index_changed=False),indent=2)+'\n')
+    print(json.dumps(dict(source_equality='passed',reference_files=len(files),checkout_changed=False)))
+
+
+if __name__ == '__main__':
+    main()

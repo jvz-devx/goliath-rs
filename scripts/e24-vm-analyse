@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Read native allocator and stack residency without treating virtual size as RSS."""
+import argparse
+import hashlib
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def mib(value):
+    match = re.fullmatch(r'([\d.]+)([KMG]?)',value)
+    if not match:raise ValueError('unknown native size: '+value)
+    scale = {'':1/1048576,'K':1/1024,'M':1,'G':1024}[match[2]]
+    return float(match[1])*scale
+
+
+def parse(path):
+    result = dict(path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    for line in path.read_text().splitlines():
+        fields = line.split()
+        if line.startswith('DefaultMallocZone_'):
+            result['malloc'] = dict(resident_mib=mib(fields[2]),dirty_mib=mib(fields[3]),swapped_mib=mib(fields[4]),
+                allocations=int(fields[5]),allocated_mib=mib(fields[6]),fragmentation_mib=mib(fields[7]),reported_fragmentation_percent=float(fields[8].rstrip('%')))
+        elif fields and fields[0]=='Stack' and len(fields)>3 and fields[1]!='Guard':
+            result['stack'] = dict(resident_mib=mib(fields[2]),dirty_mib=mib(fields[3]))
+    if 'malloc' not in result or 'stack' not in result:raise ValueError('native summary is incomplete')
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--files',nargs='+',required=True)
+    parser.add_argument('--output',type=Path,required=True)
+    args = parser.parse_args()
+    folder = ROOT/'.local/evidence/E24'/args.name
+    rows = [parse(folder/name) for name in args.files]
+    first,last = rows[0],rows[-1]
+    result = dict(kind='E24-native-residency',snapshots=rows,
+        deltas={group:{key:last[group][key]-first[group][key] for key in first[group]}
+            for group in ['malloc','stack']},
+        limits=['native summary values are rounded','resident bytes include free/reusable allocator pages',
+            'virtual reservations are not resident memory','sampling can itself touch stack pages; no baseline-stack attribution from this run alone'])
+    if args.output.exists():raise RuntimeError('native readback already exists')
+    args.output.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2))
+
+
+if __name__=='__main__':main()

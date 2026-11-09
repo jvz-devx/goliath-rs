@@ -4,6 +4,58 @@ use crate::{Fence, TileId};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+/// A caller-driven renewal decision. The application owns sleeping and IO.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenewalAction {
+    WaitUntil(Instant),
+    SendBefore(Instant),
+    Expired,
+}
+
+/// One serial renewal stream, anchored to its previous original send time.
+/// Neither replies nor failures move the next cadence point. A positive slack
+/// reserves time for processing the result before the keeper's unchanged deadline.
+pub struct RenewalSchedule {
+    previous_send: Instant,
+    period: Duration,
+    slack: Duration,
+}
+
+impl RenewalSchedule {
+    pub fn new(previous_send: Instant, period: Duration, slack: Duration) -> Option<Self> {
+        if period.is_zero() || slack.is_zero() || slack >= period {
+            return None;
+        }
+        Some(Self {
+            previous_send,
+            period,
+            slack,
+        })
+    }
+
+    pub fn advance(&mut self, now: Instant, keeper_deadline: Instant) -> RenewalAction {
+        if now >= keeper_deadline {
+            return RenewalAction::Expired;
+        }
+        let Some(due) = self.previous_send.checked_add(self.period) else {
+            return RenewalAction::Expired;
+        };
+        if now < due {
+            return RenewalAction::WaitUntil(due.min(keeper_deadline));
+        }
+        let Some(call_deadline) = keeper_deadline.checked_sub(self.slack) else {
+            return RenewalAction::Expired;
+        };
+        if now >= call_deadline {
+            // No spin or last-moment unbounded call. The keeper still expires
+            // at its own deadline, not at this transport-processing reserve.
+            return RenewalAction::WaitUntil(keeper_deadline);
+        }
+        self.previous_send = now;
+        RenewalAction::SendBefore(call_deadline)
+    }
+}
+
 /// A durable grant. Counter zero identifies the initial claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LeaseGrant {

@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Conservative retry-receipt sizing from timed store batches, never average rates."""
+import argparse
+import csv
+import gzip
+import hashlib
+import io
+import json
+import math
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def peak(points,window_us):
+    points = sorted(points)
+    left = total = maximum = 0
+    bounds = None
+    for at,count in points:
+        total += count
+        while points[left][0] < at-window_us:
+            total -= points[left][1]
+            left += 1
+        if total>maximum:
+            maximum,bounds = total,[points[left][0],at]
+    return dict(commands=maximum,bounds_us=bounds)
+
+
+def analyse(path,span_seconds,capacity,margin):
+    content = path.read_bytes()
+    text = gzip.decompress(content).decode() if path.suffix=='.gz' else content.decode()
+    batches = list(csv.DictReader(io.StringIO(text)))
+    starts = [(int(row['start_us']),int(row['count'])) for row in batches]
+    ends = [(int(row['start_us'])+math.ceil(float(row['execute_ms'])*1000),int(row['count'])) for row in batches]
+    maximum_batch = max(count for _,count in starts)
+    one = {name:peak(points,1_000_000) for name,points in [('start',starts),('end',ends)]}
+    span = {name:peak(points,span_seconds*1_000_000) for name,points in [('start',starts),('end',ends)]}
+    # At most one serial batch can straddle each interval endpoint. Count each
+    # whole boundary batch as extra rather than guess individual prepare times.
+    peak_rate_upper = max(row['commands'] for row in one.values())+2*maximum_batch
+    peak_span_upper = max(row['commands'] for row in span.values())+2*maximum_batch
+    intervening = max(math.ceil(span_seconds*peak_rate_upper),peak_span_upper)
+    required = math.ceil(margin*intervening)+1
+    return dict(path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(content).hexdigest(),
+        batches=len(batches),maximum_batch_commands=maximum_batch,
+        count_scope='all commands, including reads and refusals; conservative upper bound on mutations',
+        one_second_peaks=one,retry_span_peaks=span,
+        boundary_accounting='two additional maximum-sized serial batches',
+        peak_mutation_rate_upper_per_second=peak_rate_upper,
+        maximum_intervening_mutations_budget=intervening,
+        required_receipts=required,capacity=capacity,
+        effective_margin=(capacity-1)/intervening,qualified_for_requested_margin=capacity>=required)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--trace',action='append',required=True,help='PLAYERS=PATH, use only retained completed traces')
+    parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--timeout-ms',type=int,default=3000)
+    parser.add_argument('--attempts',type=int,default=3)
+    parser.add_argument('--capacity',type=int,default=16384)
+    parser.add_argument('--margin',type=int,default=4)
+    args = parser.parse_args()
+    span = args.timeout_ms*3*args.attempts/1000
+    if args.output.exists():
+        raise RuntimeError('budget result already exists; use a fresh name')
+    traces = {}
+    for item in args.trace:
+        players,name = item.split('=',1)
+        traces[players] = analyse((ROOT/name).resolve(),span,args.capacity,args.margin)
+    result = dict(kind='E24-retry-window-budget',phase_count=3,
+        phase_names=['connect including reconnect','whole-frame write','whole-frame read'],
+        timeout_ms=args.timeout_ms,attempts=args.attempts,retry_span_seconds=span,
+        margin=args.margin,traces=traces,
+        required_1050_trace_present='1050' in traces,
+        qualified_650_and_1050=all(str(n) in traces and traces[str(n)]['qualified_for_requested_margin'] for n in [650,1050]),
+        operating_guarantee='650 players at the qualified 20 TPS operating point only',
+        overloaded_1050_caveat='about 5.5 TPS; its measured traffic is not a bound for 1050 players at 20 TPS',
+        larger_cluster_rule='re-measure peak mutation traffic at 20 TPS, then size for the requested margin',
+        lifetime_scope='one bounded Client call; arbitrary manual resubmission is covered by operation safety, not receipt accuracy')
+    args.output.parent.mkdir(parents=True,exist_ok=True)
+    args.output.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(result,indent=2))
+
+
+if __name__ == '__main__':
+    main()

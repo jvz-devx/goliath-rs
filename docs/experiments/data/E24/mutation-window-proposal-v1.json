@@ -1,0 +1,81 @@
+{
+  "kind": "E24-barrier-bearing-mutation-budget",
+  "proposed_capacity": 9216,
+  "retry_seconds": 27,
+  "cadence_extra_upper_per_second": 16,
+  "required_margin": 4,
+  "traces": {
+    "650": {
+      "path": ".local/evidence/E24/diagnosis-r1/store-batches.csv.gz",
+      "sha256": "0445d0ac85a0acc75660eb515fa6092ec509581313e1fcab2ecc2820521d4f63",
+      "all_batches": 169522,
+      "barrier_bearing_batches": 66576,
+      "mutation_upper_total": 67970,
+      "one_second_interval_upper": {
+        "commands": 50,
+        "window_start_us": 34909747
+      },
+      "twenty_seven_second_interval_upper": {
+        "commands": 1131,
+        "window_start_us": 13820250
+      },
+      "rate_with_full_extra_cadence": 66,
+      "retry_budget": 1782,
+      "required_capacity": 7129,
+      "effective_margin": 5.171156004489338,
+      "qualified": true
+    },
+    "1050-overloaded": {
+      "path": ".local/evidence/E24/rate-1050-r1/store-batches.csv.gz",
+      "sha256": "79a5cbb9a73608165e2e54edea9712d1313407e3239e9a069bb0f215f552d447",
+      "all_batches": 29523,
+      "barrier_bearing_batches": 10253,
+      "mutation_upper_total": 12359,
+      "one_second_interval_upper": {
+        "commands": 61,
+        "window_start_us": 57267593
+      },
+      "twenty_seven_second_interval_upper": {
+        "commands": 1390,
+        "window_start_us": 34497598
+      },
+      "rate_with_full_extra_cadence": 77,
+      "retry_budget": 2079,
+      "required_capacity": 8317,
+      "effective_margin": 4.432419432419432,
+      "qualified": true
+    },
+    "650-soak": {
+      "path": ".local/evidence/E24/soak-fixed-r1/store-batches.csv.gz",
+      "sha256": "1ccd8be2b4728b2afe03c4791c643b57654c77b7fa2dd37043f1586b76f4b0cf",
+      "all_batches": 115419,
+      "barrier_bearing_batches": 43401,
+      "mutation_upper_total": 45411,
+      "one_second_interval_upper": {
+        "commands": 52,
+        "window_start_us": 19121025
+      },
+      "twenty_seven_second_interval_upper": {
+        "commands": 1139,
+        "window_start_us": 13857622
+      },
+      "rate_with_full_extra_cadence": 68,
+      "retry_budget": 1836,
+      "required_capacity": 7345,
+      "effective_margin": 5.019063180827887,
+      "qualified": true
+    }
+  },
+  "proof": [
+    "SyncMode Full, normal binary; append_batch resets last_barrier to zero and skips it iff records are empty",
+    "positive-barrier batches contain at least one accepted change; count ALL their commands as mutations conservatively",
+    "weighted interval overlap counts whole boundary batches, without assuming individual prepare timestamps",
+    "add all16new renewal sends/s without subtracting any old renewals, conservatively covering cadence changes"
+  ],
+  "limits": [
+    "measured workload planning margin, not an arbitrary future workload guarantee",
+    "1050 trace is overloaded around5.5TPS, never a1050/20TPS qualification",
+    "requires unchanged durable-journal semantics; not valid for a nondurable renewal path"
+  ],
+  "all_qualified": true
+}

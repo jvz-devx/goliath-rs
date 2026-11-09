@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Resource-free checks for E24's causal arithmetic and call attribution."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parent.parent
+loader = importlib.machinery.SourceFileLoader('e24_readback',str(ROOT/'scripts/e24-analyse'))
+spec = importlib.util.spec_from_loader(loader.name,loader)
+analysis = importlib.util.module_from_spec(spec)
+loader.exec_module(analysis)
+native_loader = importlib.machinery.SourceFileLoader('e24_native_logs',str(ROOT/'scripts/e24-native-logs'))
+native_spec = importlib.util.spec_from_loader(native_loader.name,native_loader)
+native_logs = importlib.util.module_from_spec(native_spec)
+native_loader.exec_module(native_logs)
+run_loader = importlib.machinery.SourceFileLoader('e24_run',str(ROOT/'scripts/e24-run'))
+run_spec = importlib.util.spec_from_loader(run_loader.name,run_loader)
+run = importlib.util.module_from_spec(run_spec)
+run_loader.exec_module(run)
+clock_loader = importlib.machinery.SourceFileLoader('e24_clock',str(ROOT/'scripts/e24-clock-analyse'))
+clock_spec = importlib.util.spec_from_loader(clock_loader.name,clock_loader)
+clock = importlib.util.module_from_spec(clock_spec)
+clock_loader.exec_module(clock)
+soak_loader = importlib.machinery.SourceFileLoader('e24_loaded_clock',str(ROOT/'scripts/e24-clock-soak'))
+soak_spec = importlib.util.spec_from_loader(soak_loader.name,soak_loader)
+loaded_clock = importlib.util.module_from_spec(soak_spec)
+soak_loader.exec_module(loaded_clock)
+m3_loader = importlib.machinery.SourceFileLoader('e24_m3_contract',str(ROOT/'scripts/e24-m3'))
+m3_spec = importlib.util.spec_from_loader(m3_loader.name,m3_loader)
+m3 = importlib.util.module_from_spec(m3_spec)
+m3_loader.exec_module(m3)
+from e24_mutation_watch import MutationWatch
+
+
+class CausalContracts(unittest.TestCase):
+    def test_mutation_watch_keeps_partial_rows_and_counts_boundary_batches(self):
+        with tempfile.TemporaryDirectory(prefix='E24-rate-watch-',dir=ROOT/'.local/runs') as temporary:
+            path=Path(temporary)/'batches.csv'
+            path.write_text('start_us,execute_ms,mutations\n0,500,2\n1200000,100,')
+            watch=MutationWatch(path,3);watch.sample()
+            self.assertEqual(watch.maximum,2)
+            with path.open('a') as output:output.write('2\n')
+            with self.assertRaisesRegex(RuntimeError,'exceeds planning'):watch.sample()
+            self.assertEqual(watch.maximum,4)
+
+    def test_matrix_checker_rejects_dead_process_or_accepted_stale_cas(self):
+        import json
+        with tempfile.TemporaryDirectory(prefix='E24-matrix-check-',dir=ROOT/'.local/runs') as temporary:
+            folder=Path(temporary);binaries={'horizon-client':'fixed'};plan=[]
+            for index in range(18):
+                case='partition' if index<12 else 'stale-login'
+                planned=dict(name='trial'+str(index),seed=index,case=case,exit=0,status='complete');plan.append(planned)
+                row=dict(case=case,seed=index,status='complete',binaries=binaries,binaries_unchanged=True,
+                    run_directory_removed=True,replacement_running=True,
+                    e24_read_only_process_observation={'old_tile_alive_after_test':True})
+                if case=='partition':row.update(queued_cut_after_replacement={'ok':False},new_cut_while_partitioned={'ok':False},
+                    new_cut_after_heal={'ok':False},stale_placement={'ok':False},delayed_cas='010501',replayed_cas='010501',
+                    player_after={'generation':0,'owner':0},isolated_status=None,stale_fence_file_unchanged=True)
+                else:row.update(placed_by_old_process=False,old_fence=[0,1,1],replacement_fence=[0,2,2])
+                (folder/f'{planned["name"]}-{index}.json').write_text(json.dumps(row))
+            outcome=dict(status='complete',rows=plan)
+            self.assertEqual(m3.check_matrix(folder,outcome,binaries)['counts'],{'partition':12,'stale-login':6})
+            path=folder/'trial0-0.json';row=json.loads(path.read_text())
+            row['e24_read_only_process_observation']['old_tile_alive_after_test']=False;path.write_text(json.dumps(row))
+            with self.assertRaisesRegex(ValueError,'dead process'):m3.check_matrix(folder,outcome,binaries)
+            row['e24_read_only_process_observation']['old_tile_alive_after_test']=True
+            row['delayed_cas']=row['replayed_cas']='accepted';path.write_text(json.dumps(row))
+            with self.assertRaisesRegex(ValueError,'not fenced'):m3.check_matrix(folder,outcome,binaries)
+
+    def test_loaded_clock_histogram_subtracts_startup_and_rejects_closure_or_rebase(self):
+        import copy
+        baseline=dict(uptime_before_ns=0,continuous_raw_ns=10,uptime_after_ns=20,width_ns=20)
+        first=dict(schema='E24-claim-raw-clock-v1',allowance_ns=1000,baseline_width_limit_ns=500,
+            resample_limit=3,attempt_limit=4,baseline_width_ns=20,baseline=baseline,
+            checks=4,triple_reads=5,inconclusive_reads=0,resamples=0,
+            width_histogram_ns={'20':5},dropped_widths=0,closures_by_cause={},failure=None)
+        last=dict(first,checks=12,triple_reads=15,inconclusive_reads=2,resamples=2,width_histogram_ns={'20':13,'2000':2})
+        result=loaded_clock.tile_result(first,last)
+        self.assertTrue(result['valid'])
+        self.assertEqual(result['width_distribution_ns'],dict(p50=20,p99=2000,p99_99=2000,max=2000))
+        self.assertEqual(result['widths_1500_to_2500_ns'],{'2000':2})
+        closed=dict(last,closures_by_cause={'resamples-exhausted':1})
+        self.assertFalse(loaded_clock.tile_result(first,closed)['valid'])
+        rebased=copy.deepcopy(last);rebased['baseline']['uptime_before_ns']=1
+        self.assertFalse(loaded_clock.tile_result(first,rebased)['valid'])
+
+    def test_campaign_budget_stops_new_trials_but_finishes_pending_trials(self):
+        import ast
+        source=ast.parse((ROOT/'scripts/m3-chaos').read_text())
+        original={node.name:ast.dump(node) for node in source.body if isinstance(node,ast.FunctionDef)
+            and node.name in ['crossing','partition','stale_login','run']}
+        transform=m3.WindowBoundary();tree=ast.fix_missing_locations(transform.visit(source))
+        self.assertEqual((transform.outer,transform.inner),(1,1))
+        unchanged={node.name:ast.dump(node) for node in tree.body if isinstance(node,ast.FunctionDef) and node.name in original}
+        self.assertEqual(original,unchanged)
+        main=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='main')
+        tests=[node.test for node in ast.walk(main) if isinstance(node,ast.While) and 'pending' in ast.unparse(node.test)]
+        for pending in [{},{'job':True}]:
+            scope=dict(pending=pending,next_index=0,plan=[1,2],failed=False,e24_expired=lambda:True,
+                args=type('Args',(),dict(jobs=4))())
+            values=[bool(eval(compile(ast.Expression(test),'<budget>','eval'),scope)) for test in tests]
+            self.assertEqual(values,[bool(pending),False])
+
+    def test_fixed_clock_offset_intersection_uses_read_uncertainty(self):
+        def row(at, before, after, value):
+            return dict(elapsed_ns=at,next=dict(monotonic_raw=dict(
+                instant_before_ns=before,instant_after_ns=after,value_ns=value)))
+        value=clock.describe([row(0,0,10,100),row(1000,1000,1010,1105)],'monotonic_raw')
+        self.assertTrue(value['fixed_offset_is_consistent'])
+        self.assertEqual(value['fixed_offset_intersection_lower_ns'],95)
+        self.assertEqual(value['fixed_offset_intersection_upper_ns'],100)
+        shifted=clock.describe([row(0,0,10,100),row(1000,1000,1010,1120)],'monotonic_raw')
+        self.assertFalse(shifted['fixed_offset_is_consistent'])
+
+    def test_clock_rate_units_are_ppm_not_nanoseconds_per_second(self):
+        rows=[dict(elapsed_ns=at,next=dict(monotonic=dict(instant_before_ns=at,
+            instant_after_ns=at,value_ns=at+100+index*1000)))
+            for index,at in enumerate([0,1_000_000_000,2_000_000_000])]
+        result=clock.describe(rows,'monotonic')
+        self.assertEqual(result['linear_slope_ppm'],1)
+        self.assertEqual(result['first_to_last_offset_change_ns'],2000)
+
+    def test_clock_latch_is_found_even_without_a_successful_status_poll(self):
+        import gzip
+        import json
+        with tempfile.TemporaryDirectory(prefix='E24-latch-',dir=ROOT/'.local/runs') as temporary:
+            folder=Path(temporary)
+            (folder/'tiles').mkdir()
+            row=dict(event='authority-stop',at_ns=20,data=dict(cause='action-clock-anomaly'))
+            (folder/'tiles/tile-2-1-lease.jsonl.gz').write_bytes(gzip.compress((json.dumps(row)+'\n').encode()))
+            stops=run.authority_stops(folder)
+            self.assertEqual(len(stops),1)
+            self.assertEqual(stops[0]['data']['cause'],'action-clock-anomaly')
+
+    def test_failure_noise_span_excludes_the_first_boundarys_previous_interval(self):
+        report = dict(error=None,samples=[
+            dict(at=100,mark='steady-first',outside_cpu_s_delta={'9':100}),
+            dict(at=105,mark=None,outside_cpu_s_delta={'9':1}),
+            dict(at=110,mark='failure-before-cleanup',outside_cpu_s_delta={'9':2})])
+        value = analysis.phase_noise(report,'steady-first','failure-before-cleanup')
+        self.assertEqual(value['maximum_outside_process_cores'],.3)
+        self.assertTrue(value['valid'])
+        self.assertIsNone(analysis.phase_noise(report,'cell-start','failure-before-cleanup'))
+
+    def test_clock_bracket_is_strict_only_outside_both_slack_endpoints(self):
+        data = dict(previous_before_ns=0,previous_after_ns=0,next_before_ns=100000,
+            next_after_ns=100000,previous_continuous_ns=0)
+        for elapsed,expected in [(100000,False),(101201,True),(98799,True),(101200,False),(98800,False)]:
+            with self.subTest(elapsed=elapsed):
+                self.assertEqual(analysis.clock_failure(dict(data,next_continuous_ns=elapsed))['rejected'],expected)
+
+    def test_sampling_pause_widens_the_interval_instead_of_becoming_suspend(self):
+        data = dict(previous_before_ns=0,previous_after_ns=1000,next_before_ns=2000,
+            next_after_ns=250_000_000,previous_continuous_ns=500,next_continuous_ns=100_000_000)
+        self.assertFalse(analysis.clock_failure(data)['rejected'])
+
+    def test_client_lock_wait_is_attributed_to_its_request_and_unfinished_call_is_kept(self):
+        with tempfile.TemporaryDirectory(prefix='E24-parser-',dir=ROOT/'.local/runs') as temporary:
+            path = Path(temporary)/'client.csv'
+            path.write_text('wall_ns,event,request_id,operation,attempt,instant\n'
+                '0,call-waiting,one,renew-lease,0,clock\n'
+                '1000,lock-acquired,one,renew-lease,0,clock\n'
+                '2000,call-waiting,two,renew-lease,0,clock\n'
+                '1000000,lock-releasing,one,renew-lease,0,clock\n'
+                '1001000,lock-acquired,two,renew-lease,0,clock\n')
+            result = analysis.client_summary(path)
+            self.assertEqual(result['calls'],2)
+            self.assertAlmostEqual(result['maximum_lock_wait_ms'],.999)
+            self.assertAlmostEqual(result['maximum_lock_held_ms'],.999)
+            self.assertEqual(result['pending_ids'],['two'])
+
+    def test_chunked_native_archive_recovers_exact_original_bytes(self):
+        import base64
+        import gzip
+        import hashlib
+        import json
+        with tempfile.TemporaryDirectory(prefix='E24-archive-test-',dir=ROOT/'.local/runs') as temporary:
+            temporary = Path(temporary)
+            folder = temporary/'.local/evidence/E24/check-native'
+            folder.mkdir(parents=True)
+            source = folder/'server-a.log.raw'
+            content = bytes(range(256))*4000
+            source.write_bytes(content)
+            (folder/'retention.json').write_text(json.dumps(dict(files=[dict(
+                original='.local/runs/test/server-a.log',retained=str(source.relative_to(temporary)))])))
+            with patch.object(native_logs,'ROOT',temporary):
+                native_logs.pack('check')
+            self.assertFalse(source.exists())
+            packed = json.loads(gzip.decompress((folder/'server-a.log.json.gz').read_bytes()))
+            restored = b''.join(base64.b64decode(chunk) for chunk in packed['chunks'])
+            self.assertEqual(restored,content)
+            self.assertEqual(packed['raw_sha256'],hashlib.sha256(content).hexdigest())
+            self.assertEqual(packed['bytes'],len(content))
+
+
+if __name__ == '__main__':
+    unittest.main()

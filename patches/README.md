@@ -217,6 +217,20 @@ upstream changes.
   `python3 -B scripts/e18-patch --event-loop` verifies the frozen stack including
   patch 05, clean application and every source byte without rewriting patch 05.
 
+- E26's diagnostic stack is `horizon-14-tick-timers.patch`, then
+  `horizon-15-tick-timer-conditions.patch`, `horizon-16-reader-inbox-timers.patch`,
+  `horizon-17-tick-busy-waits.patch` and `horizon-18-tick-wait-detail.patch`.
+  Apply it after FINAL-09 and the recorded E11 measurement stack, not after
+  the unselected warm-tick or shared-observer candidates. It records exclusive
+  main-thread costs, with reader-only delivery and inbox scopes. Explicit
+  pacing sleep and worker-completion waiting are recorded separately from
+  busy work. `e26-timers on` enables only the main thread serving that control
+  endpoint; `e26-timers drain` returns bounded per-tick rows and dropped counts.
+  A separately named build with `HORIZON_E26_PLANTED_COST=1` adds a 200 us
+  pulse once per dedicated tick for the positive control. These are diagnostic
+  builds, not selected production or M4 acceptance binaries. Native gates and
+  measurements are tracked in `docs/experiments/E26-tick-profile.md`.
+
 - `horizon-08-m4-measurement.patch`: E17's measurement-only integration on
   Horizon `fc2868b2b26d56ec76e17414909fe58a3b87bb92`. Apply the E12 FINAL stack
   through `horizon-07-observer-status.patch`, then `horizon-03-bots.patch`,
@@ -324,3 +338,29 @@ do not replace the accepted measurement stack or qualify an availability fix.
   Instrumentation can change performance, so these builds are not capacity or
   latency qualification. See
   [E24's proxy-memory handoff](../docs/experiments/E24-lease-availability.md#proxy-memory-handoff-to-e25).
+
+- `horizon-13-lease-raw-clock.patch` and `horizon-13-lease-raw-clock-r1.patch`:
+  E24's first clock fix on Horizon `fc2868b2b26d56ec76e17414909fe58a3b87bb92`,
+  applied directly after the complete FINAL-09 stack. On macOS the keeper's
+  suspend check compares MONOTONIC_RAW with UPTIME_RAW against one baseline taken
+  before the claim, with a fixed 1 µs allowance and at most three resamples.
+  It adds the macOS-only MIT `nix` 0.31.3 dependency (default features off,
+  `time` only). Frozen as `lease-fixed-r1`. Superseded by revision 2 below; do
+  not apply both. See
+  [E24's clock fix](../docs/experiments/E24-lease-availability.md).
+
+- `horizon-13-lease-renewal-r2.patch`: the accepted lease patch, self-contained
+  on FINAL-09. It keeps the raw clock pair and adds a send-anchored renewal
+  cadence: the next renewal is due 250 ms after the previous send, a failed call
+  retries at once when that time has passed, and each call ends 50 ms before the
+  keeper deadline. Deadline anchoring, fences and counters are unchanged. It
+  also corrects the generic margin guard to include the clock allowance. Frozen
+  with the bounded store as `lease-fixed-r2`, which passes the 30-minute soak
+  (proxy memory excepted) and the full M3 campaign.
+
+- `goliath-store-e24-memory-r1.patch`: a record of E24's store change in this
+  repository's own crates, already applied in `crates/goliath-store`. It bounds
+  retry receipts to 9,216 FIFO entries, reuses the snapshot buffer and writes the
+  snapshot frame without a second full copy, in the same on-disk format. A
+  snapshot holding more receipts than the cap is refused at startup and needs an
+  explicit migration.

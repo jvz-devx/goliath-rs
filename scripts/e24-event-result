@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Freeze an authority-latch result from raw trace readback, not status-poll success."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+ROOT=Path(__file__).resolve().parent.parent
+DATA=ROOT/'docs/experiments/data/E24'
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    args=parser.parse_args()
+    causal_path=DATA/(args.name+'-causal-readback.json')
+    summary_path=DATA/(args.name+'-summary.json')
+    causal=json.loads(causal_path.read_text())
+    summary=json.loads(summary_path.read_text())
+    events=[]
+    for name,tile in causal['tiles'].items():
+        stop=tile['first_stop']
+        if not stop:continue
+        replies=[row for row in tile['recent_event_chain'] if row['event']=='renew-reply' and row['at_ns']<stop['at_ns']]
+        events.append(dict(tile_trace=name,first_stop=stop,
+            keeper_slack_at_stop_ns=stop['data']['deadline_ns']-stop['data']['now_ns'],
+            clock_anomalies=tile['clock_anomalies'],last_reply=replies[-1] if replies else None,
+            limiter_signal_call_brackets=tile['nearby_limiter_signal_call_brackets']))
+    result=dict(kind='E24-raw-authority-event-result',name=args.name,authority_latch=bool(events),
+        total_window_seconds=summary['seconds'],events=events,
+        noise={name:{key:causal['window'][name][key] for key in ['seconds','maximum_outside_process_cores','valid']}
+            for name in ['whole_noise','steady_noise']},
+        store=causal['store'],binaries_unchanged=summary['binaries_unchanged'],
+        inherited_status_poll_flag=summary['observed_authority_latch'],
+        status_flag_correction='Raw authority-stop records take precedence. The inherited status poll missed the stop before bot failure.',
+        limits=['cause proven for this invocation, not earlier E22/E23 events',
+            'clock disagreement is proven; an NTP service event is not',
+            'early failed run, no complete capacity or memory qualification',
+            'legacy availability metadata describes its status polling, not the E24 per-renewal raw files'],
+        inputs={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in [causal_path,summary_path]})
+    output=DATA/(args.name+'-authority-event-v1.json')
+    if output.exists():raise RuntimeError('event result already exists')
+    output.write_text(json.dumps(result,indent=2)+'\n')
+    print(json.dumps(dict(output=str(output.relative_to(ROOT)),sha256=hashlib.sha256(output.read_bytes()).hexdigest(),authority_latch=bool(events))))
+
+
+if __name__=='__main__':main()

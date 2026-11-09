@@ -1,0 +1,112 @@
+diff --git a/crates/meridian-proxy/src/main.rs b/crates/meridian-proxy/src/main.rs
+--- a/crates/meridian-proxy/src/main.rs
++++ b/crates/meridian-proxy/src/main.rs
+@@ -1,5 +1,10 @@
+ //! The Meridian proxy.
+ mod access;
++#[cfg(feature = "e24-heap")]
++mod heap_profile;
++#[cfg(feature = "e24-heap")]
++#[global_allocator]
++static E24_ALLOCATOR: dhat::Alloc = dhat::Alloc;
+ mod args;
+ mod balance;
+ mod commands;
+@@ -45,6 +50,11 @@
+ use std::sync::atomic::{AtomicBool, Ordering};
+ 
+ fn main() -> ExitCode {
++    #[cfg(feature = "e24-heap")]
++    let _heap = match heap_profile::initialize() {
++        Ok(guard) => guard,
++        Err(error) => { eprintln!("E24 heap initialization failed: {error}"); return ExitCode::FAILURE; }
++    };
+     log::init_from_env();
+     let command = match args::parse(std::env::args_os().skip(1)) {
+         Ok(command) => command,
+diff --git a/crates/meridian-proxy/src/console.rs b/crates/meridian-proxy/src/console.rs
+--- a/crates/meridian-proxy/src/console.rs
++++ b/crates/meridian-proxy/src/console.rs
+@@ -43,6 +43,11 @@
+     pub fn builtin() -> Self {
+         let mut commands = Commands { list: Vec::new() };
+         for command in [
++            #[cfg(feature = "e24-heap")]
++            command("e24-heap", "e24-heap [dump]", "reads allocation counters or freezes the one-shot live heap profile", |_, _, args| {
++                if args.len() > 1 || args.first().is_some_and(|word| *word != "dump") { return Err("usage: e24-heap [dump]".into()); }
++                Ok(vec![format!("E24_HEAP {}", crate::heap_profile::snapshot(args == ["dump"])?)])
++            ),
+             command(
+                 "e18-path",
+                 "e18-path [reset]",
+diff --git a/crates/meridian-proxy/Cargo.toml b/crates/meridian-proxy/Cargo.toml
+--- a/crates/meridian-proxy/Cargo.toml
++++ b/crates/meridian-proxy/Cargo.toml
+@@ -11,7 +11,11 @@
+ name = "meridian"
+ path = "src/main.rs"
+ 
++[features]
++e24-heap = ["dep:dhat"]
++
+ [dependencies]
++dhat = { version = "=0.3.3", optional = true }
+ goliath-store = { path = "../../../../../crates/goliath-store" }
+ ctrlc = "3.4"
+ horizon-protocol.workspace = true
+diff --git a/crates/meridian-proxy/src/heap_profile.rs b/crates/meridian-proxy/src/heap_profile.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/meridian-proxy/src/heap_profile.rs
+@@ -0,0 +1,51 @@
++//! Owns the optional E24 heap profiler and explicit pre-teardown snapshots.
++use serde_json::{Value, json};
++use std::{fs::OpenOptions, path::PathBuf, sync::{Mutex, OnceLock}, time::Instant};
++
++static PROFILER: Mutex<Option<dhat::Profiler>> = Mutex::new(None);
++static START: OnceLock<Instant> = OnceLock::new();
++static OUTPUT: OnceLock<PathBuf> = OnceLock::new();
++
++pub(crate) struct Guard;
++
++pub(crate) fn initialize() -> Result<Guard,String> {
++    let Some(path) = std::env::var_os("E24_HEAP_FILE") else { return Ok(Guard) };
++    let path = PathBuf::from(path);
++    if !path.is_absolute() {
++        return Err("E24_HEAP_FILE needs an absolute, fresh diagnostic output path".into());
++    }
++    // Reserve the exact output so the profiler never overwrites a frozen result.
++    OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e|e.to_string())?;
++    let mut profiler = PROFILER.lock().map_err(|_|"heap profiler lock poisoned")?;
++    START.set(Instant::now()).map_err(|_|"heap profiler already initialized")?;
++    OUTPUT.set(path.clone()).map_err(|_|"heap output already initialized")?;
++    *profiler = Some(dhat::Profiler::builder().file_name(path).trim_backtraces(Some(16)).build());
++    Ok(Guard)
++}
++
++pub(crate) fn snapshot(dump: bool) -> Result<Value,String> {
++    let mut profiler = PROFILER.lock().map_err(|_|"heap profiler lock poisoned")?;
++    if profiler.is_none() {
++        return Err("E24 heap profiler is not active or was already dumped".into());
++    }
++    let stats = dhat::HeapStats::get();
++    let output = json!({"kind":"E24-proxy-heap","dumped":dump,
++        "elapsed_ms":START.get().ok_or("missing heap origin")?.elapsed().as_millis(),
++        "file":OUTPUT.get().ok_or("missing heap output")?,
++        "total_blocks":stats.total_blocks,"total_bytes":stats.total_bytes,
++        "live_blocks":stats.curr_blocks,"live_bytes":stats.curr_bytes,
++        "maximum_blocks":stats.max_blocks,"maximum_bytes":stats.max_bytes,
++        "sessions_alive":meridian_handoff::sessions_alive(),
++        "scope":"instrumented heap allocations, not RSS or capacity acceptance"});
++    let finished = if dump {profiler.take()} else {None};
++    drop(profiler);
++    // Capture live owners before the fixture closes any player connection.
++    drop(finished);
++    Ok(output)
++}
++
++impl Drop for Guard {
++    fn drop(&mut self) {
++        let _ = snapshot(true);
++    }
++}

@@ -13,6 +13,7 @@ const MAX_RECORD: usize = 1024 * 1024;
 
 pub(crate) struct Journal {
     pub(crate) last_barrier: Duration,
+    pub(crate) last_barrier_span: Option<(Instant, Instant)>,
     directory: PathBuf,
     log: File,
     prepared: Option<File>,
@@ -46,9 +47,13 @@ pub struct Compaction {
 pub struct CompactionReady {
     directory: PathBuf,
     next: File,
+    snapshot: Vec<u8>,
 }
 
 impl Compaction {
+    pub fn snapshot_usage(&self) -> (usize, usize) {
+        (self.snapshot.len(), self.snapshot.capacity())
+    }
     pub fn run(self) -> io::Result<CompactionReady> {
         install_snapshot(&self.directory, self.mode, self.sequence, &self.snapshot)?;
         fs::remove_file(self.directory.join("journal.previous"))?;
@@ -57,6 +62,7 @@ impl Compaction {
         Ok(CompactionReady {
             directory: self.directory,
             next,
+            snapshot: self.snapshot,
         })
     }
 }
@@ -75,7 +81,7 @@ fn install_snapshot(
 ) -> io::Result<()> {
     let next_path = directory.join("snapshot.next");
     let mut next = File::create(&next_path)?;
-    next.write_all(&frame(sequence, snapshot)?)?;
+    write_frame(&mut next, sequence, snapshot)?;
     mode.sync(&next)?;
     fs::rename(&next_path, directory.join("snapshot"))?;
     sync_directory(directory, mode)
@@ -110,6 +116,26 @@ fn frame(sequence: u64, bytes: &[u8]) -> io::Result<Vec<u8>> {
     Ok(record)
 }
 
+/// Snapshot-only streamed representation, byte-compatible with `frame`.
+/// The destination is private until the original sync/rename sequence completes.
+fn write_frame(writer: &mut impl Write, sequence: u64, bytes: &[u8]) -> io::Result<()> {
+    let len = u32::try_from(bytes.len()).map_err(|_| invalid("record too large"))?;
+    let checksum = crc(sequence
+        .to_le_bytes()
+        .into_iter()
+        .chain(len.to_le_bytes())
+        .chain(bytes.iter().copied()));
+    let mut header = [0u8; HEADER];
+    header[..8].copy_from_slice(MAGIC);
+    header[8..16].copy_from_slice(&sequence.to_le_bytes());
+    header[16..20].copy_from_slice(&len.to_le_bytes());
+    header[20..24].copy_from_slice(&(!len).to_le_bytes());
+    header[24..28].copy_from_slice(&checksum.to_le_bytes());
+    header[28..32].copy_from_slice(&(!checksum).to_le_bytes());
+    writer.write_all(&header)?;
+    writer.write_all(bytes)
+}
+
 fn parse(bytes: &[u8], bounded: bool) -> Option<(u64, &[u8], usize)> {
     if bytes.len() < HEADER || &bytes[..8] != MAGIC {
         return None;
@@ -133,8 +159,31 @@ fn parse(bytes: &[u8], bounded: bool) -> Option<(u64, &[u8], usize)> {
     (computed == checksum).then_some((sequence, payload, end))
 }
 
+fn read_snapshot(directory: &Path) -> io::Result<Option<(u64, Vec<u8>)>> {
+    match fs::read(directory.join("snapshot")) {
+        Ok(bytes) => {
+            let (sequence, payload, end) =
+                parse(&bytes, false).ok_or_else(|| invalid("snapshot checksum/header failure"))?;
+            if end != bytes.len() {
+                return Err(invalid("snapshot trailing bytes"));
+            }
+            Ok(Some((sequence, payload.to_vec())))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 impl Journal {
-    pub(crate) fn open(directory: &Path, mode: SyncMode) -> io::Result<(Self, Recovery)> {
+    pub(crate) fn open(
+        directory: &Path,
+        mode: SyncMode,
+        mut validate_snapshot: impl FnMut(Option<&[u8]>) -> io::Result<()>,
+    ) -> io::Result<(Self, Recovery)> {
+        // Refuse unsupported history before creating files or repairing a tail.
+        // Revalidate under the writer lock if an existing writer changed it.
+        let inspected = read_snapshot(directory)?;
+        validate_snapshot(inspected.as_ref().map(|(_, bytes)| bytes.as_slice()))?;
         match fs::create_dir(directory) {
             Ok(()) => sync_directory(directory.parent().unwrap_or(Path::new(".")), mode)?,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -147,18 +196,11 @@ impl Journal {
             .write(true)
             .open(directory.join("writer.lock"))?;
         lock.try_lock().map_err(io::Error::from)?;
-        let snapshot = match fs::read(directory.join("snapshot")) {
-            Ok(bytes) => {
-                let (sequence, payload, end) = parse(&bytes, false)
-                    .ok_or_else(|| invalid("snapshot checksum/header failure"))?;
-                if end != bytes.len() {
-                    return Err(invalid("snapshot trailing bytes"));
-                }
-                Some((sequence, payload.to_vec()))
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e),
-        };
+        let snapshot = read_snapshot(directory)?;
+        if snapshot != inspected {
+            validate_snapshot(snapshot.as_ref().map(|(_, bytes)| bytes.as_slice()))?;
+        }
+        drop(inspected);
         let mut log = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -210,6 +252,7 @@ impl Journal {
         Ok((
             Self {
                 last_barrier: Duration::ZERO,
+                last_barrier_span: None,
                 directory: directory.to_path_buf(),
                 log,
                 prepared,
@@ -230,6 +273,7 @@ impl Journal {
 
     pub(crate) fn append_batch(&mut self, records: &[(u64, Vec<u8>)]) -> io::Result<()> {
         self.last_barrier = Duration::ZERO;
+        self.last_barrier_span = None;
         if records.is_empty() {
             return Ok(());
         }
@@ -258,7 +302,9 @@ impl Journal {
         }
         let barrier_start = Instant::now();
         self.mode.sync(&self.log)?;
-        self.last_barrier = barrier_start.elapsed();
+        let barrier_end = Instant::now();
+        self.last_barrier = barrier_end.duration_since(barrier_start);
+        self.last_barrier_span = Some((barrier_start, barrier_end));
         #[cfg(test)]
         {
             self.barriers += 1;
@@ -305,12 +351,12 @@ impl Journal {
         })
     }
 
-    pub(crate) fn complete_compaction(&mut self, ready: CompactionReady) -> io::Result<()> {
+    pub(crate) fn complete_compaction(&mut self, ready: CompactionReady) -> io::Result<Vec<u8>> {
         if ready.directory != self.directory || self.prepared.is_some() {
             return Err(invalid("wrong compaction completion"));
         }
         self.prepared = Some(ready.next);
-        Ok(())
+        Ok(ready.snapshot)
     }
 }
 
@@ -319,6 +365,74 @@ mod tests {
     //! Owns checksum coverage of every record byte.
 
     use super::*;
+
+    #[test]
+    fn streamed_snapshot_is_byte_identical_to_the_original_full_frame() {
+        for length in [0, 1, 1023, 1024 * 1024] {
+            let payload: Vec<_> = (0..length).map(|index| (index % 251) as u8).collect();
+            for sequence in [0, 7, u64::MAX] {
+                let expected = frame(sequence, &payload).unwrap();
+                let mut streamed = Vec::new();
+                write_frame(&mut streamed, sequence, &payload).unwrap();
+                assert_eq!(streamed, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_ignores_a_crash_after_header_or_after_synced_write_before_rename() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../.local/runs/e24-stream-crash-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let (mut journal, _) = Journal::open(&path, SyncMode::Full, |_| Ok(())).unwrap();
+        journal.compact(7, b"old committed snapshot").unwrap();
+        drop(journal);
+        struct HeaderOnly {
+            file: File,
+            left: usize,
+        }
+        impl Write for HeaderOnly {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.left == 0 {
+                    return Err(io::Error::other("injected crash after header"));
+                }
+                let count = bytes.len().min(self.left);
+                let written = self.file.write(&bytes[..count])?;
+                self.left -= written;
+                Ok(written)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.file.flush()
+            }
+        }
+        let mut interrupted = HeaderOnly {
+            file: File::create(path.join("snapshot.next")).unwrap(),
+            left: HEADER,
+        };
+        assert!(write_frame(&mut interrupted, 8, b"new uncommitted snapshot").is_err());
+        SyncMode::Full.sync(&interrupted.file).unwrap();
+        drop(interrupted);
+        let (journal, recovered) = Journal::open(&path, SyncMode::Full, |_| Ok(())).unwrap();
+        assert_eq!(
+            recovered.snapshot,
+            Some((7, b"old committed snapshot".to_vec()))
+        );
+        drop(journal);
+        let mut next = File::create(path.join("snapshot.next")).unwrap();
+        write_frame(&mut next, 8, b"new fully written but not renamed").unwrap();
+        SyncMode::Full.sync(&next).unwrap();
+        drop(next);
+        let (journal, recovered) = Journal::open(&path, SyncMode::Full, |_| Ok(())).unwrap();
+        assert_eq!(
+            recovered.snapshot,
+            Some((7, b"old committed snapshot".to_vec()))
+        );
+        drop(journal);
+        fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn every_header_payload_and_checksum_byte_is_protected() {

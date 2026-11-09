@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Gate, prove and freeze the conditionally approved raw-clock tile release."""
+import argparse
+import difflib
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import time
+import tomllib
+
+from e14_snapshot_support import validate_snapshot
+
+ROOT=Path(__file__).resolve().parent.parent
+SOURCE=ROOT/'.local/src/horizon'
+EVIDENCE=ROOT/'.local/evidence/E24'
+DATA=ROOT/'docs/experiments/data/E24'
+REFERENCE=ROOT/'.local/bin/goliath-e24/diagnostic-r3'
+STORE=ROOT/'.local/bin/goliath-store-e24-a7988a425/retention-r1/goliath-store'
+STORE_SHA='71e7840cf71fab15871d9b19ebf446bf65e7826a15b0c7468e4bca6023765fe5'
+NIX_SHA='cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d'
+LEASE='crates/horizon-client/src/game/dedicated/cluster/lease'
+ALLOWED={'Cargo.lock','crates/horizon-client/Cargo.toml',LEASE+'.rs',LEASE+'/trace.rs',LEASE+'/clock.rs'}
+
+
+def sha(path):return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--revision',required=True)
+    parser.add_argument('--probe',default='clock-pair-enhanced-r1')
+    parser.add_argument('--store-build',type=Path)
+    parser.add_argument('--base',choices=['diagnostic','final09'],default='diagnostic')
+    parser.add_argument('--patch',type=Path)
+    parser.add_argument('--reuse-root-gates',type=Path)
+    args=parser.parse_args()
+    if any(not re.fullmatch('[A-Za-z0-9_-]+',value) for value in [args.name,args.revision,args.probe]):raise ValueError('simple names required')
+    probe_path=DATA/(args.probe+'-readback.json')
+    probe=json.loads(probe_path.read_text())
+    if not probe.get('complete') or not probe.get('conditional_fix_build_ready'):raise RuntimeError('exhaustive raw-clock condition did not pass')
+    owner=ROOT/'.local/host/quiet/owner'
+    if owner.exists() and owner.read_text().splitlines()[0]=='E24':raise RuntimeError('release own measurement window before build')
+    target=ROOT/'.local/bin/goliath-e24'/args.name
+    output=DATA/(args.name+'-build.json')
+    patch=(args.patch.resolve() if args.patch else ROOT/'patches'/('horizon-13-lease-raw-clock-'+args.revision+'.patch'))
+    if target.exists() or output.exists() or patch.exists():raise RuntimeError('single-use build/patch identity exists')
+    store,store_sha=STORE,STORE_SHA
+    if args.store_build:
+        store_record=json.loads(args.store_build.read_text())
+        if store_record['status']!='complete':raise RuntimeError('store build incomplete')
+        store=ROOT/store_record['directory']/'goliath-store';store_sha=store_record['binary_sha256']
+    if sha(store)!=store_sha:raise RuntimeError('approved store binary differs')
+    validate_snapshot(REFERENCE)
+    env={k:v for k,v in os.environ.items() if k not in ['CI','CARGO_TARGET_DIR'] and not k.startswith('CARGO_PROFILE_')}
+    env.update(CARGO_INCREMENTAL='0',CARGO_BUILD_JOBS='6',CARGO_PROFILE_RELEASE_LTO='thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',GIT_OPTIONAL_LOCKS='0')
+    record=dict(kind='E24-raw-clock-fixed-build',status='running',profile='release',incremental=False,
+        probe=dict(path=str(probe_path.relative_to(ROOT)),sha256=sha(probe_path)),commands=[])
+    def gate(label,cwd,command):
+        if owner.exists() and owner.read_text().splitlines()[0]=='E24':raise RuntimeError('own measurement appeared before '+label)
+        actual=[str(ROOT/'.local/bin/host-window'),'build','E24','--',*command]
+        log=EVIDENCE/(args.name+'-'+label+'.log')
+        began=time.monotonic()
+        print('E24_GATE '+label,flush=True)
+        with log.open('x') as stream:completed=subprocess.run(actual,cwd=cwd,env=env,stdout=stream,stderr=subprocess.STDOUT)
+        text=log.read_text(errors='replace')
+        tests=re.findall(r'test result: .*',text)
+        record['commands'].append(dict(label=label,command=actual,exit=completed.returncode,seconds=time.monotonic()-began,
+            log=str(log.relative_to(ROOT)),test_results=tests))
+        output.write_text(json.dumps(record,indent=2)+'\n')
+        print(json.dumps(record['commands'][-1]),flush=True)
+        if completed.returncode:
+            print('\n'.join(text.splitlines()[-60:]),flush=True)
+            raise RuntimeError('gate failed: '+label)
+        if label=='horizon-lease-tests' and not any(re.search(r'\b(?:1[2-9]|[2-9][0-9]) passed; 0 failed;',row) for row in tests):
+            raise RuntimeError('scoped clock/lease test count missing')
+        if log.stat().st_size>1_000_000:
+            raw=log.read_bytes();compressed=log.with_suffix('.log.gz')
+            compressed.write_bytes(gzip.compress(raw,mtime=0));log.unlink()
+            record['commands'][-1]['log']=str(compressed.relative_to(ROOT))
+            record['commands'][-1]['log_sha256']=sha(compressed)
+            output.write_text(json.dumps(record,indent=2)+'\n')
+        return text
+    try:
+        gate('resolve-clock-dependency',SOURCE,['cargo','metadata','--offline','--no-deps','--format-version','1',
+            '--no-default-features','--filter-platform','aarch64-apple-darwin'])
+        index=EVIDENCE/(args.name+'-diagnostic-base-index')
+        shutil.copy2(EVIDENCE/('source-backup/final09-index' if args.base=='final09' else 'diagnostic-index'),index)
+        git_env=dict(env,GIT_INDEX_FILE=str(index))
+        def git(*a):return subprocess.check_output(['git',*a],cwd=SOURCE,env=git_env)
+        old_lock=tomllib.loads(git('show',':Cargo.lock').decode())['package']
+        new_lock=tomllib.loads((SOURCE/'Cargo.lock').read_text())['package']
+        identities=lambda rows:{(row['name'],row['version'],row.get('source'),row.get('checksum')) for row in rows if 'source'in row}
+        if not identities(old_lock)<=identities(new_lock):raise RuntimeError('resolution changed an existing locked dependency')
+        nix=next(row for row in new_lock if row['name']=='nix' and row['version']=='0.31.3')
+        if nix['checksum']!=NIX_SHA:raise RuntimeError('nix registry checksum differs')
+        record['nix']=dict(version='0.31.3',checksum=NIX_SHA,license='MIT',target='macos',default_features=False,features=['time'])
+        names=set(git('diff','--name-only').decode().splitlines())
+        names.update(set(git('ls-files','-o','--exclude-standard').decode().splitlines())-set(git('ls-files').decode().splitlines()))
+        if names-ALLOWED:raise RuntimeError('unexpected change from diagnostic base: '+str(sorted(names-ALLOWED)))
+        parts=[]
+        for name in sorted(names):
+            old=subprocess.run(['git','show',':'+name],cwd=SOURCE,env=git_env,capture_output=True)
+            before=old.stdout.decode() if old.returncode==0 else ''
+            after=(SOURCE/name).read_text()
+            parts.append(f'diff --git a/{name} b/{name}\n')
+            if old.returncode:parts.append('new file mode 100644\n')
+            parts.extend(difflib.unified_diff(before.splitlines(keepends=True),after.splitlines(keepends=True),
+                fromfile='a/'+name if before else '/dev/null',tofile='b/'+name))
+        patch.write_text(''.join(parts))
+        git('apply','--cached','--check',str(patch));git('apply','--cached',str(patch))
+        for name in names:
+            if git('show',':'+name)!=(SOURCE/name).read_bytes():raise RuntimeError('patch byte proof differs: '+name)
+        internal={str(path.relative_to(ROOT)):sha(path) for path in sorted((ROOT/'crates').rglob('*'))
+            if path.is_file() and ('src'in path.parts or 'tests'in path.parts or path.name=='Cargo.toml')}
+        record['source']=dict(patch=str(patch.relative_to(ROOT)),patch_sha256=sha(patch),
+            files={name:sha(SOURCE/name) for name in sorted(names)},internal_files=internal,byte_proof='passed')
+        for label,cwd,command in [
+            ('root-fmt',ROOT,['cargo','fmt','--all','--check']),
+            ('root-clippy',ROOT,['cargo','clippy','--workspace','--all-targets','--','-D','warnings']),
+            ('root-test',ROOT,['just','test']),
+            ('horizon-fmt',SOURCE,['cargo','fmt','--all','--check']),
+            ('horizon-clippy',SOURCE,['cargo','clippy','--locked','--release','--no-default-features','-p','horizon-client','--lib','--','-D','warnings']),
+            ('horizon-lease-tests',SOURCE,['cargo','test','--locked','--release','--no-default-features','-p','horizon-client','--lib','game::dedicated::cluster::lease::']),
+            ('horizon-release',SOURCE,['cargo','build','--locked','--release','--no-default-features','-p','horizon-client','--bin','horizon-client'])]:
+            if label.startswith('root-') and args.reuse_root_gates:
+                prior=json.loads(args.reuse_root_gates.read_text())
+                if prior['status']!='passed':raise RuntimeError('root gates not passed')
+                kind=label.removeprefix('root-')
+                row=next(row for row in prior['commands'] if row['label']==kind)
+                if row['exit'] or sha(ROOT/row['log'])!=row['sha256']:raise RuntimeError('root gate evidence differs')
+                if not args.store_build or any(sha(ROOT/name)!=digest for name,digest in store_record['files'].items()):raise RuntimeError('root sources differ from store gate closure')
+                record['commands'].append(dict(row,label=label,reused_from=str(args.reuse_root_gates)))
+            else:gate(label,cwd,command)
+        for name,digest in record['source']['files'].items():
+            if sha(SOURCE/name)!=digest:raise RuntimeError('Horizon source changed during gates: '+name)
+        for name,digest in internal.items():
+            if sha(ROOT/name)!=digest:raise RuntimeError('internal source changed during gates: '+name)
+        target.mkdir(parents=True)
+        for name in ['meridian','meridian-sidecar','horizon-bots','e4-client','LEASES','cluster-launcher.py']:
+            shutil.copy2(REFERENCE/name,target/name)
+        shutil.copy2(store,target/'goliath-store')
+        shutil.copy2(SOURCE/'target/release/horizon-client',target/'horizon-client')
+        binaries={name:sha(target/name) for name in ['horizon-client','meridian','meridian-sidecar','goliath-store','horizon-bots','e4-client']}
+        for name in ['FINAL.json','canonical.json','candidate.json']:
+            value=json.loads((REFERENCE/name).read_text())
+            value.update(kind='E24-raw-clock-fixed-awaiting-soak-and-M3',e24_source=record['source'],store_binary_sha256=store_sha)
+            value['binaries']=({binary:dict(path=str((target/binary).relative_to(ROOT)),sha256=binaries[binary]) for binary in value['binaries']}
+                if name=='FINAL.json' else binaries)
+            project=value.get('projects',{}).get('horizon')
+            if project:
+                if args.base=='final09':project['patches']=[row for row in project['patches'] if not Path(row['path']).name.startswith(('horizon-12-','horizon-13-'))]
+                project['patches'].append(dict(path=str(patch.relative_to(ROOT)),sha256=sha(patch)))
+            (target/name).write_text(json.dumps(value,indent=2)+'\n')
+        required=['horizon-client','meridian','meridian-sidecar','goliath-store','e4-client']
+        (target/'manifest.json').write_text(json.dumps({name:binaries[name] for name in required},indent=2)+'\n')
+        validate_snapshot(target)
+        record.update(status='complete',directory=str(target.relative_to(ROOT)),binaries=binaries)
+    except BaseException as error:
+        record.update(status='failed',error=str(error));raise
+    finally:
+        output.write_text(json.dumps(record,indent=2)+'\n')
+        if record['status']=='complete':shutil.copy2(output,target/'build.json')
+
+
+if __name__=='__main__':main()

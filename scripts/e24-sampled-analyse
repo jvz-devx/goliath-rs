@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Compare requested Rust heap counts with RSS and retained stack samples."""
+import argparse
+import gzip
+import hashlib
+import json
+import re
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def read(path):
+    data = path.read_bytes()
+    return json.loads(gzip.decompress(data) if path.suffix=='.gz' else data)
+
+
+def available(path):
+    return path if path.exists() else path.with_suffix(path.suffix+'.gz')
+
+
+def owner(stack):
+    lines = stack.splitlines()
+    for index,line in enumerate(lines):
+        if not line.lstrip().startswith('at ') and ('meridian' in line or 'horizon_protocol' in line) and 'goliath_alloc' not in line:
+            name = re.sub(r'^\s*\d+:\s*','',line).strip()
+            location = lines[index+1].strip() if index+1<len(lines) and ' at ' in lines[index+1] else None
+            return name,location
+    return 'unattributed sampled stack',None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',required=True)
+    args = parser.parse_args()
+    folder = ROOT/'.local/evidence/E24'/args.name
+    profile_path = available(folder/'proxy-heap.json')
+    profile = read(profile_path)
+    if profile.get('format')!='E24-sampled-heap-v1':raise RuntimeError('not a sparse allocation profile')
+    samples = read(available(folder/'heap-samples.json'))
+    memory = read(folder/'process-memory.json.gz')
+    first,last = samples[0],samples[-1]
+    a,b = first['statistics'],last['statistics']
+    groups = {}
+    for sample in profile['samples']:
+        name,location = owner(sample['stack'])
+        row = groups.setdefault(name,dict(sampled_retained_bytes=0,sampled_blocks=0,
+            maximum_age_ms=0,locations=set(),example_stack=sample['stack']))
+        row['sampled_retained_bytes'] += sample['bytes']
+        row['sampled_blocks'] += 1
+        row['maximum_age_ms'] = max(row['maximum_age_ms'],sample['age_ms'])
+        if location:row['locations'].add(location)
+    start = min(memory,key=lambda row:abs(row['at']-first['at'])) if memory else None
+    end = min(memory,key=lambda row:abs(row['at']-last['at'])) if memory else None
+    result = dict(kind='E24-sparse-heap-attribution',name=args.name,
+        profile=dict(path=str(profile_path.relative_to(ROOT)),sha256=hashlib.sha256(profile_path.read_bytes()).hexdigest()),
+        capture_seconds=last['at']-first['at'],sessions_at_start=a['sessions_alive'],sessions_at_end=b['sessions_alive'],
+        rust_live_bytes_start=a['live_bytes'],rust_live_bytes_end=b['live_bytes'],rust_live_growth_bytes=b['live_bytes']-a['live_bytes'],
+        rust_allocated_bytes_during_capture=b['total_bytes']-a['total_bytes'],
+        sampled_retained_bytes=sum(row['bytes'] for row in profile['samples']),
+        sample_count=len(profile['samples']),sampler_failed=b.get('sampler_failed'),
+        missed_tls_callbacks=b.get('missed_tls_callbacks'),dropped_samples=b.get('dropped_samples'),
+        rss_start_mib=start['processes']['proxy']['rss_mb'] if start else None,
+        rss_end_mib=end['processes']['proxy']['rss_mb'] if end else None,
+        source_groups=[dict(owner=name,**dict(value,locations=sorted(value['locations'])))
+            for name,value in sorted(groups.items(),key=lambda row:row[1]['sampled_retained_bytes'],reverse=True)],
+        limits=['counts describe requested Rust allocations, including diagnostic bookkeeping, not native malloc/VM/stack residency',
+            'sparse retained stacks are not an exhaustive RSS decomposition; no extrapolation from weighted sample sizes',
+            'pre-capture allocations are counted globally but do not have retained stack samples'],
+        capacity_acceptance=False)
+    target = ROOT/'docs/experiments/data/E24'/(args.name+'-sampled-attribution.json')
+    if target.exists():raise RuntimeError('attribution already exists')
+    text = json.dumps(result,indent=2).replace(str(ROOT),'$REPO').replace(str(Path.home()),'$HOME')+'\n'
+    target.write_text(text)
+    print(json.dumps({key:result[key] for key in ['capture_seconds','sessions_at_start','sessions_at_end','rust_live_growth_bytes',
+        'sample_count','sampler_failed','missed_tls_callbacks','dropped_samples','rss_start_mib','rss_end_mib']},indent=2))
+    for row in result['source_groups'][:8]:print(row['sampled_retained_bytes'],row['owner'])
+
+
+if __name__=='__main__':main()

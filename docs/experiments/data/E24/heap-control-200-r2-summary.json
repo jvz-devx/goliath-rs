@@ -1,0 +1,231 @@
+{
+  "kind": "E24-step1-diagnostic",
+  "error": "D9 bot exit/drop: {'a': {'bytes_in': 1582095, 'bytes_out': 131875, 'chunks': 2064, 'corrections': 0, 'distance': 673.7678418854268, 'elapsed': 12.001381916, 'errors': [], 'event_loop': True, 'failed': 0, 'falling_behind': False, 'joined': 25, 'late_rounds': 0, 'max_lateness_ms': 0.0, 'online': 25, 'rounds': 241, 'switches': 0, 'threads': 1, 'transfers': 0, 'waited_ticks': 23}, 'b': {'bytes_in': 1508330, 'bytes_out': 133970, 'chunks': 2198, 'corrections': 0, 'distance': 686.5678418854269, 'elapsed': 12.001379292, 'errors': ['6: socket closed'], 'event_loop': True, 'failed': 1, 'falling_behind': False, 'joined': 24, 'late_rounds': 0, 'max_lateness_ms': 0.0, 'online': 23, 'rounds': 241, 'switches': 0, 'threads': 1, 'transfers': 0, 'waited_ticks': 28}, 'c': {'bytes_in': 1487955, 'bytes_out': 134038, 'chunks': 2135, 'corrections': 0, 'distance': 685.9678418854268, 'elapsed': 12.001375708, 'errors': ['12: socket closed', '20: socket closed'], 'event_loop': True, 'failed': 2, 'falling_behind': False, 'joined': 25, 'late_rounds': 0, 'max_lateness_ms': 0.0, 'online': 23, 'rounds': 241, 'switches': 0, 'threads': 1, 'transfers': 0, 'waited_ticks': 24}, 'd': {'bytes_in': 1491033, 'bytes_out': 131800, 'chunks': 2189, 'corrections': 0, 'distance': 676.167841885427, 'elapsed': 12.002137417, 'errors': [], 'event_loop': True, 'failed': 0, 'falling_behind': False, 'joined': 23, 'late_rounds': 0, 'max_lateness_ms': 0.0, 'online': 23, 'rounds': 241, 'switches': 0, 'threads': 1, 'transfers': 0, 'waited_ticks': 29}, 'cross': {'bytes_in': 1359201, 'bytes_out': 126796, 'chunks': 3061, 'corrections': 25, 'distance': 627.9677090300148, 'elapsed': 12.000921167, 'errors': [], 'event_loop': True, 'failed': 0, 'falling_behind': False, 'joined': 20, 'late_rounds': 0, 'max_lateness_ms': 0.0, 'online': 20, 'rounds': 241, 'switches': 1, 'threads': 1, 'transfers': 0, 'waited_ticks': 149}}",
+  "seconds": 19.1321210419992,
+  "players": 200,
+  "rate_calibration_only": false,
+  "heap_diagnostic": true,
+  "heap_dumped": true,
+  "observed_authority_latch": false,
+  "availability": {
+    "kind": "frozen-executable-harness-availability",
+    "store_trace_enabled": true,
+    "executables_changed": false,
+    "lease_rules_changed": false,
+    "per_renewal_tile_trace": false,
+    "per_renewal_note": "not exposed by frozen engine; separate investigation if expiry recurs",
+    "origin_bracket": {
+      "store_pid": 72329,
+      "spawn_before_monotonic_ns": 175095869768958,
+      "spawn_before_wall_ns": 1794166042669657000,
+      "popen_return_monotonic_ns": 175095871042291,
+      "listen_observed_monotonic_ns": 175096129878708,
+      "listen_observed_wall_ns": 1794166042929790000,
+      "origin_bracket_width_ms": 260.10975
+    },
+    "events_dropped": 0,
+    "collection_scope": "trace harvest and signal serialization after the CPU span; limiter records were memory-only",
+    "overhead_scope": "existing store tracing enabled identically in both arms; its work remains in measured store CPU",
+    "harness_sha256": "1bec801f3bea03f6aa8fe48100e84245d42bbba76b8d613a298ef763ef60ece3",
+    "store_batches": {
+      "rows": 695,
+      "time_scope": "store-relative Instant microseconds; startup origin is separately bracketed, not exact",
+      "incomplete_tail_bytes": 0,
+      "gap_threshold_ms": 200,
+      "gap_note": "batch spacing can be idle time; it is not by itself a stall",
+      "maxima_ms": {
+        "admission_max_ms": 13.24175,
+        "queue_max_ms": 11.552958,
+        "execute_ms": 15.745291,
+        "barrier_ms": 15.72175,
+        "maintain_ms": 0.001375,
+        "background_ms": 0.0
+      },
+      "gaps_over_200ms": [
+        {
+          "index": 7,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 248.102,
+          "context": [
+            {
+              "start_us": 1007458.0,
+              "count": 1.0,
+              "admission_max_ms": 0.001583,
+              "queue_max_ms": 0.01275,
+              "queue_mean_ms": 0.01275,
+              "collect_ms": 8.3e-05,
+              "execute_ms": 0.000292,
+              "barrier_ms": 0.0,
+              "dispatch_ms": 0.000625,
+              "maintain_ms": 0.0,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1255560.0,
+              "count": 1.0,
+              "admission_max_ms": 0.006041,
+              "queue_max_ms": 0.012,
+              "queue_mean_ms": 0.012,
+              "collect_ms": 0.000916,
+              "execute_ms": 4.978875,
+              "barrier_ms": 4.964292,
+              "dispatch_ms": 0.004167,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1521826.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007084,
+              "queue_max_ms": 0.009166,
+              "queue_mean_ms": 0.009166,
+              "collect_ms": 0.000583,
+              "execute_ms": 3.618542,
+              "barrier_ms": 3.60425,
+              "dispatch_ms": 0.002083,
+              "maintain_ms": 0.000208,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 8,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 266.266,
+          "context": [
+            {
+              "start_us": 1255560.0,
+              "count": 1.0,
+              "admission_max_ms": 0.006041,
+              "queue_max_ms": 0.012,
+              "queue_mean_ms": 0.012,
+              "collect_ms": 0.000916,
+              "execute_ms": 4.978875,
+              "barrier_ms": 4.964292,
+              "dispatch_ms": 0.004167,
+              "maintain_ms": 4.2e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1521826.0,
+              "count": 1.0,
+              "admission_max_ms": 0.007084,
+              "queue_max_ms": 0.009166,
+              "queue_mean_ms": 0.009166,
+              "collect_ms": 0.000583,
+              "execute_ms": 3.618542,
+              "barrier_ms": 3.60425,
+              "dispatch_ms": 0.002083,
+              "maintain_ms": 0.000208,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 1623641.0,
+              "count": 1.0,
+              "admission_max_ms": 0.038,
+              "queue_max_ms": 0.012959,
+              "queue_mean_ms": 0.012959,
+              "collect_ms": 0.000334,
+              "execute_ms": 0.002416,
+              "barrier_ms": 0.0,
+              "dispatch_ms": 0.001584,
+              "maintain_ms": 8.3e-05,
+              "background_ms": 0.0
+            }
+          ]
+        },
+        {
+          "index": 694,
+          "reasons": [
+            "batch-start-spacing-ms"
+          ],
+          "start_spacing_ms": 261.271,
+          "context": [
+            {
+              "start_us": 18076777.0,
+              "count": 1.0,
+              "admission_max_ms": 0.024084,
+              "queue_max_ms": 0.024,
+              "queue_mean_ms": 0.024,
+              "collect_ms": 0.001792,
+              "execute_ms": 3.915666,
+              "barrier_ms": 3.867458,
+              "dispatch_ms": 0.005625,
+              "maintain_ms": 8.3e-05,
+              "background_ms": 0.0
+            },
+            {
+              "start_us": 18338048.0,
+              "count": 1.0,
+              "admission_max_ms": 0.017458,
+              "queue_max_ms": 0.016584,
+              "queue_mean_ms": 0.016584,
+              "collect_ms": 0.001084,
+              "execute_ms": 5.080166,
+              "barrier_ms": 5.055666,
+              "dispatch_ms": 0.003417,
+              "maintain_ms": 8.4e-05,
+              "background_ms": 0.0
+            }
+          ]
+        }
+      ],
+      "path": ".local/evidence/E24/heap-control-200-r2/heap-control-200-r2-store-batches.csv.gz",
+      "sha256": "9dc2d8ad6209d8c6cf9fc41d577bcf453bad4ca900b7abe2f1026957b59fe678"
+    },
+    "store_connections": {
+      "path": ".local/evidence/E24/heap-control-200-r2/heap-control-200-r2-store-connections.csv.gz",
+      "sha256": "9b6879215511b0f68ae5e83dbb361e79708483a38e3646229988c327d11d3b75"
+    },
+    "limiter_signals": {
+      "path": ".local/evidence/E24/heap-control-200-r2/heap-control-200-r2-limiter-signals.json.gz",
+      "sha256": "92dd7b144ed65ce0f95feab780cf61c2f9a4b6350171db249a15ce15f302884b",
+      "count": 5300,
+      "roles": {
+        "72329": "store",
+        "72331": "tile-a",
+        "72333": "tile-b",
+        "72365": "tile-c",
+        "72366": "tile-d"
+      },
+      "scope": "exact successful/failed per-PID kill-call brackets from limiter threads, including final limiter resumes"
+    },
+    "complete": true,
+    "lease_expiry_observed": false,
+    "expiry_events": []
+  },
+  "binaries_unchanged": true,
+  "cleanup_errors": [],
+  "evidence": {
+    ".local/evidence/E24/heap-control-200-r2/cleanup-errors.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+    ".local/evidence/E24/heap-control-200-r2/environment.json": "584ef53643da4f4485b21110741a1c507e59e8219d28cf4aab8f4589e5ea0bcd",
+    ".local/evidence/E24/heap-control-200-r2/executed-availability.py": "1bec801f3bea03f6aa8fe48100e84245d42bbba76b8d613a298ef763ef60ece3",
+    ".local/evidence/E24/heap-control-200-r2/executed-cell.py": "44313698c3bbd1dab8197ab2f7cb4a1eba2aa4b4244ab97013d715133c012e76",
+    ".local/evidence/E24/heap-control-200-r2/heap-control-200-r2-200-failure-native.json.gz": "74d42c40dff067365052f9dd5d5130260dd0bc09cf2d46ee7183fbdbc76c3265",
+    ".local/evidence/E24/heap-control-200-r2/heap-control-200-r2-availability.json": "ef67469816aac94bab83d521d0129745c5118d2405661a3fae6f7472761e6892",
+    ".local/evidence/E24/heap-control-200-r2/heap-control-200-r2-limiter-signals.json.gz": "92dd7b144ed65ce0f95feab780cf61c2f9a4b6350171db249a15ce15f302884b",
+    ".local/evidence/E24/heap-control-200-r2/heap-control-200-r2-store-batches.csv.gz": "9dc2d8ad6209d8c6cf9fc41d577bcf453bad4ca900b7abe2f1026957b59fe678",
+    ".local/evidence/E24/heap-control-200-r2/heap-control-200-r2-store-connections.csv.gz": "9b6879215511b0f68ae5e83dbb361e79708483a38e3646229988c327d11d3b75",
+    ".local/evidence/E24/heap-control-200-r2/heap-control-200-r2.json": "46e67112a5671d954660baf55427244abc1aa935ff755a50fa048a9a8cdcf8a6",
+    ".local/evidence/E24/heap-control-200-r2/heap-samples.json": "63c17139d8f39551c93c6e5ccf8babcd975cbe5925009c12eda910d48ae0fc37",
+    ".local/evidence/E24/heap-control-200-r2/native-logs.json.gz": "9897cedbaf3ac11e396a152921821bcd82b3eacf2201fc289017dbf12b5505d2",
+    ".local/evidence/E24/heap-control-200-r2/partial-ticks.json.gz": "f36cfcc48555fd2cdf5d4a8e004054775d451ca63c9658ec8981863bb26638d7",
+    ".local/evidence/E24/heap-control-200-r2/process-memory.json.gz": "029ac1ef2bb96aa9fa0166f8f60604b79b92f7fb5cd41a374f80171306cf1b52",
+    ".local/evidence/E24/heap-control-200-r2/proxy-heap.json.gz": "65eca6bd25e5e80b41efeee4f91c985766b61c23f488d82d7358b9e453105f4f",
+    ".local/evidence/E24/heap-control-200-r2/store-batches.connections.csv": "494020be1402600cbfbb4efd96f1d45838f2dd2a043929d3127fbf1f952cce0f",
+    ".local/evidence/E24/heap-control-200-r2/store-batches.csv": "0660008fb3481f4bca783da86877f73a9d3a4d110bb140e79595ddfcd22b9343",
+    ".local/evidence/E24/heap-control-200-r2/tiles/tile-0-72331-client.csv": "e36343f89510d5b10ab87c9b6db553c5e1dd4f62ca73752dc6d501397d035bde",
+    ".local/evidence/E24/heap-control-200-r2/tiles/tile-0-72331-lease.jsonl": "91d3e5ae0a58004b0c7cca45f4715c07a38c320093a5ad68bd9120c41e7fa1a9",
+    ".local/evidence/E24/heap-control-200-r2/tiles/tile-1-72333-client.csv": "9ded6a6de0f48585b081e9e2a18e17c903b52462d7e38aaf6ac88aefc4a245ad",
+    ".local/evidence/E24/heap-control-200-r2/tiles/tile-1-72333-lease.jsonl": "35bfef0a7f3cd024a0473818a458fccfaa8e0289b5555592a4f5859c3d860b9f",
+    ".local/evidence/E24/heap-control-200-r2/tiles/tile-2-72365-client.csv": "4e3355fa14995aeece332beea17481ced47c31629ded51ac132fdc518ea7cabc",
+    ".local/evidence/E24/heap-control-200-r2/tiles/tile-2-72365-lease.jsonl": "7f19758eea59ac92fc7b18b920cb7b618faf5c224f434d29b1cab0cb083a4159",
+    ".local/evidence/E24/heap-control-200-r2/tiles/tile-3-72366-client.csv": "7d8cda3af97e84e081b1bcc133e1ce81f25e9d97b25b6063fed13a99ff3cac50",
+    ".local/evidence/E24/heap-control-200-r2/tiles/tile-3-72366-lease.jsonl": "4ba0b108a228651292cee5d74a745dd5b4c4cca621bcad73700a0423603cf2cc"
+  },
+  "interpretation": "diagnostic instrumentation, not capacity qualification"
+}

@@ -1,0 +1,408 @@
+{
+  "kind": "E20-derived-frontier-cell",
+  "acceptance": false,
+  "status": "complete",
+  "binaries": {
+    "horizon-client": "53b0918027a700d9c2684936beb218c922b229401b7a3344805d65831d0adb9f",
+    "meridian": "29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b",
+    "meridian-sidecar": "c79c47d8ffc57081f8f0352e470f2837a089049c52bee17376f80733ff2bd65b",
+    "goliath-store": "9636fa6d8089b071be241437e79eb2942a07dc756039b394e73cc8f705e26d0e",
+    "horizon-bots": "bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d"
+  },
+  "cells": {
+    "650": {
+      "status": "complete",
+      "diagnostic_pass": true,
+      "failures": [],
+      "proxy": {
+        "cpu_s": 1.1052242317022447,
+        "user_s": 0.42916590979812347,
+        "system_s": 0.6760583219041212,
+        "unix_syscalls": 190008.3066350679,
+        "context_switches": 39023.996448722646,
+        "cores": 1.1052242317022447,
+        "cores_per_player": 0.0017003449718496072,
+        "threads_min": 1325,
+        "threads_max": 1331,
+        "threads_increment_per_player": 2.0215384615384617,
+        "rss_mb_max": 558.828125
+      },
+      "tiles": {
+        "a": {
+          "cores": 0.5978957534992081,
+          "main_cores": 0.34529499487990045,
+          "tps": 20.000530889475435,
+          "count": 1209,
+          "dropped": 0,
+          "p99_ms": 41.468583,
+          "placed": 163,
+          "held": 1,
+          "readers": 65,
+          "chunks": 368,
+          "pigs": 64
+        },
+        "b": {
+          "cores": 0.5599763566152528,
+          "main_cores": 0.31870511196504003,
+          "tps": 20.000209164079987,
+          "count": 1209,
+          "dropped": 0,
+          "p99_ms": 29.592541999999998,
+          "placed": 153,
+          "held": 1,
+          "readers": 65,
+          "chunks": 367,
+          "pigs": 64
+        },
+        "c": {
+          "cores": 0.5769402973264959,
+          "main_cores": 0.3385003977518905,
+          "tps": 19.999982684357587,
+          "count": 1209,
+          "dropped": 0,
+          "p99_ms": 40.437,
+          "placed": 166,
+          "held": 2,
+          "readers": 65,
+          "chunks": 367,
+          "pigs": 64
+        },
+        "d": {
+          "cores": 0.5787697419130026,
+          "main_cores": 0.3250237041165317,
+          "tps": 20.000131932442887,
+          "count": 1209,
+          "dropped": 0,
+          "p99_ms": 28.139125,
+          "placed": 168,
+          "held": 3,
+          "readers": 65,
+          "chunks": 367,
+          "pigs": 64
+        }
+      },
+      "server_cores": 3.430374912844135,
+      "process_cores": {
+        "observer-and-driver": 0.2318405230536568,
+        "tile-a": 0.5978957534992081,
+        "tile-b": 0.5599763566152528,
+        "tile-c": 0.5769402973264959,
+        "tile-d": 0.5787697419130026,
+        "proxy": 1.1051508433942245,
+        "store": 0.007151465201798596,
+        "sidecar-0": 0.0011641920095951201,
+        "sidecar-1": 0.0009978788653672457,
+        "sidecar-2": 0.0011641920095951201,
+        "sidecar-3": 0.0011641920095951201,
+        "shim-a": 0.13122107079579282,
+        "bots-a": 0.08498601670044377,
+        "shim-b": 0.1438608697571113,
+        "bots-b": 0.09346798705606535,
+        "shim-c": 0.12157490843057613,
+        "bots-c": 0.07999662237360755,
+        "shim-d": 0.14103354630523743,
+        "bots-d": 0.09296904762338173,
+        "shim-cross": 0.08249131953702565,
+        "bots-cross": 0.051557074710641033
+      },
+      "proxy_matching_thread_cores": {
+        "IO drivers": 0.8323166981796586,
+        "terrain managers": 0.23188133353318438,
+        "other matching threads": 0.001110425264661354,
+        "command workers": 0.0
+      },
+      "proxy_thread_counter_scope": "matching native IDs at both endpoints; short-lived workers can be absent",
+      "internal_paths": {
+        "activation-ack": {
+          "count": 50,
+          "p95_us_upper": 77720,
+          "p99_us_upper": 88250,
+          "maximum_us": 88247,
+          "unstamped_writes": 0,
+          "overflow_at_100ms": 0
+        },
+        "clientbound": {
+          "count": 41663041,
+          "p95_us_upper": 1870,
+          "p99_us_upper": 6340,
+          "maximum_us": 21214,
+          "unstamped_writes": 157164,
+          "overflow_at_100ms": 0
+        },
+        "reader-replies": {
+          "count": 2373,
+          "p95_us_upper": 930,
+          "p99_us_upper": 2050,
+          "maximum_us": 11236,
+          "unstamped_writes": 0,
+          "overflow_at_100ms": 0
+        },
+        "serverbound": {
+          "count": 2366750,
+          "p95_us_upper": 400,
+          "p99_us_upper": 1360,
+          "maximum_us": 84030,
+          "unstamped_writes": 0,
+          "overflow_at_100ms": 0
+        }
+      },
+      "limiter_window": {
+        "servers": {
+          "stop_cycles": 231,
+          "process_stop_signals": 2310,
+          "stop_wall_s": 1.9870685020869132,
+          "sum_process_pause_s": 18.964069509820547
+        },
+        "bots": {
+          "stop_cycles": 2,
+          "process_stop_signals": 10,
+          "stop_wall_s": 0.015064583014464006,
+          "sum_process_pause_s": 0.07467016598093323
+        }
+      },
+      "latency_includes_sigstop": true,
+      "external_witness_p95_ms": null,
+      "bot_cores": 0.40297674846413944,
+      "bots_last": {
+        "a": {
+          "bytes_in": 499318881,
+          "bytes_out": 12407960,
+          "chunks": 45893,
+          "corrections": 146,
+          "distance": 64128.649909942724,
+          "elapsed": 129.000953375,
+          "errors": [],
+          "event_loop": true,
+          "failed": 0,
+          "falling_behind": false,
+          "joined": 147,
+          "late_rounds": 0,
+          "max_lateness_ms": 0.0,
+          "online": 147,
+          "rounds": 2581,
+          "switches": 0,
+          "threads": 1,
+          "transfers": 0,
+          "waited_ticks": 282
+        },
+        "b": {
+          "bytes_in": 507197548,
+          "bytes_out": 12335390,
+          "chunks": 45434,
+          "corrections": 144,
+          "distance": 63753.89153309174,
+          "elapsed": 129.002502375,
+          "errors": [],
+          "event_loop": true,
+          "failed": 0,
+          "falling_behind": false,
+          "joined": 146,
+          "late_rounds": 0,
+          "max_lateness_ms": 0.0,
+          "online": 146,
+          "rounds": 2581,
+          "switches": 0,
+          "threads": 1,
+          "transfers": 0,
+          "waited_ticks": 292
+        },
+        "c": {
+          "bytes_in": 526658852,
+          "bytes_out": 12336550,
+          "chunks": 45459,
+          "corrections": 144,
+          "distance": 63764.637293411935,
+          "elapsed": 129.00069425,
+          "errors": [],
+          "event_loop": true,
+          "failed": 0,
+          "falling_behind": false,
+          "joined": 146,
+          "late_rounds": 0,
+          "max_lateness_ms": 0.0,
+          "online": 146,
+          "rounds": 2581,
+          "switches": 0,
+          "threads": 1,
+          "transfers": 0,
+          "waited_ticks": 292
+        },
+        "d": {
+          "bytes_in": 510598937,
+          "bytes_out": 12334402,
+          "chunks": 45328,
+          "corrections": 146,
+          "distance": 63752.23846494996,
+          "elapsed": 129.002223125,
+          "errors": [],
+          "event_loop": true,
+          "failed": 0,
+          "falling_behind": false,
+          "joined": 146,
+          "late_rounds": 0,
+          "max_lateness_ms": 0.0,
+          "online": 146,
+          "rounds": 2581,
+          "switches": 0,
+          "threads": 1,
+          "transfers": 0,
+          "waited_ticks": 292
+        },
+        "cross": {
+          "bytes_in": 100370649,
+          "bytes_out": 5984085,
+          "chunks": 19237,
+          "corrections": 65,
+          "distance": 31224.834282454467,
+          "elapsed": 129.002339417,
+          "errors": [],
+          "event_loop": true,
+          "failed": 0,
+          "falling_behind": false,
+          "joined": 65,
+          "late_rounds": 0,
+          "max_lateness_ms": 0.0,
+          "online": 65,
+          "rounds": 2581,
+          "switches": 0,
+          "threads": 1,
+          "transfers": 0,
+          "waited_ticks": 170
+        }
+      },
+      "shims_cores": {
+        "shim-a": 0.13122107079579282,
+        "shim-b": 0.1438608697571113,
+        "shim-c": 0.12157490843057613,
+        "shim-d": 0.14103354630523743,
+        "shim-cross": 0.08249131953702565
+      },
+      "shim_reports": {
+        "a": {
+          "port": 61208,
+          "pid": 43591,
+          "errors": [],
+          "forwarded_bytes": [
+            12469461,
+            501738948
+          ],
+          "maximum_pending_bytes": 18401,
+          "outbound_connections": 147
+        },
+        "b": {
+          "port": 61212,
+          "pid": 43593,
+          "errors": [],
+          "forwarded_bytes": [
+            12391958,
+            509516626
+          ],
+          "maximum_pending_bytes": 19046,
+          "outbound_connections": 146
+        },
+        "c": {
+          "port": 61217,
+          "pid": 43595,
+          "errors": [],
+          "forwarded_bytes": [
+            12398137,
+            529408089
+          ],
+          "maximum_pending_bytes": 21029,
+          "outbound_connections": 146
+        },
+        "d": {
+          "port": 61221,
+          "pid": 43597,
+          "errors": [],
+          "forwarded_bytes": [
+            12395485,
+            512942516
+          ],
+          "maximum_pending_bytes": 25697,
+          "outbound_connections": 146
+        },
+        "cross": {
+          "port": 61227,
+          "pid": 43599,
+          "errors": [],
+          "forwarded_bytes": [
+            6009451,
+            100791549
+          ],
+          "maximum_pending_bytes": 19686,
+          "outbound_connections": 65
+        }
+      },
+      "shim_production_required": false,
+      "socket_pressure": {
+        "error": null,
+        "rate_limit": "observed unique tuple creation rates, not exact connect syscall counts; subsecond reset/shared-store/control connections may be missed; fixture envelope is not a strict upper bound on unobserved attempts; no root tracing available",
+        "window_proxy_new_observed_per_s": 29.453464461471533,
+        "window_fixture_new_observed_per_s": 58.607571294311505,
+        "proxy_open_tcp_sockets_max": 1624,
+        "proxy_open_outbound_connections_max": 973,
+        "proxy_tcp_fds_max": 5058,
+        "loopback_time_wait_max": 2611,
+        "loopback_ephemeral_ports_observed_max": 4253
+      },
+      "noise_valid": true,
+      "outside_max_steady": 0.09230379504646949,
+      "io_pool_started": [
+        "2026-11-09T01:15:40.264Z INFO  E18 fixed IO pool: 4 drivers"
+      ],
+      "warnings": [
+        "2026-11-09T01:15:40.283Z WARN  127.0.0.1:61207: the client closed the connection or stopped answering; closing the connection"
+      ],
+      "capped_server_cores": 3.430374912844135,
+      "tile_cores": 2.3135821493539592,
+      "server_cap_roles": [
+        "tile-a",
+        "tile-b",
+        "tile-c",
+        "tile-d",
+        "proxy",
+        "store",
+        "sidecar-0",
+        "sidecar-1",
+        "sidecar-2",
+        "sidecar-3"
+      ],
+      "proxy_inside_server_cap": true,
+      "start_load": [
+        3.88720703125,
+        5.525390625,
+        5.943359375
+      ],
+      "outside_max_whole": 0.0840783863096355,
+      "proxy_native_role_counters": {
+        "IO drivers": {
+          "cores": 0.8323166981796586,
+          "user_cores": 0.3751488791020143,
+          "system_cores": 0.4571678190776445,
+          "threads": 4
+        },
+        "terrain managers": {
+          "cores": 0.23188133353318438,
+          "user_cores": 0.039947275329466604,
+          "system_cores": 0.19193405820371778,
+          "threads": 650
+        },
+        "other matching threads": {
+          "cores": 0.001110425264661354,
+          "user_cores": 0.00019265499418462653,
+          "system_cores": 0.0009177702704767279,
+          "threads": 659
+        },
+        "command workers": {
+          "cores": 0.0,
+          "user_cores": 0.0,
+          "system_cores": 0.0,
+          "threads": 4
+        }
+      }
+    }
+  },
+  "proxy_inside_server_cap": true,
+  "raw_sha256": "b4cf4ec74244788b2356b38f27f41bb3e37befaa565c96b68a2706c6e0e28218"
+}
