@@ -1,0 +1,36 @@
+diff --git a/crates/horizon-client/src/lan/entity.rs b/crates/horizon-client/src/lan/entity.rs
+--- a/crates/horizon-client/src/lan/entity.rs
++++ b/crates/horizon-client/src/lan/entity.rs
+@@ -944,10 +944,6 @@
+             )];
+             let mut bodies = None;
+             for v in &mut *viewers {
+-                let _e26_reader_pair = horizon_core::tick_timers::scope_if(
+-                    11,
+-                    horizon_core::tick_timers::reader(v.entity_id),
+-                );
+                 if v.entity_id == e.id
+                     || v.tracker.is_tracking(e.id)
+                     || !sees(v, &probe, &chunks, &mut [0])
+@@ -1139,10 +1135,6 @@
+         self.pairs.clear();
+         self.pairs.resize(entities.len(), false);
+         for (v, flags) in viewers.iter_mut().zip(&mut self.flags) {
+-            let _e26_reader_tracking = horizon_core::tick_timers::scope_if(
+-                11,
+-                horizon_core::tick_timers::reader(v.entity_id),
+-            );
+             flags.clear();
+             self.held.clear();
+             self.held.resize(self.chunks.len(), 0);
+@@ -1292,10 +1284,6 @@
+             let mut encoded = false;
+             let mut pairing: Option<Vec<Vec<u8>>> = None;
+             for (v, flags) in viewers.iter_mut().zip(&self.flags) {
+-                let _e26_reader_output = horizon_core::tick_timers::scope_if(
+-                    11,
+-                    horizon_core::tick_timers::reader(v.entity_id),
+-                );
+                 let f = flags[index];
+                 if f & TRACKS != 0 {
+                     if self.packets.is_empty() {

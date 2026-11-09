@@ -1,0 +1,214 @@
+"""Run one queued E26 D9 control, direct-timer cell or planted-cost control."""
+import argparse
+import ast
+from datetime import datetime, timezone
+import fcntl
+import gzip
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+import e11_support as support
+ROOT = support.ROOT
+DATA = ROOT / 'docs/experiments/data/E26'
+
+def sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+def packed(path):
+    raw = path.read_bytes()
+    if len(raw) > 1000000:
+        target = path.with_suffix('.json.gz')
+        if target.exists():
+            raise RuntimeError('compressed evidence already exists')
+        target.write_bytes(gzip.compress(raw, mtime=0))
+        if gzip.decompress(target.read_bytes()) != raw:
+            raise RuntimeError('compression round trip differs')
+        path.unlink()
+    else:
+        target = path
+    support.save(DATA / (path.stem + '-hash.json'), dict(path=str(target.relative_to(ROOT)), raw_bytes=len(raw), decompressed_sha256=hashlib.sha256(raw).hexdigest()))
+
+class Adapt(ast.NodeTransformer):
+
+    def visit_If(self, node):
+        if any((isinstance(item, ast.Constant) and item.value == 'another quiet request exists' for item in ast.walk(node))):
+            return ast.copy_location(ast.Pass(), node)
+        if any((isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and isinstance(item.func.value, ast.Name) and (item.func.value.id == 'request') and (item.func.attr == 'unlink') for item in ast.walk(node))):
+            return ast.copy_location(ast.Pass(), node)
+        if isinstance(node.test, ast.BoolOp) and any((isinstance(item, ast.Attribute) and isinstance(item.value, ast.Name) and (item.value.id == 'args') and (item.attr == 'seconds') for item in ast.walk(node.test))):
+            node.test = ast.parse('len(counts) != 1 or counts[0] < 100 or args.warmup != 30').body[0].value
+        return self.generic_visit(node)
+
+    def visit_With(self, node):
+        for item in node.items:
+            call = item.context_expr
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name) and (call.func.value.id == 'request') and (call.func.attr == 'open'):
+                return ast.copy_location(ast.Pass(), node)
+        return self.generic_visit(node)
+
+    def visit_Assign(self, node):
+        if any((isinstance(target, ast.Name) and target.id == 'identity' for target in node.targets)):
+            node.value = ast.parse('os.environ["E26_QUIET_IDENTITY"]').body[0].value
+        node = self.generic_visit(node)
+        if any((isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and (target.value.id == 'cell') and isinstance(target.slice, ast.Constant) and (target.slice.value == 'tick_samples') for target in node.targets)):
+            return [node, ast.Expr(ast.Call(ast.Name('e26_collect', ast.Load()), [ast.Name('instance', ast.Load()), ast.Name('cell', ast.Load())], []))]
+        return node
+
+    def visit_Call(self, node):
+        if isinstance(node.func, ast.Name) and node.func.id == 'pause' and (len(node.args) == 1) and isinstance(node.args[0], ast.Attribute) and (node.args[0].attr == 'warmup'):
+            return ast.copy_location(ast.Call(ast.Name('e26_warmup', ast.Load()), [ast.Name('instance', ast.Load()), node.args[0]], []), node)
+        return self.generic_visit(node)
+
+    def visit_Constant(self, node):
+        if isinstance(node.value, str):
+            return ast.copy_location(ast.Constant(node.value.replace('E20-D9-', 'E26-D9-')), node)
+        return node
+
+def kernel(name):
+    source = ROOT / 'scripts/e20-frontier'
+    tree = ast.fix_missing_locations(Adapt().visit(ast.parse(source.read_text())))
+    transformed = ast.unparse(tree) + '\n'
+    executed = DATA / (name + '-kernel.py')
+    if executed.exists():
+        raise RuntimeError('executed kernel already exists')
+    executed.write_text(transformed)
+    namespace = dict(__name__='e26_measurement_kernel', __file__=str(source))
+    exec(compile(tree, str(source), 'exec'), namespace)
+    namespace['DATA'] = DATA
+    return (namespace, executed)
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--arm', choices=['A', 'B', 'P'], required=True)
+    parser.add_argument('--bins', type=Path, required=True)
+    parser.add_argument('--players', type=int, default=650)
+    parser.add_argument('--seconds', type=int, default=60)
+    args = parser.parse_args()
+    if not args.name.startswith(('e26-', 'repro-')) or '/' in args.name:
+        raise RuntimeError('use a fresh e26- or repro- name')
+    if args.arm != 'P' and (args.players != 650 or args.seconds != 60):
+        raise RuntimeError('fixed A/B cells are 650 players for 60 seconds')
+    if args.arm == 'P' and (args.players != 100 or args.seconds != 15):
+        raise RuntimeError('planted control is one 100-player, 15-second cell')
+    DATA.mkdir(parents=True, exist_ok=True)
+    target = DATA / (args.name + '.json')
+    if target.exists() or target.with_suffix('.json.gz').exists():
+        raise RuntimeError('attempt already exists')
+    bins = args.bins.resolve()
+    before = {name: sha(bins / name) for name in ['horizon-client', 'meridian', 'meridian-sidecar', 'goliath-store', 'horizon-bots']}
+    if args.arm == 'A' and before['horizon-client'] != 'b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d':
+        raise RuntimeError('A must be unchanged FINAL-09')
+    if args.arm != 'A':
+        build = json.loads((bins / 'build.json').read_text())
+        if build['status'] != 'complete' or build['kind'] != 'E26-lite-native-release':
+            raise RuntimeError('diagnostic and planted bundles must not be mixed')
+        if sha(bins / 'source-proof.json') != build['source_proof']['sha256']:
+            raise RuntimeError('diagnostic source proof changed')
+    adapter_snapshot = DATA / (args.name + '-adapter.py')
+    if adapter_snapshot.exists():
+        raise RuntimeError('adapter snapshot already exists')
+    adapter_snapshot.write_bytes(Path(__file__).read_bytes())
+    ns, executed = kernel(args.name)
+    selected = {}
+
+    def warmup(instance, seconds):
+        time.sleep(seconds - 5)
+        first = {name: ns['counters'](tile.server.process.pid) for name, tile in instance.tiles.items()}
+        time.sleep(5)
+        last = {name: ns['counters'](tile.server.process.pid) for name, tile in instance.tiles.items()}
+        cores = {name: (last[name]['cpu_s'] - row['cpu_s']) / (last[name]['at'] - row['at']) for name, row in first.items()}
+        name = max(cores, key=cores.get)
+        selected.update(tile=name, cores=cores, first=first, last=last, method='native process CPU deltas over the final five warmup seconds')
+        if args.arm != 'A':
+            reply = instance.tiles[name].ask('e26-lite on')
+            if not reply.get('ok'):
+                raise RuntimeError('direct timer recorder did not enable')
+        print('E26 selected tile ' + name + ' ' + json.dumps(cores), flush=True)
+
+    def collect(instance, cell):
+        cell['e26_selection'] = selected
+        if args.arm != 'A':
+            cell['e26_lite'] = instance.tiles[selected['tile']].ask('e26-lite drain')
+            if not cell['e26_lite'].get('ok'):
+                raise RuntimeError('direct timer recorder did not drain')
+        for summary_name, batch in cell['tick_samples'].items():
+            ordered = sorted((row['ms'] for row in batch['ticks']))
+            if not ordered:
+                raise RuntimeError('raw tick coverage is empty')
+            cell.setdefault('e26_tick_quantiles', {})[summary_name] = {'p50_ms': ordered[math.ceil(0.5 * len(ordered)) - 1], 'p99_ms': ordered[math.ceil(0.99 * len(ordered)) - 1], 'ticks': len(ordered)}
+    ns['e26_warmup'], ns['e26_collect'] = (warmup, collect)
+    original_save = support.save
+
+    class Support:
+
+        def __getattr__(self, name):
+            if name != 'save':
+                return getattr(support, name)
+
+            def save(path, value):
+                if Path(path) == target:
+                    value.update(e26_arm=args.arm, e26_selection=selected, executed_kernel=dict(path=str(executed.relative_to(ROOT)), sha256=sha(executed)), adapter_sha256=sha(Path(__file__)), control='final clock-fixed warm-tick stack with bounded store and matched reactor-1; B-only observation', adapter_snapshot=dict(path=str(adapter_snapshot.relative_to(ROOT)), sha256=sha(adapter_snapshot)), cpu_scope='four tiles, proxy, store and sidecars inside four aggregate cores')
+                return original_save(path, value)
+            return save
+    ns['support'] = Support()
+    request = ROOT / '.local/quiet-request'
+    identity = json.dumps(dict(owner='E26', name=args.name, pid=os.getpid(), time=datetime.now(timezone.utc).isoformat())) + '\n'
+    acquired = False
+    window = dict(owner='E26', method='exclusive host-window scheduling; legacy per-builder acknowledgements are not the isolation mechanism')
+    try:
+        subprocess.run([str(ROOT / '.local/bin/host-window'), 'quiet', 'E26', args.name], check=True)
+        acquired = True
+        window['acquired_wall_ns'] = time.time_ns()
+        window['start_status'] = subprocess.check_output([str(ROOT / '.local/bin/host-window'), 'status'], text=True)
+        with request.open('x') as stream:
+            stream.write(identity)
+        os.environ['E26_QUIET_IDENTITY'] = identity
+        for key in ['E12_TERRAIN_OFF', 'E18_TERRAIN_EAGER', 'E18_WRITES_DIRECT', 'E18_CONTROL_FRESH', 'E18_BLOCKING_IO']:
+            os.environ.pop(key, None)
+        sys.argv = ['e26-cell-kernel', '--name', args.name, '--counts', str(args.players), '--bins', str(bins), '--no-other-agents', '--warmup', '30', '--seconds', str(args.seconds)]
+        ns['main']()
+    finally:
+        if request.exists() and request.read_text() == identity:
+            request.unlink()
+        if acquired:
+            window['end_status'] = subprocess.check_output([str(ROOT / '.local/bin/host-window'), 'status'], text=True)
+            window['released_wall_ns'] = time.time_ns()
+            subprocess.run([str(ROOT / '.local/bin/host-window'), 'release', 'E26'], check=True)
+        window_path = DATA / (args.name + '-window.json')
+
+        def held_without_builds(status):
+            lines = status.splitlines()
+            return bool(lines and lines[0].startswith('window: E26 ') and any((line.strip() == 'builds:' for line in lines)))
+        window['verified_at_endpoints'] = held_without_builds(window.get('start_status', '')) and held_without_builds(window.get('end_status', ''))
+        support.save(window_path, window)
+        if target.exists():
+            value = json.loads(target.read_text())
+            value['host_window_evidence'] = dict(path=str(window_path.relative_to(ROOT)), sha256=sha(window_path))
+            value['host_window_verified'] = window['verified_at_endpoints']
+            value['adapter_unchanged_during_cell'] = sha(Path(__file__)) == sha(adapter_snapshot)
+            value['shared_harness_unchanged_during_cell'] = all((sha(ROOT / 'scripts' / name) == expected for name, expected in value.get('harness_sha256', {}).items()))
+            support.save(target, value)
+            packed(target)
+        if {name: sha(bins / name) for name in before} != before:
+            raise RuntimeError('frozen executable changed during cell')
+if __name__ == '__main__':
+    local = ROOT / '.local/evidence/E26'
+    local.mkdir(parents=True, exist_ok=True)
+    with (local / 'operation.lock').open('a') as operation:
+        fcntl.flock(operation, fcntl.LOCK_EX)
+        main()
