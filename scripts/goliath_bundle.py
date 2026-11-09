@@ -1,15 +1,29 @@
-"""Owns strict E28 bundle identities, separate from frozen Darwin identities."""
+"""Owns strict Linux bundle identities, separate from frozen Darwin identities.
+
+Each Linux host has its own trust anchor, because the same sources compile to
+different bytes on each machine. The workstation's is E28's build manifest and
+is the default. `GOLIATH_HOST_PLATFORM=vm` selects the VM host's E32 manifest.
+A bundle validates only against the manifest of the host it was built on.
+"""
 import hashlib
+import importlib
 import json
 from pathlib import Path
 
+import goliath_platform as platform
+
 ROOT = Path(__file__).resolve().parent.parent
-MANIFEST = ROOT / 'docs/experiments/data/E28/build-manifest.json'
-BUNDLES = ROOT / '.local/bin/goliath-e28'
+HOST = platform.host_platform()
+EXPERIMENT, FOLDER = dict(workstation=('E28', 'goliath-e28'), vm=('E32', 'goliath-e32'))[HOST]
+MANIFEST = ROOT / 'docs/experiments/data' / EXPERIMENT / 'build-manifest.json'
+BUNDLES = ROOT / '.local/bin' / FOLDER
+LINUX_FOLDERS = ('goliath-e28', 'goliath-e32')
+# The VM host builds only the bots of the stamped stack, as a bundle of its own.
+BOTS_ONLY = {'vm': 'stamped-bots'}.get(HOST)
+# The complete server bundle that fixes and fixtures are compared with.
+BASE_STACK = dict(workstation='final', vm='final-r2')[HOST]
 
-
-
-DISPOSITION = ROOT / 'docs/experiments/data/E28/gate-disposition.json'
+DISPOSITION = ROOT / 'docs/experiments/data' / EXPERIMENT / 'gate-disposition.json'
 
 
 def disposed_gates(bundle):
@@ -26,16 +40,27 @@ def sha(path):
 
 
 def is_e28(directory):
-    return Path(directory).resolve().parent == BUNDLES.resolve()
+    """True for a bundle of either Linux host, so the other host's bundle is refused, not skipped."""
+    parent = Path(directory).resolve().parent
+    return parent == BUNDLES.resolve() or (parent.name in LINUX_FOLDERS and parent.parent == (ROOT/'.local/bin').resolve())
+
+
+def direct_bots():
+    """The direct-bot identity module for the selected host."""
+    return importlib.import_module('e32_direct_bots' if HOST == 'vm' else 'e28_direct_bots')
 
 
 def validate(directory, expected=None):
     directory = Path(directory).resolve()
-    if not is_e28(directory):
-        raise ValueError('E28 bundle must be an immediate child of .local/bin/goliath-e28')
+    if directory.parent != BUNDLES.resolve():
+        raise ValueError('E28 bundle must be an immediate child of .local/bin/'+BUNDLES.name)
     manifest = json.loads(MANIFEST.read_text())
     if manifest.get('schema_version') != 1 or manifest.get('platform') != 'linux':
         raise ValueError('invalid E28 build manifest schema/platform')
+    if manifest.get('host', 'workstation') != HOST:
+        raise ValueError('E28 build manifest belongs to another host platform')
+    if HOST == 'vm' and platform.virtualization() in ('none', 'undetected'):
+        raise ValueError('the VM host manifest was selected on a physical host')
     name = directory.name
     if expected and name not in expected:
         raise ValueError('wrong E28 bundle for this runner: '+name)
@@ -48,7 +73,9 @@ def validate(directory, expected=None):
     if set(files) != {path.name for path in directory.iterdir()}:
         raise ValueError('E28 bundle has missing or unlisted files')
     required = {'horizon-client', 'horizon-bots', 'build.json', 'canonical.json'}
-    if name != 'plain-09':
+    if name == BOTS_ONLY:
+        required -= {'horizon-client'}
+    elif name != 'plain-09':
         required |= {'meridian', 'meridian-sidecar', 'goliath-store', 'e4-client',
             'manifest.json', 'candidate.json', 'FINAL.json', 'LEASES', 'cluster-launcher.py'}
     if name == 'final-lite':
@@ -61,7 +88,7 @@ def validate(directory, expected=None):
         if sha(directory/filename) != digest:
             raise ValueError('E28 frozen file changed: '+filename)
     binaries = record['binaries']
-    expected_binaries = {'horizon-client', 'horizon-bots'} if name == 'plain-09' else {
+    expected_binaries = {'horizon-bots'} if name == BOTS_ONLY else {'horizon-client', 'horizon-bots'} if name == 'plain-09' else {
         'horizon-client', 'horizon-bots', 'meridian', 'meridian-sidecar', 'goliath-store', 'e4-client'}
     if not expected_binaries <= set(binaries):
         raise ValueError('E28 executable identities incomplete')
@@ -82,6 +109,8 @@ def validate(directory, expected=None):
         raise ValueError('E28 build gates did not pass: '+', '.join(blocking))
     if build.get('verification_status', 'passed') != 'passed' and not build.get('failed_gates'):
         raise ValueError('E28 build verification did not pass')
+    if canonical.get('host', 'workstation') != HOST:
+        raise ValueError('E28 bundle was built on another host platform')
     for metadata in [canonical, build]:
         if any(metadata['binaries'].get(key) != digest for key, digest in binaries.items()):
             raise ValueError('E28 binary mapping differs between build records')
@@ -94,13 +123,13 @@ def validate(directory, expected=None):
 
 # The measured server stacks. final-r2 is final with the two soak fixes in the
 # tile; every other executable is final's bytes.
-SERVER_STACKS = ('final', 'final-r2')
+SERVER_STACKS = ('final', 'final-r2') if BASE_STACK == 'final' else (BASE_STACK,)
 
 
 def validate_server_stack(directory):
     """Validate a measured server bundle; final-r2 may differ from final in the tile only."""
     identity = validate(directory, set(SERVER_STACKS))
-    if identity['bundle'] != 'final':
+    if identity['bundle'] != BASE_STACK:
         base = validate(BUNDLES / 'final', {'final'})['binaries']
         changed = {name for name in set(base) | set(identity['binaries'])
                    if base.get(name) != identity['binaries'].get(name)}

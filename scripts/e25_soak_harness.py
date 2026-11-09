@@ -22,8 +22,11 @@ def configure(data_dir):
     EVIDENCE=ROOT/'.local/evidence/E25'
     DERIVED=EVIDENCE/'soak-derived'
     if DATA != ROOT/'docs/experiments/data/E25':
-        DATA.relative_to(ROOT/'docs/experiments/data/E28')
-        EVIDENCE=ROOT/'.local/evidence/E28/soak'
+        # Each Linux host keeps its own private namespace: E28 the workstation, E32 the VM host.
+        experiment=next((name for name in ['E28','E32'] if DATA.is_relative_to(ROOT/'docs/experiments/data'/name)),None)
+        if not experiment:
+            DATA.relative_to(ROOT/'docs/experiments/data/E28')
+        EVIDENCE=ROOT/'.local/evidence'/experiment/'soak'
         DERIVED=EVIDENCE/'soak-derived'
     for directory in [DATA,EVIDENCE,DERIVED]:directory.mkdir(parents=True,exist_ok=True)
 
@@ -163,7 +166,7 @@ def readback(name):
         data['rss_soak_lines_pass']=data['rss_soak_lines_pass'] and whole['valid']
         data['verdict']='rss-lines-passed' if data['rss_soak_lines_pass'] else 'rss-lines-failed'
         data['d9_memory_qualified']=data['d9_memory_qualified'] and whole['valid']
-    elif EVIDENCE==ROOT/'.local/evidence/E28/soak':
+    elif EVIDENCE in [ROOT/'.local/evidence'/experiment/'soak' for experiment in ['E28','E32']]:
         raise RuntimeError('E28 requires whole-window D12 evidence, including recovery and restoration')
     data.update(kind='E25-full-soak-readback',proxy_rss_judged=True,
         store_diagnostics=store,executed_readbacks=executed,

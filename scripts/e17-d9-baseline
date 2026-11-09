@@ -37,7 +37,7 @@ def main():
     args=parser.parse_args()
     base.BINS=args.bins.resolve()
     base.DATA=args.data_dir.resolve()
-    if not any(base.DATA.is_relative_to(ROOT/'docs/experiments/data'/experiment) for experiment in ['E17', 'E28']):
+    if not any(base.DATA.is_relative_to(ROOT/'docs/experiments/data'/experiment) for experiment in ['E17', 'E28', 'E32']):
         parser.error('data directory must remain under E17 evidence')
     base.REQUEST_PREFIX='d9-plain09-baseline'
     original=base.provenance

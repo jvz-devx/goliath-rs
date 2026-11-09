@@ -304,7 +304,7 @@ def main():
     args=parser.parse_args()
     BINS=args.bins.resolve()
     DATA=args.data_dir.resolve()
-    if not any(DATA.is_relative_to(ROOT/'docs/experiments/data'/experiment) for experiment in ['E17', 'E28']):
+    if not any(DATA.is_relative_to(ROOT/'docs/experiments/data'/experiment) for experiment in ['E17', 'E28', 'E32']):
         parser.error('--data-dir must stay under E17 evidence')
     if args.cell:
         if not args.out: parser.error('--cell requires --out')

@@ -30,7 +30,7 @@ def main():
     args = parser.parse_args()
     harness.configure(args.data_dir)
     print('E25_SOAK_CONTROL_PROCESS '+str(os.getpid()),flush=True)
-    if not re.fullmatch(r'(?:e25-|e28-|repro-)[A-Za-z0-9_-]+',args.name):
+    if not re.fullmatch(r'(?:e25-|e28-|e32-|repro-)[A-Za-z0-9_-]+',args.name):
         raise ValueError('fresh simple control name required')
     target = harness.DATA / (args.name+'-plan.json')
     result_path = harness.DATA / (args.name+'-run.json')
@@ -47,8 +47,7 @@ def main():
         reference_kind = 'E28-rebuilt-reactor-control'
         if not args.direct_bots or args.cpu_mode!='pin' or args.players!=425:
             raise ValueError('E28 soak requires425players, pin and direct untraced bots')
-        import e28_direct_bots
-        _,bot_identity,proof=e28_direct_bots.selection()
+        _,bot_identity,proof=goliath_bundle.direct_bots().selection()
         from e28_window import ready
         ready()
     elif args.frozen_reference:

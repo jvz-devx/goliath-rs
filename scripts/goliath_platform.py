@@ -3,6 +3,11 @@
 Darwin counter implementations stay in their original modules. Linux schedstat
 is nanoseconds; stat user/system counters are clock ticks. Short-lived threads
 not seen by a sample retain only the process stat counter's tick precision.
+
+Two Linux hosts exist. The workstation is the default and is physical: six
+CPUs, a governor and thermal-throttle counters. `GOLIATH_HOST_PLATFORM=vm`
+selects the VM host, which has more CPUs, no governor and no throttle
+counters, and is judged on CPU steal instead.
 """
 import argparse
 import atexit
@@ -22,6 +27,11 @@ SYS_CPU = Path('/sys/devices/system/cpu')
 CGROUP = Path('/sys/fs/cgroup')
 STATE = ROOT / '.local/evidence/E28/harness-restore.json'
 ACTIVE = None
+HOSTS = ('workstation', 'vm')
+FIXTURE_CPUS = ('0', '1', '2', '3', '4')
+STEAL_LIMIT = .01
+VM_GOVERNOR = 'unavailable (virtual machine)'
+_virtualization = None
 _cpu_cache = {}
 _cpu_lock = threading.Lock()
 
@@ -30,6 +40,50 @@ def resources():
     default = (Path.home() / '.local/share/goliath-resources/26.3' if LINUX else
         Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3')
     return Path(os.environ.get('GOLIATH_RESOURCES', default)).expanduser()
+
+
+def host_platform():
+    """The explicitly selected Linux host; never inferred from the machine."""
+    host = os.environ.get('GOLIATH_HOST_PLATFORM', 'workstation')
+    if host not in HOSTS:
+        raise ValueError('GOLIATH_HOST_PLATFORM must be workstation or vm')
+    return host
+
+
+def virtualization():
+    """What systemd-detect-virt reports: `none` on a physical host."""
+    global _virtualization
+    if _virtualization is None:
+        result = subprocess.run(['systemd-detect-virt'], capture_output=True, text=True)
+        _virtualization = result.stdout.strip() or 'undetected'
+    return _virtualization
+
+
+def cpu_span(cpus):
+    cpus = sorted(map(int, cpus))
+    if not cpus or cpus != list(range(cpus[0], cpus[-1]+1)):
+        raise ValueError('CPUs must be one contiguous range')
+    return str(cpus[0]) if len(cpus) == 1 else f'{cpus[0]}-{cpus[-1]}'
+
+
+def harness_cpus(cpus):
+    """Every CPU above the four server cores and the bot core runs the harness."""
+    return sorted((str(cpu) for cpu in cpus if int(cpu) > 4), key=int)
+
+
+def layout(online=None, host=None, mode=None):
+    """Cpusets per role. The workstation has exactly CPUs 0-5; the VM host has 0 to N-1."""
+    host = host or host_platform()
+    online = (SYS_CPU/'online').read_text().strip() if online is None else online
+    first, _, last = online.partition('-')
+    count = int(last)+1 if last.isdigit() else 0
+    if first != '0' or count < 6 or (host == 'workstation' and count != 6):
+        raise RuntimeError('D12 requires exactly CPUs 0-5 online' if host == 'workstation' else
+            'D12 on the VM host requires CPUs 0 to N-1 online, with N at least 6')
+    harness = cpu_span(range(5, count))
+    pinned = (mode or cpu_mode()) == 'pin'
+    return dict(all=cpu_span(range(count)), servers='0-3' if pinned else '0-4',
+        bots='4' if pinned else '0-4', harness=harness)
 
 
 def mac_only(operation):
@@ -178,7 +232,26 @@ def parse_cpu_stat(text):
     return result
 
 
+def parse_cpu_steal(text):
+    """Per-CPU steal ticks: time the hypervisor ran something else while this vCPU wanted to run."""
+    return {fields[0][3:]: int(fields[8]) for fields in map(str.split, text.splitlines())
+        if fields and fields[0].startswith('cpu') and fields[0][3:].isdigit() and len(fields) > 8}
+
+
 def host_snapshot(proc=PROC, cpu=SYS_CPU):
+    if host_platform() == 'vm':
+        return vm_snapshot(proc, cpu)
+    return physical_snapshot(proc, cpu)
+
+
+def vm_snapshot(proc=PROC, cpu=SYS_CPU):
+    row = physical_snapshot(proc, cpu)
+    row.update(platform='vm', virtualization=virtualization(),
+        steal_ticks=parse_cpu_steal((proc / 'stat').read_text()))
+    return row
+
+
+def physical_snapshot(proc=PROC, cpu=SYS_CPU):
     vm = dict(line.split() for line in (proc / 'vmstat').read_text().splitlines())
     memory = parse_status((proc / 'meminfo').read_text())
     throttle = {str(path.relative_to(cpu)): int(path.read_text())
@@ -205,18 +278,62 @@ def host_delta(first, last):
     reasons = []
     if first['load'][0] > 4:
         reasons.append('start load above 4')
-    if busy.get('5', {}).get('busy_fraction') is None:
-        reasons.append('CPU 5 busy coverage unavailable')
-    elif busy['5']['busy_fraction'] >= .95:
-        reasons.append('CPU 5 busy fraction at least 95%')
-    if rising:
-        reasons.append('thermal throttle counters rose')
-    if not first['thermal_throttle_available'] or not last['thermal_throttle_available']:
-        reasons.append('thermal throttle counters unavailable')
-    return dict(cpu_mode=cpu_mode(), per_cpu=busy, throttle_delta=rising,
+    # The harness rule applies to the mean of the harness set and each CPU is reported.
+    # On the workstation that set is CPU 5 alone.
+    harness = harness_cpus(busy)
+    fractions = [busy[name]['busy_fraction'] for name in harness]
+    label = 'CPU 5' if harness in (['5'], []) else 'harness CPUs '+cpu_span(harness)
+    mean = sum(fractions)/len(fractions) if fractions and None not in fractions else None
+    if mean is None:
+        reasons.append(label+' busy coverage unavailable')
+    elif mean >= .95:
+        reasons.append(label+(' busy fraction at least 95%' if harness == ['5'] else ' mean busy fraction at least 95%'))
+    result = dict(cpu_mode=cpu_mode(), per_cpu=busy, throttle_delta=rising,
         swap_in_pages=last['swap_in_pages']-first['swap_in_pages'],
-        memory_available_kb_start=first['memory_available_kb'], memory_available_kb_end=last['memory_available_kb'],
-        valid=not reasons, reasons=reasons)
+        memory_available_kb_start=first['memory_available_kb'], memory_available_kb_end=last['memory_available_kb'])
+    if first.get('platform') == 'vm' or last.get('platform') == 'vm':
+        reasons += vm_validity(first, last, busy, result)
+        result.update(harness_cpus=harness, harness_mean_busy_fraction=mean)
+    else:
+        if rising:
+            reasons.append('thermal throttle counters rose')
+        if not first['thermal_throttle_available'] or not last['thermal_throttle_available']:
+            reasons.append('thermal throttle counters unavailable')
+    result.update(valid=not reasons, reasons=reasons)
+    return result
+
+
+def vm_validity(first, last, busy, result):
+    """A virtual machine has no throttle counters; judge the cell on CPU steal instead.
+
+    Steal above 1% of any fixture CPU's time means the hypervisor took that core
+    away during the cell. A physical host is never valid through this path.
+    """
+    reasons = []
+    virtual = [row.get('virtualization') for row in (first, last)]
+    if first.get('platform') != 'vm' or last.get('platform') != 'vm':
+        reasons.append('VM and physical host snapshots mixed in one cell')
+    if any(value in (None, 'none', 'undetected') for value in virtual) or virtual[0] != virtual[1]:
+        reasons.append('VM validity path on a host that is not a detected virtual machine')
+    steal = {}
+    for name in sorted(busy, key=int):
+        total = busy[name]['total_ticks']
+        before, after = first.get('steal_ticks', {}).get(name), last.get('steal_ticks', {}).get(name)
+        ticks = None if before is None or after is None else after-before
+        steal[name] = dict(steal_ticks=ticks, total_ticks=total,
+            steal_fraction=ticks/total if ticks is not None and total else None)
+    for name in FIXTURE_CPUS:
+        fraction = steal.get(name, {}).get('steal_fraction')
+        if fraction is None:
+            reasons.append('CPU '+name+' steal coverage unavailable')
+        elif fraction > STEAL_LIMIT:
+            reasons.append('CPU '+name+' steal above 1%')
+    result.update(platform='vm', virtualization=virtual[1], governor=VM_GOVERNOR,
+        steal=steal, steal_limit=STEAL_LIMIT, fixture_cpus=list(FIXTURE_CPUS),
+        maximum_fixture_steal_fraction=max((steal[name]['steal_fraction'] for name in FIXTURE_CPUS
+            if steal.get(name, {}).get('steal_fraction') is not None), default=None),
+        thermal_throttle='unavailable (virtual machine); CPU steal is the validity signal')
+    return reasons
 
 
 def socket_inputs(pid):
@@ -342,8 +459,10 @@ class CpuWindow:
             raise RuntimeError('stale D12 window; run scripts/goliath-cpu restore first')
         if (CGROUP/'cgroup.controllers').read_text().split().count('cpuset') != 1:
             raise RuntimeError('cgroup v2 cpuset controller unavailable')
-        if (SYS_CPU/'online').read_text().strip() != '0-5':
-            raise RuntimeError('D12 requires exactly CPUs 0-5 online')
+        cpus = layout()
+        vm = host_platform() == 'vm'
+        if vm and virtualization() in ('none', 'undetected'):
+            raise RuntimeError('the VM host platform was selected on a physical host')
         base = CGROUP / ('goliath-e28-'+str(os.getpid()))
         original = next(line.split('::', 1)[1] for line in (PROC/'self/cgroup').read_text().splitlines() if line.startswith('0::'))
         state = dict(pid=os.getpid(), driver_start_ticks=parse_stat((PROC/'self/stat').read_text())['start_ticks'],
@@ -354,7 +473,9 @@ class CpuWindow:
             state['slices'][unit] = subprocess.check_output(['systemctl', 'show', unit, '-p', 'AllowedCPUs', '--value'], text=True).strip()
         for governor in sorted(SYS_CPU.glob('cpufreq/policy*/scaling_governor')):
             state['governors'][str(governor)] = governor.read_text().strip()
-        if not state['governors']:
+        if state['governors'] and vm:
+            raise RuntimeError('the VM host platform expects no CPU governor; this host has one')
+        if not state['governors'] and not vm:
             raise RuntimeError('CPU governors unavailable')
         save_state(state)
         self.owner = True
@@ -365,17 +486,17 @@ class CpuWindow:
         try:
             sudo_write(CGROUP/'cgroup.subtree_control', '+cpuset')
             subprocess.run(['sudo', '-n', 'mkdir', str(base)], check=True)
-            sudo_write(base/'cpuset.cpus', '0-5')
+            sudo_write(base/'cpuset.cpus', cpus['all'])
             sudo_write(base/'cpuset.mems', (CGROUP/'cpuset.mems.effective').read_text().strip())
             sudo_write(base/'cgroup.subtree_control', '+cpuset')
-            for name, cpus in [('servers', '0-3' if cpu_mode() == 'pin' else '0-4'), ('bots', '4' if cpu_mode() == 'pin' else '0-4'), ('harness', '5')]:
+            for name in ['servers', 'bots', 'harness']:
                 group = base/name
                 subprocess.run(['sudo', '-n', 'mkdir', str(group)], check=True)
-                sudo_write(group/'cpuset.cpus', cpus)
+                sudo_write(group/'cpuset.cpus', cpus[name])
                 sudo_write(group/'cpuset.mems', (CGROUP/'cpuset.mems.effective').read_text().strip())
             sudo_write(base/'harness/cgroup.procs', os.getpid())
             for unit in units:
-                subprocess.run(slice_command(unit, '5'), check=True)
+                subprocess.run(slice_command(unit, cpus['harness']), check=True)
             for governor in state['governors']:
                 sudo_write(governor, 'performance')
             os.environ['GOLIATH_CPU_CGROUP'] = str(base)

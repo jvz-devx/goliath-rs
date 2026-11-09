@@ -23,7 +23,7 @@ import tomllib
 import e11_support as support
 import goliath_platform as platform
 import goliath_bundle
-import e28_direct_bots as direct_bots
+direct_bots = goliath_bundle.direct_bots()  # the selected host's direct-bot identity module
 from e18_d9_layout import plan
 from e18_d9_wire import D9Observer
 from e18_process import ProcessSampler as OriginalProcessSampler
@@ -213,7 +213,7 @@ def main():
     result=dict(kind='E20-D9-frontier-cell',status='preflight',acceptance=False,mode='release coalesced, lazy readers, endpoint pool, cut backoff',
         server_core_cap=4,bot_core_cap=1,proxy_inside_server_cap=not args.proxy_outside_cap,counts=counts,layouts=layouts,cells={},
         warmup_seconds=args.warmup,measurement_seconds=args.seconds,
-        bots_bundle='final-stamps' if args.direct_bots else bins.name,
+        bots_bundle=bots_bins.name if args.direct_bots else bins.name,
         binaries={name:hashlib.sha256(((bots_bins if name=='horizon-bots' else bins)/name).read_bytes()).hexdigest() for name in ['horizon-client','meridian','meridian-sidecar','goliath-store','horizon-bots']})
     if linux_identity:
         result.update(e28_bundle=linux_identity, cpu_mode=platform.cpu_mode())
@@ -235,7 +235,8 @@ def main():
     if platform.LINUX:
         result['harness_sha256'].update({name:goliath_bundle.sha(ROOT/'scripts'/name) for name in ['goliath_platform.py','goliath_bundle.py']})
     if args.direct_bots:
-        result['harness_sha256'].update({name:goliath_bundle.sha(ROOT/'scripts'/name) for name in ['e28_direct_bots.py','e28-direct-bots-tests']})
+        result['harness_sha256'].update({name:goliath_bundle.sha(ROOT/'scripts'/name) for name in ['e28_direct_bots.py','e28-direct-bots-tests']+
+            (['e32_direct_bots.py','e32-direct-bots-proof'] if goliath_bundle.HOST=='vm' else [])})
     support.save(target,result)
     began=time.monotonic();deadline=began+1500
     def check():

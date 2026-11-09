@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""Check the VM host mode: CPU layout, steal validity and its separate trust anchor."""
+import copy
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import goliath_platform as platform
+import goliath_bundle as bundle
+import e28_window as window
+
+RUNS = platform.ROOT/'.local/runs'
+
+
+def host(cpus=8, vm=True, virtualization='kvm'):
+    row = dict(at=1., load=[0., 0., 0.], cpus={str(i):dict(total=1000, idle=900) for i in range(cpus)},
+        swap_in_pages=0, memory_available_kb=400000, thermal_throttle={}, thermal_throttle_available=False,
+        frequency_khz={})
+    if vm:
+        row.update(platform='vm', virtualization=virtualization, steal_ticks={str(i):5 for i in range(cpus)})
+    return row
+
+
+def later(first, busy=.5, steal=0):
+    last = copy.deepcopy(first)
+    for name, cpu in last['cpus'].items():
+        cpu.update(total=cpu['total']+10000, idle=cpu['idle']+int(10000*(1-busy)))
+        if 'steal_ticks' in last:
+            last['steal_ticks'][name] += steal
+    return last
+
+
+class LayoutTests(unittest.TestCase):
+    def test_workstation_still_requires_exactly_six_cpus(self):
+        self.assertEqual(platform.layout('0-5', 'workstation', 'pin'), dict(all='0-5', servers='0-3', bots='4', harness='5'))
+        self.assertEqual(platform.layout('0-5', 'workstation', 'limiter'), dict(all='0-5', servers='0-4', bots='0-4', harness='5'))
+        for online in ['0-7', '0-4', '1-6', '0-3,5', '0']:
+            with self.assertRaisesRegex(RuntimeError, 'exactly CPUs 0-5'):
+                platform.layout(online, 'workstation', 'pin')
+
+    def test_vm_host_gives_every_cpu_above_the_bot_core_to_the_harness(self):
+        self.assertEqual(platform.layout('0-7', 'vm', 'pin'), dict(all='0-7', servers='0-3', bots='4', harness='5-7'))
+        self.assertEqual(platform.layout('0-5', 'vm', 'pin')['harness'], '5')
+        self.assertEqual(platform.layout('0-15', 'vm', 'pin')['harness'], '5-15')
+        for online in ['0-4', '0-3,5-7', '2-9']:
+            with self.assertRaisesRegex(RuntimeError, 'VM host requires'):
+                platform.layout(online, 'vm', 'pin')
+
+    def test_host_platform_is_explicit_and_defaults_to_the_workstation(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('GOLIATH_HOST_PLATFORM', None)
+            self.assertEqual(platform.host_platform(), 'workstation')
+            os.environ['GOLIATH_HOST_PLATFORM'] = 'vm'
+            self.assertEqual(platform.host_platform(), 'vm')
+            os.environ['GOLIATH_HOST_PLATFORM'] = 'cloud'
+            with self.assertRaises(ValueError):
+                platform.host_platform()
+
+    def test_a_physical_host_cannot_open_a_vm_window(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root = Path(temporary); (root/'.local/host/quiet').mkdir(parents=True)
+            (root/'.local/host/quiet/owner').write_text('E32\n')
+            cgroup = root/'cgroup'; cgroup.mkdir(); (cgroup/'cgroup.controllers').write_text('cpuset cpu\n')
+            cpu = root/'cpu'; cpu.mkdir(); (cpu/'online').write_text('0-7\n')
+            with patch.dict(os.environ, dict(GOLIATH_HOST_PLATFORM='vm', GOLIATH_WINDOW_OWNER='E32')), \
+                    patch.object(platform, 'ROOT', root), patch.object(platform, 'STATE', root/'state.json'), \
+                    patch.object(platform, 'CGROUP', cgroup), patch.object(platform, 'SYS_CPU', cpu), \
+                    patch.object(platform, 'ACTIVE', None), patch.object(platform, 'virtualization', return_value='none'), \
+                    patch.object(platform.subprocess, 'check_output', return_value='window: E32\nbuilds: \n'), \
+                    patch.object(platform, 'sudo_write') as write, patch.object(platform.subprocess, 'run') as run:
+                os.environ.pop('GOLIATH_CPU_CGROUP', None)
+                with self.assertRaisesRegex(RuntimeError, 'physical host'):
+                    platform.CpuWindow().start()
+                write.assert_not_called(); run.assert_not_called()
+                self.assertFalse((root/'state.json').exists())
+
+
+class StealTests(unittest.TestCase):
+    def test_steal_is_read_per_cpu_from_proc_stat(self):
+        text = 'cpu  9 9 9 9 9 9 9 99 0 0\ncpu0 100 2 30 400 20 5 6 7 50 1\ncpu11 1 1 1 1 1 1 1 42 0 0\nintr 50\n'
+        self.assertEqual(platform.parse_cpu_steal(text), {'0':7, '11':42})
+        self.assertEqual(platform.parse_cpu_stat(text)['0'], dict(total=570, idle=420))
+
+    def test_a_quiet_vm_cell_is_valid_and_labelled(self):
+        first = host(); row = platform.host_delta(first, later(first, steal=50))
+        self.assertTrue(row['valid'], row['reasons'])
+        self.assertEqual((row['platform'], row['virtualization'], row['governor']), ('vm', 'kvm', 'unavailable (virtual machine)'))
+        self.assertEqual(row['steal']['3'], dict(steal_ticks=50, total_ticks=10000, steal_fraction=.005))
+        self.assertEqual(row['maximum_fixture_steal_fraction'], .005)
+        self.assertEqual(row['harness_cpus'], ['5', '6', '7'])
+        self.assertEqual(sorted(row['per_cpu'], key=int), [str(i) for i in range(8)])
+        self.assertFalse(any('thermal' in reason for reason in row['reasons']))
+
+    def test_steal_above_one_percent_on_a_fixture_cpu_invalidates(self):
+        first = host(); last = later(first)
+        last['steal_ticks']['2'] += 101
+        row = platform.host_delta(first, last)
+        self.assertEqual(row['reasons'], ['CPU 2 steal above 1%'])
+        last['steal_ticks']['2'] -= 1  # exactly 1% is still inside the rule
+        self.assertTrue(platform.host_delta(first, last)['valid'])
+
+    def test_steal_on_a_harness_cpu_is_reported_but_does_not_invalidate(self):
+        first = host(); last = later(first)
+        last['steal_ticks']['6'] += 900
+        row = platform.host_delta(first, last)
+        self.assertTrue(row['valid']); self.assertEqual(row['steal']['6']['steal_fraction'], .09)
+
+    def test_missing_steal_coverage_is_unproven_not_zero(self):
+        first = host(); last = later(first)
+        del last['steal_ticks']['4']
+        self.assertIn('CPU 4 steal coverage unavailable', platform.host_delta(first, last)['reasons'])
+
+    def test_a_physical_host_is_never_valid_through_the_vm_path(self):
+        for value in ['none', 'undetected', None]:
+            first = host(virtualization=value)
+            self.assertIn('VM validity path on a host that is not a detected virtual machine',
+                platform.host_delta(first, later(first))['reasons'])
+        first = host(); last = later(host(vm=False))
+        self.assertIn('VM and physical host snapshots mixed in one cell', platform.host_delta(first, last)['reasons'])
+        first = host(); last = later(first); last['virtualization'] = 'qemu'
+        self.assertFalse(platform.host_delta(first, last)['valid'])
+
+    def test_the_harness_rule_uses_the_mean_of_the_harness_set(self):
+        first = host(); last = later(first)
+        last['cpus']['5']['idle'] = first['cpus']['5']['idle']  # one harness CPU saturated, two half busy
+        row = platform.host_delta(first, last)
+        self.assertTrue(row['valid']); self.assertEqual(row['per_cpu']['5']['busy_fraction'], 1.)
+        self.assertAlmostEqual(row['harness_mean_busy_fraction'], 2/3)
+        for name in ['6', '7']:
+            last['cpus'][name]['idle'] = first['cpus'][name]['idle']+400
+        self.assertEqual(platform.host_delta(first, last)['reasons'], ['harness CPUs 5-7 mean busy fraction at least 95%'])
+
+    def test_start_load_still_applies(self):
+        first = host(); first['load'][0] = 4.01
+        self.assertIn('start load above 4', platform.host_delta(first, later(first))['reasons'])
+
+    def test_the_workstation_path_is_unchanged(self):
+        first = host(cpus=6, vm=False); row = platform.host_delta(first, later(first))
+        self.assertEqual(row['reasons'], ['thermal throttle counters unavailable'])
+        self.assertEqual(set(row), {'cpu_mode', 'per_cpu', 'throttle_delta', 'swap_in_pages',
+            'memory_available_kb_start', 'memory_available_kb_end', 'valid', 'reasons'})
+        first['thermal_throttle_available'] = True; last = later(first, busy=.96); last['thermal_throttle_available'] = True
+        self.assertEqual(platform.host_delta(first, last)['reasons'], ['CPU 5 busy fraction at least 95%'])
+        del first['cpus']['5']; del last['cpus']['5']
+        self.assertEqual(platform.host_delta(first, last)['reasons'], ['CPU 5 busy coverage unavailable'])
+
+    def test_snapshots_record_steal_only_on_the_vm_host(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            proc = Path(temporary)/'proc'; cpu = Path(temporary)/'cpu'; proc.mkdir(); cpu.mkdir()
+            (proc/'vmstat').write_text('pswpin 3\n'); (proc/'meminfo').write_text('MemAvailable: 9 kB\n')
+            (proc/'stat').write_text('cpu0 100 2 30 400 20 5 6 7 50 1\n')
+            with patch.dict(os.environ, dict(GOLIATH_HOST_PLATFORM='vm')), patch.object(platform, 'virtualization', return_value='kvm'):
+                row = platform.host_snapshot(proc, cpu)
+            self.assertEqual((row['platform'], row['virtualization'], row['steal_ticks']), ('vm', 'kvm', {'0':7}))
+            self.assertFalse(row['thermal_throttle_available']); self.assertEqual(row['frequency_khz'], {})
+            with patch.dict(os.environ, dict(GOLIATH_HOST_PLATFORM='workstation')), \
+                    patch.object(platform, 'virtualization', side_effect=AssertionError('not consulted')):
+                row = platform.host_snapshot(proc, cpu)
+            self.assertFalse({'platform', 'virtualization', 'steal_ticks'} & set(row))
+
+
+class WindowTests(unittest.TestCase):
+    def rows(self, harness):
+        first = host(); last = later(first)
+        def placement(role, cpus):
+            return dict(pid=7, role=role, cpus_allowed_list=cpus, cgroup='/goliath-e28-1/'+role, stable=True)
+        entries = [placement('servers', '0-3'), placement('bots', '4'), placement('harness', harness)]
+        return [dict(at=float(index), host=value, owned=[1], processes={}, descendant_placement=entries)
+            for index, value in enumerate([first, last])]
+
+    def test_whole_window_placement_expects_the_wide_harness_set(self):
+        with patch.dict(os.environ, dict(GOLIATH_CPU_MODE='pin')):
+            self.assertTrue(window.audit(self.rows('5-7'))['valid'])
+            report = window.audit(self.rows('5'))
+            self.assertIn('descendant CPU placement mismatch', report['d12']['reasons'])
+            self.assertEqual(report['frequency_khz_range'], {})
+
+
+class IdentityTests(unittest.TestCase):
+    def fixture(self, root, folder, name, host_name, files):
+        directory = root/'.local/bin'/folder/name; directory.mkdir(parents=True)
+        binaries = {}
+        for binary in files:
+            (directory/binary).write_text(folder+name+binary); (directory/binary).chmod(0o755)
+            binaries[binary] = bundle.sha(directory/binary)
+        metadata = dict(status='complete', profile='release', source_equality='passed', binaries=binaries)
+        if host_name == 'vm':
+            metadata['host'] = 'vm'
+        for record in ['canonical.json', 'build.json']:
+            (directory/record).write_text(json.dumps(metadata))
+        return directory, dict(path=str(directory.relative_to(root)), binaries=binaries,
+            files={path.name:bundle.sha(path) for path in directory.iterdir()})
+
+    def selected(self, root, host_name, manifest, virtualization='kvm'):
+        folder = dict(workstation='goliath-e28', vm='goliath-e32')[host_name]
+        return [patch.object(bundle, 'ROOT', root), patch.object(bundle, 'HOST', host_name),
+            patch.object(bundle, 'BUNDLES', root/'.local/bin'/folder), patch.object(bundle, 'MANIFEST', manifest),
+            patch.object(bundle, 'DISPOSITION', root/'none.json'),
+            patch.object(bundle, 'BOTS_ONLY', 'stamped-bots' if host_name == 'vm' else None),
+            patch.object(bundle.platform, 'virtualization', return_value=virtualization)]
+
+    def enter(self, patches):
+        for item in patches:
+            item.start(); self.addCleanup(item.stop)
+
+    def both(self, root):
+        work, work_record = self.fixture(root, 'goliath-e28', 'plain-09', 'workstation', ['horizon-client', 'horizon-bots'])
+        vm, vm_record = self.fixture(root, 'goliath-e32', 'plain-09', 'vm', ['horizon-client', 'horizon-bots'])
+        bots, bots_record = self.fixture(root, 'goliath-e32', 'stamped-bots', 'vm', ['horizon-bots'])
+        work_manifest = root/'e28.json'; vm_manifest = root/'e32.json'
+        work_manifest.write_text(json.dumps(dict(schema_version=1, platform='linux', bundles={'plain-09':work_record})))
+        vm_manifest.write_text(json.dumps(dict(schema_version=1, platform='linux', host='vm',
+            bundles={'plain-09':vm_record, 'stamped-bots':bots_record})))
+        return work, vm, bots, work_manifest, vm_manifest
+
+    def test_each_bundle_validates_only_against_its_own_manifest(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root = Path(temporary).resolve(); work, vm, bots, work_manifest, vm_manifest = self.both(root)
+            self.enter(self.selected(root, 'vm', vm_manifest))
+            self.assertEqual(bundle.validate(vm)['bundle'], 'plain-09')
+            self.assertEqual(set(bundle.validate(bots, {'stamped-bots'})['binaries']), {'horizon-bots'})
+            self.assertTrue(bundle.is_e28(work))  # refused loudly, never treated as a non-Linux bundle
+            with self.assertRaisesRegex(ValueError, 'immediate child of .local/bin/goliath-e32'):
+                bundle.validate(work)
+
+    def test_the_workstation_refuses_vm_bundles_and_the_vm_manifest(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root = Path(temporary).resolve(); work, vm, bots, work_manifest, vm_manifest = self.both(root)
+            self.enter(self.selected(root, 'workstation', work_manifest, virtualization='none'))
+            self.assertEqual(bundle.validate(work)['bundle'], 'plain-09')
+            self.assertTrue(bundle.is_e28(vm))
+            with self.assertRaisesRegex(ValueError, 'immediate child of .local/bin/goliath-e28'):
+                bundle.validate(vm)
+            with patch.object(bundle, 'MANIFEST', vm_manifest):
+                with self.assertRaisesRegex(ValueError, 'another host platform'):
+                    bundle.validate(work)
+
+    def test_a_manifest_swap_or_copied_bundle_is_refused(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root = Path(temporary).resolve(); work, vm, bots, work_manifest, vm_manifest = self.both(root)
+            self.enter(self.selected(root, 'vm', vm_manifest))
+            with patch.object(bundle, 'MANIFEST', work_manifest):
+                with self.assertRaisesRegex(ValueError, 'another host platform'):
+                    bundle.validate(vm)
+            # The workstation's bytes copied over the VM host's bundle fail on their hashes.
+            for path in work.iterdir():
+                (vm/path.name).write_bytes(path.read_bytes())
+            with self.assertRaisesRegex(ValueError, 'frozen file changed'):
+                bundle.validate(vm)
+            # Even with a manifest forged to list them, the bundle's own record names the other host.
+            record = dict(path=str(vm.relative_to(root)), binaries=json.loads((vm/'build.json').read_text())['binaries'],
+                files={path.name:bundle.sha(path) for path in vm.iterdir()})
+            vm_manifest.write_text(json.dumps(dict(schema_version=1, platform='linux', host='vm', bundles={'plain-09':record})))
+            with self.assertRaisesRegex(ValueError, 'built on another host platform'):
+                bundle.validate(vm)
+
+    def test_the_vm_manifest_never_validates_on_a_physical_host(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root = Path(temporary).resolve(); work, vm, bots, work_manifest, vm_manifest = self.both(root)
+            self.enter(self.selected(root, 'vm', vm_manifest, virtualization='none'))
+            with self.assertRaisesRegex(ValueError, 'physical host'):
+                bundle.validate(vm)
+
+    def test_a_bots_only_bundle_exists_only_on_the_vm_host(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root = Path(temporary).resolve()
+            bots, record = self.fixture(root, 'goliath-e28', 'stamped-bots', 'workstation', ['horizon-bots'])
+            manifest = root/'e28.json'
+            manifest.write_text(json.dumps(dict(schema_version=1, platform='linux', bundles={'stamped-bots':record})))
+            self.enter(self.selected(root, 'workstation', manifest, virtualization='none'))
+            with self.assertRaisesRegex(ValueError, 'lacks required files'):
+                bundle.validate(bots)
+
+    def test_selection_is_fixed_by_the_environment_at_import(self):
+        def anchors(host_name):
+            environment = dict(os.environ); environment.pop('GOLIATH_HOST_PLATFORM', None)
+            if host_name: environment['GOLIATH_HOST_PLATFORM'] = host_name
+            code = ('import goliath_bundle as b;print(b.HOST,b.MANIFEST.relative_to(b.ROOT),b.BUNDLES.relative_to(b.ROOT),'
+                'b.BASE_STACK,b.SERVER_STACKS,b.BOTS_ONLY,b.DISPOSITION.relative_to(b.ROOT))')
+            return subprocess.check_output([sys.executable, '-B', '-c', code], cwd=Path(__file__).parent,
+                env=environment, text=True).strip()
+        self.assertEqual(anchors(None), "workstation docs/experiments/data/E28/build-manifest.json .local/bin/goliath-e28 "
+            "final ('final', 'final-r2') None docs/experiments/data/E28/gate-disposition.json")
+        self.assertEqual(anchors('workstation'), anchors(None))
+        self.assertEqual(anchors('vm'), "vm docs/experiments/data/E32/build-manifest.json .local/bin/goliath-e32 "
+            "final-r2 ('final-r2',) stamped-bots docs/experiments/data/E32/gate-disposition.json")
+
+    def test_the_vm_host_server_stack_is_its_own_complete_bundle(self):
+        identity = dict(bundle='final-r2', binaries={'horizon-client':'tile'})
+        with patch.object(bundle, 'BASE_STACK', 'final-r2'), patch.object(bundle, 'SERVER_STACKS', ('final-r2',)), \
+                patch.object(bundle, 'validate', return_value=identity) as validate:
+            self.assertEqual(bundle.validate_server_stack('anywhere'), identity)
+            validate.assert_called_once_with('anywhere', {'final-r2'})
+
+
+if __name__ == '__main__':
+    RUNS.mkdir(parents=True, exist_ok=True)
+    unittest.main()

@@ -74,8 +74,9 @@ def audit(rows, error=None):
     outside = [dict(pid=pid, name='outside', cpu_s=amount, cores=amount/elapsed)
         for pid, amount in sorted(totals.items(), key=lambda pair:pair[1], reverse=True)]
     d12 = platform.host_delta(rows[0]['host'], rows[-1]['host'])
-    expected = dict(servers='0-3', bots='4', harness='5') if platform.cpu_mode() == 'pin' else dict(
-        servers='0-4', bots='0-4', harness='5')
+    # The harness set is CPU 5 on the workstation and CPUs 5 to N-1 on the VM host.
+    expected = dict(servers='0-3', bots='4') if platform.cpu_mode() == 'pin' else dict(servers='0-4', bots='0-4')
+    expected['harness'] = platform.cpu_span(platform.harness_cpus(rows[0]['host']['cpus']))
     bad = [dict(at=row['at'], **entry) for row in rows for entry in row['descendant_placement']
         if not entry.get('stable',True) or entry['cpus_allowed_list'] != expected.get(entry['role']) or Path(entry['cgroup']).name != entry['role']]
     if bad:
@@ -90,7 +91,7 @@ def audit(rows, error=None):
         outside_total_cores=sum(row['cores'] for row in outside), outside=outside,
         placement_errors=bad, samples=rows,
         host_first=rows[0]['host'],host_last=rows[-1]['host'],
-        frequency_khz_range={str(cpu):[min(values),max(values)] for cpu in range(6)
+        frequency_khz_range={str(cpu):[min(values),max(values)] for cpu in range(len(rows[0]['host']['cpus']))
             if (values:=[row['host']['frequency_khz'][str(cpu)] for row in rows if str(cpu) in row['host'].get('frequency_khz',{})])},
         scope='one-second and boundary snapshots, acquisition through recovery and cleanup; no outside names retained')
 
