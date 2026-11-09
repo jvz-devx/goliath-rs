@@ -62,7 +62,8 @@ impl Renewer {
         }
         // A poisoned lock means a thread died inside the state. Fail closed.
         let mut state = self.state.lock().ok()?;
-        state.renew_unjournaled(command, Instant::now())
+        let now = state.clock();
+        state.renew_unjournaled(command, now)
     }
 }
 
@@ -269,7 +270,8 @@ impl Engine {
             // Read the clock, prepare and apply under one hold of the lock.
             // An early renewal lands wholly before or wholly after a command.
             let mut state = self.state.lock().map_err(poisoned)?;
-            state.set_now(Instant::now());
+            let now = state.clock();
+            state.set_now(now);
             let (response, change) = match state.prepare(command) {
                 Ok(result) => result,
                 Err(fault) => {
@@ -837,19 +839,36 @@ mod tests {
         }
     }
 
+    fn set_clock(renewer: &Renewer, now: Instant) {
+        renewer.state.lock().unwrap().fixed_clock = Some(now);
+    }
+
     #[test]
     fn e29_a_renewal_is_answered_inside_a_stalled_barrier_and_the_claim_waits_for_it() {
+        use crate::journal::BarrierGate;
+        use std::sync::mpsc;
         let path = directory();
         let mut engine = Engine::open(&path, SyncMode::Full, 0).unwrap();
         let renewer = engine.renewer();
-        let second = Duration::from_millis(1000);
+        // The store's clock is injected, so every deadline below is exact and
+        // no assertion depends on how fast the host runs or syncs.
+        let lease = Duration::from_millis(1000);
+        let start = Instant::now();
+        set_clock(&renewer, start);
         let Response::Leased(grant) = engine.execute(&lease_claim(1, 0, 1000)).unwrap() else {
             panic!("lease expected")
         };
-        engine.journal.barrier_delay = second;
-        // The claim was granted before this instant, so it expires by start + 1 s.
-        let start = Instant::now();
-        let (asked, answered) = std::thread::scope(|scope| {
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        engine.journal.barrier_gate = Some(BarrierGate {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let renewed_at = start + Duration::from_millis(300);
+        std::thread::scope(|scope| {
+            // A failed assertion drops the sender, so the barrier fails
+            // instead of holding the scope open forever.
+            let release = release;
             // An unrelated mutation holds the engine inside its barrier.
             let worker = scope.spawn(|| {
                 engine
@@ -859,36 +878,41 @@ mod tests {
                     })
                     .unwrap()
             });
-            std::thread::sleep(Duration::from_millis(300));
-            let asked = Instant::now();
-            let reply = renewer.renew(&renewal(3, grant.fence, 1));
-            let answered = Instant::now();
+            entered.recv().unwrap();
+            // The barrier is in progress and the state lock is free.
+            assert!(renewer.state.try_lock().is_ok());
+            set_clock(&renewer, renewed_at);
             assert_eq!(
-                reply,
+                renewer.renew(&renewal(3, grant.fence, 1)),
                 Some(Response::Leased(goliath_model::LeaseGrant {
                     counter: 1,
                     ..grant
                 }))
             );
-            assert!(answered < start + second, "host too slow to judge");
             assert!(!worker.is_finished());
+            release.send(()).unwrap();
             assert!(matches!(worker.join().unwrap(), Response::Claimed(_)));
-            (asked, answered)
         });
-        engine.journal.barrier_delay = Duration::ZERO;
-        // The barrier ended after start + 1 s: the original claim has expired.
-        assert!(Instant::now() >= start + second);
+        engine.journal.barrier_gate = None;
+        // The original claim's window has ended. The renewal's has not.
+        set_clock(&renewer, start + lease);
         let takeover = Command {
             id: RequestId(4),
             operation: Operation::BeginTakeover(grant.fence),
         };
         assert_eq!(engine.execute(&takeover).unwrap(), Response::Ok);
-        let busy = engine.execute(&lease_claim(5, 0, 1000)).unwrap();
-        // Evaluated before asked + 1 s, the earliest the renewed lease can end.
-        assert!(Instant::now() < asked + second, "host too slow to judge");
-        assert_eq!(busy, Response::Fault(StoreFault::LeaseBusy));
-        std::thread::sleep((answered + second).saturating_duration_since(Instant::now()));
-        let Response::Leased(successor) = engine.execute(&lease_claim(6, 0, 1000)).unwrap() else {
+        assert_eq!(
+            engine.execute(&lease_claim(5, 0, 1000)).unwrap(),
+            Response::Fault(StoreFault::LeaseBusy)
+        );
+        let renewed_end = renewed_at + lease;
+        set_clock(&renewer, renewed_end - Duration::from_nanos(1));
+        assert_eq!(
+            engine.execute(&lease_claim(6, 0, 1000)).unwrap(),
+            Response::Fault(StoreFault::LeaseBusy)
+        );
+        set_clock(&renewer, renewed_end);
+        let Response::Leased(successor) = engine.execute(&lease_claim(7, 0, 1000)).unwrap() else {
             panic!("successor expected")
         };
         assert_ne!(successor.fence, grant.fence);

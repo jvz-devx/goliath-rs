@@ -161,6 +161,9 @@ pub(crate) struct State {
     closed: bool,
     // None only during deterministic historical journal replay.
     now: Option<Instant>,
+    // Replaces the wall clock for engine tests, read under the same lock.
+    #[cfg(test)]
+    pub(crate) fixed_clock: Option<Instant>,
     #[cfg(feature = "fault-injection")]
     pub(crate) disable_fence: bool,
 }
@@ -591,6 +594,16 @@ impl State {
 
     pub(crate) fn set_now(&mut self, now: Instant) {
         self.now = Some(now);
+    }
+
+    /// The time a command or an early renewal is decided at. Callers read it
+    /// while they hold the state lock.
+    pub(crate) fn clock(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = self.fixed_clock {
+            return now;
+        }
+        Instant::now()
     }
 
     pub(crate) fn restart_leases(&mut self) -> std::io::Result<()> {

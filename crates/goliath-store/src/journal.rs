@@ -28,9 +28,19 @@ pub(crate) struct Journal {
     pub(crate) fail_barrier: bool,
     #[cfg(test)]
     pub(crate) barriers: u64,
+    // Holds a barrier open until the test lets it finish.
+    #[cfg(test)]
+    pub(crate) barrier_gate: Option<BarrierGate>,
     // Slow storage for tests. It delays the barrier and removes none.
     #[cfg(any(test, feature = "fault-injection"))]
     pub(crate) barrier_delay: Duration,
+}
+
+/// A barrier that tells the test it has started and waits for its release.
+#[cfg(test)]
+pub(crate) struct BarrierGate {
+    pub(crate) entered: std::sync::mpsc::Sender<()>,
+    pub(crate) release: std::sync::mpsc::Receiver<()>,
 }
 
 pub(crate) struct Recovery {
@@ -269,6 +279,8 @@ impl Journal {
                 fail_barrier: false,
                 #[cfg(test)]
                 barriers: 0,
+                #[cfg(test)]
+                barrier_gate: None,
                 #[cfg(any(test, feature = "fault-injection"))]
                 barrier_delay: Duration::ZERO,
             },
@@ -308,6 +320,11 @@ impl Journal {
         let barrier_start = Instant::now();
         #[cfg(any(test, feature = "fault-injection"))]
         std::thread::sleep(self.barrier_delay);
+        #[cfg(test)]
+        if let Some(gate) = &self.barrier_gate {
+            gate.entered.send(()).map_err(io::Error::other)?;
+            gate.release.recv().map_err(io::Error::other)?;
+        }
         self.mode.sync(&self.log)?;
         let barrier_end = Instant::now();
         self.last_barrier = barrier_end.duration_since(barrier_start);

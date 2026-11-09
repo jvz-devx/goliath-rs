@@ -367,7 +367,7 @@ Engine, with real files and threads:
 
 | Test | What it shows |
 | --- | --- |
-| `e29_a_renewal_is_answered_inside_a_stalled_barrier_and_the_claim_waits_for_it` | With a 1 s barrier in flight on another command, a renewal is answered before that barrier ends. A replacement is then refused after the original claim's window and granted only after the renewal's. |
+| `e29_a_renewal_is_answered_inside_a_stalled_barrier_and_the_claim_waits_for_it` | With another command's barrier held open, the state lock is free and a renewal is answered inside that barrier. On an injected clock, a replacement is refused from the end of the original claim's window until 1 ns before the renewal's ends, and granted at that end. |
 | `e29_recovery_replays_a_journal_that_never_saw_the_renewals` | Journaled and unjournaled renewals interleave around a snapshot. 9,224 unjournaled renewals leave the journal's three receipts in place. The store reopens, reports the journal's last counter and grants the next one early. |
 | `e29_a_failed_journal_stops_early_renewals` | After an injected barrier failure the early path answers nothing. |
 
@@ -393,6 +393,35 @@ Formatting and both clippy runs pass with no diagnostics. `cargo test
 --workspace` passes 92 tests and `--all-features` 93. `goliath-sim leases 20000`
 still reproduces `data/E16/leases.csv` byte for byte. The timing tests ran on
 shared sandbox vCPUs, not on either test machine.
+
+### Flaky test
+
+The reviewer's first gate run had one failure in the store's lib tests. Loops
+on a fresh fork reproduced it in 2 of 400 runs, both in
+`e29_a_renewal_is_answered_inside_a_stalled_barrier_and_the_claim_waits_for_it`.
+One run hit the "host too slow to judge" assertion. In the other, the takeover
+returned `LeaseExpired`. The test stalled a barrier with a 1 s sleep, read the
+real clock, and left 300 ms after that barrier for a real fsync and two more
+journaled commands. Under fsync load that was not enough, and the renewed
+lease had really expired by the time the takeover ran. The store's behaviour
+was correct in both runs. The test only exists on this branch.
+
+The test now injects the store's clock, read under the state lock in the
+engine and the `Renewer` (test builds only), and holds the other command's
+barrier open on a gate instead of a sleep. It checks the exact boundaries: the
+replacement is refused at the end of the original window and 1 ns before the
+renewal's end, and granted at that end. It also checks that the state lock is
+free while the barrier is held. Two mutations fail it: holding the state lock
+across the barrier, and an early renewal that does not move the deadline.
+
+After the fix, on boat, the lib test binary ran 1,200 times with no failure:
+300 plain, 300 with `--all-features`, 200 under fsync load, 200 in concurrent
+pairs, 100 pinned to one CPU and 100 with all CPUs busy. A last change only
+lets a failed assertion end the test instead of hanging it. The committed code
+then passed 300 more runs of the binary with and without `--all-features`, and
+30 runs each of `cargo test --workspace` with and without `--all-features`.
+Formatting and both clippy runs pass. The sweep does not link
+`goliath-store`, so it was not rerun.
 
 ## Unproven
 
