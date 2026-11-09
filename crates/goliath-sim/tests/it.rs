@@ -271,3 +271,58 @@ fn p0_duplicates_with_one_crossing_and_no_faults() {
     assert!(run(&scenario, Policy::P0, false).duplicates > 0);
     assert!(shrink(&scenario, Policy::P0).inputs.len() == 1);
 }
+
+#[test]
+fn unjournaled_renewals_survive_store_crashes_and_every_planted_bug_is_caught() {
+    use goliath_sim::{RenewalFault, RenewalPath, RenewalSetup, Stall, renewal_crash};
+    let seeds = 0..150;
+    let run = |seed, stall, path, fault| {
+        renewal_crash(
+            seed,
+            RenewalSetup {
+                lease_ms: 1000,
+                stall,
+                path,
+                fault,
+            },
+        )
+    };
+    let mut barrier_stops = 0;
+    let (mut crashes, mut lost) = (0, 0);
+    for stall in Stall::ALL {
+        for seed in seeds.clone() {
+            let journaled = run(seed, stall, RenewalPath::Barrier, RenewalFault::None);
+            assert!(
+                !journaled.violated(),
+                "seed {seed} {stall:?}: {journaled:?}"
+            );
+            barrier_stops += journaled.stall_stops;
+            let early = run(seed, stall, RenewalPath::Unjournaled, RenewalFault::None);
+            assert!(!early.violated(), "seed {seed} {stall:?}: {early:?}");
+            // A holder that has renewed once never waits behind a barrier again.
+            assert_eq!(early.stall_stops, 0, "seed {seed} {stall:?}");
+            assert_eq!(early.unjournaled_grants > 0, early.renewals > 0);
+            crashes += early.store_crashes;
+            lost += early.renewals_lost;
+        }
+    }
+    // The journaled path is what couples a tile's authority to the barrier.
+    assert!(barrier_stops > 0);
+    // The safe runs really did crash the store and lose granted renewals.
+    assert!(
+        crashes > 100 && lost > 100,
+        "{crashes} crashes, {lost} lost"
+    );
+    for fault in RenewalFault::PLANTED {
+        let caught = seeds
+            .clone()
+            .filter(|seed| run(*seed, Stall::Severe, RenewalPath::Unjournaled, fault).violated())
+            .count();
+        assert!(caught > 0, "{} not caught", fault.name());
+    }
+    let again = run(7, Stall::Tail, RenewalPath::Unjournaled, RenewalFault::None);
+    assert_eq!(
+        again,
+        run(7, Stall::Tail, RenewalPath::Unjournaled, RenewalFault::None)
+    );
+}

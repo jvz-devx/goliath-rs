@@ -12,6 +12,10 @@ replay policy seed setting="0":
 leases seeds="20000" output="docs/experiments/data/E16/leases.csv":
     cargo run --release -p goliath-sim -- leases {{seeds}} {{output}}
 
+# Store crash and restart with renewals answered before the barrier, plus planted bugs.
+renewals seeds="20000" output="docs/experiments/data/E29/renewals.csv":
+    cargo run --release -p goliath-sim -- renewals {{seeds}} {{output}}
+
 # Long, real-process durability and latency experiment. Never part of `test`.
 store-torture kills="1000":
     cargo build --release -p goliath-store --features fault-injection
