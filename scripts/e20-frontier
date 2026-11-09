@@ -23,6 +23,7 @@ import tomllib
 import e11_support as support
 import goliath_platform as platform
 import goliath_bundle
+import e28_direct_bots as direct_bots
 from e18_d9_layout import plan
 from e18_d9_wire import D9Observer
 from e18_process import ProcessSampler as OriginalProcessSampler
@@ -82,6 +83,16 @@ def native_threads(pid):
 def last_bot(path):
     rows=[row for row in support.complete_json_lines(path) if 'online' in row]
     return rows[-1] if rows else {}
+
+
+def io_pool_ready(folder, process, required):
+    """A listening TCP socket can precede the proxy's IO-pool initialization."""
+    def lines():
+        if process.poll() is not None:
+            raise RuntimeError('proxy exited before fixed IO drivers were ready')
+        return [line for line in (folder/'proxy.log').read_text().rpartition('\n')[0].splitlines()
+            if 'E18 fixed IO pool:' in line]
+    return support.wait(lines,10,'reactor snapshot did not enable fixed IO drivers within 10s') if required else lines()
 
 
 def population(tile):
@@ -173,6 +184,7 @@ def main():
     parser.add_argument('--counts',default='500')
     parser.add_argument('--allow-200',action='store_true',help='only for an explicitly reviewer-approved window')
     parser.add_argument('--capacity-diagnostic',action='store_true',default=True,help='tap-free D9 capacity cell')
+    parser.add_argument('--direct-bots',action='store_true',help='Linux E28 capacity: untraced final-stamps bots with direct handshake-host routing, no shims')
     parser.add_argument('--warmup',type=float,default=30)
     parser.add_argument('--seconds',type=float,default=60)
     args=parser.parse_args();counts=[int(v) for v in args.counts.split(',')]
@@ -182,6 +194,12 @@ def main():
     support.RUNS.mkdir(parents=True,exist_ok=True)
     bins=args.bins.resolve()
     linux_identity = goliath_bundle.validate(bins) if goliath_bundle.is_e28(bins) else None
+    bots_bins=bins;bots_identity=None;bot_proof_hash=None
+    if args.direct_bots:
+        if not platform.LINUX or not args.capacity_diagnostic:
+            raise SystemExit('--direct-bots requires Linux capacity mode')
+        goliath_bundle.validate(bins,{'final'})
+        bots_bins,bots_identity,bot_proof_hash=direct_bots.selection()
     if len(counts)!=1 or counts[0]<100 or args.warmup!=30 or args.seconds!=60:
         raise SystemExit('one frontier cell per window, at least100 players,30warm/60measure')
     target=DATA/(args.name+'.json')
@@ -195,14 +213,18 @@ def main():
     result=dict(kind='E20-D9-frontier-cell',status='preflight',acceptance=False,mode='release coalesced, lazy readers, endpoint pool, cut backoff',
         server_core_cap=4,bot_core_cap=1,proxy_inside_server_cap=not args.proxy_outside_cap,counts=counts,layouts=layouts,cells={},
         warmup_seconds=args.warmup,measurement_seconds=args.seconds,
-        binaries={name:hashlib.sha256((bins/name).read_bytes()).hexdigest() for name in ['horizon-client','meridian','meridian-sidecar','goliath-store','horizon-bots']})
+        bots_bundle='final-stamps' if args.direct_bots else bins.name,
+        binaries={name:hashlib.sha256(((bots_bins if name=='horizon-bots' else bins)/name).read_bytes()).hexdigest() for name in ['horizon-client','meridian','meridian-sidecar','goliath-store','horizon-bots']})
     if linux_identity:
         result.update(e28_bundle=linux_identity, cpu_mode=platform.cpu_mode())
+    if bots_identity:
+        result.update(bots_bundle_identity=bots_identity,direct_bots_proof_sha256=bot_proof_hash,
+            bot_latency_trace_enabled=False,bot_trace_environment_removed=list(direct_bots.TRACE_ENV))
     canonical=json.loads((bins/'canonical.json').read_text())
     candidate_path=bins/'candidate.json'
     proxy_candidate=json.loads((candidate_path if candidate_path.exists() else ROOT/'.local/bin/meridian-e18/candidate-1/candidate.json').read_text())
     for name,digest in result['binaries'].items():
-        expected=canonical['binaries'].get(name,proxy_candidate['binaries'].get(name))
+        expected=bots_identity['binaries'][name] if name=='horizon-bots' and bots_identity else canonical['binaries'].get(name,proxy_candidate['binaries'].get(name))
         if expected!=digest:raise SystemExit('frozen release artifact changed: '+name)
     result['canonical_sha256']=hashlib.sha256((bins/'canonical.json').read_bytes()).hexdigest()
     result['proxy_candidate_sha256']=hashlib.sha256((candidate_path if candidate_path.exists() else ROOT/'.local/bin/meridian-e18/candidate-1/candidate.json').read_bytes()).hexdigest()
@@ -212,6 +234,8 @@ def main():
     result['harness_sha256']={name:hashlib.sha256((ROOT/'scripts'/name).read_bytes()).hexdigest() for name in ['e18-production-slope','e18_d9_layout.py','e18_d9_wire.py','e18-front-shim','e18_sockets.py','e18_process.py','e17_flat09_metrics.py','e17-m4','capacity-bench','e11_support.py','goliath-cluster']}
     if platform.LINUX:
         result['harness_sha256'].update({name:goliath_bundle.sha(ROOT/'scripts'/name) for name in ['goliath_platform.py','goliath_bundle.py']})
+    if args.direct_bots:
+        result['harness_sha256'].update({name:goliath_bundle.sha(ROOT/'scripts'/name) for name in ['e28_direct_bots.py','e28-direct-bots-tests']})
     support.save(target,result)
     began=time.monotonic();deadline=began+1500
     def check():
@@ -235,7 +259,9 @@ def main():
             if args.capacity_diagnostic and count==1050 and (args.proxy_outside_cap or not result['cells']['975'].get('diagnostic_pass')):
                 result['cells']['1050']=dict(status='not-run',reason='feasibility diagnostic is 975 only' if args.proxy_outside_cap else '975 did not pass the diagnostic gates');break
             settle();layout=layouts[count]
-            cell=dict(status='starting',load_start=os.getloadavg(),samples=[],bot_commands=[],layout=layout)
+            cell=dict(status='starting',load_start=os.getloadavg(),samples=[],bot_commands=[],layout=layout,
+                shim_mode='none-direct-bots' if args.direct_bots else 'forward-only' if args.capacity_diagnostic else 'not used',
+                bots_bundle=result['bots_bundle'])
             result['cells'][str(count)]=cell;support.save(target,result)
             print(f'D9 {count}: starting release fixture',flush=True)
             with tempfile.TemporaryDirectory(prefix='E20-D9-',dir=support.RUNS) as temporary:
@@ -271,8 +297,7 @@ def main():
                 if observer:observer.start()
                 try:
                     instance.__init__(folder,module.RESOURCES,layout['edge'],tile_env={'HORIZON_E11_MEASURE':'1'},max_players=10000,max_expected=10000)
-                    cell['io_pool_started']=[line for line in (folder/'proxy.log').read_text().rpartition('\n')[0].splitlines() if 'E18 fixed IO pool:' in line]
-                    if reactor and not cell['io_pool_started']:raise RuntimeError('reactor snapshot did not enable fixed IO drivers')
+                    cell['io_pool_started']=io_pool_ready(folder,instance.proxy.process,reactor)
                     pids=[]
                     for name,tile in instance.tiles.items():
                         role='tile-'+name;server_roles.append(role);monitor.register(role,tile.server.process.pid);pids.append(tile.server.process.pid)
@@ -291,9 +316,11 @@ def main():
                         for command in ['gamerule spawn_mobs false','gamerule advance_weather false','gamerule advance_time false','gamerule random_tick_speed 3','gamerule respawn_radius 0','time set day','kill @e[type=!minecraft:player]']:
                             tile.ask('console '+command)
                     for index,group in enumerate(layout['groups']):
-                        if args.capacity_diagnostic:
+                        if args.direct_bots:
+                            port=instance.port
+                        elif args.capacity_diagnostic:
                             shim_path=folder/('shim-'+group['label']+'.jsonl');shim_stream=shim_path.open('w');streams.append(shim_stream)
-                            shim=subprocess.Popen(platform.launch_command([os.sys.executable,'-B',str(ROOT/'scripts/e18-front-shim'),'--target',str(instance.port),'--host',group['host'],'--index',str(index)], 'harness'),cwd=folder,stdout=shim_stream,stderr=subprocess.STDOUT)
+                            shim=subprocess.Popen(platform.launch_command([os.sys.executable,'-B',str(ROOT/'scripts/e18-front-shim'),'--target',str(instance.port),'--host',group['host'],'--index',str(index),'--forward-only'], 'harness'),cwd=folder,stdout=shim_stream,stderr=subprocess.STDOUT)
                             shims.append((group,shim,shim_path));monitor.register('shim-'+group['label'],shim.pid)
                             def listening():
                                 if shim.poll() is not None:raise RuntimeError('test-only shim exited before listen')
@@ -302,17 +329,21 @@ def main():
                             port=support.wait(listening,10,'shim listen timeout')['port']
                         else:port=observer.listen(('127.0.0.1',instance.port),front=True,label='front-'+group['label'],host=group['host'])
                         sockets.add_target(port)
-                        command=[str(bins/'horizon-bots'),'--event-loop','--server',f'127.0.0.1:{port}','--bots',str(group['count']),
+                        command=[str(bots_bins/'horizon-bots'),'--event-loop','--server',f'127.0.0.1:{port}','--bots',str(group['count']),
                             '--behaviour','route','--seconds','900','--join-every','.25' if args.capacity_diagnostic else '.1','--view-distance','3','--seed','12345','--speed','4','--height','2','--name',group['prefix']]
                         command+=['--spread',','.join(map(str,group['spread']))] if group['kind']=='interior' else ['--path',group['path']]
+                        if args.direct_bots:command+=direct_bots.arguments(group)
                         stream=(folder/(group['label']+'.jsonl')).open('w');streams.append(stream)
-                        process=subprocess.Popen(platform.launch_command(command, 'bots'),cwd=folder,env=support.private_env(folder/(group['label']+'-home')),stdout=stream,stderr=subprocess.STDOUT)
+                        environment=direct_bots.environment(folder/(group['label']+'-home')) if args.direct_bots else support.private_env(folder/(group['label']+'-home'))
+                        process=subprocess.Popen(platform.launch_command(command, 'bots'),cwd=folder,env=environment,stdout=stream,stderr=subprocess.STDOUT)
                         processes.append((group,process));monitor.register('bots-'+group['label'],process.pid);cell['bot_commands'].append(command)
                     budgets['bots']=proxy.TrackedBudget([p.pid for _,p in processes],1).start()
                     crossed=set();last_cross_poll=0.
                     def healthy(joining=False):
                         nonlocal last_cross_poll
                         rows={g['label']:last_bot(folder/(g['label']+'.jsonl')) for g,_ in processes}
+                        if args.direct_bots and any('e25_pending_frames' in row for row in rows.values()):
+                            raise RuntimeError('direct capacity bot unexpectedly enabled latency tracing')
                         if any(p.poll() is not None for _,p in processes) or any(r.get('failed',0) for r in rows.values()):raise RuntimeError('D9 bot exit/drop: '+str(rows))
                         for _,process,path in shims:
                             reports=support.complete_json_lines(path)
@@ -452,6 +483,10 @@ def main():
             try:
                 if goliath_bundle.validate(bins) != linux_identity:
                     raise RuntimeError('E28 bundle identity changed during cell')
+                if bots_identity:
+                    _,current_bots,current_proof=direct_bots.selection()
+                    if current_bots!=bots_identity or current_proof!=bot_proof_hash:
+                        raise RuntimeError('direct bot identity or disabled-trace proof changed during cell')
                 if any(goliath_bundle.sha(ROOT/'scripts'/name)!=digest for name,digest in result['harness_sha256'].items()):
                     raise RuntimeError('E28 measurement code changed during cell')
             except Exception as error:

@@ -11,7 +11,8 @@ from e18_d9_wire import D9Observer
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--target',type=int,required=True);parser.add_argument('--host',required=True);parser.add_argument('--index',type=int,required=True)
-    args=parser.parse_args();observer=D9Observer([])
+    parser.add_argument('--forward-only',action='store_true',help='rewrite the handshake, then forward opaque bytes without packet decoding')
+    args=parser.parse_args();observer=D9Observer([],forward_only=args.forward_only)
     observer.source_ports=(20000+4000*args.index,24000+4000*args.index);observer.next_source_port=observer.source_ports[0]
     port=observer.listen(('127.0.0.1',args.target),front=True,host=args.host)
     done=threading.Event()
@@ -19,7 +20,7 @@ def main():
     observer.start()
     def report():
         value=observer.report()
-        print(json.dumps(dict(port=port,pid=os.getpid(),errors=value['errors'],forwarded_bytes=value['forwarded_bytes'],
+        print(json.dumps(dict(port=port,pid=os.getpid(),forward_only=value['forward_only'],errors=value['errors'],forwarded_bytes=value['forwarded_bytes'],
             maximum_pending_bytes=value['maximum_pending_bytes'],outbound_connections=value['outbound_connections'])),flush=True)
     try:
         report()

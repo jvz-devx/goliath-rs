@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Check forward-only capacity transport without game-server load."""
+import selectors
+import socket
+import threading
+import unittest
+from unittest.mock import Mock, patch
+
+import e18_d9_wire as wire
+
+
+def handshake(host):
+    host=host.encode()
+    body=wire.vint(0)+wire.vint(777)+wire.vint(len(host))+host+bytes([99,221,2])
+    return wire.vint(len(body))+body
+
+
+def pair():
+    states=[dict(output=bytearray(),direction=index,prelude=None,read_open=True,
+        write_open=True,end_write=False,closed=False) for index in range(2)]
+    sockets=[Mock(),Mock()]
+    for index,state in enumerate(states):
+        state.update(peer=sockets[1-index],other=states[1-index])
+    return sockets,states
+
+
+class ForwardOnly(unittest.TestCase):
+    def test_fragmented_handshake_rewrite_preserves_a_large_coalesced_tail(self):
+        original=handshake('127.0.0.1');tail=b'\xffopaque\x00'*40000
+        prelude=wire.HostPrelude('d9-capacity.test')
+        for byte in original[:-1]:self.assertIsNone(prelude.feed(bytes([byte])))
+        self.assertEqual(prelude.feed(original[-1:]+tail),handshake('d9-capacity.test')+tail)
+        self.assertEqual(prelude.feed(tail),tail)
+
+    def test_oversized_handshake_still_fails_before_forwarding(self):
+        with self.assertRaisesRegex(ValueError,'handshake frame cap'):
+            wire.HostPrelude('d9-a.test').feed(wire.vint(4097)+b'x')
+
+    def test_forward_only_rejects_nonempty_witness_selection(self):
+        with self.assertRaisesRegex(ValueError,'cannot decode witnesses'):
+            wire.D9Observer(['witness'],forward_only=True)
+
+    def test_opaque_bytes_forward_both_directions_and_half_closes_drain(self):
+        payload=bytes(range(256))*4096
+        reply=bytes(reversed(range(256)))*2048
+        received=[];errors=[]
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1',0));listener.listen();listener.settimeout(5)
+            def backend():
+                try:
+                    with listener.accept()[0] as connection:
+                        connection.settimeout(5)
+                        parts=[]
+                        while data:=connection.recv(8191):parts.append(data)
+                        received.append(b''.join(parts))
+                        connection.sendall(reply);connection.shutdown(socket.SHUT_WR)
+                except BaseException as error:errors.append(repr(error))
+            worker=threading.Thread(target=backend,daemon=True);worker.start()
+            observer=wire.D9Observer([],forward_only=True)
+            port=observer.listen(listener.getsockname(),front=True,host='d9-capacity.test')
+            try:
+                with patch.object(wire,'WitnessDecoder',side_effect=AssertionError('capacity bytes must not be decoded')):
+                    observer.start()
+                    with socket.create_connection(('127.0.0.1',port),timeout=5) as client:
+                        original=handshake('127.0.0.1')
+                        client.sendall(original[:1]);client.sendall(original[1:4]);client.sendall(original[4:]+payload)
+                        client.shutdown(socket.SHUT_WR)
+                        parts=[]
+                        while data:=client.recv(16381):parts.append(data)
+                    worker.join(5)
+                    self.assertFalse(worker.is_alive())
+            finally:observer.stop()
+        self.assertEqual(errors,[])
+        expected=handshake('d9-capacity.test')+payload
+        self.assertEqual(received,[expected]);self.assertEqual(b''.join(parts),reply)
+        report=observer.report()
+        self.assertEqual(report['errors'],[])
+        self.assertEqual(report['forwarded_bytes'],[len(expected),len(reply)])
+        self.assertEqual(report['outbound_connections'],1)
+        self.assertTrue(report['forward_only']);self.assertEqual(report['front_packets'],0)
+        self.assertLessEqual(report['maximum_pending_bytes'],8*1024*1024)
+
+    def test_partial_writes_preserve_order_and_shutdown_only_after_drain(self):
+        observer=wire.D9Observer([],forward_only=True)
+        sockets,states=pair();state=states[0]
+        state['output'].extend(b'abcdefgh');state['end_write']=True
+        sent=bytearray()
+        def send(data):
+            size=min(3,len(data));sent.extend(data[:size]);return size
+        sockets[0].send.side_effect=send
+        try:
+            with patch.object(observer,'selector',Mock()) as selector:
+                observer.flush_output(sockets[0],state)
+                self.assertEqual(state['output'],b'defgh');sockets[0].shutdown.assert_not_called()
+                observer.flush_output(sockets[0],state)
+                self.assertEqual(state['output'],b'gh');sockets[0].shutdown.assert_not_called()
+                observer.flush_output(sockets[0],state)
+                self.assertEqual(state['output'],b'');self.assertEqual(sent,b'abcdefgh')
+                sockets[0].shutdown.assert_called_once_with(socket.SHUT_WR)
+                self.assertEqual(selector.modify.call_args.args[1],selectors.EVENT_READ)
+        finally:observer.selector.close()
+
+    def test_eof_waits_for_pending_peer_bytes_and_closes_both_sockets(self):
+        observer=wire.D9Observer([],forward_only=True)
+        sockets,states=pair();states[1]['output'].extend(b'last bytes')
+        sockets[1].send.side_effect=lambda data:len(data)
+        try:
+            with patch.object(observer,'selector',Mock()):
+                observer.forward_eof(sockets[0],states[0])
+                sockets[1].shutdown.assert_not_called()
+                observer.flush_output(sockets[1],states[1])
+                sockets[1].shutdown.assert_called_once_with(socket.SHUT_WR)
+                sockets[0].close.assert_not_called()
+                observer.forward_eof(sockets[1],states[1])
+                for item in sockets:item.close.assert_called_once()
+                self.assertTrue(all(state['closed'] for state in states))
+        finally:observer.selector.close()
+
+    def test_pending_cap_rejects_without_extending_the_buffer(self):
+        observer=wire.D9Observer([],forward_only=True)
+        _,states=pair();states[1]['output'].extend(b'x'*(8*1024*1024-1))
+        try:
+            with self.assertRaisesRegex(ValueError,'output cap exceeded'):
+                observer.queue_forwarded(states[0],b'xx')
+            self.assertEqual(len(states[1]['output']),8*1024*1024-1)
+            self.assertEqual(observer.forwarded_bytes,[0,0])
+        finally:observer.selector.close()
+
+    def test_immediate_full_write_needs_no_write_subscription(self):
+        observer=wire.D9Observer([],forward_only=True)
+        sockets,states=pair();sockets[1].send.side_effect=lambda data:len(data)
+        try:
+            with patch.object(observer,'selector',Mock()) as selector:
+                observer.queue_forwarded(states[0],b'opaque bytes')
+                self.assertEqual(states[1]['output'],b'')
+                self.assertEqual(observer.forwarded_bytes,[12,0])
+                selector.modify.assert_not_called()
+        finally:observer.selector.close()
+
+    def test_immediate_partial_write_buffers_the_tail_without_reordering(self):
+        observer=wire.D9Observer([],forward_only=True)
+        sockets,states=pair();sockets[1].send.return_value=3
+        try:
+            with patch.object(observer,'selector',Mock()) as selector:
+                observer.queue_forwarded(states[0],b'abcdef')
+                self.assertEqual(states[1]['output'],b'def')
+                self.assertEqual(selector.modify.call_args.args[1],selectors.EVENT_READ|selectors.EVENT_WRITE)
+                observer.queue_forwarded(states[0],b'gh')
+                self.assertEqual(states[1]['output'],b'defgh')
+                sockets[1].send.assert_called_once_with(b'abcdef')
+                self.assertEqual(observer.forwarded_bytes,[8,0])
+        finally:observer.selector.close()
+
+    def test_immediate_blocked_write_queues_every_byte(self):
+        observer=wire.D9Observer([],forward_only=True)
+        sockets,states=pair();sockets[1].send.side_effect=BlockingIOError()
+        try:
+            with patch.object(observer,'selector',Mock()) as selector:
+                observer.queue_forwarded(states[0],b'abcdef')
+                self.assertEqual(states[1]['output'],b'abcdef')
+                self.assertEqual(observer.forwarded_bytes,[6,0])
+                self.assertTrue(selector.modify.called)
+        finally:observer.selector.close()
+
+    def test_eof_with_an_incomplete_handshake_reports_an_error(self):
+        observer=wire.D9Observer([],forward_only=True)
+        sockets,states=pair();states[0]['prelude']=wire.HostPrelude('d9-a.test')
+        states[0]['prelude'].feed(b'\x10\x00')
+        try:
+            with self.assertRaisesRegex(ValueError,'truncated initial handshake'):
+                observer.forward_eof(sockets[0],states[0])
+        finally:observer.selector.close()
+
+    def test_empty_probe_close_is_not_a_truncated_handshake(self):
+        observer=wire.D9Observer([],forward_only=True)
+        sockets,states=pair();states[0]['prelude']=wire.HostPrelude('d9-a.test')
+        try:
+            with patch.object(observer,'selector',Mock()):
+                observer.forward_eof(sockets[0],states[0])
+                sockets[1].shutdown.assert_called_once_with(socket.SHUT_WR)
+                self.assertFalse(states[0]['read_open'])
+                self.assertEqual(observer.errors,[])
+        finally:observer.selector.close()
+
+
+if __name__=='__main__':unittest.main()

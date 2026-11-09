@@ -1,0 +1,38 @@
+{
+  "kind": "E28-builder-final-verification",
+  "acceptance": "pending reviewer reproduction",
+  "scope": "Builder checks completed before E28R began reproduction; recorded host-window status is a handoff snapshot, not a live status.",
+  "registered_tests": 239,
+  "passed_tests": 232,
+  "skipped_tests": 7,
+  "failed_tests": 0,
+  "suites": [
+    {"command": "python3 -B scripts/e28-direct-bots-tests", "tests": 8, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e11-tools-test", "tests": 7, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e17-flat09-tests", "tests": 5, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e14-runner-test", "tests": 30, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e17-tools-test", "tests": 12, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e17-d9-tests", "tests": 5, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e18-tools-test", "tests": 12, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e20-tools-test", "tests": 11, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e23-tests", "tests": 17, "skipped": 1, "exit": 0},
+    {"command": "python3 -B scripts/e23-soak-contracts", "tests": 3, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e24-tests", "tests": 12, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e25-tools-test", "tests": 48, "skipped": 4, "exit": 0},
+    {"command": "python3 -B scripts/e26-tests", "tests": 6, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e26b-tests", "tests": 11, "skipped": 2, "exit": 0},
+    {"command": "python3 -B scripts/m3-chaos-test", "tests": 20, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e28-platform-tests", "tests": 20, "skipped": 0, "exit": 0},
+    {"command": "python3 -B scripts/e28-shim-tests", "tests": 12, "skipped": 0, "exit": 0}
+  ],
+  "skip_scope": "One E23 retained Mac bundle check, four E25 private Mac index checks and two E26b retained Mac bundle checks. These are not passing artifact validations.",
+  "other_checks": [
+    {"command": "python3 -B scripts/e17-flat09-report --data-dir docs/experiments/data/E28/baseline", "exit": 0, "result": "200/225 bracket verified from retained rows"},
+    {"command": "python3 -B scripts/e20-results e28-frontier-v3 --baseline 200 --data-dir docs/experiments/data/E28/frontier", "exit": 0, "result": "425/475 bracket, 450 mixed, ratio 2.125"},
+    {"command": "git diff --check", "exit": 0},
+    {"command": "scripts/clean-builds", "exit": 0, "freed_mb": 0, "project_mb": 1511},
+    {"command": ".local/bin/host-window status", "exit": 0, "window": "free", "builds_running": 0, "builds_waiting": 0}
+  ],
+  "native_probe_scope": "A tiny standalone Rust guard probe was compiled through the E28M build reservation. No frozen bot/server or application workspace was rebuilt by the measurement builder.",
+  "not_claimed": ["reviewer reproduction", "Darwin runtime regression", "30-minute soak", "proxy latency", "instrumentation cost bound", "live M3 campaign"]
+}

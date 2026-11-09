@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Hash-check stamped bot sources and execute their untraced write guard."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import e11_support as support
+import e28_direct_bots as direct
+import goliath_bundle as bundle
+
+ROOT=support.ROOT
+BOT_SOURCE='crates/horizon-bots/src/'
+PROOF={}
+
+
+def digest(data):return hashlib.sha256(data).hexdigest()
+
+
+def stamped_sources():
+    identity=bundle.validate(direct.STAMP_BUNDLE,{'final-stamps'})
+    canonical=json.loads((direct.STAMP_BUNDLE/'canonical.json').read_text())
+    plain=json.loads((ROOT/'.local/bin/goliath-e28/final/canonical.json').read_text())
+    expected=canonical['projects']['horizon']['source_files']
+    with tempfile.TemporaryDirectory(prefix='E28-bot-source-proof-',dir=support.RUNS) as temporary:
+        directory=Path(temporary)
+        for name in ['main.rs','measured.rs']:
+            relative=BOT_SOURCE+name
+            source=(ROOT/'.local/src/horizon-tiles'/relative).read_bytes()
+            if digest(source)!=plain['projects']['horizon']['source_files'][relative]:
+                raise AssertionError('source proof requires the restored final source: '+relative)
+            target=directory/relative;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(source)
+        patches=[entry for entry in canonical['projects']['horizon']['patches'] if 'horizon-15-' in entry['path']]
+        if len(patches)!=2:raise AssertionError('expected b2 and Linux stamp overlay')
+        for entry in patches:
+            path=ROOT/entry['path']
+            if bundle.sha(path)!=entry['sha256']:raise AssertionError('stamp patch changed')
+            sections=re.split(r'(?=^diff --git )',path.read_text(),flags=re.MULTILINE)
+            selected=''.join(section for section in sections if section.startswith('diff --git a/'+BOT_SOURCE))
+            subprocess.run(['patch','--batch','--silent','-p1'],cwd=directory,input=selected,text=True,
+                capture_output=True,check=True)
+        result={name:(directory/(BOT_SOURCE+name)).read_text() for name in ['main.rs','measured.rs','latency_trace.rs']}
+        hashes={BOT_SOURCE+name:digest(text.encode()) for name,text in result.items()}
+        if any(expected.get(name)!=value for name,value in hashes.items()):
+            raise AssertionError('reconstructed source differs from the frozen compiled source')
+    PROOF.update(kind='E28-direct-bots-disabled-trace-proof',status='passed',
+        bots_bundle='final-stamps',bots_sha256=identity['binaries']['horizon-bots'],
+        manifest_sha256=identity['manifest_sha256'],source_sha256=hashes,patches=patches,
+        checker_sha256=bundle.sha(Path(__file__)),
+        launcher_sha256=bundle.sha(ROOT/'scripts/e28_direct_bots.py'),
+        trace_enable_environment=list(direct.TRACE_ENV),
+        scope='source-hash proof and extracted native guard test, not a rebuild of the frozen bot')
+    return result
+
+
+def rust_function(source,signature):
+    """Extract the pinned function, ignoring double-quoted string braces."""
+    start=source.index(signature);opening=source.index('{',start)
+    depth=0;quoted=False;escaped=False
+    for index in range(opening,len(source)):
+        char=source[index]
+        if quoted:
+            if escaped:escaped=False
+            elif char=='\\':escaped=True
+            elif char=='"':quoted=False
+            continue
+        if char=='"':quoted=True
+        elif char=='{':depth+=1
+        elif char=='}':
+            depth-=1
+            if not depth:return source[start:index+1]
+    raise AssertionError('unterminated pinned Rust function')
+
+
+def native_probe(sources):
+    trace=sources['latency_trace.rs'].replace('use serde_json::json;','')
+    signature='pub(super) fn now_ns() -> Result<u64>'
+    while True:
+        original=rust_function(trace,signature)
+        replacement=signature+' { crate::CLOCK_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst); Ok(1000000) }'
+        trace=trace.replace(original,replacement,1)
+        # Two cfg-selected definitions exist. Replace each exactly once.
+        next_at=trace.find(signature,trace.find(signature)+len(signature))
+        if next_at<0:break
+        second=rust_function(trace[next_at:],signature)
+        trace=trace[:next_at]+trace[next_at:].replace(second,replacement,1)
+        break
+    flush=rust_function(sources['measured.rs'],'fn flush(&mut self) -> Result<()>')
+    program='''//! Exercises the pinned bot trace guard with counted clock and JSON sinks.
+use std::io::Write;
+use std::sync::atomic::{AtomicUsize,Ordering};
+extern crate self as horizon_protocol;
+pub mod ids { pub mod play { pub mod serverbound { pub const MOVE_PLAYER_POS: u32 = 30; } } }
+static CLOCK_CALLS: AtomicUsize = AtomicUsize::new(0);
+macro_rules! json { ($($token:tt)*) => { "probe-json-sink" }; }
+mod latency_trace {
+'''+trace+'''
+pub(super) fn output_initialized() -> bool { OUTPUT.get().is_some() }
+pub(super) fn enabled(path: &std::path::Path) -> Trace {
+    Trace {name:"Probe".into(),uuid:7,tile:"a".into(),output:Arc::new(Mutex::new(File::create(path).unwrap())),pending:VecDeque::new(),sequence:0}
+}
+}
+type Result<T> = std::result::Result<T,String>;
+fn err(error: std::io::Error) -> String { error.to_string() }
+mod measured {
+use super::*;
+#[derive(Default)] struct Socket { bytes: Vec<u8> }
+impl Write for Socket {
+    fn write(&mut self,data:&[u8])->std::io::Result<usize>{let size=data.len().min(3);self.bytes.extend_from_slice(&data[..size]);Ok(size)}
+    fn flush(&mut self)->std::io::Result<()>{Ok(())}
+}
+struct Bot { connected: bool, sent: usize, output: Vec<u8>, bytes_out:u64, socket:Socket, latency_trace:Option<latency_trace::Trace> }
+impl Bot {
+'''+flush+'''
+}
+pub(super) fn run() {
+    assert!(std::env::var_os("E25_LATENCY_DIR").is_none());
+    assert!(latency_trace::Trace::bind("Probe",7).unwrap().is_none());
+    assert!(!latency_trace::output_initialized());
+    let mut bot=Bot {connected:true,sent:0,output:vec![1,2,3,4,5,6],bytes_out:0,socket:Socket::default(),latency_trace:None};
+    bot.flush().unwrap();
+    assert_eq!(bot.socket.bytes,vec![1,2,3,4,5,6]);assert_eq!(CLOCK_CALLS.load(Ordering::SeqCst),0);
+    let mut trace=latency_trace::enabled(std::path::Path::new(&std::env::args().nth(1).unwrap()));
+    trace.queued(&[30,1,2],0,3,None).unwrap();
+    let mut bot=Bot {connected:true,sent:0,output:vec![1,2,3,4,5,6],bytes_out:0,socket:Socket::default(),latency_trace:Some(trace)};
+    bot.flush().unwrap();assert_eq!(CLOCK_CALLS.load(Ordering::SeqCst),1);
+    println!("disabled_clock_calls=0 enabled_clock_calls=1");
+}
+}
+fn main() { measured::run(); }
+'''
+    with tempfile.TemporaryDirectory(prefix='E28-bot-clock-probe-',dir=support.RUNS) as temporary:
+        directory=Path(temporary);source=directory/'probe.rs';binary=directory/'probe'
+        source.write_text(program)
+        compiled=subprocess.run([str(ROOT/'.local/bin/host-window'),'build','E28M','--','rustc',
+            '--edition=2021','-A','warnings',str(source),'-o',str(binary)],capture_output=True,text=True,timeout=120)
+        if compiled.returncode:raise AssertionError(support.sanitize(compiled.stderr))
+        environment=os.environ.copy()
+        for name in direct.TRACE_ENV:environment.pop(name,None)
+        run=subprocess.run([str(binary),str(directory/'enabled-control.jsonl')],env=environment,
+            capture_output=True,text=True,timeout=10)
+        if run.returncode:raise AssertionError(support.sanitize(run.stderr))
+    if run.stdout.strip()!='disabled_clock_calls=0 enabled_clock_calls=1':raise AssertionError('native clock control did not execute')
+    return dict(disabled_clock_calls=0,enabled_clock_calls=1,probe_sha256=digest(program.encode()),
+        method='original Trace::bind and Bot::flush bodies; counted clock, partial-write socket and substituted JSON sink')
+
+
+class SourceProof(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):cls.sources=stamped_sources()
+
+    def test_trace_is_absent_before_output_initialization_without_opt_in(self):
+        bind=rust_function(self.sources['latency_trace.rs'],'pub(super) fn bind(')
+        self.assertRegex(bind,r'let Some\(directory\) = std::env::var_os\("E25_LATENCY_DIR"\) else\s*\{\s*return Ok\(None\);\s*\}')
+        self.assertLess(bind.index('return Ok(None)'),bind.index('OUTPUT.get_or_init'))
+        self.assertNotIn('now_ns(',bind)
+
+    def test_only_added_packet_clock_call_is_guarded_by_optional_trace(self):
+        measured=self.sources['measured.rs']
+        self.assertEqual(measured.count('latency_trace::now_ns()'),1)
+        normalized=' '.join(measured.split())
+        self.assertIn('let at_ns = if self .latency_trace .as_ref() .is_some_and(super::latency_trace::Trace::needs_clock) { Some(super::latency_trace::now_ns()?) } else { None };',normalized)
+        self.assertNotIn('latency_trace::now_ns()',self.sources['main.rs'])
+        self.assertIn('if let Some(trace) = &mut self.latency_trace { trace.queued(',normalized)
+        self.assertIn('if let Some(trace) = &mut self.latency_trace { trace.accepted(',normalized)
+
+    def test_native_untraced_write_makes_no_clock_call(self):
+        PROOF['native_probe']=native_probe(self.sources)
+
+
+class Launch(unittest.TestCase):
+    def selection_fixture(self,proof_changes=None):
+        sources={name:'source-hash' for name in direct.SOURCE_FILES}
+        proof=dict(status='passed',bots_sha256='stamped-binary',checker_sha256='checker',launcher_sha256='launcher',
+            source_sha256=sources,native_probe=dict(disabled_clock_calls=0,enabled_clock_calls=1))
+        proof.update(proof_changes or {})
+        return proof,dict(projects=dict(horizon=dict(source_files=sources)))
+
+    def select_fixture(self,proof_changes=None):
+        proof,canonical=self.selection_fixture(proof_changes)
+        def sha(path):
+            return 'checker' if Path(path).name=='e28-direct-bots-tests' else 'launcher' if Path(path).name=='e28_direct_bots.py' else 'proof'
+        with patch.object(bundle,'validate',return_value=dict(binaries={'horizon-bots':'stamped-binary'})) as validate, \
+                patch.object(Path,'read_text',side_effect=[json.dumps(proof),json.dumps(canonical)]),patch.object(bundle,'sha',side_effect=sha):
+            result=direct.selection()
+            validate.assert_called_once_with(direct.STAMP_BUNDLE,{'final-stamps'})
+            return result
+
+    def test_selection_validates_the_stamped_bundle_and_proof(self):
+        directory,identity,proof=self.select_fixture()
+        self.assertEqual(directory,direct.STAMP_BUNDLE)
+        self.assertEqual(identity['binaries']['horizon-bots'],'stamped-binary')
+        self.assertEqual(proof,'proof')
+
+    def test_selection_rejects_a_proof_for_a_different_bot_binary(self):
+        with self.assertRaisesRegex(ValueError,'selected stamped binary'):
+            self.select_fixture(dict(bots_sha256='ordinary-final-bots'))
+
+    def test_selection_rejects_an_enabled_clock_path(self):
+        with self.assertRaisesRegex(ValueError,'disabled clock path is unproven'):
+            self.select_fixture(dict(native_probe=dict(disabled_clock_calls=1,enabled_clock_calls=1)))
+
+    def test_direct_options_only_add_the_original_group_host(self):
+        self.assertEqual(direct.arguments({'host':'d9-a.test'}),['--handshake-host','d9-a.test'])
+
+    def test_trace_configuration_is_removed_but_cpu_placement_is_preserved(self):
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            values={name:'must-not-reach-capacity-bots' for name in direct.TRACE_ENV}
+            values['GOLIATH_CPU_CGROUP']='test-placement-preserved'
+            with patch.dict(os.environ,values):environment=direct.environment(Path(temporary))
+            self.assertTrue(all(name not in environment for name in direct.TRACE_ENV))
+            self.assertEqual(environment['GOLIATH_CPU_CGROUP'],'test-placement-preserved')
+
+
+if __name__=='__main__':
+    parser=argparse.ArgumentParser();parser.add_argument('--proof',type=Path)
+    args=parser.parse_args()
+    result=unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__]))
+    if result.wasSuccessful() and args.proof:support.save(args.proof,PROOF)
+    raise SystemExit(0 if result.wasSuccessful() else 1)

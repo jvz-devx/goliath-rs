@@ -28,11 +28,11 @@ def endpoints(levels, baseline=None):
 
 def ledger(prefix, baseline=None):
     rows=[];levels={};modes=set()
-    pattern=re.compile(re.escape(prefix)+r'-(\d+)-r(\d+)\.json(?:\.gz)?$')
+    pattern=re.compile(re.escape(prefix)+r'-(\d+)-r(\d+)(?:-a(\d+))?\.json(?:\.gz)?$')
     for path in DATA.glob(prefix+'-*-r*.json*'):
         match=pattern.fullmatch(path.name)
         if not match:continue
-        count,repeat=map(int,match.groups());data=support.read_json(path)
+        count,repeat=map(int,match.groups()[:2]);attempt=int(match.group(3) or 0);data=support.read_json(path)
         if data.get('e28_bundle') and baseline is None:
             raise ValueError('E28 needs --baseline from this machine; never reuse the Mac baseline')
         if data.get('e28_bundle'):
@@ -40,7 +40,8 @@ def ledger(prefix, baseline=None):
             if len(modes)>1:raise ValueError('do not mix pin and limiter cells in one frontier ledger')
         cell=data['cells'][str(count)]
         raw=path.read_bytes();raw=gzip.decompress(raw) if path.suffix=='.gz' else raw
-        row=dict(count=count,repeat=repeat,path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(raw).hexdigest(),status=cell['status'])
+        row=dict(count=count,repeat=repeat,attempt=attempt,path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(raw).hexdigest(),status=cell['status'],
+            valid=False,passed=False,failures=[cell.get('error',data.get('error','incomplete cell'))])
         if cell['status']=='complete':
             steady=cell['processes']['phases']['steady']
             cpu={name:value['cores'] for name,value in steady['fixture'].items()}
@@ -57,7 +58,7 @@ def ledger(prefix, baseline=None):
                 quiet_seconds=data['seconds'],binaries=data['binaries'])
             levels.setdefault(count,[]).append(row)
         rows.append(row)
-    rows.sort(key=lambda row:(row['count'],row['repeat']))
+    rows.sort(key=lambda row:(row['count'],row['repeat'],row['attempt']))
     return dict(kind='E20-frontier-ledger',prefix=prefix,**endpoints(levels,baseline),rows=rows,
         authority='builder evidence; reviewer independently verifies milestone acceptance')
 

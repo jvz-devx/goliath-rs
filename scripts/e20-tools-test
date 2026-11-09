@@ -4,6 +4,8 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 import tempfile
+import json
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +15,30 @@ frontier=importlib.util.module_from_spec(spec)
 loader.exec_module(frontier)
 
 class Contract(unittest.TestCase):
+    def test_io_pool_waits_for_a_complete_delayed_startup_line(self):
+        with tempfile.TemporaryDirectory(dir=frontier.support.RUNS) as temporary:
+            process=SimpleNamespace(poll=lambda:None)
+            with patch.object(Path,'read_text',side_effect=['listening\n','E18 fixed IO pool: 4 drivers','E18 fixed IO pool: 4 drivers\n']):
+                self.assertEqual(frontier.io_pool_ready(Path(temporary),process,True),['E18 fixed IO pool: 4 drivers'])
+
+    def test_io_pool_wait_rejects_exit_and_has_a_finite_deadline(self):
+        process=SimpleNamespace(poll=lambda:1)
+        with self.assertRaisesRegex(RuntimeError,'proxy exited'):frontier.io_pool_ready(Path('.'),process,True)
+        with patch.object(Path,'read_text',return_value='listening\n'),patch.object(frontier.support.time,'monotonic',side_effect=[100,111]):
+            with self.assertRaisesRegex(RuntimeError,'within 10s'):
+                frontier.io_pool_ready(Path('.'),SimpleNamespace(poll=lambda:None),True)
+
+    def test_failed_attempts_keep_their_reason_and_fresh_attempt_name(self):
+        results=frontier.load('e20_attempt_test_results',frontier.ROOT/'scripts/e20-results')
+        with tempfile.TemporaryDirectory(dir=frontier.support.RUNS) as temporary:
+            data=Path(temporary)
+            for name in ['attempts-400-r1.json','attempts-400-r1-a1.json']:
+                (data/name).write_text(json.dumps(dict(cells={'400':dict(status='failed',error='startup failure')})))
+            with patch.object(results,'DATA',data):ledger=results.ledger('attempts',200)
+            self.assertEqual([(row['repeat'],row['attempt'],row['valid'],row['failures']) for row in ledger['rows']],
+                [(1,0,False,['startup failure']),(1,1,False,['startup failure'])])
+            self.assertIsNone(ledger['frontier'])
+
     def test_compressed_frontier_cell_cannot_be_overwritten(self):
         with tempfile.TemporaryDirectory(dir=frontier.support.RUNS) as temporary:
             data=Path(temporary)
