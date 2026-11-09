@@ -1,4 +1,5 @@
-//! Owns durable-before-visible operation ordering and fail-closed IO handling.
+//! Owns durable-before-visible operation ordering, its one exception for lease
+//! renewals, and fail-closed IO handling.
 
 use crate::codec::{decode_command, encode_command, invalid};
 use crate::journal::{Compaction, CompactionReady, Journal};
@@ -77,7 +78,10 @@ impl Engine {
         }
     }
 
-    // Statistics only. Decisions use `lock`, which fails closed on poison.
+    // The one place that reads past a poisoned lock. A thread that died inside
+    // the state may have left it half-updated, so nothing here decides anything:
+    // callers sample diagnostic counters or set the closed flag. Every decision
+    // uses `lock`, which fails closed.
     fn peek(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
