@@ -90,3 +90,20 @@ def validate(directory, expected=None):
             if sha(ROOT/patch['path']) != patch['sha256']:
                 raise ValueError('E28 source patch changed: '+patch['path'])
     return dict(bundle=name, manifest_sha256=sha(MANIFEST), binaries=binaries, files=files)
+
+
+# The measured server stacks. final-r2 is final with the two soak fixes in the
+# tile; every other executable is final's bytes.
+SERVER_STACKS = ('final', 'final-r2')
+
+
+def validate_server_stack(directory):
+    """Validate a measured server bundle; final-r2 may differ from final in the tile only."""
+    identity = validate(directory, set(SERVER_STACKS))
+    if identity['bundle'] != 'final':
+        base = validate(BUNDLES / 'final', {'final'})['binaries']
+        changed = {name for name in set(base) | set(identity['binaries'])
+                   if base.get(name) != identity['binaries'].get(name)}
+        if changed != {'horizon-client'}:
+            raise ValueError('E28 final-r2 must differ from final in horizon-client only')
+    return identity

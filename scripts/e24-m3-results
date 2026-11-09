@@ -34,8 +34,9 @@ def main():
     matrix=json.loads((matrix_folder/(args.matrix+'-matrix.json')).read_text())
     matrix_check=matrix_kernel.check_matrix(matrix_folder,matrix,campaign['binaries'])
     windows=[]
-    linux_bundle=bool((ROOT/'.local/bin/goliath-e28/final/horizon-client').exists()
-        and campaign['binaries'].get('horizon-client')==hashlib.sha256((ROOT/'.local/bin/goliath-e28/final/horizon-client').read_bytes()).hexdigest())
+    linux_bundle=any((ROOT/'.local/bin/goliath-e28'/stack/'horizon-client').exists()
+        and campaign['binaries'].get('horizon-client')==hashlib.sha256((ROOT/'.local/bin/goliath-e28'/stack/'horizon-client').read_bytes()).hexdigest()
+        for stack in ['final','final-r2'])
     for base in [folder,matrix_folder]:
         for path in sorted(base.glob('*-window/window.json')):
             record=json.loads(path.read_text())

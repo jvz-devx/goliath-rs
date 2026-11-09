@@ -75,6 +75,7 @@ def main():
     parser.add_argument('--clock-telemetry',action='store_true',help='require fixed-tile raw-clock counters and retain loaded endpoints')
     parser.add_argument('--soak-audit',action='store_true',help='retain E23 cargo, ownership and all-tile checkpoint/recovery audit')
     parser.add_argument('--planning-mutation-rate',type=int)
+    parser.add_argument('--bulk-logs-tmpfs',action='store_true',help='diagnostic only, default off: tile stdout/stderr and anticheat logs on tmpfs')
     args = parser.parse_args()
     if not all(c.isalnum() or c in '-_' for c in args.name) or not args.name:
         raise ValueError('simple fresh attempt name required')
@@ -82,11 +83,17 @@ def main():
         raise ValueError('at most one 45-minute diagnostic window')
     if args.soak_audit and ((args.players!=650 and not platform.LINUX) or args.seconds!=1800 or not args.clock_telemetry):
         raise ValueError('fixed soak is 650 players for1800seconds with clock telemetry')
+    if args.bulk_logs_tmpfs and not (platform.LINUX and args.direct_bots and '-diag-' in args.name):
+        raise ValueError('bulk logs on tmpfs is a named Linux diagnostic, never the standard fixture')
     bins = args.bins.resolve()
     identity_before = validate_snapshot(bins)
     DATA.mkdir(parents=True,exist_ok=True)
     folder = EVIDENCE/args.name
     folder.mkdir(parents=True,exist_ok=False)
+    bulk = None
+    if args.bulk_logs_tmpfs:
+        from e28_log_integrity import BulkLogs
+        bulk = BulkLogs(args.name)
     target = folder/(args.name+'.json')
     if (DATA/(args.name+'-summary.json')).exists():
         raise RuntimeError('attempt already exists')
@@ -180,6 +187,7 @@ def main():
                 if platform.LINUX and args.direct_bots:
                     from e28_log_integrity import install_cluster,path_command
                     install_cluster(result,folder/'log-integrity')
+                    if bulk:bulk.install(result)
                     ns['path_command']=path_command
                 popen = result.subprocess.Popen
                 result.subprocess = scope['Proxy'](result.subprocess,Popen=lambda *a,**kw:trace.store_popen(popen,*a,**kw))
@@ -242,6 +250,7 @@ def main():
                                     sha256=hashlib.sha256(content).hexdigest(),bytes=len(content),
                                     base64=base64.b64encode(content).decode())
                         save(folder/'native-logs.json.gz',dict(encoding='base64-or-archive',files=logs))
+                        if bulk:bulk.observe(instance.root)
                 result.Tile.start,result.Tile.stop,result.Tile.ask,result.Cluster.__init__,result.Cluster.stop = start,stop,asked,initialize,stop_cluster
                 if soak:result=soak.cluster(result)
                 return result
@@ -376,6 +385,7 @@ def main():
                     if gzip.decompress(compressed.read_bytes()) != raw:
                         raise RuntimeError('trace compression differs')
                     path.unlink()
+            if bulk:save(folder/'bulk-logs-tmpfs.json',bulk.finish())
             unchanged = validate_snapshot(bins) == identity_before
             stops = authority_stops(folder)
             from e28_log_integrity import trace_integrity
@@ -385,6 +395,7 @@ def main():
                 heap_diagnostic=args.heap,heap_started=heap_started[0],heap_dumped=heap_dumped[0],
                 observed_authority_latch=bool(trace.expiry_events or stops),authority_stop_events=stops,availability=captured,
                 binaries_unchanged=unchanged,cleanup_errors=cleanup_errors,
+                bulk_logs_tmpfs=bulk.report if bulk else None,
                 authority_trace_integrity=integrity,authority_trace_complete=bool(integrity) and all(row['complete'] for row in integrity.values()),
                 evidence={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in sorted(folder.rglob('*')) if path.is_file()},
@@ -393,6 +404,7 @@ def main():
         finally:
             if request.exists() and request.read_text() == identity:
                 request.unlink()
+            if bulk:bulk.remove()
             if target.exists() and target.stat().st_size>1_000_000:
                 raw = target.read_bytes()
                 target.with_suffix('.json.gz').write_bytes(gzip.compress(raw,mtime=0))

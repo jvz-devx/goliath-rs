@@ -18,6 +18,7 @@ import e11_support as support
 import e25_soak_harness as harness
 import e28_soak_clock as clock
 import e28_window as window
+import goliath_bundle as bundle
 import goliath_platform as platform
 from e28_m3_startup import observe_clock_calls
 
@@ -245,6 +246,71 @@ class Contracts(unittest.TestCase):
                 return read(path,*args,**kwargs)
             with patch.object(Path,'read_text',new=main_gone):
                 with self.assertRaises(ProcessLookupError):platform.usage(12,proc)
+
+
+    def test_server_stack_guard_accepts_final_and_final_r2_only(self):
+        bundles=ROOT/'.local/bin/goliath-e28'
+        manifest=json.loads(bundle.MANIFEST.read_text())['bundles']
+        for name in ['final','final-r2']:
+            identity=bundle.validate_server_stack(bundles/name)
+            self.assertEqual(identity['bundle'],name)
+            self.assertEqual(identity['binaries'],manifest[name]['binaries'])
+            self.assertEqual(identity,bundle.validate(bundles/name))
+        for name in ['final-lite','final-stamps','plain-09']:
+            with self.assertRaisesRegex(ValueError,'wrong E28 bundle'):bundle.validate_server_stack(bundles/name)
+        base=manifest['final']['binaries'];fixed=manifest['final-r2']['binaries']
+        self.assertEqual({name for name in base if base[name]!=fixed[name]},{'horizon-client'})
+
+    def test_final_r2_may_differ_from_final_in_the_tile_only(self):
+        base=dict(bundle='final',binaries={'horizon-client':'a','meridian':'b','goliath-store':'c'})
+        def identities(fixed):
+            return lambda directory,expected=None:base if Path(directory).name=='final' else dict(bundle='final-r2',binaries=fixed)
+        with patch.object(bundle,'validate',new=identities(dict(base['binaries'],**{'horizon-client':'z'}))):
+            self.assertEqual(bundle.validate_server_stack('final-r2')['bundle'],'final-r2')
+        for fixed in [dict(base['binaries']),dict(base['binaries'],**{'horizon-client':'z','goliath-store':'y'}),
+                dict(base['binaries'],**{'horizon-client':'z','extra':'x'}),{'horizon-client':'z','meridian':'b'}]:
+            with patch.object(bundle,'validate',new=identities(fixed)):
+                with self.assertRaisesRegex(ValueError,'horizon-client only'):bundle.validate_server_stack('final-r2')
+
+    def test_runners_select_server_stacks_through_the_strict_guard(self):
+        control=(ROOT/'scripts/e25-soak-control').read_text()
+        self.assertIn('linux_identity = goliath_bundle.validate_server_stack(bins)',control)
+        self.assertIn("name=linux_identity['bundle']",control)
+        cell=(ROOT/'scripts/e25-soak-cell').read_text()
+        self.assertIn("goliath_bundle.validate_server_stack(bins)['bundle']=='final-r2' else {'meridian'}",cell)
+        self.assertIn('if name not in rebuilt',cell)
+        m3=(ROOT/'scripts/e24-m3').read_text()
+        self.assertIn('linux_identity=goliath_bundle.validate_server_stack(bins)',m3)
+        self.assertIn("metadata.update(bundle=linux_identity['bundle']",m3)
+        self.assertIn("binaries_unchanged=validate_snapshot(bins)==identity",m3)
+        self.assertIn("for stack in ['final','final-r2']",(ROOT/'scripts/e24-m3-results').read_text())
+        # The lite kernel widens exactly one final-only guard in the frontier runner; keep that seam.
+        frontier=ast.unparse(ast.parse((ROOT/'scripts/e20-frontier').read_text()))
+        self.assertEqual(frontier.count("goliath_bundle.validate(bins, {'final'})"),1)
+        self.assertIn("goliath_bundle.validate_server_stack(bins) if bins.name == 'final-r2' else goliath_bundle.validate(bins, {'final'})",frontier)
+        self.assertIn('if goliath_bundle.validate(bins) != linux_identity',frontier)
+
+    def test_soak_cell_guard_passes_server_stacks_and_rejects_other_bundles(self):
+        cell=load('e25-soak-cell')
+        class Reached(Exception):pass
+        with tempfile.TemporaryDirectory(dir=ROOT/'.local/runs') as temporary:
+            host=Path(temporary)/'.local/host/quiet';host.mkdir(parents=True);(host/'owner').write_text('E28R2\n')
+            def run(name,execute):
+                argv=['e25-soak-cell','--name','e28-guard-test','--bins',str(ROOT/'.local/bin/goliath-e28'/name),
+                    '--owner','E28R2','--players','425','--cpu-mode','pin','--direct-bots','--data-dir',str(Path(temporary)/'data')]
+                with patch.object(sys,'argv',argv),patch.object(cell.harness,'ROOT',Path(temporary)),\
+                     patch.object(cell.harness,'configure'),patch.object(cell.harness,'execute',execute),\
+                     patch.object(cell.harness,'digest',lambda path:dict(sha256=bundle.sha(path))),\
+                     patch.object(cell.harness,'EVIDENCE',unittest.mock.Mock(mkdir=unittest.mock.Mock(side_effect=Reached))):
+                    cell.main()
+            with patch.dict(os.environ,GOLIATH_WINDOW_OWNER='E28R2'):
+                cell=load('e25-soak-cell')
+                execute=unittest.mock.Mock()
+                for name in ['final','final-r2']:
+                    with self.assertRaises(Reached):run(name,execute)
+                for name in ['final-lite','final-stamps']:
+                    with self.assertRaisesRegex(ValueError,'wrong E28 bundle'):run(name,execute)
+                execute.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

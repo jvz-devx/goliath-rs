@@ -114,4 +114,84 @@ class Contracts(unittest.TestCase):
             self.assertEqual(module.e2.Child.__name__,'SplitProxyChild')
 
 
+    def bulk(self,temporary,name='e28-test-diag-logs'):
+        base=Path(temporary)/'shm';base.mkdir(exist_ok=True)
+        free=SimpleNamespace(f_bavail=16*1024**3,f_frsize=1)
+        with patch.object(logs,'filesystem',return_value='tmpfs'),patch.object(logs.os,'statvfs',return_value=free),\
+             patch.object(logs,'memory_available_kb',return_value=12*1024**2):
+            return logs.BulkLogs(name,base)
+
+    def test_bulk_logs_land_on_tmpfs_behind_links_at_their_usual_paths(self):
+        opened=[]
+        class Base:
+            def __init__(self,command,directory,log_path):
+                self.log=log_path.open('w');opened.append(log_path)
+                with (Path(directory)/'logs/anticheat.log').open('a') as stream:stream.write('flag\n')
+        with tempfile.TemporaryDirectory(dir=support.ROOT/'.local/runs') as temporary:
+            root=Path(temporary)/'run';tile=root/'a';tile.mkdir(parents=True)
+            bulk=self.bulk(temporary)
+            server=bulk.server_class(Base)(['tile'],tile,root/'server-a-1.log')
+            server.log.write('stderr line\n');server.log.close()
+            target=bulk.target
+            self.assertEqual(sorted(path.name for path in target.iterdir()),['a-anticheat.log','server-a-1.log'])
+            self.assertEqual((target/'server-a-1.log').read_text(),'stderr line\n')
+            self.assertEqual((target/'a-anticheat.log').read_text(),'flag\n')
+            for path in [root/'server-a-1.log',tile/'logs/anticheat.log']:
+                self.assertTrue(path.is_symlink() and path.is_file())
+            # Readers keep the usual paths: the archive walk still finds both files with their bytes.
+            found={str(path.relative_to(root)):path.read_text() for path in sorted(root.rglob('*')) if path.is_file() and path.suffix=='.log'}
+            self.assertEqual(found,{'a/logs/anticheat.log':'flag\n','server-a-1.log':'stderr line\n'})
+            # A restarted tile gets a new stdout log and keeps appending to the same anticheat log.
+            bulk.server_class(Base)(['tile'],tile,root/'server-a-2.log').log.close()
+            self.assertEqual((target/'a-anticheat.log').read_text(),'flag\nflag\n')
+            with patch.object(logs,'memory_available_kb',return_value=11*1024**2):
+                bulk.observe(root)
+                report=bulk.finish()
+            self.assertEqual(report['clusters'][0]['replaced_links'],[])
+            self.assertEqual(report['clusters'][0]['tmpfs_bytes'],22)
+            self.assertEqual(report['tmpfs_bytes_at_end'],22)
+            self.assertTrue(report['removed']);self.assertFalse(target.exists())
+            self.assertEqual((report['memory_available_kb_before'],report['memory_available_kb_at_end']),(12*1024**2,11*1024**2))
+
+    def test_bulk_logs_refuse_existing_files_replaced_links_and_small_memory(self):
+        class Base:
+            def __init__(self,command,directory,log_path):pass
+        with tempfile.TemporaryDirectory(dir=support.ROOT/'.local/runs') as temporary:
+            root=Path(temporary)/'run';tile=root/'a';(tile/'logs').mkdir(parents=True)
+            bulk=self.bulk(temporary)
+            (tile/'logs/anticheat.log').write_text('already on the data volume\n')
+            with self.assertRaisesRegex(RuntimeError,'already exists on its original volume'):
+                bulk.server_class(Base)(['tile'],tile,root/'server-a-1.log')
+            (tile/'logs/anticheat.log').unlink();(root/'server-a-1.log').unlink()
+            (bulk.target/'server-a-1.log').unlink()
+            bulk.server_class(Base)(['tile'],tile,root/'server-a-1.log')
+            (tile/'logs/anticheat.log').unlink();(tile/'logs/anticheat.log').write_text('rotated onto disk\n')
+            with patch.object(logs,'memory_available_kb',return_value=1):
+                with self.assertRaisesRegex(RuntimeError,'replaced its bulk log link'):bulk.observe(root)
+            bulk.remove();self.assertFalse(bulk.target.exists())
+            with self.assertRaises(FileExistsError):
+                self.bulk(temporary,'again');self.bulk(temporary,'again')
+            base=Path(temporary)/'shm'
+            with patch.object(logs,'filesystem',return_value='xfs'):
+                with self.assertRaisesRegex(RuntimeError,'needs a tmpfs'):logs.BulkLogs('e28-x-diag-y',base)
+            small=SimpleNamespace(f_bavail=2*1024**3,f_frsize=1)
+            with patch.object(logs,'filesystem',return_value='tmpfs'),patch.object(logs.os,'statvfs',return_value=small):
+                with self.assertRaisesRegex(RuntimeError,'would not fit'):logs.BulkLogs('e28-x-diag-y',base)
+        self.assertEqual(logs.filesystem('/dev/shm'),'tmpfs')
+
+    def test_bulk_logs_are_opt_in_and_only_for_named_diagnostics(self):
+        run=(support.ROOT/'scripts/e24-run').read_text()
+        self.assertIn("parser.add_argument('--bulk-logs-tmpfs',action='store_true'",run)
+        self.assertIn("'-diag-' in args.name",run)
+        self.assertIn("    bulk = None\n    if args.bulk_logs_tmpfs:",run)
+        self.assertIn("if bulk:bulk.install(result)",run)
+        self.assertIn("if bulk:bulk.remove()",run)
+        cell=(support.ROOT/'scripts/e25-soak-cell').read_text()
+        self.assertIn("*(['--bulk-logs-tmpfs'] if args.bulk_logs_tmpfs else [])",cell)
+        control=(support.ROOT/'scripts/e25-soak-control').read_text()
+        self.assertIn("*(['--bulk-logs-tmpfs'] if args.bulk_logs_tmpfs else [])",control)
+        self.assertIn("'-diag-' in args.name",control)
+        self.assertIn("kind='E28-diagnostic-soak-plan'",control)
+
+
 if __name__=='__main__':unittest.main()
