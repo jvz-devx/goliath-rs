@@ -1,0 +1,46 @@
+{
+  "kind": "E32-direct-bots-disabled-trace-proof",
+  "status": "passed",
+  "host": "vm",
+  "bots_bundle": "stamped-bots",
+  "bots_sha256": "19b80307e0625649e62d2b7df1a101a3fa8171d8d2bdd35d31ce72d2994b26f4",
+  "manifest_sha256": "840301c59d45148a7100f0e0acb4b1046f98fd7e0b0fe0a991ac09e7ab4fc067",
+  "source_sha256": {
+    "crates/horizon-bots/src/main.rs": "fb0f658c12706c80ca452517c0bb8dc07edb4946f461ae48cf083c2454ae30c4",
+    "crates/horizon-bots/src/measured.rs": "0990c83e23a2c0d55a82ba337122fa11a3f85760c64cc222f69b088802044514",
+    "crates/horizon-bots/src/latency_trace.rs": "342d040ca5e3f290a2fe4af4378da23a7a45180a4d02978a911efff9a9861885"
+  },
+  "patches": [
+    {
+      "path": "patches/horizon-15-latency-stamps-e25-stamps-lease-r2-b2.patch",
+      "sha256": "cdbc4a388f703007a0b4e7bfe6acf320b0a9fd93f6b947d4f5c590decf7c00a9",
+      "apply_options": []
+    },
+    {
+      "path": "patches/horizon-15-latency-stamps-e25-stamps-lease-r2-b2-linux.patch",
+      "sha256": "c5eac3d59d8999c9040845cd0ff11cdebff80ea8d8ce3d9b18e25455a94cefb0",
+      "apply_options": []
+    }
+  ],
+  "base_patches": 13,
+  "sources_equal_workstation_proof": true,
+  "workstation_proof_sha256": "5411d3d5039c3b6dccfd9e1a3da7eb78a30eb9347474f940aae7c0fd72f917ec",
+  "checker_sha256": "c61e0717b8c825d811bc990a5cbe1a3004c4780c6e9c08a3b9d33bce285112e3",
+  "guard_checks_sha256": "841a78389a12a9cd8fbfd59e298cb7f1400cfa17216768c3c2a0dd3bf035a208",
+  "launcher_sha256": {
+    "e32_direct_bots.py": "41967ebda1c1a3bb5c9df2715b40501da6ee2cec636a17cab663b3bc8552275b",
+    "e28_direct_bots.py": "c31d67a8ec9962600ca9c3f8d79a59c131cf89303a047de64009290b893192ca"
+  },
+  "trace_enable_environment": [
+    "E25_LATENCY_DIR",
+    "E25_LATENCY_NAMES",
+    "E25_LATENCY_TILE"
+  ],
+  "scope": "source-hash proof and extracted native guard test, not a rebuild of the frozen bot",
+  "native_probe": {
+    "disabled_clock_calls": 0,
+    "enabled_clock_calls": 1,
+    "probe_sha256": "1500a5064ca8d5ab6065d506e0ce8a139e4bf1810b68ca1300c40c9c62c1efb1",
+    "method": "original Trace::bind and Bot::flush bodies; counted clock, partial-write socket and substituted JSON sink"
+  }
+}
