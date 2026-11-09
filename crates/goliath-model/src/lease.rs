@@ -71,14 +71,21 @@ pub struct StoreLease {
     counter: u64,
     draining: bool,
     deadline: Instant,
+    // False until the claim that created this fence is on stable storage.
+    settled: bool,
 }
 
 impl StoreLease {
+    /// A fresh claim. It is not settled until the caller's durable barrier
+    /// covers it and `settle` is called.
     pub fn new(lease_ms: u64, now: Instant) -> Option<Self> {
-        Self::recover(lease_ms, 0, false, now)
+        let mut lease = Self::recover(lease_ms, 0, false, now)?;
+        lease.settled = false;
+        Some(lease)
     }
 
     /// Recovery waits a full L again, even if the previous store was down briefly.
+    /// A recovered lease came from stable storage, so it is settled.
     pub fn recover(lease_ms: u64, counter: u64, draining: bool, now: Instant) -> Option<Self> {
         if !(1..=60_000).contains(&lease_ms) {
             return None;
@@ -88,7 +95,17 @@ impl StoreLease {
             counter,
             draining,
             deadline: now.checked_add(Duration::from_millis(lease_ms))?,
+            settled: true,
         })
+    }
+
+    /// Call once the claim that created this lease is on stable storage.
+    pub fn settle(&mut self) {
+        self.settled = true;
+    }
+
+    pub fn settled(&self) -> bool {
+        self.settled
     }
 
     pub fn lease_ms(&self) -> u64 {
@@ -126,6 +143,20 @@ impl StoreLease {
         self.counter = counter;
         self.deadline = deadline;
         true
+    }
+
+    /// A renewal that may be answered before any durable barrier and need not
+    /// be journaled at all.
+    ///
+    /// Let g be this store-clock grant time. The reply promises that no other
+    /// fence is granted before g + L. A crash can lose the extension, but not
+    /// the claim, because only a settled lease is extended here. The restarted
+    /// store finds that claim and `recover` waits a full L from a time after g,
+    /// so the promise holds without the renewal on disk. The caller must decide
+    /// against the same lease value its claim and takeover paths read and
+    /// write, never a copy, or a concurrent drain or successor is missed.
+    pub fn renew_unjournaled(&mut self, counter: u64, now: Instant) -> bool {
+        self.settled && self.renew(counter, now)
     }
 
     pub fn grant(&self, fence: Fence) -> LeaseGrant {

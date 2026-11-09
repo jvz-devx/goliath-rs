@@ -196,3 +196,32 @@ fn wall_clock_steps_never_enter_keeper_logic_and_drift_margin_has_slack() {
     assert!(LeaseKeeper::new(TileId(0), 1000, Duration::from_secs(1)).is_none());
     assert!(StoreLease::new(0, start).is_none());
 }
+
+#[test]
+fn only_a_settled_lease_is_renewed_without_a_journal_record() {
+    let start = Instant::now();
+    let at = |ms| start + Duration::from_millis(ms);
+    let mut store = StoreLease::new(1000, at(0)).unwrap();
+    assert!(!store.settled());
+    // The claim is still behind its barrier: nothing may extend it early.
+    assert!(!store.renew_unjournaled(1, at(10)));
+    assert_eq!(store.counter(), 0);
+    assert_eq!(store.deadline(), at(1000));
+    // The journaled path is unchanged for an unsettled lease.
+    assert!(store.renew(1, at(20)));
+    store.settle();
+    assert!(store.renew_unjournaled(2, at(300)));
+    assert_eq!(store.deadline(), at(1300));
+    // Replay, drain and expiry are refused exactly as on the journaled path.
+    assert!(!store.renew_unjournaled(2, at(310)));
+    assert!(!store.renew_unjournaled(3, at(1300)));
+    let mut draining = store.clone();
+    draining.drain();
+    assert!(!draining.renew_unjournaled(3, at(320)));
+    assert_eq!(draining.deadline(), at(1300));
+    // A crash loses counter 2. Recovery is settled and waits L from restart,
+    // which is later than the lost grant's own expiry.
+    let recovered = StoreLease::recover(1000, 1, false, at(400)).unwrap();
+    assert!(recovered.settled());
+    assert!(recovered.deadline() >= store.deadline());
+}
