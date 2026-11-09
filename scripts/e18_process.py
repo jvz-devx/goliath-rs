@@ -150,9 +150,11 @@ class ProcessSampler:
             result['d12'] = platform.host_delta(self.rows[0]['host'], end['host'])
             placement=end.get('placement',{})
             result['d12']['placement']=placement
+            if result['d12'].get('platform'):result['platform']=result['d12']['platform']
             for role, row in placement.items():
                 leaf=Path(row['cgroup']).name
-                expected={'servers':'0-3','bots':'4','harness':'5'} if platform.cpu_mode()=='pin' else {'servers':'0-4','bots':'0-4','harness':'5'}
+                expected={'servers':'0-3','bots':'4'} if platform.cpu_mode()=='pin' else {'servers':'0-4','bots':'0-4'}
+                expected['harness']=platform.cpu_span(platform.harness_cpus(end['host']['cpus']))
                 if leaf not in expected or row['cpus_allowed_list']!=expected[leaf]:
                     result['d12']['reasons'].append('fixture CPU placement mismatch: '+role)
             result['d12']['valid']=not result['d12']['reasons']
