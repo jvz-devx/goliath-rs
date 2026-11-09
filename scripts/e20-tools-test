@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +13,15 @@ frontier=importlib.util.module_from_spec(spec)
 loader.exec_module(frontier)
 
 class Contract(unittest.TestCase):
+    def test_compressed_frontier_cell_cannot_be_overwritten(self):
+        with tempfile.TemporaryDirectory(dir=frontier.support.RUNS) as temporary:
+            data=Path(temporary)
+            retained=data/'fresh.json.gz';retained.write_bytes(b'retained')
+            argv=['e20-frontier','--name','fresh','--counts','100','--data-dir',str(data)]
+            with patch.object(frontier.os.sys,'argv',argv),patch.object(frontier.goliath_bundle,'is_e28',return_value=False):
+                with self.assertRaisesRegex(SystemExit,'fresh result name'):frontier.main()
+            self.assertEqual(retained.read_bytes(),b'retained')
+
     def test_mixed_band_is_kept_and_higher_double_failure_closes_bracket(self):
         results=frontier.load('e20_test_results',frontier.ROOT/'scripts/e20-results')
         row=lambda passed:dict(valid=True,passed=passed)

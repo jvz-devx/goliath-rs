@@ -68,7 +68,8 @@ def phase_noise(report,first,last):
         maximum_outside_process_cores=max((amount/seconds for amount in totals.values()),default=0),
         outside_processes=[dict(pid=pid,name='outside',cpu_s=amount,cores=amount/seconds)
             for pid,amount in sorted(totals.items(),key=lambda row:row[1],reverse=True)],
-        valid=all(amount/seconds<=.5 for amount in totals.values()) and not report.get('error'))
+        valid=all(amount/seconds<=.5 for amount in totals.values()) and not report.get('error')
+            and report.get('d12',{}).get('valid',True))
 
 
 def main():
@@ -80,7 +81,7 @@ def main():
     result = dict(kind='E24-causal-readback',name=args.name,tiles={})
     cell_path = next((path for path in [folder/(args.name+'.json'),folder/(args.name+'.json.gz')] if path.exists()),None)
     if cell_path:
-        cell = json.loads(raw(cell_path)).get('cells',{}).get('650',{})
+        cell = next(iter(json.loads(raw(cell_path)).get('cells',{}).values()), {})
         report = cell.get('processes',{})
         endpoint = 'steady-last' if any(row.get('mark')=='steady-last' for row in report.get('samples',[])) else 'failure-before-cleanup'
         result['window'] = dict(status=cell.get('status'),error=cell.get('error'),load_start=cell.get('load_start'),

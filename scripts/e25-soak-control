@@ -10,15 +10,19 @@ import sys
 
 from e14_snapshot_support import validate_snapshot
 import e25_soak_harness as harness
+import goliath_platform as platform
+import goliath_bundle
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    platform.cpu_options(parser)
+    parser.add_argument('--players', type=int, default=650)
     parser.add_argument('--name',required=True)
     parser.add_argument('--bins',type=Path,required=True)
     parser.add_argument('--frozen-reference',action='store_true',help='approved exact 29f repeat, not a rebuilt control')
     parser.add_argument('--campaign-plan',type=Path,default=harness.DATA/'e25-memory-next-plan-r3.json')
-    parser.add_argument('--owner',choices=['E25','reviewer'],default='E25')
+    parser.add_argument('--owner',choices=sorted({'E25','reviewer',platform.window_owner('E25')}),default=platform.window_owner('E25'))
     parser.add_argument('--collect-only',action='store_true',help='release the window and leave readback for a separate command')
     args = parser.parse_args()
     print('E25_SOAK_CONTROL_PROCESS '+str(os.getpid()),flush=True)
@@ -30,7 +34,12 @@ def main():
         raise RuntimeError('control already exists')
     bins = args.bins.resolve()
     identity = validate_snapshot(bins)
-    if args.frozen_reference:
+    if goliath_bundle.is_e28(bins):
+        goliath_bundle.validate(bins, {'final'})
+        if args.frozen_reference:
+            raise ValueError('the Mac frozen reference is not a Linux bundle')
+        reference_kind = 'E28-rebuilt-reactor-control'
+    elif args.frozen_reference:
         frozen = harness.ROOT/'.local/bin/meridian-e18/reactor-1'
         expected = '29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b'
         if harness.digest(bins/'meridian')['sha256'] != expected or harness.digest(frozen/'meridian')['sha256'] != expected:
@@ -46,7 +55,7 @@ def main():
             raise ValueError('control provenance changed')
         reference_kind = 'rebuilt80f-control'
     plan = dict(kind='E25-full-soak-reactor-control-plan',reference_kind=reference_kind,name=args.name,queue_owner=args.owner,
-        readback_mode='manual' if args.collect_only else 'automatic-after-release',players=650,measurement_seconds=1800,
+        readback_mode='manual' if args.collect_only else 'automatic-after-release',players=args.players,measurement_seconds=1800,
         cargo_items=65,owner_audits='unchanged E24 soak harness',planning_mutation_rate=72,
         approved_plan=harness.digest(args.campaign_plan.resolve()),
         bundle=dict(path=str(bins.relative_to(harness.ROOT)),final=harness.digest(bins/'FINAL.json'),binaries=identity['binaries'],
@@ -59,7 +68,7 @@ def main():
     subprocess.run([host,'quiet',args.owner,args.name+' full30m soak control'],check=True)
     error = None
     try:
-        subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-soak-cell','--name',args.name,'--bins',bins,'--owner',args.owner],cwd=harness.ROOT,check=True)
+        subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-soak-cell','--name',args.name,'--bins',bins,'--owner',args.owner,'--players',str(args.players)],cwd=harness.ROOT,check=True)
     except BaseException as caught:
         error = str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME')
     finally:

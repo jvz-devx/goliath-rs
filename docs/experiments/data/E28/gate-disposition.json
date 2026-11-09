@@ -1,0 +1,33 @@
+{
+  "kind": "E28-reviewer-gate-disposition",
+  "schema_version": 1,
+  "decided": "2026-11-09",
+  "rule": "A failed gate is accepted only when it is lint or formatting drift from the newer toolchain (rustc 1.99.1, its rustfmt and clippy) and changes no compiled behaviour. Any test failure, compile error or source deviation blocks.",
+  "source_rule": "Frozen binaries are built from the documented pins and patch order only. Patches that exist only to silence a lint are not applied; the lint failure is recorded instead.",
+  "gates": {
+    "plain-09-fmt": {
+      "accepted": true,
+      "class": "toolchain-lint",
+      "bundles": ["plain-09"],
+      "reason": "Whole-workspace rustfmt reports one formatting diff in crates/horizon-client/src/lan/hub.rs. Formatting only."
+    },
+    "root-clippy": {
+      "accepted": true,
+      "class": "toolchain-lint",
+      "bundles": ["final", "final-lite", "final-stamps"],
+      "reason": "rustc 1.99 deprecates AtomicUsize::fetch_update (renamed try_update) at crates/goliath-store/src/main.rs:345. The store is built from repository HEAD unchanged; the rename is made in the repository after the E28 binaries are frozen."
+    },
+    "proxy-fmt": {
+      "accepted": true,
+      "class": "toolchain-lint",
+      "bundles": ["final", "final-lite", "final-stamps"],
+      "reason": "Whole-workspace rustfmt reports formatting in meridian-testkit/src/bin/e2-client.rs. The scoped proxy formatting gate passes."
+    },
+    "proxy-clippy": {
+      "accepted": true,
+      "class": "toolchain-lint",
+      "bundles": ["final", "final-lite", "final-stamps"],
+      "reason": "rustc 1.99 deprecates fetch_update in crates/meridian-net/src/io_pool.rs from meridian-06-io-pool.patch. The rename would raise Meridian's declared MSRV, so the proxy is built from the documented reactor-1 patches without it."
+    }
+  }
+}

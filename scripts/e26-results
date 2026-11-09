@@ -107,7 +107,7 @@ def row(path):
                   per_tile_main_cores={label:value['main']['cores'] if value['main'] else None
                                        for label,value in cell['tile_thread_cpu'].items()},
                   per_tile_cores={label:steady['fixture']['tile-'+label]['cores'] for label in 'abcd'},
-                  threads={name:sum(thread['cores'] for thread in cell['tile_thread_cpu'][chosen]['threads'] if thread['name']==name)
+                  threads={name:main['cores'] if name=='main' and main else sum(thread['cores'] for thread in cell['tile_thread_cpu'][chosen]['threads'] if thread['name']==name)
                            for name in ['main','e6-cut-writer','goliath-lease']},
                   selected_p50_ms=cell['e26_tick_quantiles'][chosen]['p50_ms'],
                   selected_p99_ms=cell['e26_tick_quantiles'][chosen]['p99_ms'],

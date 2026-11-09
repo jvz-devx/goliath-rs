@@ -21,6 +21,8 @@ import time
 import tomllib
 
 import e11_support as support
+import goliath_platform as platform
+import goliath_bundle
 from e18_d9_layout import plan
 from e18_d9_wire import D9Observer
 from e18_process import ProcessSampler as OriginalProcessSampler
@@ -58,6 +60,8 @@ def server_cap(pids,roles,proxy_pid,outside):
 
 
 def counters(pid):
+    if platform.LINUX:
+        return platform.usage(pid)
     info=support.TaskInfo()
     if support.LIBPROC.proc_pidinfo(pid,4,0,ctypes.byref(info),ctypes.sizeof(info))!=ctypes.sizeof(info):
         raise ProcessLookupError(pid)
@@ -107,7 +111,7 @@ def thread_deltas(before,after):
             b=after[tile].get(identity)
             if b and b['at']>a['at']:rows.append(dict(id=identity,name=b['name'],cores=(b['cpu_s']-a['cpu_s'])/(b['at']-a['at']),
                 user_cores=(b['user_cpu_s']-a['user_cpu_s'])/(b['at']-a['at']),system_cores=(b['system_cpu_s']-a['system_cpu_s'])/(b['at']-a['at'])))
-        rows.sort(key=lambda r:r['cores'],reverse=True);mains=[r for r in rows if r['name']=='main']
+        rows.sort(key=lambda r:r['cores'],reverse=True);mains=[r for r in rows if (after[tile][r['id']].get('is_main') if platform.LINUX else r['name']=='main')]
         result[tile]=dict(threads=rows,main=mains[0] if len(mains)==1 else None,matching_thread_cores=sum(r['cores'] for r in rows),
             missing_end_ids=[identity for identity in first if identity not in after[tile]],new_ids=[identity for identity in after[tile] if identity not in first])
     return result
@@ -157,25 +161,31 @@ def conservative_p95(latency):
 
 
 def main():
+    global DATA
     parser=argparse.ArgumentParser(description=__doc__)
+    platform.cpu_options(parser)
+    parser.add_argument('--data-dir',type=Path,default=DATA)
     parser.add_argument('--name',required=True)
     parser.add_argument('--no-other-agents',action='store_true',help='explicit reviewer waiver while no other builder is active')
     parser.add_argument('--e22-peer',action='store_true',help='require E22 acknowledgement in addition to any E21 waiver')
     parser.add_argument('--proxy-outside-cap',action='store_true',help='feasibility only; cap tiles/store/sidecars, record uncapped proxy')
     parser.add_argument('--bins',type=Path,default=BINS)
     parser.add_argument('--counts',default='500')
-    parser.add_argument('--allow-200',action='store_true',help='only for an explicitly parent-approved window')
+    parser.add_argument('--allow-200',action='store_true',help='only for an explicitly reviewer-approved window')
     parser.add_argument('--capacity-diagnostic',action='store_true',default=True,help='tap-free D9 capacity cell')
     parser.add_argument('--warmup',type=float,default=30)
     parser.add_argument('--seconds',type=float,default=60)
     args=parser.parse_args();counts=[int(v) for v in args.counts.split(',')]
+    DATA=args.data_dir.resolve()
     if args.proxy_outside_cap:raise SystemExit('E20 always includes the proxy in the four-core cap')
     DATA.mkdir(parents=True,exist_ok=True)
+    support.RUNS.mkdir(parents=True,exist_ok=True)
     bins=args.bins.resolve()
+    linux_identity = goliath_bundle.validate(bins) if goliath_bundle.is_e28(bins) else None
     if len(counts)!=1 or counts[0]<100 or args.warmup!=30 or args.seconds!=60:
         raise SystemExit('one frontier cell per window, at least100 players,30warm/60measure')
     target=DATA/(args.name+'.json')
-    if target.exists():raise SystemExit('use a fresh result name')
+    if target.exists() or target.with_suffix('.json.gz').exists():raise SystemExit('use a fresh result name')
     request=ROOT/'.local/quiet-request';ack=ROOT/'.local/quiet-ack-E21'
     if request.exists():raise SystemExit('another quiet request exists')
     adapter=load('e18_d9_adapter',ROOT/'scripts/e17-m4')
@@ -186,6 +196,8 @@ def main():
         server_core_cap=4,bot_core_cap=1,proxy_inside_server_cap=not args.proxy_outside_cap,counts=counts,layouts=layouts,cells={},
         warmup_seconds=args.warmup,measurement_seconds=args.seconds,
         binaries={name:hashlib.sha256((bins/name).read_bytes()).hexdigest() for name in ['horizon-client','meridian','meridian-sidecar','goliath-store','horizon-bots']})
+    if linux_identity:
+        result.update(e28_bundle=linux_identity, cpu_mode=platform.cpu_mode())
     canonical=json.loads((bins/'canonical.json').read_text())
     candidate_path=bins/'candidate.json'
     proxy_candidate=json.loads((candidate_path if candidate_path.exists() else ROOT/'.local/bin/meridian-e18/candidate-1/candidate.json').read_text())
@@ -198,6 +210,8 @@ def main():
     result['reactor_candidate']=reactor
     result['e20_harness_sha256']=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     result['harness_sha256']={name:hashlib.sha256((ROOT/'scripts'/name).read_bytes()).hexdigest() for name in ['e18-production-slope','e18_d9_layout.py','e18_d9_wire.py','e18-front-shim','e18_sockets.py','e18_process.py','e17_flat09_metrics.py','e17-m4','capacity-bench','e11_support.py','goliath-cluster']}
+    if platform.LINUX:
+        result['harness_sha256'].update({name:goliath_bundle.sha(ROOT/'scripts'/name) for name in ['goliath_platform.py','goliath_bundle.py']})
     support.save(target,result)
     began=time.monotonic();deadline=began+1500
     def check():
@@ -207,13 +221,16 @@ def main():
         until=time.monotonic()+seconds
         while time.monotonic()<until:check();time.sleep(min(.2,until-time.monotonic()))
     def settle():
+        if platform.LINUX:
+            while os.getloadavg()[0]>4:check();time.sleep(1)
+            return
         while (not args.no_other_agents and not ack.exists()) or (args.e22_peer and not (ROOT/'.local/quiet-ack-E22').exists()) or os.getloadavg()[0]>4:check();time.sleep(1)
     identity=json.dumps(dict(owner='E20',name=args.name,pid=os.getpid(),time=datetime.now(timezone.utc).isoformat()))+'\n'
     with request.open('x') as stream:stream.write(identity)
     try:
         settle()
-        result['quiet_acknowledgements']=dict(E21='waived: reviewer confirmed E21 finished and idle' if args.no_other_agents else ack.read_text(),at=time.monotonic())
-        if args.e22_peer:result['quiet_acknowledgements']['E22']=(ROOT/'.local/quiet-ack-E22').read_text()
+        result['quiet_acknowledgements']=dict(E21='host-window reservation' if platform.LINUX else 'waived: reviewer confirmed E21 finished and idle' if args.no_other_agents else ack.read_text(),at=time.monotonic())
+        if args.e22_peer and not platform.LINUX:result['quiet_acknowledgements']['E22']=(ROOT/'.local/quiet-ack-E22').read_text()
         for count in counts:
             if args.capacity_diagnostic and count==1050 and (args.proxy_outside_cap or not result['cells']['975'].get('diagnostic_pass')):
                 result['cells']['1050']=dict(status='not-run',reason='feasibility diagnostic is 975 only' if args.proxy_outside_cap else '975 did not pass the diagnostic gates');break
@@ -276,7 +293,7 @@ def main():
                     for index,group in enumerate(layout['groups']):
                         if args.capacity_diagnostic:
                             shim_path=folder/('shim-'+group['label']+'.jsonl');shim_stream=shim_path.open('w');streams.append(shim_stream)
-                            shim=subprocess.Popen([os.sys.executable,'-B',str(ROOT/'scripts/e18-front-shim'),'--target',str(instance.port),'--host',group['host'],'--index',str(index)],cwd=folder,stdout=shim_stream,stderr=subprocess.STDOUT)
+                            shim=subprocess.Popen(platform.launch_command([os.sys.executable,'-B',str(ROOT/'scripts/e18-front-shim'),'--target',str(instance.port),'--host',group['host'],'--index',str(index)], 'harness'),cwd=folder,stdout=shim_stream,stderr=subprocess.STDOUT)
                             shims.append((group,shim,shim_path));monitor.register('shim-'+group['label'],shim.pid)
                             def listening():
                                 if shim.poll() is not None:raise RuntimeError('test-only shim exited before listen')
@@ -289,7 +306,7 @@ def main():
                             '--behaviour','route','--seconds','900','--join-every','.25' if args.capacity_diagnostic else '.1','--view-distance','3','--seed','12345','--speed','4','--height','2','--name',group['prefix']]
                         command+=['--spread',','.join(map(str,group['spread']))] if group['kind']=='interior' else ['--path',group['path']]
                         stream=(folder/(group['label']+'.jsonl')).open('w');streams.append(stream)
-                        process=subprocess.Popen(command,cwd=folder,env=support.private_env(folder/(group['label']+'-home')),stdout=stream,stderr=subprocess.STDOUT)
+                        process=subprocess.Popen(platform.launch_command(command, 'bots'),cwd=folder,env=support.private_env(folder/(group['label']+'-home')),stdout=stream,stderr=subprocess.STDOUT)
                         processes.append((group,process));monitor.register('bots-'+group['label'],process.pid);cell['bot_commands'].append(command)
                     budgets['bots']=proxy.TrackedBudget([p.pid for _,p in processes],1).start()
                     crossed=set();last_cross_poll=0.
@@ -350,7 +367,8 @@ def main():
                     cell['after']={name:population(tile) for name,tile in instance.tiles.items()}
                     cell['tick_samples']={name:tile.ask('e11-samples') for name,tile in instance.tiles.items()}
                     cell['tick_summary']={name:dict(count=len(batch['ticks']),dropped=batch['dropped'],p99_ms=sorted(tick['ms'] for tick in batch['ticks'])[math.ceil(.99*len(batch['ticks']))-1]) for name,batch in cell['tick_samples'].items()}
-                    elapsed=last['at']-first['at'];cell['proxy']={key:(last[key]-first[key])/elapsed for key in ['cpu_s','user_s','system_s','unix_syscalls','context_switches']}
+                    elapsed=last['at']-first['at'];cell['proxy']={key:(last[key]-first[key])/elapsed if last[key] is not None and first[key] is not None else None for key in ['cpu_s','user_s','system_s','unix_syscalls','context_switches']}
+                    if platform.LINUX:cell['proxy']['unavailable']=last['unavailable']
                     cell['proxy'].update(cores=cell['proxy']['cpu_s'],cores_per_player=cell['proxy']['cpu_s']/count,
                         threads_min=min(r['threads'] for r in cell['samples']),threads_max=max(r['threads'] for r in cell['samples']),
                         threads_increment_per_player=(max(r['threads'] for r in cell['samples'])-cell['idle_proxy']['threads'])/count,
@@ -406,6 +424,10 @@ def main():
                     cell['processes']=process_report
                     steady=process_report['phases']['steady'];whole=process_report['phases']['whole_cell']
                     cell['noise_valid']=bool(steady and whole and steady['no_outside_process_above_half_core'] and whole['no_outside_process_above_half_core'] and not monitor.error)
+                    if platform.LINUX:
+                        cell['d12'] = process_report['d12']
+                        cell['cpu_mode'] = platform.cpu_mode()
+                        cell['noise_valid'] = cell['noise_valid'] and cell['d12']['valid']
                     cell['observer_and_driver_cores']=steady['fixture']['observer-and-driver']['cores'] if steady else None
                     cell['cpu_latency_eligible']=bool(observer) and cell['status']=='complete' and cell['noise_valid'] and not cell['witness_latency']['errors'] and bool(cell.get('witness_crossings'))
                     if args.capacity_diagnostic and cell['status']=='complete':
@@ -425,8 +447,23 @@ def main():
         result['status']='complete'
     except BaseException as error:result.update(status='failed',error=repr(error));raise
     finally:
+        identity_error=None
+        if linux_identity:
+            try:
+                if goliath_bundle.validate(bins) != linux_identity:
+                    raise RuntimeError('E28 bundle identity changed during cell')
+                if any(goliath_bundle.sha(ROOT/'scripts'/name)!=digest for name,digest in result['harness_sha256'].items()):
+                    raise RuntimeError('E28 measurement code changed during cell')
+            except Exception as error:
+                identity_error=str(error)
+                result.update(status='failed', error=str(error))
+                for cell in result['cells'].values():
+                    cell.update(noise_valid=False,diagnostic_pass=False)
+                    cell.setdefault('diagnostic_failures',[]).append(str(error))
         if request.exists() and request.read_text()==identity:request.unlink()
         result.update(seconds=time.monotonic()-began,load_end=os.getloadavg());support.save(target,result)
+        if __name__=='__main__':support.pack_json(target)
+        if identity_error:raise RuntimeError(identity_error)
 
 
 if __name__=='__main__':main()

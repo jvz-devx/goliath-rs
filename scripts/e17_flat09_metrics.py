@@ -2,6 +2,7 @@
 import ctypes
 import time
 from e11_support import LIBPROC
+import goliath_platform as platform
 
 
 class ThreadInfo(ctypes.Structure):
@@ -11,6 +12,8 @@ class ThreadInfo(ctypes.Structure):
 
 
 def thread_ids(pid):
+    if platform.LINUX:
+        return platform.thread_ids(pid)
     identifiers=(ctypes.c_uint64*8192)()
     # Flavor 6 returns pthread addresses. Flavor 28 returns native 64-bit IDs,
     # which flavor 15 accepts and Python's native-thread clock can validate.
@@ -21,6 +24,8 @@ def thread_ids(pid):
 
 
 def thread_usage(pid,identity):
+    if platform.LINUX:
+        return platform.thread_usage(pid, identity)
     info=ThreadInfo()
     if LIBPROC.proc_pidinfo(pid,15,identity,ctypes.byref(info),ctypes.sizeof(info))!=ctypes.sizeof(info):
         raise RuntimeError('main thread identity disappeared')
@@ -31,6 +36,8 @@ def thread_usage(pid,identity):
 def outside_validity(report):
     if report.get('error'): return False,['outside-process sampler failed']
     reasons=[]
+    if report.get('d12') and not report['d12']['valid']:
+        reasons.extend(report['d12']['reasons'])
     for phase in ['steady','whole_cell']:
         row=report.get('phases',{}).get(phase)
         if not row:

@@ -342,7 +342,7 @@ fn run(
         // Persistent clients must not occupy every slot of a smaller fixed pool.
         // Bound live sockets and their binary-owned workers together instead.
         if active
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 (count < 512).then_some(count + 1)
             })
             .is_err()

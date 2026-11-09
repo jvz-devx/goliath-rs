@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """E11 load staircase, game-time TPS, raw tick P99 and independent CPU budgets."""
 import argparse
+import goliath_platform as platform
 import hashlib
 import json
 import math
@@ -263,7 +264,7 @@ def cell(config,count,repeat,args):
                 '--height','2','--name','E11Bot']
             if config.get('path'):
                 command += ['--path',config['path']]
-            bot=subprocess.Popen(command,cwd=folder,env=private_env(folder/'bot-home'),stdout=bot_log,stderr=subprocess.STDOUT)
+            bot=subprocess.Popen(platform.launch_command(command, 'bots'),cwd=folder,env=private_env(folder/'bot-home'),stdout=bot_log,stderr=subprocess.STDOUT)
             limits.append(CpuBudget([bot.pid],args.bot_cores).start())
             def joined():
                 if bot.poll() is not None:
@@ -343,6 +344,7 @@ def cell(config,count,repeat,args):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
+    platform.cpu_options(parser)
     parser.add_argument('--config',type=Path)
     parser.add_argument('--servers',type=int,default=1)
     parser.add_argument('--loads',default='25,50,100,200,400,800')

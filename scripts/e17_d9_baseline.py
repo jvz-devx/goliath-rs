@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+import goliath_platform as platform
 from e11_support import ROOT,RUNS,Engine,CpuBudget,usage,private_env,save,sanitize,wait,complete_json_lines
 from e18_process import ProcessSampler
 from e18_d9_layout import plan
@@ -80,7 +81,7 @@ def cell(args,base):
             row['config']=config
             engine=Engine(folder/'engine',config)
             monitor.register('engine-0',engine.pid)
-            main_id=min(thread_ids(engine.pid))
+            main_id=engine.pid if platform.LINUX else min(thread_ids(engine.pid))
             limits.append(CpuBudget([engine.pid],4).start())
             for command in ['gamerule spawn_mobs false','gamerule advance_weather false','gamerule advance_time false',
                     'gamerule random_tick_speed 3','gamerule respawn_radius 0','time set day','kill @e[type=!minecraft:player]']:
@@ -92,7 +93,7 @@ def cell(args,base):
                 command+=['--spread',','.join(map(str,group['spread']))] if group['kind']=='interior' else ['--path',group['path']]
                 log=folder/(group['label']+'.jsonl')
                 stream=log.open('w');streams.append(stream)
-                process=subprocess.Popen(command,cwd=folder,env=private_env(folder/(group['label']+'-home')),
+                process=subprocess.Popen(platform.launch_command(command, 'bots'),cwd=folder,env=private_env(folder/(group['label']+'-home')),
                     stdout=stream,stderr=subprocess.STDOUT)
                 clients.append((group,process,log));monitor.register('bots-'+group['label'],process.pid)
                 row['bot_commands'].append(command)

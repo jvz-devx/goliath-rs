@@ -32,6 +32,8 @@ def proxy(binary):
 
 
 def main():
+    from goliath_platform import mac_only
+    mac_only('vmmap/thread profiling')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--name',required=True)
     parser.add_argument('--binary',type=Path,required=True)

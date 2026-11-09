@@ -28,7 +28,7 @@ BINS = ROOT / '.local/bin/horizon-e7'
 BASE = ROOT / '.local/bin/horizon-fc2868b2b'
 DATA = ROOT / 'docs/experiments/data/E7'
 RUNS = ROOT / '.local/runs'
-RESOURCES = Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'
+RESOURCES = __import__('goliath_platform').resources()
 sys.path.insert(0, str((SOURCE if SOURCE.exists() else ROOT/'.local/src/horizon') / 'tools'))
 from server_transfer_e2e import read_nbt  # Horizon MIT, notice in patches/README-E2.md
 

@@ -13,10 +13,15 @@ DATA = ROOT / 'docs/experiments/data/E26'
 
 
 def main():
+    global DATA
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('name')
     parser.add_argument('--out', required=True)
+    parser.add_argument('--data-dir',type=Path,default=DATA)
+    parser.add_argument('--controls',nargs=4,help='four same-platform A row names')
+    parser.add_argument('--calibration',type=Path,help='same-platform thread-clock calibration')
     args = parser.parse_args()
+    DATA=args.data_dir.resolve()
     if any('/' in name or not name.startswith(('e26-', 'repro-')) for name in [args.name, args.out]):
         raise RuntimeError('scoped fresh names required')
     helpers = runpy.run_path(str(ROOT / 'scripts/e26b-warm-results'))
@@ -26,24 +31,35 @@ def main():
         path = path.with_suffix('.json.gz')
     row = base.row(path)
     raw, _ = base.read(path)
+    linux_row = bool(raw.get('e28_bundle'))
+    if linux_row and (not args.controls or not args.calibration):
+        raise RuntimeError('E28 requires four same-platform --controls and a fresh --calibration; Mac data cannot be reused')
     if row['arm'] != 'B' or not row.get('valid'):
         raise RuntimeError('one valid lite-B observation required')
-    cell = raw['cells']['650']
+    cell = next(iter(raw['cells'].values()))
     sample = helpers['lite'](cell)
     selected = row['selected']
     low, high = cell['game_time_before'][selected], cell['game_time_after'][selected]
     wall_upper = high['at'] + high['rtt_s'] / 2 - low['at'] + low['rtt_s'] / 2
     controls = []
-    for name in ['e26-lite-a1', 'e26-lite-a2', 'e26-lite-a3', 'e26-lite-a4']:
+    for name in args.controls or ['e26-lite-a1', 'e26-lite-a2', 'e26-lite-a3', 'e26-lite-a4']:
+        if '/' in name:
+            raise ValueError('control names must be simple row names')
         control_path = DATA / (name + '.json.gz')
         if not control_path.exists():
             control_path = control_path.with_suffix('')
         control = base.row(control_path)
+        control_raw, _ = base.read(control_path)
+        if linux_row and (not control_raw.get('e28_bundle') or control_raw.get('cpu_mode') != raw.get('cpu_mode')
+                or set(control_raw['cells']) != set(raw['cells']) or control_raw.get('e26_arm') != 'A'):
+            raise RuntimeError('E28 control platform, CPU mode, load or arm differs')
         if not control.get('valid'):
             raise RuntimeError('fixed A control invalid')
         controls.append(control)
-    calibration_path = DATA / 'e26-clock-calibration-2.json'
+    calibration_path = args.calibration.resolve() if args.calibration else DATA / 'e26-clock-calibration-2.json'
     calibration = json.loads(calibration_path.read_text())
+    if linux_row and not calibration.get('e28_bundle'):
+        raise RuntimeError('E28 calibration must identify a Linux bundle')
     if calibration['status'] != 'complete' or not calibration['noise_valid']:
         raise RuntimeError('valid calibration required')
     metrics = {}

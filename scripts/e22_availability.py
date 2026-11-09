@@ -103,7 +103,8 @@ class Availability:
 
     def store_popen(self,original,*args,**kwargs):
         command=args[0] if args else kwargs.get('args')
-        store=bool(command and isinstance(command,(list,tuple)) and Path(command[0]).name=='goliath-store')
+        from goliath_platform import original_command
+        store=bool(command and isinstance(command,(list,tuple)) and Path(original_command(command)[0]).name=='goliath-store')
         before=time.monotonic_ns();wall=time.time_ns()
         child=original(*args,**kwargs)
         if store:

@@ -1,0 +1,60 @@
+diff --git a/crates/horizon-bots/Cargo.toml b/crates/horizon-bots/Cargo.toml
+--- a/crates/horizon-bots/Cargo.toml
++++ b/crates/horizon-bots/Cargo.toml
+@@ -15,2 +15,2 @@
+-[target.'cfg(target_os = "macos")'.dependencies]
++[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+ nix = { version = "=0.31.3", default-features = false, features = ["time"] }
+diff --git a/crates/horizon-client-lib/Cargo.toml b/crates/horizon-client-lib/Cargo.toml
+--- a/crates/horizon-client-lib/Cargo.toml
++++ b/crates/horizon-client-lib/Cargo.toml
+@@ -103,2 +103,5 @@
++[target.'cfg(target_os = "linux")'.dependencies]
++nix = { version = "=0.31.3", default-features = false, features = ["time"] }
++
+ [target.'cfg(target_os = "macos")'.dependencies]
+ nix = { version = "=0.31.3", default-features = false, features = ["time"] }
+diff --git a/crates/horizon-bots/src/latency_trace.rs b/crates/horizon-bots/src/latency_trace.rs
+--- a/crates/horizon-bots/src/latency_trace.rs
++++ b/crates/horizon-bots/src/latency_trace.rs
+@@ -129,2 +129,2 @@
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "linux"))]
+ pub(super) fn now_ns() -> Result<u64> {
+@@ -145,4 +145,4 @@
+-#[cfg(not(target_os = "macos"))]
++#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+ pub(super) fn now_ns() -> Result<u64> {
+-    Err("E25 latency trace requires macOS".into())
++    Err("E25 latency trace requires macOS or Linux".into())
+ }
+@@ -154,2 +154,10 @@
+     use super::*;
++    #[cfg(any(target_os = "macos", target_os = "linux"))]
++    #[test]
++    fn the_raw_clock_is_available_and_does_not_reverse() {
++        let before = now_ns().unwrap();
++        let after = now_ns().unwrap();
++        assert!(before > 0);
++        assert!(after >= before);
++    }
+     #[test]
+diff --git a/crates/horizon-client/src/lan/latency_trace.rs b/crates/horizon-client/src/lan/latency_trace.rs
+--- a/crates/horizon-client/src/lan/latency_trace.rs
++++ b/crates/horizon-client/src/lan/latency_trace.rs
+@@ -54,2 +54,2 @@
+-#[cfg(target_os = "macos")]
++#[cfg(any(target_os = "macos", target_os = "linux"))]
+ pub(super) fn now_ns() -> Option<u64> {
+@@ -65,2 +65,2 @@
+-#[cfg(not(target_os = "macos"))]
++#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+ pub(super) fn now_ns() -> Option<u64> {
+diff --git a/crates/horizon-client/src/lan/io_pool.rs b/crates/horizon-client/src/lan/io_pool.rs
+--- a/crates/horizon-client/src/lan/io_pool.rs
++++ b/crates/horizon-client/src/lan/io_pool.rs
+@@ -805,3 +805,3 @@
+-    #[cfg(target_os = "macos")]
++    #[cfg(any(target_os = "macos", target_os = "linux"))]
+     #[test]
+     fn a_decode_stamp_precedes_session_packet_dispatch() {

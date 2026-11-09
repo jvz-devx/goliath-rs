@@ -91,3 +91,17 @@ So M4 reports the cluster's measured frontier inside the D9 budget and layout, a
 The real-client checks run Horizon's own client, a reimplementation of the Java Edition 26.3 client, because it can be driven and measured from scripts. On 2026-11-08 the project decided to treat it as equivalent to the vanilla client for crossing behaviour and not to run a separate in-person test with a stock 26.3 client.
 
 What that leaves unproven: vanilla has its own code for chunk loading and unloading, movement prediction and entity tracking, so a difference there could show up only in a stock client. The protocol both clients speak is the same, and every crossing check on the final stack passes with Horizon's client. The M2 item for the stock client stays unticked and says so.
+
+## D12. Second platform: Linux with core pinning
+
+E28 repeats the M4 measurements on a second machine, a 6-core Intel i5-8400 (no SMT, 16 GiB RAM) running Linux with cgroup v2. Its numbers are reported as a second platform beside the Mac's and never replace or correct them. Each platform's frontier is compared only with its own baseline.
+
+D9's budget stays: four cores for the servers (tiles, proxy, store and sidecars, or the one plain Horizon process), one core for the bots. On Linux it is enforced by pinning instead of the SIGSTOP duty-cycle limiter:
+
+- CPUs 0 to 3 run the servers, CPU 4 runs the bots, and CPU 5 runs the harness, the test-only front shims and everything else on the host. Each group is a cgroup v2 cpuset. For the length of a window the system's own slices are narrowed to CPU 5, so outside work can't run on the fixture's cores, and are restored afterwards.
+- The front shims sat outside both caps on the Mac too. They stay outside them here, on CPU 5, and their CPU is reported.
+- The CPU governor is `performance` during a window, turbo stays on, and each cell records per-core frequency and thermal-throttle counters. A cell whose throttle counters rise is invalid.
+
+The reason: on the Mac, 82 to 88% of the proxy's P95-tail sends overlapped a limiter STOP (E25). The limiter turns a CPU budget into pauses that show up as latency. Pinning gives the same core count with no pauses. The limiter stays available as a comparison mode, so the effect of the change is measured on this machine.
+
+D9's validity rules apply unchanged: load 4 or less at the start of a cell, and no outside process averaging more than 0.5 core. With six cores that rule leaves the harness core little room, so each cell reports CPU 5's total busy time and the outside total, and a cell with CPU 5 saturated (95% busy or more) is invalid. Each cell also reports swap-in, since the machine has 16 GiB.

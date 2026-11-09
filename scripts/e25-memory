@@ -195,10 +195,15 @@ def main():
                     **{'tile-' + label: tile.server.process.pid for label, tile in instance.tiles.items()},
                     **{'sidecar-' + str(index): child.process.pid for index, child in enumerate(instance.sidecars)})
                 point = dict(at=time.monotonic(), processes={role: native(other) for role, other in roles.items()})
-                info = support.TaskInfo()
-                if support.LIBPROC.proc_pidinfo(pid, 4, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
-                    raise ProcessLookupError(pid)
-                point['proxy_faults'] = dict(faults=info.faults, pageins=info.pageins, cow=info.cow)
+                from goliath_platform import LINUX
+                if LINUX:
+                    info = support.usage(pid)
+                    point['proxy_faults'] = dict(faults=info['faults'],pageins=None,cow=None,unavailable=['pageins','cow'])
+                else:
+                    info = support.TaskInfo()
+                    if support.LIBPROC.proc_pidinfo(pid, 4, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+                        raise ProcessLookupError(pid)
+                    point['proxy_faults'] = dict(faults=info.faults, pageins=info.pageins, cow=info.cow)
                 memories.append(point)
                 if point['at'] - last_drain[0] >= 60:
                     for label, tile in instance.tiles.items():

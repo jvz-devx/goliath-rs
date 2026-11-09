@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Check D12 on throwaway Python workers, without game-server load or Rust."""
+import json
+import argparse
+import hashlib
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+import goliath_platform as platform
+from e11_support import save
+from e18_process import ProcessSampler
+
+
+def policy():
+    units=sorted(path.name for path in platform.CGROUP.iterdir()
+        if path.name.endswith('.slice') or path.name=='init.scope')
+    return dict(slices={unit:subprocess.check_output(['systemctl','show',unit,'-p','AllowedCPUs','--value'],text=True).strip() for unit in units},
+        governors={str(path.relative_to(platform.SYS_CPU)):path.read_text().strip()
+            for path in sorted(platform.SYS_CPU.glob('cpufreq/policy*/scaling_governor'))},
+        cgroup=(platform.PROC/'self/cgroup').read_text())
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name',default='harness-live',help='fresh harness-* or reviewer repro-* evidence name')
+    args=parser.parse_args()
+    if not args.name.startswith(('harness-','repro-')) or not all(c.isalnum() or c in '-_' for c in args.name):
+        raise ValueError('simple fresh harness-* or repro-* name required')
+    if not platform.LINUX:
+        raise SystemExit('Linux only')
+    if platform.cpu_mode()!='pin':
+        raise ValueError('this placement check requires pin mode')
+    target=platform.ROOT/'.local/evidence/E28'/(args.name+'.json')
+    if target.exists():
+        raise RuntimeError('live check already exists; preserve the first attempt')
+    before=policy()
+    result=dict(kind='E28-harness-live',status='running',before=before,workers=[],
+        harness_sha256={name:hashlib.sha256((platform.ROOT/'scripts'/name).read_bytes()).hexdigest()
+            for name in ['e28-platform-check','goliath_platform.py','e11_support.py','e18_process.py']})
+    sampler=None;workers=[]
+    try:
+        sampler=ProcessSampler(observer=True).start()
+        result['during']=policy()
+        command=[sys.executable,'-B','-c',
+            'import time\nwhile True:\n sum(i*i for i in range(10000))']
+        for index in range(5):
+            role='servers' if index<4 else 'bots'
+            child=subprocess.Popen(platform.launch_command(command,role),stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+            workers.append(child);sampler.register(role+'-'+str(index),child.pid)
+        # Read after the wrapper has execed. Both cgroup membership and allowed
+        # CPUs must agree, not just an inherited affinity mask.
+        deadline=time.monotonic()+10
+        for index,child in enumerate(workers):
+            expected='0-3' if index<4 else '4'
+            while True:
+                if child.poll() is not None:
+                    raise RuntimeError('worker exited: '+child.stderr.read().decode())
+                status=platform.parse_status((platform.PROC/str(child.pid)/'status').read_text())
+                membership=(platform.PROC/str(child.pid)/'cgroup').read_text()
+                if status['Cpus_allowed_list']==expected and ('/servers' if index<4 else '/bots') in membership:
+                    break
+                if time.monotonic()>deadline:
+                    raise RuntimeError('worker did not enter expected cpuset')
+                time.sleep(.01)
+            result['workers'].append(dict(pid=child.pid,role='servers' if index<4 else 'bots',
+                cpus_allowed_list=status['Cpus_allowed_list'],cgroup=membership,
+                counters_before=platform.usage(child.pid)))
+        sampler.capture('joined');sampler.capture('steady-first')
+        # This is the only timed worker window. No retries or game load.
+        time.sleep(2)
+        sampler.capture('steady-last')
+        for row,child in zip(result['workers'],workers):
+            row['counters_after']=platform.usage(child.pid)
+        result['report']=sampler.report()
+        steady=platform.host_delta(sampler.marks['steady-first']['host'],sampler.marks['steady-last']['host'])
+        result['steady_host']=steady
+        if sum(steady['per_cpu'][str(i)]['busy_fraction'] for i in range(4))<2:
+            raise RuntimeError('server CPUs did not show expected busy work')
+        if steady['per_cpu']['4']['busy_fraction']<.5:
+            raise RuntimeError('bot CPU did not show expected busy work')
+        result['status']='complete'
+    except BaseException as error:
+        result.update(status='failed',error=type(error).__name__+': '+str(error))
+    finally:
+        for child in workers:
+            if child.poll() is None:
+                child.terminate()
+                try:child.wait(timeout=5)
+                except subprocess.TimeoutExpired:child.kill();child.wait()
+            child.stderr.close()
+        if sampler:
+            sampler.stop()
+        result['after']=policy()
+        result['restored']=result['after']==before and not platform.STATE.exists()
+        save(target,result)
+    if result['status']!='complete' or not result['restored']:
+        raise RuntimeError('live check failed; see $REPO/.local/evidence/E28/harness-live.json')
+    # Exercise the installed SIGTERM handler and the same unwind/restore path.
+    window=platform.CpuWindow().start()
+    caught=False
+    try:
+        os.kill(os.getpid(),signal.SIGTERM)
+    except KeyboardInterrupt:
+        caught=True
+    finally:
+        window.stop()
+    result.update(sigterm_caught=caught,sigterm_restored=policy()==before and not platform.STATE.exists())
+    save(target,result)
+    if not result['sigterm_caught'] or not result['sigterm_restored']:
+        raise RuntimeError('SIGTERM restoration failed')
+    platform.restore();platform.restore()
+    print(json.dumps(dict(status=result['status'],workers=len(workers),restored=result['restored'],
+        sigterm_restored=result['sigterm_restored'],d12=result['report']['d12'])))
+
+
+if __name__=='__main__':main()

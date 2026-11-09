@@ -31,6 +31,8 @@ class Lite(ast.NodeTransformer):
 
 
 def main():
+    DATA.mkdir(parents=True,exist_ok=True)
+    (ROOT/'.local/evidence/E26').mkdir(parents=True,exist_ok=True)
     if '--name' not in sys.argv:raise RuntimeError('name is required')
     name=sys.argv[sys.argv.index('--name')+1]
     if not name.startswith(('e26-','repro-')) or '/' in name:raise RuntimeError('scoped fresh name required')

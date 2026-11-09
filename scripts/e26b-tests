@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from goliath_platform import LINUX
 from unittest.mock import patch
 import shutil
 
@@ -58,6 +59,7 @@ class Adapter(unittest.TestCase):
         self.assertIn('frozen executable changed during cell', text)
         self.assertIn("ROOT / 'docs/experiments/data/E21/stack-proof.json'", text)
 
+    @unittest.skipIf(LINUX and not (ROOT/'.local/bin/horizon-e26/e26-lite-r2/build.json').exists(), 'retained Mac lite bundles are not present on this host')
     def test_all_selected_frozen_proofs_exist_and_match(self):
         plans = json.loads((ROOT / 'docs/experiments/data/E26/e26-patch10-plan-1.json').read_text())
         import hashlib
@@ -152,6 +154,7 @@ class Adapter(unittest.TestCase):
         self.assertEqual(ast.unparse(changed), expected)
         compile(changed, 'final-lite-adapter-test', 'exec')
 
+    @unittest.skipIf(LINUX and not (ROOT/'.local/bin/goliath-e24/lease-fixed-r2/FINAL.json').exists(), 'retained Mac final bundle is not present on this host')
     def test_final_snapshot_metadata_identifies_both_candidate_kinds(self):
         module = runpy.run_path(str(ROOT / 'scripts/e26b-final-build'))
         base = ROOT / '.local/bin/goliath-e24/lease-fixed-r2'

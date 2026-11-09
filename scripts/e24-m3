@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import goliath_platform as platform
 
 ROOT=Path(__file__).resolve().parent.parent
 EVIDENCE=ROOT/'.local/evidence/E24'
@@ -32,8 +33,9 @@ def process_audit(sampler):
             delta=max(0,value['cpu_s']-prior)
             outside[pid]=outside.get(pid,0)+delta
     maximum=max((value/elapsed for value in outside.values()),default=0)
+    d12 = platform.host_delta(rows[0]['host'], rows[-1]['host']) if platform.LINUX else None
     return dict(seconds=elapsed,maximum_outside_process_cores=maximum,
-        valid=not sampler.error and maximum<=.5,error=sampler.error,
+        valid=not sampler.error and maximum<=.5 and (d12 is None or d12['valid']),error=sampler.error,d12=d12,
         outside=[dict(pid=pid,name='outside',cpu_s=value,cores=value/elapsed)
             for pid,value in sorted(outside.items(),key=lambda item:item[1],reverse=True)],
         samples=rows,scope='one-second process CPU, owned descendant tree, outside names redacted before retention')
@@ -90,6 +92,7 @@ class WindowBoundary(ast.NodeTransformer):
 
 def main():
     parser=argparse.ArgumentParser(add_help=False)
+    platform.cpu_options(parser)
     parser.add_argument('--bins',type=Path,default=Path(os.environ.get('GOLIATH_BIN_DIR','.local/bin/goliath-e24/lease-fixed-r2')))
     parser.add_argument('--data-name',default=os.environ.get('E24_M3_DATA_NAME'))
     parser.add_argument('--window-name',default=os.environ.get('E24_M3_WINDOW_NAME'))
@@ -130,15 +133,15 @@ def main():
             if not (window/'window.json').exists():(window/'window.json').write_text(json.dumps(metadata,indent=2)+'\n')
             if request.exists() and request.read_text()==owned_identity:request.unlink()
             owner=ROOT/'.local/host/quiet/owner'
-            if owner.exists() and owner.read_text().splitlines()[0]=='E24':
-                subprocess.run([ROOT/'.local/bin/host-window','release','E24'],check=False)
+            if owner.exists() and owner.read_text().splitlines()[0]==platform.window_owner('E24'):
+                subprocess.run([ROOT/'.local/bin/host-window','release',platform.window_owner('E24')],check=False)
         atexit.register(emergency_release)
-        subprocess.run([ROOT/'.local/bin/host-window','quiet','E24','bounded M3 '+window_name],check=True)
+        subprocess.run([ROOT/'.local/bin/host-window','quiet',platform.window_owner('E24'),'bounded M3 '+window_name],check=True)
         marker_wait=time.monotonic()+30
         while request.exists():
             if json.loads(request.read_text()).get('owner')=='E24':raise RuntimeError('different E24 marker after acquisition')
             if time.monotonic()>marker_wait:
-                subprocess.run([ROOT/'.local/bin/host-window','release','E24'],check=False)
+                subprocess.run([ROOT/'.local/bin/host-window','release',platform.window_owner('E24')],check=False)
                 raise RuntimeError('foreign quiet marker remained after coordinator grant')
             time.sleep(.2)
         until=time.monotonic()+600
@@ -174,7 +177,7 @@ def main():
         if not request.exists() or request.read_text()!=os.environ['E24_M3_IDENTITY']:
             raise RuntimeError('owned M3 quiet request lost')
         owner=ROOT/'.local/host/quiet/owner'
-        if not owner.exists() or owner.read_text().splitlines()[0]!='E24':raise RuntimeError('M3 coordinator ownership lost')
+        if not owner.exists() or owner.read_text().splitlines()[0]!=platform.window_owner('E24'):raise RuntimeError('M3 coordinator ownership lost')
     guard()
     support=load('m3_chaos_support',ROOT/'scripts/m3_chaos_support.py')
     sys.modules['m3_chaos_support']=support
@@ -292,7 +295,7 @@ def main():
                 outside_noise_valid=audit['valid'],outside_maximum_cores=audit['maximum_outside_process_cores'])
             (window/'window.json').write_text(json.dumps(metadata,indent=2)+'\n')
             if request.exists() and request.read_text()==owned_identity:request.unlink()
-            subprocess.run([ROOT/'.local/bin/host-window','release','E24'],check=True)
+            subprocess.run([ROOT/'.local/bin/host-window','release',platform.window_owner('E24')],check=True)
             finalized=True
 
 

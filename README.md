@@ -27,7 +27,7 @@ Later [E10 crossings](docs/experiments/E10-cluster.md) include the cut and fence
 
 ## Current experiment stacks
 
-E1 runs from this checkout. The current cluster results are E20's capacity experiment and E23's crossing and closeout checks. Their commands require a prepared Minecraft installation and a specific patched Horizon/Meridian stack. The frozen local binaries are not included in this repository. A fresh-clone reconstruction of that full stack has not been verified.
+E1 runs from this checkout. The current cluster results are E20's capacity experiment and E23's crossing and closeout checks. Their commands require a prepared Minecraft installation and a specific patched Horizon/Meridian stack. The frozen local binaries are not included in this repository. E28 rebuilt the plain-09 baseline and the final stack from fresh upstream clones at these pins and patch orders, on Linux, and recorded every patch, source and binary hash in [its build records](docs/experiments/data/E28/build-manifest.json). That reconstruction has not been repeated on macOS.
 
 The following inventory records source identities and patch order. It is not a complete build recipe. Patch paths are relative to `patches/`. See the [patch index](patches/README.md) for what each delta changes and whether it qualifies.
 
@@ -61,6 +61,10 @@ Horizon uses the same `fc2868b2b26d56ec76e17414909fe58a3b87bb92` pin. Apply thes
 The [tile build record](docs/experiments/data/E18/flat09-tiles-build-1.json) lists this exact order and option. It produced engine SHA-256 `b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d`. The [E17 prerequisite manifest](docs/experiments/data/E17/final-release-prereqs-v2.json) records internal-source revision `b4dc5af04b41a70c68d0e5d8608c4d7dd983b3ec` and per-file hashes for the model, store and workspace configuration. Those hashes, not today's working tree, identify the internal sources.
 
 That historical revision is outside published history. Every internal-source file listed in the manifest also matches published commit `25507cdf0819a0a530e6cbb36087a107cb890580`, the M3 completion commit. Use that reachable revision and verify the manifest's file hashes when preparing these internal crates. This source check does not establish a reproduced binary build.
+
+### Final tiles
+
+The final tile stack is FINAL-09, then `horizon-13-lease-renewal-r2.patch`, then `horizon-10-warm-tick.patch`. It runs with the bounded store from this repository and the reactor-1 proxy below.
 
 ### reactor-1 proxy
 

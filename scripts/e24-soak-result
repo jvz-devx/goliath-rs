@@ -26,7 +26,7 @@ def main():
     summary,summary_path=read(DATA/(args.name+'-summary.json'))
     causal,causal_path=read(DATA/(args.name+'-causal-readback.json'))
     clocks,clock_path=read(DATA/(args.name+'-loaded-clocks.json'))
-    cell=measurement['cells']['650']
+    cell=next(iter(measurement['cells'].values()))
     memory=raw['memory']
     first=min(memory,key=lambda row:abs(row['elapsed_seconds']-300))
     last=min(memory,key=lambda row:abs(row['elapsed_seconds']-1800))
@@ -60,12 +60,12 @@ def main():
             previous[name]=row['after']
     recovery=raw.get('recovery') or {}
     totals=recovery.get('totals',{})
-    cargo=bool(len(totals)==65 and all(amount==1 for amount in totals.values()) and not recovery.get('duplicates')
+    cargo=bool(len(totals)==cell['layout']['players']//10 and all(amount==1 for amount in totals.values()) and not recovery.get('duplicates')
         and not recovery.get('missing') and not recovery.get('stale_files') and recovery.get('pass_line_met'))
     stops={name:row['first_stop'] for name,row in causal['tiles'].items() if row['first_stop']}
     anomaly_count=sum(row['clock_anomaly_count'] for row in causal['tiles'].values())
     populations=[sum(group['online'] for group in row['groups'].values()) for row in cell.get('bot_samples',[])]
-    population=bool(populations and min(populations)==max(populations)==650)
+    population=bool(populations and min(populations)==max(populations)==cell['layout']['players'])
     counts=[0]*30
     for row in cell.get('activations_in_window',[]):
         index=int((row['ns']-cell['start_ns'])/60_000_000_000)

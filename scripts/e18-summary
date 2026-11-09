@@ -41,7 +41,7 @@ def row(path):
             tile_tps=data.get('tile_tps'))
         for key in ['unix_syscalls', 'context_switches']:
             if key in last['proxy']:
-                output[key+'_per_s']=(last['proxy'][key]-first['proxy'][key])/duration
+                output[key+'_per_s']=(last['proxy'][key]-first['proxy'][key])/duration if last['proxy'][key] is not None and first['proxy'][key] is not None else None
         output['cores_per_player']=output['cores']/data['bots']
         output['threads_increment_per_player']=(output['threads_max']-data['idle_proxy']['threads'])/data['bots']
     timing = data.get('internal_and_witness_timing', {})

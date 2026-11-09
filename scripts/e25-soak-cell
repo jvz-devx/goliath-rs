@@ -7,13 +7,17 @@ import re
 
 from e14_snapshot_support import validate_snapshot
 import e25_soak_harness as harness
+import goliath_platform as platform
+import goliath_bundle
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    platform.cpu_options(parser)
+    parser.add_argument('--players', type=int, default=650)
     parser.add_argument('--name',required=True)
     parser.add_argument('--bins',type=Path,required=True)
-    parser.add_argument('--owner',choices=['E25','reviewer'],default='E25')
+    parser.add_argument('--owner',choices=sorted({'E25','reviewer',platform.window_owner('E25')}),default=platform.window_owner('E25'))
     args = parser.parse_args()
     if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
         raise ValueError('fresh simple cell name required')
@@ -22,15 +26,16 @@ def main():
         raise RuntimeError('the requested owner does not hold its measurement window')
     bins = args.bins.resolve()
     validate_snapshot(bins)
-    fixture = validate_snapshot(harness.ROOT/'.local/bin/goliath-e24/lease-fixed-r2')
+    fixture = validate_snapshot(goliath_bundle.BUNDLES/'final' if goliath_bundle.is_e28(bins) else harness.ROOT/'.local/bin/goliath-e24/lease-fixed-r2')
     selected = validate_snapshot(bins)
     if set(selected['binaries']) != set(fixture['binaries']) or any(
         selected['binaries'][name] != digest for name,digest in fixture['binaries'].items() if name != 'meridian'):
         raise ValueError('soak must use unchanged unstamped fixed-r2 fixture binaries')
-    if harness.digest(bins/'horizon-bots')['sha256'] != harness.digest(harness.ROOT/'.local/bin/goliath-e24/lease-fixed-r2/horizon-bots')['sha256']:
+    reference = goliath_bundle.BUNDLES/'final' if goliath_bundle.is_e28(bins) else harness.ROOT/'.local/bin/goliath-e24/lease-fixed-r2'
+    if harness.digest(bins/'horizon-bots')['sha256'] != harness.digest(reference/'horizon-bots')['sha256']:
         raise ValueError('soak bot executable differs from fixed-r2 fixture')
-    harness.EVIDENCE.mkdir(exist_ok=True)
-    harness.DERIVED.mkdir(exist_ok=True)
+    harness.EVIDENCE.mkdir(parents=True,exist_ok=True)
+    harness.DERIVED.mkdir(parents=True,exist_ok=True)
     target = harness.EVIDENCE / (args.name+'-collection.json')
     if target.exists():
         raise RuntimeError('collection already exists')
@@ -38,7 +43,7 @@ def main():
     executed = None
     try:
         executed = harness.execute('e24-run',['--name',args.name,'--bins',bins,'--host-released',
-            '--players','650','--seconds','1800','--clock-telemetry','--soak-audit','--planning-mutation-rate','72'],args.name,owner=args.owner)
+            '--players',str(args.players),'--seconds','1800','--clock-telemetry','--soak-audit','--planning-mutation-rate','72'],args.name,owner=args.owner)
     except BaseException as caught:
         error = dict(type=type(caught).__name__,message=str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME'))
     native_path = harness.DERIVED / (args.name+'-summary.json')

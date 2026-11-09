@@ -20,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+import goliath_platform as platform
 
 
 def free_port():
@@ -32,7 +33,7 @@ class Child:
     def __init__(self, command, cwd, log):
         self.log = log.open("w")
         self.process = subprocess.Popen(
-            [str(part) for part in command], cwd=cwd, env=os.environ,
+            platform.launch_command([str(part) for part in command]), cwd=cwd, env=os.environ,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log,
             text=True, bufsize=1, start_new_session=True,
         )

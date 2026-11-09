@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import io
+import contextlib
 import tempfile
 from contextlib import redirect_stdout
 from unittest.mock import patch
@@ -21,6 +22,27 @@ bench=importlib.util.module_from_spec(spec);loader.exec_module(bench)
 
 
 class D9Tests(unittest.TestCase):
+    def test_direct_linux_cell_reserves_marker_and_preserves_compressed_rows(self):
+        loader=importlib.machinery.SourceFileLoader('d9_direct_test',str(ROOT/'scripts/e17-d9-baseline'))
+        spec=importlib.util.spec_from_loader(loader.name,loader)
+        direct=importlib.util.module_from_spec(spec);loader.exec_module(direct)
+        with tempfile.TemporaryDirectory(dir=ROOT/'.local/runs') as temporary:
+            root=Path(temporary);events=[]
+            @contextlib.contextmanager
+            def quiet(count):
+                events.append(('acquire',count))
+                try:yield
+                finally:events.append(('release',count))
+            args=SimpleNamespace(cell=50,out=root/'fresh.json')
+            base=SimpleNamespace(REQUEST=root/'request',quiet=quiet)
+            def cell(*values):events.append('cell');return 'saved'
+            with patch.object(direct.platform,'LINUX',True),patch.object(direct,'cell',side_effect=cell):
+                self.assertEqual(direct.single_cell(args,base),'saved')
+                self.assertEqual(events,[('acquire',50),'cell',('release',50)])
+                args.out.with_suffix('.json.gz').write_bytes(b'retained')
+                with self.assertRaisesRegex(RuntimeError,'fresh result name'):direct.single_cell(args,base)
+                self.assertEqual(args.out.with_suffix('.json.gz').read_bytes(),b'retained')
+
     def test_mocked_fixture_uses_one_engine_five_clients_and_256_pigs(self):
         layout=plan(300,bench.route_anchor,seed=18)
         clock=SimpleNamespace(value=0.)

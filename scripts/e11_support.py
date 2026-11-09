@@ -1,5 +1,7 @@
 """E11 private process, control, CPU-budget and result-writing helpers."""
 import ctypes
+import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,12 +11,13 @@ import subprocess
 import sys
 import threading
 import time
+import goliath_platform as platform
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNS = ROOT / '.local/runs'
 DATA = ROOT / 'docs/experiments/data/E11'
 BINS = ROOT / '.local/bin/horizon-e11'
-RESOURCES = Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'
+RESOURCES = platform.resources()
 
 
 def sanitize(value):
@@ -27,6 +30,32 @@ def save(path, value):
     temp = path.with_suffix(path.suffix+'.tmp')
     temp.write_text(sanitize(json.dumps(value, indent=2))+'\n')
     temp.replace(path)
+
+
+def read_json(path):
+    path = Path(path)
+    if not path.exists():
+        path = path.with_suffix(path.suffix+'.gz')
+    raw = path.read_bytes()
+    return json.loads(gzip.decompress(raw) if path.suffix == '.gz' else raw)
+
+
+def pack_json(path):
+    """Compress finalized Linux raw rows; publish hashes of decompressed bytes."""
+    path = Path(path).resolve()
+    if not platform.LINUX or not path.exists() or path.suffix != '.json' or path.stat().st_size <= 1_000_000:
+        return path
+    target = path.with_suffix('.json.gz')
+    if target.exists():
+        raise RuntimeError('compressed evidence already exists')
+    raw = path.read_bytes()
+    target.write_bytes(gzip.compress(raw, mtime=0))
+    if gzip.decompress(target.read_bytes()) != raw:
+        raise RuntimeError('compressed evidence differs')
+    save(path.with_suffix('.hash.json'),dict(path=str(target.relative_to(ROOT)),
+        sha256=hashlib.sha256(raw).hexdigest(), hash_scope='decompressed bytes', raw_bytes=len(raw)))
+    path.unlink()
+    return target
 
 
 def complete_json_lines(path):
@@ -131,7 +160,7 @@ class Engine(Control):
             .replace('{port}',str(self.port)).replace('{resources}',str(RESOURCES)).replace('{root}',str(ROOT)) for word in command]
         self.lines=[]
         self.log=(folder/'engine.log').open('w')
-        self.process=subprocess.Popen(command,cwd=self.game,env=self.env,stdin=subprocess.PIPE,
+        self.process=subprocess.Popen(platform.launch_command(command, 'servers'),cwd=self.game,env=self.env,stdin=subprocess.PIPE,
             stdout=self.log,stderr=subprocess.STDOUT,text=True)
         self.pid=self.process.pid
         self.socket=None
@@ -190,6 +219,7 @@ class TaskInfo(ctypes.Structure):
             'syscalls_mach','syscalls_unix','csw','threads','running','priority']]
 
 
+LIBPROC = None
 if sys.platform == 'darwin':
     LIBPROC=ctypes.CDLL('/usr/lib/libproc.dylib',use_errno=True)
     LIBPROC.proc_pidinfo.argtypes=[ctypes.c_int,ctypes.c_int,ctypes.c_uint64,ctypes.c_void_p,ctypes.c_int]
@@ -204,6 +234,8 @@ if sys.platform == 'darwin':
 
 
 def usage(pid):
+    if platform.LINUX:
+        return platform.usage(pid)
     if sys.platform != 'darwin':
         raise RuntimeError('E11 CPU limiter currently requires Darwin proc_pidinfo')
     info=TaskInfo()
@@ -268,17 +300,26 @@ class CpuBudget:
                 except ProcessLookupError: pass
 
     def start(self):
+        if platform.LINUX and platform.cpu_mode() == 'pin':
+            if not platform.ACTIVE and not os.environ.get('GOLIATH_CPU_CGROUP'):
+                raise RuntimeError('pin budget requires an active D12 CPU window')
+            return self
         self.thread.start()
         return self
 
     def stop(self):
         self.done.set()
+        if platform.LINUX and platform.cpu_mode() == 'pin':
+            return
         self.thread.join(5)
         if self.thread.is_alive():
             raise RuntimeError('CPU limiter did not stop')
 
     def report(self):
-        return {'cores':self.cores,'stops':self.stops,'max_debt_cpu_s':self.max_debt,'error':self.error}
+        result = {'cores':self.cores,'stops':self.stops,'max_debt_cpu_s':self.max_debt,'error':self.error}
+        if platform.LINUX:
+            result['cpu_mode'] = platform.cpu_mode()
+        return result
 
 
 def percentile(values, quantile):

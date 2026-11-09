@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import goliath_bundle
 
 ROOT = Path(__file__).resolve().parent.parent
 CONTROL = 'final clock-fixed warm-tick stack with bounded store and matched reactor-1; B-only observation'
@@ -39,7 +40,9 @@ def main():
     proof = json.loads((bins / 'source-proof.json').read_text())
     if build['status'] != 'complete' or proof['kind'] != 'E26b-final-tile-source-proof' or proof['lite'] is not True:
         raise RuntimeError('a proved complete final lite bundle is required')
-    if build['binaries']['meridian'] != '80f8953a201a51a0cae84341080af0bd70e08586ad608475b3092b2c30d3c378' or build['binaries']['goliath-store'] != '9636fa6d8089b071be241437e79eb2942a07dc756039b394e73cc8f705e26d0e':
+    if goliath_bundle.is_e28(bins):
+        goliath_bundle.validate(bins, {'final-lite'})
+    elif build['binaries']['meridian'] != '80f8953a201a51a0cae84341080af0bd70e08586ad608475b3092b2c30d3c378' or build['binaries']['goliath-store'] != '9636fa6d8089b071be241437e79eb2942a07dc756039b394e73cc8f705e26d0e':
         raise RuntimeError('final selected proxy/store identity mismatch')
     adapter().main()
 

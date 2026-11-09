@@ -122,7 +122,7 @@ def main():
         assert all(limit['error'] is None for limit in row['cpu_limits'])
         assert checked['tick_p99_ms']==row['tick_p99_ms']
         a,b=row['samples'][0]['main_threads'][0],row['samples'][-1]['main_threads'][0]
-        assert a['id']==b['id'] and a['name']=='main' and b['name']=='main'
+        assert a['id']==b['id'] and (a.get('is_main') and b.get('is_main') or a['name']=='main' and b['name']=='main')
         assert abs((b['cpu_s']-a['cpu_s'])/(b['at']-a['at'])-row['main_thread_cpu_cores'][0])<1e-10
         for key in stable: stable[key].add(row['build'][key])
         times=[sample['at'] for sample in row['outside_process_cpu']['samples']]

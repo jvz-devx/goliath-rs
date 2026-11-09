@@ -130,7 +130,7 @@ def readback(name):
     native = read(DERIVED/(name+'-result.json'))
     store = read(DERIVED/(name+'-store-diagnostics.json'))
     measurement = read(EVIDENCE/name/(name+'.json'))
-    cell = measurement['cells']['650']
+    cell = next(iter(measurement['cells'].values()))
     soak = read(EVIDENCE/name/(name+'-soak.json.gz'))
     for value in [native,store,measurement,soak]:
         publication_check(value)

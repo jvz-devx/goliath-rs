@@ -33,7 +33,9 @@ def main():
         groups=defaultdict(lambda:dict(count=0,cores=0.,user_cores=0.,system_cores=0.))
         for thread in cell['proxy_thread_cpu']['threads']:
             name=thread['name']
-            group='IO drivers' if name.startswith('proxy-io-') else 'terrain managers' if name=='terrain-manager' else 'player supervisors' if name.startswith('player ') else 'other matched threads'
+            from goliath_platform import thread_role
+            from goliath_platform import LINUX
+            group=thread_role(name) if LINUX else 'IO drivers' if name.startswith('proxy-io-') else 'terrain managers' if name=='terrain-manager' else 'player supervisors' if name.startswith('player ') else 'other matched threads'
             row=groups[group];row['count']+=1
             for key in ['cores','user_cores','system_cores']:row[key]+=thread[key]
         total=cell['proxy']['cores']

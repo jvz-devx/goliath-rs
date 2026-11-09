@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from goliath_platform import LINUX
 from unittest.mock import patch
 
 from e23_support import ROOT, FROZEN, frozen, load, Ownership, pack
@@ -17,6 +18,7 @@ results = load('e23_results_test', ROOT / 'scripts/e23-results')
 
 
 class StaticContracts(unittest.TestCase):
+    @unittest.skipIf(LINUX and not (ROOT/'.local/bin/meridian-e18/reactor-1/horizon-client').exists(), 'retained Mac bundle is not present on this host')
     def test_frozen_selected_bytes(self):
         self.assertEqual(frozen()['binaries'], FROZEN)
 

@@ -429,3 +429,10 @@ do not replace the accepted measurement stack or qualify an availability fix.
   of the final tile stack: FINAL-09, then `horizon-13-lease-renewal-r2.patch`,
   then patch 10. Frozen as `e26-final-stack-r1` with the bounded store and the
   rebuilt reactor-1 proxy.
+
+- `horizon-15-latency-stamps-e25-stamps-lease-r2-b2-linux.patch`: E28's Linux port
+  of the b2 latency stamps, applied right after them. It enables the same
+  `CLOCK_MONOTONIC_RAW` reading on Linux in the bot and the tile, adds the `nix`
+  dependency for Linux, and enables the decode-before-dispatch test there.
+  Timing points and trace format are unchanged. Measurement only, not part of
+  any production stack. See [E28](../docs/experiments/E28-linux.md).

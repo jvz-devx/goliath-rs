@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""Check Linux counter parsing, D12 recovery and E28 trust-anchor rejection."""
+import argparse
+import ast
+import copy
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+import runpy
+from unittest.mock import patch
+from types import SimpleNamespace
+
+import goliath_platform as platform
+import goliath_bundle as bundle
+
+RUNS = platform.ROOT/'.local/runs'
+
+
+def stat_text(pid=12, name='name with ) space', user=31, system=7, start=100):
+    fields = ['0']*50
+    fields[0] = str(pid);fields[1] = '('+name+')';fields[2] = 'R';fields[3] = '1'
+    fields[13] = str(user);fields[14] = str(system);fields[19] = '2'
+    fields[21] = str(start);fields[23] = '256'
+    return ' '.join(fields)
+
+
+class CounterTests(unittest.TestCase):
+    def test_stat_handles_embedded_closing_bracket_and_spaces(self):
+        value = platform.parse_stat(stat_text(), hz=100)
+        self.assertEqual(value['name'], 'name with ) space')
+        self.assertEqual((value['user_s'],value['system_s'],value['threads'],value['start_ticks']),(.31,.07,2,100))
+
+    def test_process_and_thread_fixture(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            proc = Path(temporary);directory=proc/'12';directory.mkdir()
+            status='VmRSS:\t2048 kB\nThreads:\t2\nvoluntary_ctxt_switches:\t3\nnonvoluntary_ctxt_switches:\t2\n'
+            (directory/'stat').write_text(stat_text())
+            (directory/'status').write_text(status)
+            for tid, total, name in [(12,300_000_001,'horizon-client'),(15,200_000_002,'proxy-control-1')]:
+                task=directory/'task'/str(tid);task.mkdir(parents=True)
+                (task/'stat').write_text(stat_text(pid=tid))
+                (task/'status').write_text(status)
+                (task/'schedstat').write_text(f'{total} 8 9\n')
+                (task/'comm').write_text(name+'\n')
+            row=platform.usage(12,proc)
+            self.assertAlmostEqual(row['cpu_s'],.500000003)
+            self.assertEqual(row['rss_mb'],2)
+            self.assertEqual(row['context_switches'],10)
+            self.assertIsNone(row['unix_syscalls'])
+            self.assertIn('unix_syscalls',row['unavailable'])
+            thread=platform.thread_usage(12,12,proc)
+            self.assertTrue(thread['is_main'])
+            self.assertEqual(thread['name'],'horizon-client')
+            self.assertAlmostEqual(thread['cpu_s'],.300000001)
+            self.assertEqual(platform.thread_ids(12,proc),[12,15])
+            self.assertEqual(platform.process_snapshot(proc)[12]['name'],'outside')
+
+    def test_proc_cpu_excludes_guest_double_counting(self):
+        parsed=platform.parse_cpu_stat('cpu 1 2 3 4\ncpu0 100 2 30 400 20 5 6 7 50 1\nintr 50\n')
+        self.assertEqual(parsed,{'0':dict(total=570,idle=420)})
+
+    def host(self):
+        return dict(at=1.,load=[0.,0.,0.],cpus={str(i):dict(total=100,idle=90) for i in range(6)},
+            swap_in_pages=10,memory_available_kb=400000,thermal_throttle={'cpu0/thermal_throttle/core_throttle_count':2},
+            thermal_throttle_available=True)
+
+    def test_d12_validity_thresholds(self):
+        first=self.host();last=copy.deepcopy(first)
+        for cpu in last['cpus'].values():cpu.update(total=200,idle=150)
+        last['swap_in_pages']=14
+        row=platform.host_delta(first,last)
+        self.assertTrue(row['valid']);self.assertEqual(row['swap_in_pages'],4)
+        self.assertEqual(row['per_cpu']['5']['busy_fraction'],.4)
+        last['cpus']['5']['idle']=95
+        self.assertIn('CPU 5 busy fraction at least 95%',platform.host_delta(first,last)['reasons'])
+        last['thermal_throttle']['cpu0/thermal_throttle/core_throttle_count']=3
+        self.assertIn('thermal throttle counters rose',platform.host_delta(first,last)['reasons'])
+        first['load'][0]=4.01
+        self.assertIn('start load above 4',platform.host_delta(first,last)['reasons'])
+
+    def test_absent_throttle_is_unproven_not_zero(self):
+        first=self.host();last=copy.deepcopy(first)
+        first['thermal_throttle_available']=False
+        self.assertIn('thermal throttle counters unavailable',platform.host_delta(first,last)['reasons'])
+
+    def test_resource_override_and_linux_default(self):
+        with patch.dict(os.environ,{'GOLIATH_RESOURCES':'/fixture/resources'}):
+            self.assertEqual(platform.resources(),Path('/fixture/resources'))
+        with patch.dict(os.environ,{},clear=True),patch.object(platform,'LINUX',True):
+            self.assertEqual(platform.resources(),Path.home()/'.local/share/goliath-resources/26.3')
+
+    def test_linux_names_and_native_main_id(self):
+        self.assertEqual(platform.thread_role('terrain-manager'),'terrain managers')
+        self.assertEqual(platform.thread_role('proxy-control-1'),'command workers')
+        self.assertEqual(platform.thread_role('proxy-io-1234567'),'IO drivers')
+
+
+class PlacementTests(unittest.TestCase):
+    def test_slice_command_is_argv_and_retains_empty_reset(self):
+        self.assertEqual(platform.slice_command('user.slice','5'),
+            ['sudo','-n','systemctl','set-property','--runtime','user.slice','AllowedCPUs=5'])
+        self.assertEqual(platform.slice_command('user.slice','')[-1],'AllowedCPUs=')
+
+    def test_wrapper_preserves_argv_and_moves_before_exec(self):
+        with patch.dict(os.environ,{'GOLIATH_CPU_CGROUP':'/sys/fs/cgroup/goliath-e28-12'}),patch.object(platform,'LINUX',True):
+            command=['/fixture/horizon-bots','--name','space $ literal']
+            wrapped=platform.launch_command(command)
+            self.assertEqual(wrapped[4],'/sys/fs/cgroup/goliath-e28-12/bots')
+            self.assertEqual(platform.original_command(wrapped),command)
+            self.assertEqual(platform.launch_command(wrapped),wrapped)
+            self.assertIn('/sys/fs/cgroup/goliath-e28-12/harness',platform.launch_command(['python3','e18-front-shim']))
+            self.assertIn('/sys/fs/cgroup/goliath-e28-12/servers',platform.launch_command(['/fixture/goliath-store']))
+
+    def test_mac_launch_stays_unchanged(self):
+        with patch.object(platform,'LINUX',False):
+            command=['horizon-client','argument']
+            self.assertIs(platform.launch_command(command),command)
+
+    def test_private_cluster_environment_cannot_drop_placement(self):
+        with patch.object(platform,'LINUX',True),patch.dict(os.environ,{},clear=True),patch.object(platform,'ACTIVE',SimpleNamespace(base='/sys/fs/cgroup/goliath-e28-12')):
+            self.assertIn('/sys/fs/cgroup/goliath-e28-12/servers',platform.launch_command(['meridian']))
+
+    def test_cluster_environment_keeps_only_cpu_controls(self):
+        source=ast.parse((platform.ROOT/'scripts/goliath-cluster').read_text())
+        function=next(node for node in source.body if isinstance(node,ast.FunctionDef) and node.name=='env')
+        namespace=dict(os=os,platform=platform)
+        exec(compile(ast.Module(body=[function],type_ignores=[]),'cluster-env-test','exec'),namespace)
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary,patch.object(platform,'LINUX',True),patch.dict(os.environ,
+            {'GOLIATH_CPU_CGROUP':'/sys/fs/cgroup/goliath-e28-12','GOLIATH_CPU_MODE':'limiter','GOLIATH_PRIVATE':'not forwarded'}):
+            env=namespace['env'](Path(temporary))
+            self.assertEqual(env['GOLIATH_CPU_MODE'],'limiter')
+            self.assertEqual(env['GOLIATH_CPU_CGROUP'],'/sys/fs/cgroup/goliath-e28-12')
+            self.assertNotIn('GOLIATH_PRIVATE',env)
+
+    def test_main_thread_selection_uses_pid_not_comm(self):
+        ns=runpy.run_path(str(platform.ROOT/'scripts/e20-frontier'))
+        before={'a':{'12':dict(at=1,cpu_s=1,user_cpu_s=.5,system_cpu_s=.5,name='horizon-client',is_main=True)}}
+        after={'a':{'12':dict(at=2,cpu_s=2,user_cpu_s=1.5,system_cpu_s=.5,name='horizon-client',is_main=True)}}
+        with patch.object(platform,'LINUX',True):
+            self.assertEqual(ns['thread_deltas'](before,after)['a']['main']['id'],'12')
+
+    def test_large_json_hashes_decompressed_bytes(self):
+        import e11_support as support
+        import gzip
+        import hashlib
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary,patch.object(platform,'LINUX',True):
+            path=Path(temporary)/'record.json';raw=b'{"text":"'+b'x'*1_000_000+b'"}'
+            path.write_bytes(raw)
+            target=support.pack_json(path)
+            self.assertFalse(path.exists())
+            self.assertEqual(gzip.decompress(target.read_bytes()),raw)
+            record=json.loads(path.with_suffix('.hash.json').read_text())
+            self.assertEqual(record['sha256'],hashlib.sha256(raw).hexdigest())
+            self.assertEqual(support.read_json(target),dict(text='x'*1_000_000))
+
+    def test_large_relative_json_path_is_published_with_a_hash(self):
+        import e11_support as support
+        import gzip
+        import hashlib
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary,patch.object(platform,'LINUX',True):
+            source=Path(temporary)/'relative.json'
+            raw=b'{"text":"'+b'x'*1_000_000+b'"}'
+            source.write_bytes(raw)
+            target=support.pack_json(source.relative_to(support.ROOT))
+            self.assertFalse(source.exists())
+            self.assertEqual(gzip.decompress(target.read_bytes()),raw)
+            record=json.loads(source.with_suffix('.hash.json').read_text())
+            self.assertEqual(record['path'],str(target.relative_to(support.ROOT)))
+            self.assertEqual(record['sha256'],hashlib.sha256(raw).hexdigest())
+
+    def test_restore_twice_performs_mutations_once(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            state=Path(temporary)/'restore.json'
+            platform.save_state(dict(pid=0,cgroup=str(Path(temporary)/'absent'),driver_cgroup=None,
+                slices={'system.slice':'0-5','user.slice':''},governors={'/fixture/governor':'powersave'}),state)
+            with patch.object(platform.subprocess,'run') as run,patch.object(platform,'sudo_write') as write:
+                platform.restore(state);platform.restore(state)
+            self.assertEqual(run.call_count,2);write.assert_called_once_with('/fixture/governor','powersave')
+            self.assertFalse(state.exists())
+
+    def test_partial_restore_retains_journal_and_retries_only_failed_work(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            path=Path(temporary)/'restore.json'
+            platform.save_state(dict(pid=0,cgroup=str(Path(temporary)/'absent'),driver_cgroup=None,
+                slices={'system.slice':'','user.slice':''},governors={}),path)
+            with patch.object(platform.subprocess,'run',side_effect=[RuntimeError('failed'),None]):
+                with self.assertRaisesRegex(RuntimeError,'restore incomplete'):platform.restore(path)
+            self.assertEqual(json.loads(path.read_text())['slices'],{'system.slice':''})
+            with patch.object(platform.subprocess,'run') as run:platform.restore(path)
+            self.assertEqual(run.call_count,1)
+
+    def test_cli_mode_propagates_to_nested_kernels(self):
+        with patch.dict(os.environ,{},clear=True),patch.object(platform,'LINUX',True):
+            parser=argparse.ArgumentParser();platform.cpu_options(parser)
+            self.assertEqual(parser.parse_args([]).cpu_mode,'pin')
+            parser.parse_args(['--cpu-mode','limiter'])
+            self.assertEqual(platform.cpu_mode(),'limiter')
+
+    def test_profiling_fails_clearly(self):
+        with patch.object(platform,'LINUX',True):
+            with self.assertRaisesRegex(RuntimeError,'macOS only'):platform.mac_only('sample')
+
+
+class IdentityTests(unittest.TestCase):
+    def test_full_file_set_and_binary_hashes_are_required(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root=Path(temporary);directory=root/'bundles/plain-09';directory.mkdir(parents=True)
+            for name in ['horizon-client','horizon-bots']:
+                (directory/name).write_text(name);(directory/name).chmod(0o755)
+            binaries={name:bundle.sha(directory/name) for name in ['horizon-client','horizon-bots']}
+            for name in ['canonical.json','build.json']:
+                (directory/name).write_text(json.dumps(dict(status='complete',profile='release',source_equality='passed',binaries=binaries)))
+            record=dict(path='bundles/plain-09',binaries=binaries,files={p.name:bundle.sha(p) for p in directory.iterdir()})
+            manifest=root/'manifest.json';manifest.write_text(json.dumps(dict(schema_version=1,platform='linux',bundles={'plain-09':record})))
+            with patch.object(bundle,'ROOT',root),patch.object(bundle,'BUNDLES',root/'bundles'),patch.object(bundle,'MANIFEST',manifest):
+                self.assertEqual(bundle.validate(directory)['binaries'],binaries)
+                (directory/'extra').write_text('unlisted')
+                with self.assertRaisesRegex(ValueError,'unlisted'):bundle.validate(directory)
+                (directory/'extra').unlink()
+                (directory/'horizon-client').write_text('changed')
+                with self.assertRaisesRegex(ValueError,'frozen file changed'):bundle.validate(directory)
+
+
+if __name__=='__main__':
+    RUNS.mkdir(parents=True,exist_ok=True)
+    unittest.main()

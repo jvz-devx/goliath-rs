@@ -5,30 +5,42 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import gzip
+import e11_support as support
 
 ROOT=Path(__file__).resolve().parent.parent
 DATA=ROOT/'docs/experiments/data/E20'
 
-def endpoints(levels):
+def endpoints(levels, baseline=None):
     valid_levels={n:[c for c in cells if c['valid']] for n,cells in levels.items()}
     stable_pass=[n for n,cells in valid_levels.items() if len(cells)>=2 and all(c['passed'] for c in cells)]
     stable_fail=[n for n,cells in valid_levels.items() if len(cells)>=2 and all(not c['passed'] for c in cells)]
     unstable=sorted(n for n,cells in valid_levels.items() if any(c['passed'] for c in cells) and any(not c['passed'] for c in cells))
     frontier=max((n for n in stable_pass if any(failed>n for failed in stable_fail)),default=None)
     bracket=min((n for n in stable_fail if frontier and n>frontier),default=None)
-    return dict(frontier=frontier,ratio_to_325=frontier/325 if frontier else None,
+    result = dict(frontier=frontier,ratio_to_325=frontier/325 if frontier else None,
         tested_grid_step=25,bracket_fail=bracket,bracket_width=bracket-frontier if bracket else None,
         unstable_counts=unstable,stable_passing_counts=sorted(stable_pass),stable_failing_counts=sorted(stable_fail))
+    if baseline is not None:
+        result.pop('ratio_to_325')
+        result.update(baseline=baseline,ratio_to_baseline=frontier/baseline if frontier else None)
+    return result
 
-def ledger(prefix):
-    rows=[];levels={}
-    pattern=re.compile(re.escape(prefix)+r'-(\d+)-r(\d+)\.json$')
-    for path in DATA.glob(prefix+'-*-r*.json'):
+def ledger(prefix, baseline=None):
+    rows=[];levels={};modes=set()
+    pattern=re.compile(re.escape(prefix)+r'-(\d+)-r(\d+)\.json(?:\.gz)?$')
+    for path in DATA.glob(prefix+'-*-r*.json*'):
         match=pattern.fullmatch(path.name)
         if not match:continue
-        count,repeat=map(int,match.groups());data=json.loads(path.read_text())
+        count,repeat=map(int,match.groups());data=support.read_json(path)
+        if data.get('e28_bundle') and baseline is None:
+            raise ValueError('E28 needs --baseline from this machine; never reuse the Mac baseline')
+        if data.get('e28_bundle'):
+            modes.add(data['cpu_mode'])
+            if len(modes)>1:raise ValueError('do not mix pin and limiter cells in one frontier ledger')
         cell=data['cells'][str(count)]
-        row=dict(count=count,repeat=repeat,path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(path.read_bytes()).hexdigest(),status=cell['status'])
+        raw=path.read_bytes();raw=gzip.decompress(raw) if path.suffix=='.gz' else raw
+        row=dict(count=count,repeat=repeat,path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(raw).hexdigest(),status=cell['status'])
         if cell['status']=='complete':
             steady=cell['processes']['phases']['steady']
             cpu={name:value['cores'] for name,value in steady['fixture'].items()}
@@ -46,12 +58,17 @@ def ledger(prefix):
             levels.setdefault(count,[]).append(row)
         rows.append(row)
     rows.sort(key=lambda row:(row['count'],row['repeat']))
-    return dict(kind='E20-frontier-ledger',prefix=prefix,**endpoints(levels),rows=rows,
+    return dict(kind='E20-frontier-ledger',prefix=prefix,**endpoints(levels,baseline),rows=rows,
         authority='builder evidence; reviewer independently verifies milestone acceptance')
 
 def main():
-    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('prefix');args=parser.parse_args()
-    result=ledger(args.prefix)
+    global DATA
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('prefix')
+    parser.add_argument('--baseline',type=int)
+    parser.add_argument('--data-dir',type=Path,default=DATA)
+    args=parser.parse_args();DATA=args.data_dir.resolve()
+    if args.baseline is not None and args.baseline<=0:parser.error('--baseline must be positive')
+    result=ledger(args.prefix,args.baseline)
     (DATA/(args.prefix+'-staircase.json')).write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps({key:value for key,value in result.items() if key!='rows'},indent=2))
     for row in result['rows']:

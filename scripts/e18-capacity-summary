@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import e11_support as support
+from goliath_platform import thread_role
 
 
 def summarize(data):
@@ -26,7 +27,7 @@ def summarize(data):
         thread_roles={}
         for thread in cell.get('proxy_thread_cpu',{}).get('threads',[]):
             name=thread['name']
-            role='IO drivers' if name.startswith('proxy-io-') else 'command workers' if name.startswith('proxy-control-') else 'terrain managers' if name=='terrain-manager' else 'wall workers' if name.startswith('wall-') else 'other matching threads'
+            role=thread_role(name)
             thread_roles[role]=thread_roles.get(role,0)+thread['cores']
         result['cells'][count]=dict(status=cell['status'],diagnostic_pass=cell['diagnostic_pass'],failures=cell['diagnostic_failures'],
             proxy=cell['proxy'],tiles=tiles,server_cores=steady['server_cores'],process_cores=cpu,proxy_matching_thread_cores=thread_roles,

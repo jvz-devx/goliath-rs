@@ -58,7 +58,7 @@ def main():
     began=time.monotonic()
     env={key:value for key,value in os.environ.items() if key not in ['CI','CARGO_TARGET_DIR'] and not key.startswith('CARGO_PROFILE_')}
     env.update(CARGO_INCREMENTAL='0',CARGO_PROFILE_RELEASE_LTO='thin',CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',CARGO_BUILD_JOBS='6',
-        HORIZON_TEST_RESOURCES=str(Path.home()/'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'))
+        HORIZON_TEST_RESOURCES=str(__import__('goliath_platform').resources()))
     def run(label,command,red=False):
         print('FLAT_BUILD '+args.variant+' '+label,flush=True)
         start=time.monotonic();log=root/(label+'.log')

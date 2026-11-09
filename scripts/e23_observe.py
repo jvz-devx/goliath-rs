@@ -35,6 +35,8 @@ class Profile:
             cores=cores,before=before,after=after,tile=self.tile.label,pid=self.tile.server.process.pid)
 
     def begin(self):
+        from goliath_platform import mac_only
+        mac_only('xctrace profiling')
         if self.thread is None:
             self.thread = threading.Thread(target=self.collect,daemon=True)
             self.thread.start()
@@ -135,6 +137,7 @@ class Soak:
     def __init__(self,name,ns,holder):
         self.name,self.ns,self.holder = name,ns,holder
         self.seeded = {}
+        self.count = 650
         self.memory,self.audits = [],[]
         self.batches = {}
         self.origin = None
@@ -182,8 +185,8 @@ class Soak:
 
     def times(self,instance,original):
         self.instance = instance
-        if self.origin is None and len(self.seeded)!=65:
-            raise RuntimeError('not all 65 crossing actors received unique soak cargo')
+        if self.origin is None and len(self.seeded)!=self.count//10:
+            raise RuntimeError('not all crossing actors received unique soak cargo')
         return original(instance)
 
     def sample(self,counter):

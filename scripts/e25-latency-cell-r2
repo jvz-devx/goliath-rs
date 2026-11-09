@@ -14,6 +14,7 @@ import threading
 import time
 
 import e11_support as support
+import goliath_platform as platform
 from e14_snapshot_support import validate_snapshot, sha256
 from e25_latency_layout import split_witnesses
 from e25_stop_brackets import StopBrackets
@@ -120,8 +121,9 @@ def session_paths(cell,witnesses,direct):
                 path='direct-reference' if signing else 'via-proxy',destination=destination,
                 signed_initial_profile=signing,signature_or_secret_recorded=False,
                 evidence='actual bot command and before/after live player UUID'))
-    if len(rows) != 650 or len({row['name'] for row in rows}) != 650:
-        raise RuntimeError('per-session path ledger does not cover all 650 players')
+    expected_players = cell['layout']['players']
+    if len(rows) != expected_players or len({row['name'] for row in rows}) != expected_players:
+        raise RuntimeError('per-session path ledger does not cover the full population')
     if {row['name'] for row in rows if row['signed_initial_profile']} != expected_direct:
         raise RuntimeError('signed sessions differ from the eight preregistered witnesses')
     return rows
@@ -140,7 +142,11 @@ def authority_audit(memory,leases):
 
 
 def main():
+    global DATA
     parser = argparse.ArgumentParser(description=__doc__)
+    platform.cpu_options(parser)
+    parser.add_argument('--data-dir',type=Path,default=DATA)
+    parser.add_argument('--players', type=int, default=650)
     parser.add_argument('--name',required=True)
     parser.add_argument('--bins',type=Path,required=True)
     parser.add_argument('--plan',type=Path,required=True)
@@ -151,6 +157,10 @@ def main():
     parser.add_argument('--window-managed',action='store_true',help='use an E25 window held by the paired-session runner')
     parser.add_argument('--session')
     args = parser.parse_args()
+    DATA=args.data_dir.resolve()
+    DATA.mkdir(parents=True,exist_ok=True)
+    if args.profile_after_window:
+        platform.mac_only('xctrace profiling')
     if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
         raise ValueError('fresh e25- or repro- name required')
     evidence = EVIDENCE / args.name
@@ -163,19 +173,24 @@ def main():
         raise RuntimeError('attempt already exists')
     memory = load('e25_latency_storage',ROOT/'scripts/e25-memory')
     plan = json.loads(args.plan.read_text())
+    if plan.get('players',650) != args.players:
+        raise ValueError('latency plan player count differs from the cell')
     bins = args.bins.resolve()
     identity = validate_snapshot(bins)
+    if platform.LINUX:
+        import goliath_bundle
+        goliath_bundle.validate(bins, {'final-stamps'})
     contract = json.loads((bins/'FINAL.json').read_text())
     bot_hash = sha256(bins/'horizon-bots')
     host = ROOT/'.local/bin/host-window'
     if args.window_managed:
         owner = ROOT / '.local/host/quiet/owner'
-        if not owner.exists() or owner.read_text().splitlines()[0] != 'E25':
+        if not owner.exists() or owner.read_text().splitlines()[0] != platform.window_owner('E25'):
             raise RuntimeError('paired session does not hold the E25 window')
         if not args.session or not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.session):
             raise ValueError('managed window needs a named paired session')
     else:
-        subprocess.run([host,'quiet','E25',args.name],check=True)
+        subprocess.run([host,'quiet',platform.window_owner('E25'),args.name],check=True)
     request = ROOT/'.local/quiet-request'
     quiet_identity = json.dumps(dict(owner='E25',name=args.name,pid=os.getpid(),wall_ns=time.time_ns()))+'\n'
     owned = False
@@ -267,8 +282,9 @@ def main():
         ns['load'] = loaded
         original_popen = ns['subprocess'].Popen
         def popen(command,*a,**kw):
-            if Path(str(command[0])).name == 'horizon-bots':
-                prefix = command[command.index('--name')+1]
+            original = platform.original_command(command)
+            if Path(str(original[0])).name == 'horizon-bots':
+                prefix = original[original.index('--name')+1]
                 tile = prefix.removeprefix('E17Bot').lower()
                 kw['env'] = dict(kw.get('env',os.environ),E25_LATENCY_TILE=tile)
             return original_popen(command,*a,**kw)
@@ -323,7 +339,7 @@ def main():
                         raise RuntimeError('authority closed during latency cell')
             return original_times(instance)
         ns['game_times'] = game_times
-        sys.argv = ['e25-latency-base','--name',args.name,'--counts','650','--bins',str(bins),
+        sys.argv = ['e25-latency-base','--name',args.name,'--counts',str(args.players),'--bins',str(bins),
             '--no-other-agents','--warmup','30','--seconds','60']
         try:
             ns['main']()
@@ -333,7 +349,7 @@ def main():
         raw_path = evidence/(args.name+'.json')
         if raw_path.exists():
             raw = json.loads(raw_path.read_text())
-            cell = raw.get('cells',{}).get('650',{})
+            cell = raw.get('cells',{}).get(str(args.players),{})
             if args.server_uncapped_diagnostic:
                 raw.update(kind='E25-server-uncapped-diagnostic-NOT-D9-NOT-M4',server_core_cap=None,acceptance=False,proxy_inside_server_cap=None)
                 cell.update(d9_valid=False,server_limit_disabled=True,proxy_inside_server_cap=None)
@@ -392,7 +408,7 @@ def main():
             if owned and request.exists() and request.read_text() == quiet_identity:
                 request.unlink()
             if not args.window_managed:
-                subprocess.run([host,'release','E25'],check=True)
+                subprocess.run([host,'release',platform.window_owner('E25')],check=True)
     if args.profile_after_window:
         try:
             profiler=load('e25_proxy_profile_export',ROOT/'scripts/e25_proxy_profile.py')

@@ -1,0 +1,1041 @@
+#!/usr/bin/env python3
+"""Record E28's pinned reconstruction and sequential host-window build commands."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+EVIDENCE = ROOT / '.local/evidence/E28'
+DATA = ROOT / 'docs/experiments/data/E28'
+HORIZON = 'fc2868b2b26d56ec76e17414909fe58a3b87bb92'
+MERIDIAN = '902dcf195e0a8bbd3f39a5f560684af00e64bf5d'
+PLAIN = ['e2-horizon-input-trace', 'horizon-03-bots', 'horizon-04-digest', 'horizon-09-flat-light']
+FINAL = ['e2-horizon-input-trace', 'horizon-01-tile-cut', 'horizon-02-tile-ownership',
+         'horizon-03-cluster', 'horizon-05-m2', 'horizon-06-leases', 'horizon-07-observer-status',
+         'horizon-03-bots', 'horizon-04-digest', 'horizon-08-m4-measurement',
+         'horizon-09-flat-light', 'horizon-13-lease-renewal-r2', 'horizon-10-warm-tick']
+PROXY = ['e2-meridian-client', 'meridian-01-wall-trigger', 'meridian-02-fast-crossing',
+         'meridian-03-cluster', 'meridian-04-m2', 'meridian-05-proxy-cost', 'meridian-06-io-pool']
+SETTINGS = {'CARGO_INCREMENTAL': '0', 'RUSTC_WRAPPER': '', 'CARGO_BUILD_JOBS': '6',
+            'CARGO_PROFILE_RELEASE_LTO': 'thin', 'CARGO_PROFILE_RELEASE_CODEGEN_UNITS': '1',
+            'CARGO_PROFILE_RELEASE_DEBUG': '0'}
+
+
+def gate_profile(command):
+    if len(command) > 4 and command[1:4] == ['build', 'B', '--']:
+        command = command[4:]
+    if '--profile' in command:
+        return command[command.index('--profile') + 1]
+    if '--release' in command:
+        return 'release'
+    if 'fmt' in command or command[0] == 'rustfmt':
+        return 'format-only'
+    return 'dev' if any(value in command for value in ['test', 'clippy', 'build']) else 'not-applicable'
+
+
+def fast_gate(command):
+    result = []
+    for value in command:
+        result.extend(['--profile', 'fast'] if value == '--release' else [value])
+    return result
+
+
+def annotate_gate(row):
+    row['profile'] = gate_profile(row['command'])
+    if '-linux-port' in row['label']:
+        row['superseded'] = True
+        row['superseded_reason'] = 'Reviewer rejected the lint-only port and its MSRV change; canonical reactor sources and binaries replace this attempt.'
+    if row['label'] == 'proxy-clippy-restored-reactor':
+        row['gate'] = 'proxy-clippy'
+    return row
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def sanitize(value):
+    return value.replace(str(ROOT), '$REPO').replace(str(Path.home()), '$HOME')
+
+
+def machine():
+    import platform as host_platform
+    model = next(line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines()
+                 if line.startswith('model name'))
+    return {'platform': sys.platform, 'architecture': host_platform.machine(),
+            'os': host_platform.freedesktop_os_release().get('PRETTY_NAME'),
+            'kernel': host_platform.release(), 'cpu_model': model, 'logical_cpus': os.cpu_count(),
+            'visible_physical_memory_bytes': os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')}
+
+
+def dependency():
+    """Identify Cargo's pinned protocol/world source without another manual checkout."""
+    pin = '0d21d5520ec26c49b774bf1533e53ea8af81278d'
+    cargo_home = Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo')))
+    matches = [path for path in (cargo_home / 'git/checkouts').glob('horizon-*/*')
+               if (path / '.git').exists() and git(path, 'rev-parse', 'HEAD') == pin]
+    if len(matches) != 1:
+        raise RuntimeError('Expected exactly one Cargo-managed pinned Horizon dependency')
+    tree = matches[0]
+    if not (tree / 'LICENSE').read_text().startswith('MIT License'):
+        raise RuntimeError('Pinned dependency license does not match the recorded MIT provenance')
+    subprocess.run(['git', 'diff', '--exit-code', 'HEAD'], cwd=tree, check=True)
+    paths = subprocess.check_output(['git', 'ls-files', '-z'], cwd=tree).decode().split('\0')
+    files = compiled_inputs({path: sha(tree / path) for path in sorted(paths) if path and (tree / path).is_file()})
+    value = {'kind': 'E28-pinned-protocol-world-dependency',
+             'upstream_url': 'https://github.com/horizon-rust/horizon', 'pin': pin,
+             'git_tree': git(tree, 'rev-parse', 'HEAD^{tree}'), 'license': 'MIT',
+             'license_sha256': sha(tree / 'LICENSE'),
+             'source_tree_sha256': hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest(),
+             'files': files, 'cache': 'Cargo-managed dependency source; no extra manual checkout'}
+    write(DATA / 'build-dependency-inputs.json', value)
+    state(f'Pinned protocol/world dependency verified at {pin}, {len(files)} source files')
+
+
+def finish_running_gate(supervisor, wrapper, label='final-stamps-lease-tests'):
+    """Wait for the existing gate, then retire its paused release-only supervisor."""
+    import select
+    import signal as process_signal
+    arguments = Path(f'/proc/{wrapper}/cmdline').read_bytes().decode().strip('\0').split('\0')
+    command = arguments[arguments.index('--') + 1:]
+    directory = str(Path(f'/proc/{wrapper}/cwd').resolve().relative_to(ROOT))
+    profile = gate_profile(command)
+    descriptor = os.pidfd_open(wrapper)
+    try:
+        select.select([descriptor], [], [])
+        fields = Path(f'/proc/{wrapper}/stat').read_text().rsplit(')', 1)[1].split()
+        if fields[0] != 'Z':
+            raise RuntimeError('Completed gate wrapper is not retained as a zombie')
+        status = int(fields[49])
+        code = os.waitstatus_to_exitcode(status)
+    finally:
+        os.close(descriptor)
+    log = EVIDENCE / 'build-logs' / (label + '.log')
+    text = log.read_text()
+    settings = dict(SETTINGS)
+    if profile == 'fast':
+        settings = {'CARGO_INCREMENTAL': '0', 'RUSTC_WRAPPER': '', 'CARGO_BUILD_JOBS': '6',
+                    'CARGO_PROFILE_FAST_INHERITS': 'release', 'CARGO_PROFILE_FAST_LTO': 'false',
+                    'CARGO_PROFILE_FAST_CODEGEN_UNITS': '16',
+                    'HORIZON_TEST_RESOURCES': '$HOME/.local/share/goliath-resources/26.3'}
+    write(EVIDENCE / 'commands' / (label + '.json'), {
+        'label': label, 'cwd': directory,
+        'command': [str(ROOT / '.local/bin/host-window'), 'build', 'B', '--', *command],
+        'settings': settings, 'profile': profile, 'exit': code,
+        'log': str(log.relative_to(ROOT)), 'log_sha256': sha(log),
+        'test_results': re.findall(r'test result: .*', text),
+        'orchestration_note': 'Existing gate completed normally. Its supervisor was paused for reviewer-priority work; exit status recovered from the completed child wrapper.',
+        'timing_limit': 'Supervisor was paused before recording monotonic duration; the original Cargo timing remains in the log.'})
+    state(f'Existing {label} gate completed normally: exit={code}; retiring paused supervisor')
+    os.kill(supervisor, process_signal.SIGINT)
+    os.kill(supervisor, process_signal.SIGCONT)
+
+
+def write(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = (sanitize(json.dumps(value, indent=2)) + '\n').encode()
+    if len(raw) > 1_000_000:
+        raise ValueError(f'JSON exceeds the public uncompressed limit: {path.name}')
+    path.write_bytes(raw)
+
+
+def state(message):
+    EVIDENCE.mkdir(parents=True, exist_ok=True)
+    with (EVIDENCE / 'build-state.md').open('a') as stream:
+        stream.write(f'- {time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())} {sanitize(message)}\n')
+    print(message, flush=True)
+
+
+def git(tree, *args):
+    return subprocess.check_output(['git', *args], cwd=tree).decode().strip()
+
+
+def sources(tree):
+    paths = subprocess.check_output(['git', 'ls-files', '-co', '--exclude-standard', '-z'], cwd=tree)
+    return {p: sha(tree / p) for p in sorted(set(paths.decode().split('\0')) - {''})
+            if tree != ROOT or p.startswith(('crates/', '.cargo/')) or p in ['Cargo.toml', 'Cargo.lock', 'clippy.toml']
+            if (tree / p).is_file()}
+
+
+def apply(tree, name, options=(), reverse=False):
+    patch = ROOT / 'patches' / (name + '.patch')
+    command = ['git', 'apply', *(['--reverse'] if reverse else []), *options]
+    checked = subprocess.run([*command, '--check', str(patch)], cwd=tree, capture_output=True, text=True)
+    row = {'path': str(patch.relative_to(ROOT)), 'sha256': sha(patch), 'apply_options': list(options),
+           'reverse': reverse, 'check_exit': checked.returncode, 'check_output': sanitize(checked.stdout + checked.stderr)}
+    log = EVIDENCE / ('patches-' + tree.name + '.json')
+    rows = json.loads(log.read_text()) if log.exists() else []
+    rows.append(row)
+    write(log, rows)
+    state(f'{tree.name}: {name} check={checked.returncode}, reverse={reverse}')
+    if checked.returncode:
+        raise SystemExit(row['check_output'])
+    subprocess.run([*command, str(patch)], cwd=tree, check=True)
+
+
+def prepare():
+    for name, url, pin, patches in [
+        ('horizon', 'https://github.com/horizon-rust/horizon', HORIZON, PLAIN),
+        ('horizon-tiles', 'https://github.com/horizon-rust/horizon', HORIZON, FINAL),
+        ('meridian', 'https://github.com/Akirabane/Meridian', MERIDIAN, PROXY),
+    ]:
+        tree = ROOT / '.local/src' / name
+        if tree.exists():
+            raise SystemExit(f'Refusing to overwrite existing checkout: {tree}')
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['git', 'clone', '--filter=blob:none', '--no-checkout', url, str(tree)], check=True)
+        subprocess.run(['git', 'checkout', '--detach', pin], cwd=tree, check=True)
+        state(f'Fresh upstream clone {name} at {git(tree, "rev-parse", "HEAD")}')
+        for patch in patches:
+            options = ['--exclude=crates/horizon-client/src/game/dedicated/status.rs'] if name == 'horizon-tiles' and patch == 'horizon-04-digest' else []
+            apply(tree, patch, options)
+        write(EVIDENCE / ('source-' + name + '.json'), {'url': url, 'pin': pin, 'files': sources(tree)})
+    compare()
+
+
+def compare():
+    actual = sources(ROOT)
+    records = [
+        ('docs/experiments/data/E24/memory-r1-store-build.json', 'files'),
+        ('docs/experiments/data/E24/lease-fixed-r2-build.json', 'source.internal_files'),
+        ('docs/experiments/data/E26/e26-final-warm-r1-source.json', 'internal_files'),
+        ('docs/experiments/data/E26/e26-final-stack-lite-r1-source.json', 'internal_files'),
+    ]
+    rows = []
+    for name, field in records:
+        value = json.loads((ROOT / name).read_text())
+        for key in field.split('.'):
+            value = value.get(key, {})
+        for path, expected in value.items():
+            got = actual.get(path)
+            rows.append({'record': name, 'path': path, 'expected': expected, 'actual': got,
+                         'result': 'match' if expected == got else 'mismatch'})
+    write(EVIDENCE / 'internal-source-comparison.json', rows)
+    state(f'Internal-source comparison: {sum(r["result"] == "match" for r in rows)} matches, '
+          f'{sum(r["result"] != "match" for r in rows)} mismatches')
+    historical = []
+    for name, field, directory in [
+        ('docs/experiments/data/E26/e26-final-warm-r1-source.json', 'files', 'horizon-tiles'),
+        ('docs/experiments/data/E25/e25-reactor1-matched-r2-build.json', 'compiled_files', 'meridian'),
+    ]:
+        record = json.loads((ROOT / name).read_text())
+        for path, expected in record[field].items():
+            source = ROOT / '.local/src' / directory / path
+            got = sha(source) if source.is_file() else None
+            row = {'record': name, 'path': path, 'expected': expected, 'actual': got,
+                   'result': 'match' if expected == got else 'mismatch'}
+            relocation = record.get('source_path_only_change', {})
+            if row['result'] != 'match' and relocation.get('path') == path:
+                normalized = source.read_text().replace(relocation['original'], relocation['relocated'])
+                row['historical_path_relocation_matches'] = hashlib.sha256(normalized.encode()).hexdigest() == expected
+                row['note'] = 'This build keeps the canonical repository HEAD path; the historical build used an archived dependency closure.'
+            if row['result'] != 'match' and directory == 'meridian' and path == 'crates/meridian-net/src/io_pool.rs':
+                normalized = source.read_text().replace('.try_update(', '.fetch_update(')
+                row['linux_compiler_compatibility_matches'] = hashlib.sha256(normalized.encode()).hexdigest() == expected
+                row['note'] = 'The separate Linux compatibility patch adopts the Rust 1.99 atomic method rename without changing its closure or memory ordering.'
+            historical.append(row)
+    write(EVIDENCE / 'historical-source-comparison.json', historical)
+    reference = 'docs/experiments/data/E25/e25-reactor1-matched-r2-build.json'
+    prior = json.loads((ROOT / reference).read_text())['dependencies']
+    proxy_dependencies = [{'record': reference, 'historical_commit': prior['commit'], 'path': path,
+                           'expected': expected, 'actual': actual.get(path),
+                           'result': 'match' if actual.get(path) == expected else 'mismatch'}
+                          for path, expected in prior['files'].items()]
+    write(EVIDENCE / 'historical-proxy-internal-comparison.json', proxy_dependencies)
+
+
+def run(label, directory, command):
+    tree = (ROOT / directory).resolve()
+    env = {k: v for k, v in os.environ.items() if k not in ['CI', 'CARGO_TARGET_DIR'] and not k.startswith('CARGO_PROFILE_')}
+    env.update(SETTINGS)
+    settings = dict(SETTINGS)
+    if gate_profile(command) == 'fast':
+        env = {key: value for key, value in env.items() if not key.startswith('CARGO_PROFILE_')}
+        env.update(CARGO_PROFILE_FAST_INHERITS='release', CARGO_PROFILE_FAST_LTO='false', CARGO_PROFILE_FAST_CODEGEN_UNITS='16')
+        settings = {'CARGO_INCREMENTAL': '0', 'RUSTC_WRAPPER': '', 'CARGO_BUILD_JOBS': '6',
+                    'CARGO_PROFILE_FAST_INHERITS': 'release', 'CARGO_PROFILE_FAST_LTO': 'false', 'CARGO_PROFILE_FAST_CODEGEN_UNITS': '16'}
+    if label in ['root-release', 'root-release-matched-profile']:
+        env = {key: value for key, value in env.items() if not key.startswith('CARGO_PROFILE_')}
+        env['CARGO_BUILD_JOBS'] = '2'
+        settings = {'CARGO_INCREMENTAL': '0', 'RUSTC_WRAPPER': '', 'CARGO_BUILD_JOBS': '2'}
+    resources = Path(env.get('HORIZON_TEST_RESOURCES', env.get('GOLIATH_RESOURCES',
+                         str(Path.home() / '.local/share/goliath-resources/26.3'))))
+    if command[:2] == ['cargo', 'test'] and (resources / 'horizon-resources.json').is_file():
+        env['HORIZON_TEST_RESOURCES'] = str(resources)
+        settings['HORIZON_TEST_RESOURCES'] = sanitize(str(resources))
+    full = [str(ROOT / '.local/bin/host-window'), 'build', 'B', '--', *command]
+    log = EVIDENCE / 'build-logs' / (label + '.log')
+    log.parent.mkdir(parents=True, exist_ok=True)
+    if log.exists():
+        raise SystemExit(f'Use a new label, preserving existing result: {label}')
+    state(f'Running {label} in {directory}: {" ".join(command)}')
+    started = time.monotonic()
+    with log.open('w') as stream:
+        result = subprocess.run(full, cwd=tree, env=env, stdout=stream, stderr=subprocess.STDOUT)
+    content = log.read_text(errors='replace')
+    row = {'label': label, 'cwd': directory, 'command': full, 'settings': settings, 'profile': gate_profile(command),
+           'exit': result.returncode, 'seconds_including_queue': time.monotonic() - started,
+           'log': str(log.relative_to(ROOT)), 'log_sha256': sha(log),
+           'test_results': re.findall(r'test result: .*', content)}
+    write(EVIDENCE / 'commands' / (label + '.json'), row)
+    state(f'Finished {label}: exit={result.returncode}, seconds={row["seconds_including_queue"]:.1f}')
+    if label == 'final-lite-clock-probe' and result.returncode == 0:
+        probe = json.loads(content)
+        print(json.dumps({'clock': probe['clock'], 'reported_resolution_ns': probe['reported_resolution_ns'],
+                          'batches': len(probe['batches']), 'scope': 'native availability, not a qualified cost bound'}), flush=True)
+    else:
+        print(sanitize('\n'.join(content.splitlines()[-18:])), flush=True)
+    return result.returncode
+
+
+def finish_checks():
+    """Use the prepared fixture and reproduce the historical scoped formatter gate."""
+    gates_record = json.loads((ROOT / 'docs/experiments/data/E18/reactor-1-build.json').read_text())
+    commands = [
+        ('proxy-scoped-fmt', '.local/src/meridian', gates_record['gates']['commands'][0]['command']),
+        ('plain-09-integration-resources', '.local/src/horizon',
+         ['cargo', 'test', '--locked', '--profile', 'fast', '--no-default-features', '-p', 'horizon-client-lib',
+          '--test', 'flat_light', '--', '--exact', 'flat_terrain_light_region_settles_after_its_first_pass']),
+        ('final-lite-clock-probe', '.', [str(ROOT / '.local/bin/goliath-e28/final-lite/e26_clock_probe')]),
+    ]
+    for label, directory, command in commands:
+        if (EVIDENCE / 'commands' / (label + '.json')).exists():
+            state('Retaining existing completed check: ' + label)
+        else:
+            run(label, directory, command)
+
+
+def finish_proxy_port(release_only=False):
+    """Rebuild only the compiler-compatible proxy after the active sequence ends."""
+    tree = ROOT / '.local/src/meridian'
+    archive = EVIDENCE / 'compiled-shared-proxy-before-linux-port.json'
+    if not archive.exists():
+        shutil.copy2(EVIDENCE / 'compiled-shared-proxy.json', archive)
+    previous = json.loads(archive.read_text())
+    patch = 'meridian-06-io-pool-linux'
+    reversed_check = subprocess.run(['git', 'apply', '--reverse', '--check', str(ROOT / 'patches' / (patch + '.patch'))],
+                                    cwd=tree, capture_output=True)
+    if reversed_check.returncode:
+        apply(tree, patch)
+    for phase in (['release'] if release_only else ['release', 'clippy', 'tests']):
+        label = 'proxy-' + phase + '-linux-port'
+        path = EVIDENCE / 'commands' / (label + '.json')
+        if not path.exists():
+            original = json.loads((EVIDENCE / 'commands' / ('proxy-' + phase + '.json')).read_text())
+            command = original['command'][4:]
+            if phase != 'release':
+                command = fast_gate(command)
+            if run(label, '.local/src/meridian', command):
+                raise RuntimeError('Proxy compiler-compatibility gate failed: ' + phase)
+        elif json.loads(path.read_text())['exit']:
+            raise RuntimeError('Retained failed port gate requires inspection: ' + phase)
+        if phase == 'release':
+            snapshot('shared-proxy', tree, ['meridian', 'meridian-sidecar', 'e4-client'], PROXY)
+    current = json.loads((EVIDENCE / 'compiled-shared-proxy.json').read_text())
+    refresh_shared_links('shared-proxy', previous, current)
+    compare()
+    state('Linux proxy compatibility build complete; bundle metadata must now be refreshed')
+
+
+def proxy_fast_gates():
+    for phase in ['clippy', 'tests']:
+        label = 'proxy-' + phase + '-linux-port'
+        path = EVIDENCE / 'commands' / (label + '.json')
+        if path.exists():
+            continue
+        original = json.loads((EVIDENCE / 'commands' / ('proxy-' + phase + '.json')).read_text())
+        run(label, '.local/src/meridian', fast_gate(original['command'][4:]))
+
+
+def stage_shared():
+    root = ROOT / '.local/bin/goliath-e28'
+    for label in ['final', 'final-lite', 'final-stamps']:
+        shared = {'meridian': root / 'shared-proxy/meridian', 'meridian-sidecar': root / 'shared-proxy/meridian-sidecar',
+                  'e4-client': root / 'shared-proxy/e4-client', 'goliath-store': root / 'shared-store/goliath-store'}
+        if label != 'final-stamps':
+            shared['horizon-bots'] = root / 'plain-09/horizon-bots'
+        for name, source in shared.items():
+            destination = root / label / name
+            if not destination.exists():
+                os.link(source, destination)
+    state('Shared release executables linked into all cluster bundle directories')
+
+
+def restore_reactor():
+    """Retire the lint-only port and restore the exact documented reactor tree."""
+    archive = EVIDENCE / 'superseded'
+    archive.mkdir(exist_ok=True)
+    patch = ROOT / 'patches/meridian-06-io-pool-linux.patch'
+    shutil.copy2(patch, archive / patch.name)
+    shutil.copy2(EVIDENCE / 'compiled-shared-proxy.json', archive / 'compiled-proxy-linux-port.json')
+    apply(ROOT / '.local/src/meridian', 'meridian-06-io-pool-linux', reverse=True)
+    expected = json.loads((EVIDENCE / 'source-meridian.json').read_text())['files']
+    actual = sources(ROOT / '.local/src/meridian')
+    if actual != expected:
+        raise RuntimeError('Reactor tree does not exactly match its original seven-patch reconstruction')
+    write(EVIDENCE / 'restored-reactor-source.json', {'exact_original_tree_match': True,
+          'pin': git(ROOT / '.local/src/meridian', 'rev-parse', 'HEAD'),
+          'patches': patches_for(PROXY), 'files': actual})
+    state('Documented reactor-1 source restored byte-for-byte; lint-port file retained only until quiet-window deletion')
+
+
+def rebuild_reactor():
+    directory = '.local/src/meridian'
+    previous = json.loads((EVIDENCE / 'commands/proxy-release.json').read_text())
+    if run('proxy-release-restored-reactor', directory, previous['command'][4:]):
+        raise RuntimeError('Restored reactor release failed')
+    snapshot('shared-proxy', ROOT / directory, ['meridian', 'meridian-sidecar', 'e4-client'], PROXY)
+    previous = json.loads((EVIDENCE / 'commands/proxy-clippy.json').read_text())
+    code = run('proxy-clippy-restored-reactor', directory, fast_gate(previous['command'][4:]))
+    log = (EVIDENCE / 'build-logs/proxy-clippy-restored-reactor.log').read_text()
+    errors = [line for line in log.splitlines() if line.startswith('error:') and 'could not compile' not in line]
+    only_deprecation = code == 101 and len(errors) == 1 and 'use of deprecated method' in errors[0] and 'fetch_update' in errors[0] and 'crates/meridian-net/src/io_pool.rs:323' in log and 'incompatible_msrv' not in log
+    write(EVIDENCE / 'restored-reactor-clippy-disposition.json', {'exit': code, 'primary_errors': errors,
+          'only_fetch_update_deprecation': only_deprecation, 'profile': 'fast'})
+    if not only_deprecation:
+        raise RuntimeError('Restored reactor Clippy has a non-disposed error')
+    compare()
+    state('Restored reactor release complete; post-build Clippy has only the disposed fetch_update deprecation')
+
+
+def refresh_shared_links(component, previous, current):
+    for label in ['final', 'final-lite', 'final-stamps']:
+        folder = ROOT / '.local/bin/goliath-e28' / label
+        for name in current['binaries']:
+            destination = folder / name
+            if sha(destination) not in {previous['binaries'][name], current['binaries'][name]}:
+                raise RuntimeError('Unexpected shared bytes before replacement: ' + label + '/' + name)
+            source = ROOT / '.local/bin/goliath-e28' / component / name
+            if not destination.samefile(source):
+                staged = folder / (name + '.new')
+                if staged.exists():
+                    raise RuntimeError('Unexpected staged proxy file')
+                os.link(source, staged)
+                os.replace(staged, destination)
+
+
+def finish_store_profile():
+    """Match the bounded store's own Mac release recipe, not the engine profile."""
+    archive = EVIDENCE / 'compiled-shared-store-before-profile-match.json'
+    if not archive.exists():
+        shutil.copy2(EVIDENCE / 'compiled-shared-store.json', archive)
+    previous = json.loads(archive.read_text())
+    label = 'root-release-matched-profile'
+    path = EVIDENCE / 'commands' / (label + '.json')
+    if not path.exists():
+        original = json.loads((EVIDENCE / 'commands/root-release.json').read_text())
+        if run(label, '.', original['command'][4:]):
+            raise RuntimeError('Matched store release failed')
+    elif json.loads(path.read_text())['exit']:
+        raise RuntimeError('Retained failed matched store release requires inspection')
+    snapshot('shared-store', ROOT, ['goliath-store'], [])
+    current = json.loads((EVIDENCE / 'compiled-shared-store.json').read_text())
+    refresh_shared_links('shared-store', previous, current)
+    state('Store rebuilt with cleared profile overrides and two jobs, matching scripts/e24-store-build')
+
+
+def patches_for(names, tiles=False):
+    return [{'path': 'patches/' + name + '.patch', 'sha256': sha(ROOT / 'patches' / (name + '.patch')),
+             'apply_options': ['--exclude=crates/horizon-client/src/game/dedicated/status.rs']
+             if tiles and name == 'horizon-04-digest' else []} for name in names]
+
+
+def snapshot(label, tree, names, patches):
+    folder = ROOT / '.local/bin/goliath-e28' / label
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        source = tree / 'target/release' / name
+        staged = folder / (Path(name).name + '.new')
+        shutil.copy2(source, staged)
+        os.replace(staged, folder / Path(name).name)
+    write(EVIDENCE / ('compiled-' + label + '.json'), {
+        'files': sources(tree), 'internal_files': sources(ROOT),
+        'patches': patches_for(patches, tiles=label.startswith('final')),
+        'binaries': {Path(name).name: sha(folder / Path(name).name) for name in names},
+        'upstream': git(tree, 'rev-parse', 'HEAD'),
+    })
+    state(f'Frozen binaries and compiled sources: {label}')
+
+
+def compiled_inputs(files):
+    return {name: digest for name, digest in files.items()
+            if name.startswith(('crates/', 'third_party/', '.cargo/')) or name in ['Cargo.toml', 'Cargo.lock', 'build.rs', 'clippy.toml']}
+
+
+def freeze(reviewed=False):
+    if (DATA / 'build-manifest.json').exists():
+        if not reviewed:
+            raise RuntimeError('Published manifest is immutable; reviewer-authorized refreeze requires the B quiet window')
+        owner = ROOT / '.local/host/quiet/owner'
+        if not owner.is_file() or owner.read_text().splitlines()[0] != 'B':
+            raise RuntimeError('Reviewer-authorized refreeze requires the B quiet reservation')
+        if (ROOT / 'patches/meridian-06-io-pool-linux.patch').exists():
+            raise RuntimeError('Rejected lint-only patch must be deleted before refreeze')
+        backup = EVIDENCE / 'superseded/build-manifest-linux-port.json'
+        if not backup.exists():
+            shutil.copy2(DATA / 'build-manifest.json', backup)
+        previous = json.loads((EVIDENCE / 'superseded/compiled-proxy-linux-port.json').read_text())
+        current = json.loads((EVIDENCE / 'compiled-shared-proxy.json').read_text())
+        refresh_shared_links('shared-proxy', previous, current)
+    root = ROOT / '.local/bin/goliath-e28'
+    commands = [json.loads(path.read_text()) for path in sorted((EVIDENCE / 'commands').glob('*.json'))]
+    for row in commands:
+        annotate_gate(row)
+    comparison = json.loads((EVIDENCE / 'internal-source-comparison.json').read_text())
+    proxy = json.loads((EVIDENCE / 'compiled-shared-proxy.json').read_text())
+    internals = sources(ROOT)
+    anchor = {'schema_version': 1, 'platform': 'linux', 'bundles': {}}
+    for label in ['plain-09', 'final', 'final-lite', 'final-stamps']:
+        folder = root / label
+        compiled = json.loads((EVIDENCE / ('compiled-' + label + '.json')).read_text())
+        if compiled['internal_files'] != internals:
+            raise RuntimeError('Root compile inputs changed after build: ' + label)
+        if label != 'plain-09':
+            shared = {'meridian': root / 'shared-proxy/meridian',
+                      'meridian-sidecar': root / 'shared-proxy/meridian-sidecar',
+                      'e4-client': root / 'shared-proxy/e4-client',
+                      'goliath-store': root / 'shared-store/goliath-store'}
+            if label != 'final-stamps':
+                shared['horizon-bots'] = root / 'plain-09/horizon-bots'
+            for name, source in shared.items():
+                if (folder / name).exists():
+                    if sha(folder / name) != sha(source):
+                        raise RuntimeError('Frozen shared binary changed: ' + name)
+                else:
+                    os.link(source, folder / name)
+        names = ['horizon-client', 'horizon-bots'] if label == 'plain-09' else [
+            'horizon-client', 'horizon-bots', 'meridian', 'meridian-sidecar', 'goliath-store', 'e4-client']
+        if label == 'final-lite' and (folder / 'e26_clock_probe').is_file():
+            names.append('e26_clock_probe')
+        binaries = {name: sha(folder / name) for name in names}
+        for name, expected in compiled['binaries'].items():
+            if binaries.get(name) != expected:
+                raise RuntimeError('Frozen binary changed: ' + name)
+        horizon = {'upstream_url': 'https://github.com/horizon-rust/horizon', 'pin': HORIZON,
+                   'patches': compiled['patches'], 'source_files': compiled_inputs(compiled['files'])}
+        projects = {'horizon': horizon}
+        if label != 'plain-09':
+            projects['meridian'] = {'upstream_url': 'https://github.com/Akirabane/Meridian', 'pin': MERIDIAN,
+                                    'horizon_dependency_pin': '0d21d5520ec26c49b774bf1533e53ea8af81278d',
+                                    'patches': proxy['patches'], 'source_files': compiled_inputs(proxy['files'])}
+            proof = DATA / 'build-dependency-inputs.json'
+            projects['meridian']['horizon_dependency_source_proof'] = {
+                'path': str(proof.relative_to(ROOT)), 'sha256': sha(proof),
+                'source_tree_sha256': json.loads(proof.read_text())['source_tree_sha256']}
+        selected = [row for row in commands if row['label'].startswith(label + '-')
+                    or label == 'plain-09' and row['label'] == 'plain-release'
+                    or label != 'plain-09' and row['label'].startswith(('proxy-', 'root-'))]
+        resolved = []
+        if label == 'plain-09':
+            initial = next((row for row in selected if row['label'] == 'plain-09-integration'), None)
+            retry = next((row for row in selected if row['label'] == 'plain-09-integration-resources'), None)
+            if initial and initial['exit'] and retry and not retry['exit']:
+                resolved.append({'failed_attempt': initial['label'], 'successful_recheck': retry['label'],
+                                 'reason': 'Prepared resources made available; the original failure is retained unchanged.'})
+        else:
+            initial = next((row for row in selected if row['label'] == 'proxy-clippy'), None)
+            retry = next((row for row in selected if row['label'] == 'proxy-clippy-linux-port'), None)
+            if initial and initial['exit'] and retry and not retry['exit']:
+                resolved.append({'failed_attempt': initial['label'], 'successful_recheck': retry['label'],
+                                 'reason': 'Separate Linux compiler-compatibility patch applied; the original failure is retained unchanged.'})
+        failed = sorted({row.get('gate', row['label']) for row in selected if row['exit'] and not row.get('superseded') and row['label'] not in {r['failed_attempt'] for r in resolved}})
+        planned = ['final-stamps-warm-tests', 'final-stamps-clippy', 'final-stamps-bots-clippy',
+                   'final-stamps-bots-tests', 'final-stamps-tile-clippy', 'final-stamps-reader-tests'] if label == 'final-stamps' else []
+        if label != 'plain-09':
+            planned += ['proxy-clippy-restored-reactor']
+        pending = [name for name in planned if not any(row['label'] == name for row in selected)]
+        record = {'kind': 'E26-lite-native-release' if label == 'final-lite' else 'E28-fresh-linux-release',
+                  'schema_version': 1, 'bundle': label, 'status': 'complete', 'profile': 'release',
+                  'incremental': False, 'lto': 'thin', 'codegen_units': 1, 'settings': SETTINGS,
+                  'settings_scope': 'Horizon, bots, Meridian and the optional clock probe; the store uses its own recorded release profile.',
+                  'directory': str(folder.relative_to(ROOT)), 'projects': projects,
+                  'target_policy': {'CARGO_TARGET_DIR': 'unset', 'one_default_target_per_workspace': True,
+                                    'directories': ['target', '.local/src/horizon/target', '.local/src/horizon-tiles/target', '.local/src/meridian/target']},
+                  'internal_crates': {'commit': git(ROOT, 'rev-parse', 'HEAD'), 'files': internals},
+                  'internal_source_comparisons': comparison,
+                  'historical_source_comparisons': json.loads((EVIDENCE / 'historical-source-comparison.json').read_text()),
+                  'historical_proxy_internal_comparisons': json.loads((EVIDENCE / 'historical-proxy-internal-comparison.json').read_text()),
+                  'source_equality': 'passed',
+                  'source_equality_scope': 'Compiled bytes recorded from freshly applied pinned patch stacks; not binary equality with macOS.',
+                  'rustc': subprocess.check_output(['rustc', '-Vv'], text=True).strip(),
+                  'machine': machine(),
+                  'cargo': (EVIDENCE / 'build-logs/cargo-version.log').read_text().strip(),
+                  'commands': selected, 'verification_status': 'passed' if not failed else 'failed',
+                  'failed_gates': failed, 'binaries': binaries,
+                  'pending_gates': pending, 'planned_gate_profiles': {name: 'fast' for name in pending},
+                  'resolved_prior_failures': resolved,
+                  'review_status': 'awaiting independent reproduction',
+                  'linux_clocks': {'lease': 'CLOCK_BOOTTIME bracketed by std::time::Instant / CLOCK_MONOTONIC',
+                                   'lease_allowance': '(next.after - previous.before) / 500 + 1 microsecond, reanchored after each accepted check; elapsed BOOTTIME must fit the Instant uncertainty interval expanded by this slack',
+                                   'lite': 'CLOCK_THREAD_CPUTIME_ID', 'stamps': 'CLOCK_MONOTONIC_RAW'},
+                  'verification_limits': ['No live lease smoke or real system suspend in this build task.']}
+        bot_reference = json.loads((ROOT / 'docs/experiments/data/E26/e26-final-warm-r1-source.json').read_text())['files']
+        plain_inputs = json.loads((EVIDENCE / 'compiled-plain-09.json').read_text())['files']
+        bot_paths = ['crates/horizon-bots/Cargo.toml', 'crates/horizon-bots/src/main.rs', 'crates/horizon-bots/src/measured.rs']
+        record['common_bots_provenance'] = {
+            'mac_producing_record': 'docs/experiments/data/E17/final-release-prereqs-v2.json',
+            'mac_binary_sha256': 'bc2cc875a4d078bfa74b65432f752ec25d57758433698c98a3a40c6f8010c45d',
+            'mac_tree': 'E12 FINAL through patch 07, then 03-bots, 04-digest with status exclusion, and 08-measurement',
+            'flat09_jobs': 'Copied the E17 bots; they did not rebuild them.',
+            'linux_tree': '.local/src/horizon', 'linux_stack': 'plain-09',
+            'bot_crate_source_comparisons': {name: {'expected': bot_reference[name], 'actual': plain_inputs[name],
+                                                   'match': bot_reference[name] == plain_inputs[name]} for name in bot_paths},
+            'scope': 'Same E11 bot-crate bytes at the same Horizon pin; the actual plain-09 transitive source tree is recorded, not claimed byte-identical to the full server stack.'}
+        checks = {}
+        for tree in ['horizon' if label == 'plain-09' else 'horizon-tiles'] + ([] if label == 'plain-09' else ['meridian']):
+            checks[tree] = json.loads((EVIDENCE / ('patches-' + tree + '.json')).read_text())
+        record['patch_apply_results'] = checks
+        record['gate_disposition'] = {'path': 'docs/experiments/data/E28/gate-disposition.json',
+                                      'sha256': sha(DATA / 'gate-disposition.json')}
+        if label != 'plain-09':
+            attempt = EVIDENCE / 'superseded/compiled-proxy-linux-port.json'
+            if attempt.exists():
+                record['superseded_linux_port_attempt'] = {
+                    'status': 'superseded', 'reason': 'Reviewer rejected a lint-only patch that raises the declared MSRV.',
+                    'compiled_inputs': json.loads(attempt.read_text()),
+                    'patch_archive': '.local/evidence/E28/superseded/meridian-06-io-pool-linux.patch',
+                    'commands': [row for row in selected if row.get('superseded')]}
+        matched_store = next((row for row in selected if row['label'] == 'root-release-matched-profile'), None)
+        store_command = matched_store or next((row for row in selected if row['label'] == 'root-release'), None)
+        if label != 'plain-09' and store_command:
+            record['store_build_settings'] = store_command['settings']
+            record['store_profile_recipe'] = {
+                'path': 'scripts/e24-store-build', 'sha256': sha(ROOT / 'scripts/e24-store-build'),
+                'profile': 'release', 'release_profile_overrides': 'none',
+                'note': 'The Mac bounded-store recipe clears all CARGO_PROFILE_* overrides and uses two jobs. Engine/proxy ThinLTO settings do not apply to this component.'}
+            if matched_store:
+                previous = json.loads((EVIDENCE / 'compiled-shared-store-before-profile-match.json').read_text())
+                record['superseded_store_build'] = {
+                    'command': 'root-release', 'binaries': previous['binaries'],
+                    'selected_command': 'root-release-matched-profile',
+                    'reason': 'Initial common engine profile replaced with the store-specific Mac profile. Source bytes are identical.'}
+        original_proxy = EVIDENCE / 'compiled-shared-proxy-before-linux-port.json'
+        if label != 'plain-09' and original_proxy.exists():
+            previous = json.loads(original_proxy.read_text())
+            record['initial_proxy_build_inputs'] = {
+                'pin': previous['upstream'], 'patches': previous['patches'],
+                'source_files': compiled_inputs(previous['files']),
+                'internal_files': previous['internal_files'], 'binaries': previous['binaries'],
+                'commands': ['proxy-release', 'proxy-fmt', 'proxy-clippy', 'proxy-tests'],
+                'note': 'These retained original attempts predate the compiler-compatibility patch. Selected proxy bytes and sources are in projects.meridian and binaries.'}
+            for row in selected:
+                if row['label'].startswith('proxy-'):
+                    row['source_stage'] = ('superseded_linux_port_attempt.compiled_inputs' if row.get('superseded') else
+                                           'initial_proxy_build_inputs' if row['label'] in record['initial_proxy_build_inputs']['commands'] else 'projects.meridian')
+        record['failure_details'] = {
+            name: explanation for name, explanation in {
+                'root-clippy': 'Rust 1.99 deprecates AtomicUsize::fetch_update at crates/goliath-store/src/main.rs:345. Internal crates are intentionally unchanged from HEAD as required.',
+                'plain-09-fmt': 'Additional whole-workspace check finds the historical E2 trace formatting in horizon-client/src/lan/hub.rs. The plain Mac build record did not run this extra gate.',
+                'proxy-fmt': 'Additional whole-workspace check finds the historical meridian-testkit/src/bin/e2-client.rs formatting. The exact historical scoped rustfmt gate is recorded separately.',
+            }.items() if name in failed}
+        if label == 'final-lite':
+            proof = {'kind': 'E26b-final-tile-source-proof', 'lite': True, 'source_equality': 'passed',
+                     'files': horizon['source_files'], 'internal_files': internals, 'patches': compiled['patches']}
+            write(folder / 'source-proof.json', proof)
+            record['source_proof'] = {'sha256': sha(folder / 'source-proof.json')}
+        if label != 'plain-09':
+            shutil.copy2(ROOT / 'scripts/goliath-cluster', folder / 'cluster-launcher.py')
+            (folder / 'LEASES').touch(exist_ok=True)
+            required = ['horizon-client', 'meridian', 'meridian-sidecar', 'goliath-store', 'e4-client']
+            write(folder / 'manifest.json', {name: binaries[name] for name in required})
+            write(folder / 'FINAL.json', {'schema_version': 1,
+                                         'binaries': {name: {'path': str((folder / name).relative_to(ROOT)), 'sha256': binaries[name]} for name in required},
+                                         'launcher': {'leased_marker': True, 'sha256': sha(folder / 'cluster-launcher.py')},
+                                         'store_binary_sha256': binaries['goliath-store']})
+        write(DATA / ('build-' + label + '.json'), record)
+        shutil.copy2(DATA / ('build-' + label + '.json'), folder / 'build.json')
+        canonical = {'schema_version': 1, 'platform': 'linux', 'source_equality': 'passed',
+                     'projects': projects, 'internal_crates': record['internal_crates'], 'binaries': binaries,
+                     'review_status': record['review_status']}
+        write(folder / 'canonical.json', canonical)
+        if label != 'plain-09':
+            write(folder / 'candidate.json', canonical)
+        anchor['bundles'][label] = {'path': str(folder.relative_to(ROOT)), 'binaries': binaries,
+                                   'files': {path.name: sha(path) for path in sorted(folder.iterdir()) if path.is_file()}}
+        state(f'{label}: bundle metadata frozen, gates failed={failed}')
+    write(DATA / 'build-manifest.json', anchor)
+    state('All bundle files hashed in Linux build-manifest.json')
+
+
+def update_gate_records():
+    """Append gate evidence outside immutable measured bundles and their anchor."""
+    anchor = DATA / 'build-manifest.json'
+    anchor_sha = sha(anchor)
+    rows = [json.loads(path.read_text()) for path in sorted((EVIDENCE / 'commands').glob('*.json'))]
+    for row in rows:
+        annotate_gate(row)
+    for label in ['plain-09', 'final', 'final-lite', 'final-stamps']:
+        path = DATA / ('build-' + label + '.json')
+        record = json.loads(path.read_text())
+        selected = [row for row in rows if row['label'].startswith(label + '-')
+                    or label == 'plain-09' and row['label'] == 'plain-release'
+                    or label != 'plain-09' and row['label'].startswith(('proxy-', 'root-'))]
+        resolved = {row['failed_attempt'] for row in record['resolved_prior_failures']}
+        for initial_name, retry_name in [('proxy-clippy', 'proxy-clippy-linux-port'),
+                                         ('plain-09-integration', 'plain-09-integration-resources')]:
+            initial = next((row for row in selected if row['label'] == initial_name), None)
+            retry = next((row for row in selected if row['label'] == retry_name), None)
+            if initial and initial['exit'] and retry and not retry['exit'] and initial_name not in resolved:
+                record['resolved_prior_failures'].append({'failed_attempt': initial_name, 'successful_recheck': retry_name,
+                                                        'reason': 'Completed corrected-input recheck; original attempt retained unchanged.'})
+                resolved.add(initial_name)
+        if 'initial_proxy_build_inputs' in record:
+            for row in selected:
+                if row['label'].startswith('proxy-'):
+                    row['source_stage'] = ('superseded_linux_port_attempt.compiled_inputs' if row.get('superseded') else
+                                           'initial_proxy_build_inputs' if row['label'] in record['initial_proxy_build_inputs']['commands'] else 'projects.meridian')
+        record['commands'] = selected
+        record['pending_gates'] = [name for name in record['pending_gates'] if not any(row['label'] == name for row in selected)]
+        record['failed_gates'] = sorted({row.get('gate', row['label']) for row in selected if row['exit'] and not row.get('superseded') and row['label'] not in resolved})
+        record['verification_status'] = 'failed' if record['failed_gates'] else ('pending' if record['pending_gates'] else 'passed')
+        record['frozen_bundle_build_record_sha256'] = sha(ROOT / record['directory'] / 'build.json')
+        record['gate_evidence_note'] = 'Gate updates are external to the immutable measured bundle; frozen build.json retains publication-time gate status.'
+        write(path, record)
+    if sha(anchor) != anchor_sha:
+        raise RuntimeError('Gate evidence update changed the measurement anchor')
+    state('External gate records updated; published manifest and bundle bytes unchanged')
+
+
+def cleanup():
+    """Apply the existing cleaner only to this builder's disposable targets."""
+    if (DATA / 'build-disk.json').exists():
+        raise RuntimeError('Cleanup is already recorded; preserve its original disk accounting')
+    anchor = json.loads((DATA / 'build-manifest.json').read_text())
+    removed_staging = []
+    for name in ['shared-proxy', 'shared-store']:
+        directory = ROOT / '.local/bin/goliath-e28' / name
+        if not directory.exists():
+            continue
+        for path in directory.iterdir():
+            if not path.is_file() or path.is_symlink():
+                raise RuntimeError('Unexpected staging contents')
+            digest = sha(path)
+            if not any(bundle['binaries'].get(path.name) == digest
+                       and sha(ROOT / bundle['path'] / path.name) == digest
+                       for bundle in anchor['bundles'].values() if path.name in bundle['binaries']):
+                raise RuntimeError('Staging executable has no verified bundle copy')
+        removed_staging.append(str(directory.relative_to(ROOT)))
+        shutil.rmtree(directory)
+    directories = [ROOT / '.local/src' / name for name in ['horizon', 'horizon-tiles', 'meridian']]
+    targets = [directory / 'target' for directory in directories] + [ROOT / 'target']
+    if any(path.is_symlink() for path in targets):
+        raise RuntimeError('Refusing cleanup of a symlinked target directory')
+    before = {str(path.relative_to(ROOT)): int(subprocess.check_output(['du', '-sb', str(path)]).split()[0])
+              for path in targets if path.exists()}
+    # Each invocation can see just one owned workspace or the root target itself.
+    # It cannot remove another workspace's idle build output.
+    for directory in directories + [ROOT / 'target']:
+        if not directory.exists():
+            continue
+        env = dict(os.environ, GOLIATH_ROOT=str(directory), TARGET_CAP_MB='0')
+        subprocess.run([str(ROOT / 'scripts/clean-builds')], cwd=ROOT, env=env, check=True)
+    after = {str(path.relative_to(ROOT)): int(subprocess.check_output(['du', '-sb', str(path)]).split()[0])
+             for path in targets if path.exists()}
+    retained = {str(path.relative_to(ROOT)): int(subprocess.check_output(['du', '-sb', str(path)]).split()[0])
+                for path in [ROOT / '.local/src', ROOT / '.local/bin/goliath-e28', EVIDENCE]}
+    allocated = {str(path.relative_to(ROOT)): int(subprocess.check_output(['du', '-s', '-B1', str(path)]).split()[0])
+                 for path in [ROOT / '.local/src', ROOT / '.local/bin/goliath-e28', EVIDENCE]}
+    record = {'kind': 'E28-build-disk-cleanup', 'command': 'scripts/clean-builds',
+              'options': 'TARGET_CAP_MB=0, GOLIATH_ROOT scoped separately to each owned checkout and the root target',
+              'before_bytes': before, 'remaining_target_bytes': after,
+              'freed_bytes': sum(before.values()) - sum(after.values()), 'retained_bytes': retained,
+              'retained_allocated_bytes': allocated,
+              'removed_redundant_staging': removed_staging,
+              'workspace_apparent_bytes': int(subprocess.check_output(['du', '-sb', str(ROOT)]).split()[0]),
+              'workspace_allocated_bytes': int(subprocess.check_output(['du', '-s', '-B1', str(ROOT)]).split()[0]),
+              'recovery': 'Targets are disposable and can be rebuilt from the retained sources; frozen binaries are unchanged.'}
+    write(DATA / 'build-disk.json', record)
+    state(f'Cleaned disposable targets: {record["freed_bytes"]} bytes freed')
+
+
+def verify():
+    """Check artifact integrity separately from gate qualification."""
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    import goliath_bundle
+    from e14_snapshot_support import final_records
+    anchor = json.loads((DATA / 'build-manifest.json').read_text())
+    binaries = {}
+    admission = {}
+    unresolved_gates = set()
+    recorded_gate_failures = set()
+    reviewer_accepted = {}
+    for label, bundle in anchor['bundles'].items():
+        directory = ROOT / bundle['path']
+        try:
+            goliath_bundle.validate(directory)
+            admission[label] = 'passed'
+        except ValueError as error:
+            if str(error) != 'E28 source equality or build gates did not pass':
+                raise
+            canonical = json.loads((directory / 'canonical.json').read_text())
+            if canonical.get('source_equality') != 'passed':
+                raise
+            admission[label] = 'blocked by recorded gate qualification; validator is unchanged'
+        if set(bundle['files']) != {path.name for path in directory.iterdir()}:
+            raise RuntimeError('Missing or unlisted bundle file')
+        for name, digest in bundle['files'].items():
+            if sha(directory / name) != digest:
+                raise RuntimeError('Frozen bundle bytes changed')
+        build_record = json.loads((DATA / ('build-' + label + '.json')).read_text())
+        recorded_gate_failures.update(build_record['failed_gates'])
+        accepted = set(goliath_bundle.disposed_gates(label))
+        reviewer_accepted[label] = sorted(set(build_record['failed_gates']) & accepted)
+        unresolved_gates.update(set(build_record['failed_gates']) - accepted)
+        if build_record.get('pending_gates'):
+            raise RuntimeError('Native gate verification is still pending: ' + label)
+        if label != 'plain-09':
+            final = json.loads((directory / 'FINAL.json').read_text())
+            if final_records(final) != json.loads((directory / 'manifest.json').read_text()):
+                raise RuntimeError('Snapshot identity cross-check failed')
+            if not (directory / 'LEASES').is_file() or sha(directory / 'cluster-launcher.py') != final['launcher']['sha256']:
+                raise RuntimeError('Snapshot launcher/lease-marker cross-check failed')
+            proof = build_record['projects']['meridian']['horizon_dependency_source_proof']
+            if sha(ROOT / proof['path']) != proof['sha256']:
+                raise RuntimeError('Pinned dependency source proof changed')
+        for name, digest in bundle['binaries'].items():
+            with (directory / name).open('rb') as stream:
+                header = stream.read(20)
+            if header[:6] != b'\x7fELF\x02\x01' or int.from_bytes(header[18:20], 'little') != 62:
+                raise RuntimeError('Executable is not native x86-64 Linux ELF: ' + label + '/' + name)
+            binaries[label + '/' + name] = {'sha256': digest, 'format': 'ELF64 x86-64'}
+    restored = {}
+    for label, directory, reference, key in [
+        ('plain', 'horizon', 'source-horizon.json', 'files'),
+        ('final', 'horizon-tiles', 'source-horizon-tiles.json', 'files'),
+        ('proxy', 'meridian', 'compiled-shared-proxy.json', 'files'),
+    ]:
+        expected = json.loads((EVIDENCE / reference).read_text())[key]
+        restored[label] = sources(ROOT / '.local/src' / directory) == expected
+        if not restored[label]:
+            raise RuntimeError('Source tree differs from selected/restored inputs: ' + label)
+    subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', 'crates', 'Cargo.toml', 'Cargo.lock', 'clippy.toml'], cwd=ROOT, check=True)
+    expected_tests = {'root-test': 82, 'plain-09-unit': 1, 'plain-09-bots-tests': 13,
+                      'plain-09-integration-resources': 1, 'proxy-tests': 1098,
+                      'final-lease-tests': 4, 'final-warm-tests': 3,
+                      'final-lite-lease-tests': 4, 'final-lite-warm-tests': 3, 'final-lite-lite-tests': 3,
+                      'final-stamps-lease-tests': 4, 'final-stamps-warm-tests': 3,
+                      'final-stamps-bots-tests': 17, 'final-stamps-reader-tests': 8}
+    counts = {}
+    for label, expected in expected_tests.items():
+        row = json.loads((EVIDENCE / 'commands' / (label + '.json')).read_text())
+        count = sum(int(match.group(1)) for result in row['test_results']
+                    if (match := re.search(r'(\d+) passed;', result)))
+        if row['exit'] or count != expected:
+            raise RuntimeError(f'Expected native tests did not all pass: {label}, {count} vs {expected}')
+        counts[label] = count
+        if label.endswith('lease-tests'):
+            text = (ROOT / row['log']).read_text()
+            for name in ['suspend_is_detected_without_wall_clock_or_real_sleep', 'clock_discontinuity_latches_authority_closed']:
+                if not re.search(r'test .*' + name + r' \.\.\. ok', text):
+                    raise RuntimeError('Missing native lease proof: ' + label + '/' + name)
+        if label.endswith('reader-tests'):
+            if 'a_decode_stamp_precedes_session_packet_dispatch ... ok' not in (ROOT / row['log']).read_text():
+                raise RuntimeError('Linux decode-before-dispatch test did not pass')
+    probe = json.loads((EVIDENCE / 'build-logs/final-lite-clock-probe.log').read_text())
+    if probe['clock'] != 'CLOCK_THREAD_CPUTIME_ID' or probe['reported_resolution_ns'] <= 0:
+        raise RuntimeError('Native thread CPU clock probe is invalid')
+    for path in DATA.glob('build-*.json'):
+        raw = path.read_text()
+        if len(raw.encode()) > 1_000_000 or str(ROOT) in raw or str(Path.home()) in raw:
+            raise RuntimeError('Unsanitized or oversized public build record: ' + path.name)
+    write(DATA / 'build-verification.json', {
+        'kind': 'E28-builder-artifact-integrity', 'integrity_status': 'passed',
+        'review_status': 'awaiting independent reproduction', 'gates_status': 'not-clean',
+        'runtime_admission': admission,
+        'unresolved_required_gate_failures': sorted(unresolved_gates),
+        'recorded_failed_gates': sorted(recorded_gate_failures),
+        'reviewer_accepted_toolchain_drift': reviewer_accepted,
+        'additional_failed_checks': ['plain-09-fmt', 'proxy-fmt'],
+        'manifest_sha256': sha(DATA / 'build-manifest.json'), 'binaries': binaries,
+        'source_restoration': restored, 'native_tests_passed': counts,
+        'clock_probe': {'clock': probe['clock'], 'reported_resolution_ns': probe['reported_resolution_ns'],
+                        'scope': 'Native clock availability, not an independently qualified instrumentation-cost bound.'}})
+    state('Bundle byte/native-contract checks completed; runtime admission follows the unchanged reviewer gate-disposition guard')
+
+
+def gates(label):
+    tree = '.local/src/horizon' if label == 'plain-09' else '.local/src/horizon-tiles'
+    common = ['--locked', '--profile', 'fast', '--no-default-features']
+    commands = [('fmt', ['cargo', 'fmt', '--all', '--check'])]
+    if label == 'plain-09':
+        commands += [
+            ('unit', ['cargo', 'test', *common, '-p', 'horizon-client-lib', '--lib', '--', '--exact',
+                      'flatgen::tests::flat_light_views_form_a_region_in_one_pass_without_mutating_the_proto']),
+            ('integration', ['cargo', 'test', *common, '-p', 'horizon-client-lib', '--test', 'flat_light', '--', '--exact',
+                             'flat_terrain_light_region_settles_after_its_first_pass']),
+            ('clippy', ['cargo', 'clippy', *common, '-p', 'horizon-client-lib', '--lib', '--test', 'flat_light', '--', '-D', 'warnings']),
+            ('bots-clippy', ['cargo', 'clippy', *common, '-p', 'horizon-bots', '--all-targets', '--', '-D', 'warnings']),
+            ('bots-tests', ['cargo', 'test', *common, '-p', 'horizon-bots']),
+        ]
+    else:
+        commands += [('lease-tests', ['cargo', 'test', *common, '-p', 'horizon-client', '--lib', 'game::dedicated::cluster::lease::']),
+                     ('warm-tests', ['cargo', 'test', *common, '-p', 'horizon-client', '--lib', 'game::dedicated::tile_cut::tests::']),
+                     ('clippy', ['cargo', 'clippy', *common, '-p', 'horizon-client', '--lib', '--', '-D', 'warnings'])]
+        if label == 'final-lite':
+            commands += [('lite-tests', ['cargo', 'test', *common, '-p', 'horizon-client', '--lib', 'game::dedicated::e26_lite::tests::']),
+                         ('clock-clippy', ['cargo', 'clippy', *common, '-p', 'horizon-client-render', '--example', 'e26_clock_probe', '--', '-D', 'warnings'])]
+        if label == 'final-stamps':
+            commands += [('bots-clippy', ['cargo', 'clippy', *common, '-p', 'horizon-bots', '--all-targets', '--', '-D', 'warnings']),
+                         ('bots-tests', ['cargo', 'test', *common, '-p', 'horizon-bots']),
+                         ('tile-clippy', ['cargo', 'clippy', *common, '-p', 'horizon-client-lib', '--lib', '--', '-D', 'warnings']),
+                         ('reader-tests', ['cargo', 'test', *common, '-p', 'horizon-client-lib', '--lib', 'lan::io_pool::tests::'])]
+    for name, command in commands:
+        phase = label + '-' + name
+        if (EVIDENCE / 'commands' / (phase + '.json')).exists():
+            state('Retaining completed gate and its original profile: ' + phase)
+        else:
+            run(phase, tree, command)
+
+
+def fast_stamps_gates():
+    tree = ROOT / '.local/src/horizon-tiles'
+    original = sources(tree)
+    patches = ['horizon-15-latency-stamps-e25-stamps-lease-r2-b2',
+               'horizon-15-latency-stamps-e25-stamps-lease-r2-b2-linux']
+    applied = []
+    try:
+        for patch in patches:
+            apply(tree, patch)
+            applied.append(patch)
+        gates('final-stamps')
+    finally:
+        for patch in reversed(applied):
+            apply(tree, patch, reverse=True)
+        restored = sources(tree) == original
+        write(EVIDENCE / 'restoration-final-stamps-fast-gates.json', {'exact_source_restoration': restored})
+        if not restored:
+            raise RuntimeError('Source did not restore after fast stamp gates')
+
+
+def build(label):
+    if label == 'root':
+        for name, command in [
+            ('fmt', ['cargo', 'fmt', '--all', '--check']),
+            ('clippy', ['cargo', 'clippy', '--workspace', '--all-targets', '--', '-D', 'warnings']),
+            ('test', ['cargo', 'test', '--workspace']),
+            ('release', ['cargo', 'build', '--locked', '--release', '-p', 'goliath-store', '--bin', 'goliath-store']),
+        ]:
+            run('root-' + name, '.', command)
+        snapshot('shared-store', ROOT, ['goliath-store'], [])
+        return
+    if label == 'proxy':
+        directory = '.local/src/meridian'
+        command = ['cargo', 'build', '--locked', '--release', '-p', 'meridian-proxy', '--bin', 'meridian',
+                   '-p', 'meridian-sidecar', '--bin', 'meridian-sidecar', '-p', 'meridian-testkit', '--bin', 'e4-client']
+        if run('proxy-release', directory, command):
+            raise SystemExit('Proxy release failed')
+        snapshot('shared-proxy', ROOT / directory, ['meridian', 'meridian-sidecar', 'e4-client'], PROXY)
+        run('proxy-fmt', directory, ['cargo', 'fmt', '--all', '--check'])
+        run('proxy-clippy', directory, ['cargo', 'clippy', '--locked', '--release', '-p', 'meridian-handoff', '-p', 'meridian-proxy',
+                                      '-p', 'meridian-sidecar', '-p', 'meridian-net', '--all-targets', '--', '-D', 'warnings'])
+        run('proxy-tests', directory, ['cargo', 'test', '--locked', '--release', '-p', 'meridian-config', '-p', 'meridian-ghost',
+                                     '-p', 'meridian-handoff', '-p', 'meridian-proxy', '-p', 'meridian-sidecar', '-p', 'meridian-net',
+                                     '--', '--skip', 'serve::tests::the_listener_queues_a_large_burst'])
+        return
+    if label == 'plain-09':
+        tree = ROOT / '.local/src/horizon'
+        snapshot(label, tree, ['horizon-client', 'horizon-bots'], PLAIN)
+        gates(label)
+        return
+    tree = ROOT / '.local/src/horizon-tiles'
+    original = sources(tree)
+    extra = {'final': [], 'final-lite': ['horizon-21-lite-cpu-clean'],
+             'final-stamps': ['horizon-15-latency-stamps-e25-stamps-lease-r2-b2',
+                              'horizon-15-latency-stamps-e25-stamps-lease-r2-b2-linux']}[label]
+    applied = []
+    try:
+        for patch in extra:
+            apply(tree, patch)
+            applied.append(patch)
+        command = ['cargo', 'build', '--locked', '--release', '--no-default-features', '-p', 'horizon-client', '--bin', 'horizon-client']
+        names = ['horizon-client']
+        if label == 'final-lite':
+            command += ['-p', 'horizon-client-render', '--example', 'e26_clock_probe']
+            names.append('examples/e26_clock_probe')
+        if label == 'final-stamps':
+            command += ['-p', 'horizon-bots', '--bin', 'horizon-bots']
+            names.append('horizon-bots')
+        if run(label + '-release', str(tree.relative_to(ROOT)), command):
+            raise SystemExit('Release failed: ' + label)
+        snapshot(label, tree, names, FINAL + extra)
+        gates(label)
+    finally:
+        for patch in reversed(applied):
+            apply(tree, patch, reverse=True)
+        restored = sources(tree) == original
+        write(EVIDENCE / ('restoration-' + label + '.json'), {'exact_source_restoration': restored})
+        state(f'{label}: exact source restoration={restored}')
+        if not restored:
+            raise RuntimeError('Source changed beyond the variant overlay')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['prepare', 'compare', 'run', 'apply', 'reverse', 'source', 'build', 'freeze', 'remaining', 'cleanup', 'finish-checks', 'finish-proxy-port', 'finish-store-profile', 'verify', 'dependency', 'finish-running-gate', 'fast-stamps-gates', 'update-gate-records', 'stage-shared', 'finish-proxy-release', 'proxy-fast-gates', 'restore-reactor', 'rebuild-reactor', 'reviewed-refreeze'])
+    parser.add_argument('args', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    if args.action == 'prepare':
+        prepare()
+    elif args.action == 'compare':
+        compare()
+    elif args.action == 'build':
+        build(args.args[0])
+    elif args.action == 'freeze':
+        freeze()
+    elif args.action == 'cleanup':
+        cleanup()
+    elif args.action == 'finish-checks':
+        finish_checks()
+    elif args.action == 'finish-proxy-port':
+        finish_proxy_port()
+    elif args.action == 'finish-store-profile':
+        finish_store_profile()
+    elif args.action == 'verify':
+        verify()
+    elif args.action == 'dependency':
+        dependency()
+    elif args.action == 'finish-running-gate':
+        finish_running_gate(int(args.args[0]), int(args.args[1]), *(args.args[2:]))
+    elif args.action == 'fast-stamps-gates':
+        fast_stamps_gates()
+    elif args.action == 'update-gate-records':
+        update_gate_records()
+    elif args.action == 'stage-shared':
+        stage_shared()
+    elif args.action == 'finish-proxy-release':
+        finish_proxy_port(release_only=True)
+    elif args.action == 'proxy-fast-gates':
+        proxy_fast_gates()
+    elif args.action == 'restore-reactor':
+        restore_reactor()
+    elif args.action == 'rebuild-reactor':
+        rebuild_reactor()
+    elif args.action == 'reviewed-refreeze':
+        freeze(reviewed=True)
+    elif args.action == 'remaining':
+        run('cargo-version', '.', ['cargo', '-V'])
+        for label in ['plain-09', 'root', 'proxy', 'final', 'final-lite', 'final-stamps']:
+            build(label)
+        freeze()
+    elif args.action == 'run':
+        label, directory, *command = args.args
+        if command[0] == '--':
+            command = command[1:]
+        raise SystemExit(run(label, directory, command))
+    elif args.action in ['apply', 'reverse']:
+        directory, name = args.args
+        apply(ROOT / directory, name, reverse=args.action == 'reverse')
+    elif args.action == 'source':
+        label, directory = args.args
+        write(EVIDENCE / ('source-' + label + '.json'), sources(ROOT / directory))
+
+
+if __name__ == '__main__':
+    main()

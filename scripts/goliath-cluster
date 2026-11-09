@@ -25,12 +25,13 @@ import sys
 import tempfile
 import time
 import traceback
+import goliath_platform as platform
 
 ROOT = Path(__file__).resolve().parent.parent
 BINS = Path(os.environ.get('GOLIATH_BIN_DIR',ROOT / '.local/bin/goliath-e10')).resolve()
 DATA = ROOT / 'docs/experiments/data/E10'
 RUNS = ROOT / '.local/runs'
-RESOURCES = Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'
+RESOURCES = platform.resources()
 
 
 def load(name, path):
@@ -47,6 +48,13 @@ store = load('e10_store_wire', ROOT / 'scripts/e5-store.py')
 sys.path.insert(0, str(ROOT / '.local/src/horizon/tools'))
 import server_transfer_e2e as upstream
 
+# Keep upstream source untouched. Its Server owns the dedicated process spawn.
+if platform.LINUX:
+    _server = upstream.Server
+    def _pinned_server(command, *args, **kwargs):
+        return _server(platform.launch_command(command, 'servers'), *args, **kwargs)
+    upstream.Server = _pinned_server
+
 
 def save(name, value):
     DATA.mkdir(parents=True, exist_ok=True)
@@ -55,6 +63,9 @@ def save(name, value):
 
 def env(directory, extra=None):
     result = {k:v for k,v in os.environ.items() if not k.startswith(('HORIZON_', 'XDG_', 'GOLIATH_', 'E2_'))}
+    if platform.LINUX:
+        for key in ['GOLIATH_CPU_CGROUP','GOLIATH_CPU_MODE']:
+            if key in os.environ:result[key]=os.environ[key]
     for key in ('HORIZON_HOME', 'HORIZON_LAUNCHER_HOME', 'XDG_DATA_HOME', 'XDG_CONFIG_HOME',
                 'XDG_CACHE_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR', 'HORIZON_LAUNCHER_TRASH',
                 'HORIZON_LAUNCHER_CLIPBOARD', 'HORIZON_LAUNCHER_DESKTOP'):
@@ -269,7 +280,7 @@ class Cluster:
         self.proxy = None
         self.store_binary = Path(store_binary) if store_binary is not None else BINS/'goliath-store'
         self.store_log = (root/'store.log').open('w+')
-        self.store_process = subprocess.Popen([self.store_binary,'--dir',root/'store','--listen','127.0.0.1:0','--sync','full'],stdout=self.store_log,stderr=subprocess.STDOUT)
+        self.store_process = subprocess.Popen(platform.launch_command([self.store_binary,'--dir',root/'store','--listen','127.0.0.1:0','--sync','full'], 'servers'),stdout=self.store_log,stderr=subprocess.STDOUT)
         deadline = time.monotonic()+10
         while True:
             text = (root/'store.log').read_text().rpartition('\n')[0]

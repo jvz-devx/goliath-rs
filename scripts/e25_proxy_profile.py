@@ -10,6 +10,8 @@ import xml.etree.ElementTree as ET
 
 
 def capture(instance,evidence,monitor,native,thread_counters):
+    from goliath_platform import mac_only
+    mac_only('xctrace profiling')
     folder=evidence/'proxy-profile'
     folder.mkdir(exist_ok=False)
     trace=folder/'proxy.trace'

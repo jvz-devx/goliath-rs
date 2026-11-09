@@ -383,7 +383,7 @@ def main():
     parser.add_argument("--wall-particles", action="store_true", help="enable blue dust wall drawing, off by default")
     parser.add_argument("--particle-evidence", action="store_true", help="measure near/far particle delivery and framed byte cost instead of crossing trials")
     parser.add_argument("--verify", type=Path, help="recompute route, checksums and gaps without servers")
-    parser.add_argument("--resources", type=Path, default=Path.home() / "Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3")
+    parser.add_argument("--resources", type=Path, default=__import__('goliath_platform').resources())
     args = parser.parse_args()
     if args.name is None:
         args.name = ("particles-on" if args.wall_particles else "particles-off") if args.particle_evidence else "trials"

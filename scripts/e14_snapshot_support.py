@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import goliath_bundle
 
 REQUIRED = {'horizon-client', 'meridian', 'meridian-sidecar', 'e4-client', 'goliath-store'}
 
@@ -36,6 +37,8 @@ def check_files(directory, records):
 
 def validate_snapshot(directory):
     directory = Path(directory)
+    if goliath_bundle.is_e28(directory):
+        goliath_bundle.validate(directory)
     final_path, marker = directory / 'FINAL.json', directory / 'LEASES'
     if marker.exists() and not final_path.is_file():
         raise ValueError('leased snapshot requires FINAL.json')

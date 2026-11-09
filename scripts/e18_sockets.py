@@ -3,6 +3,8 @@ from collections import Counter
 import subprocess
 import threading
 import time
+import goliath_platform as platform
+from types import SimpleNamespace
 
 
 def endpoint(value):
@@ -22,7 +24,11 @@ class SocketSampler:
     def capture(self,mark=None):
         with self.lock:
             sent=time.monotonic()
-            owned=subprocess.run(['lsof','-nP','-a','-p',str(self.pid),'-iTCP','-F','fnT'],capture_output=True,text=True,timeout=3)
+            if platform.LINUX:
+                owned_raw, raw = platform.socket_inputs(self.pid)
+                owned = SimpleNamespace(returncode=0, stdout=owned_raw)
+            else:
+                owned=subprocess.run(['lsof','-nP','-a','-p',str(self.pid),'-iTCP','-F','fnT'],capture_output=True,text=True,timeout=3)
             if owned.returncode not in [0,1]:raise RuntimeError('lsof failed: '+owned.stderr)
             tuples=set();outbound=set();states=Counter();fds=0;name=None
             for line in owned.stdout.splitlines():
@@ -31,7 +37,8 @@ class SocketSampler:
                     name=line[1:];tuples.add(name)
                     if '->' in name and not name.split('->')[0].endswith(':'+str(self.listen)):outbound.add(name.replace(':','.').replace('->','>'))
                 elif line.startswith('TST='):states[line[4:]]+=1
-            raw=subprocess.check_output(['netstat','-an','-p','tcp'],text=True,timeout=3)
+            if not platform.LINUX:
+                raw=subprocess.check_output(['netstat','-an','-p','tcp'],text=True,timeout=3)
             tcp=Counter();fixture=set();exclusive=set()
             ephemeral=set()
             for line in raw.splitlines():
@@ -69,6 +76,6 @@ class SocketSampler:
         self.done.set();self.thread.join(8)
         if self.thread.is_alive():raise RuntimeError('socket sampler did not stop')
     def report(self):
-        return dict(error=self.error,method='one-second lsof PID sockets plus loopback netstat TCP tuples, including TIME_WAIT',
+        return dict(error=self.error,method='one-second /proc/net/tcp plus PID fd socket inodes' if platform.LINUX else 'one-second lsof PID sockets plus loopback netstat TCP tuples, including TIME_WAIT',
             rate_limit='observed unique tuple creation rates, not exact connect syscall counts; subsecond reset/shared-store/control connections may be missed; fixture envelope is not a strict upper bound on unobserved attempts; no root tracing available',
             proxy_exclusive_destination_ports=sorted(self.exclusive),samples=self.rows)

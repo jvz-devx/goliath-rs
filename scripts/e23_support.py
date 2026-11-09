@@ -12,12 +12,13 @@ import re
 import time
 
 import e11_support as support
+import goliath_bundle
 from e14_snapshot_support import validate_snapshot
 
 ROOT = support.ROOT
 DATA = ROOT / 'docs/experiments/data/E23'
 EVIDENCE = ROOT / '.local/evidence/E23'
-BINS = ROOT / '.local/bin/meridian-e18/reactor-1'
+BINS = Path(os.environ.get('GOLIATH_BIN_DIR', ROOT / '.local/bin/meridian-e18/reactor-1'))
 FROZEN = {
     'horizon-client': 'b2f1ea65ebf47658b24c55b52880ff609c658fbd9ab139d9421f9d99964bd16d',
     'meridian': '29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b',
@@ -76,6 +77,10 @@ def pack(path):
 
 
 def frozen():
+    if goliath_bundle.is_e28(BINS):
+        result = goliath_bundle.validate(BINS, {'final'})
+        validate_snapshot(BINS)
+        return result
     actual = {name: sha(BINS / name) for name in FROZEN}
     if actual != FROZEN:
         raise RuntimeError('final-stack executable differs from E20 frozen identity')

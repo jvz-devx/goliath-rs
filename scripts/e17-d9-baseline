@@ -1,11 +1,22 @@
 #!/usr/bin/env python3
 """Coordinate the D9-matched plain-09 staircase, never the cluster's W2 run."""
 import argparse
+import contextlib
 import importlib.machinery
 import importlib.util
 from pathlib import Path
 from e11_support import ROOT
 from e17_d9_baseline import cell
+import goliath_platform as platform
+
+
+def single_cell(args, base):
+    """Give a direct Linux cell the same legacy marker as a staircase cell."""
+    if args.out.exists() or args.out.with_suffix('.json.gz').exists():
+        raise RuntimeError('use a fresh result name')
+    reservation = base.quiet(args.cell) if platform.LINUX and not base.REQUEST.exists() else contextlib.nullcontext()
+    with reservation:
+        return cell(args, base)
 
 
 def main():
@@ -13,14 +24,20 @@ def main():
     spec=importlib.util.spec_from_loader(loader.name,loader)
     base=importlib.util.module_from_spec(spec);loader.exec_module(base)
     parser=argparse.ArgumentParser(description=__doc__)
+    platform.cpu_options(parser)
+    parser.add_argument('--bins', type=Path, default=base.BINS)
     parser.add_argument('--cell',type=int)
     parser.add_argument('--repeat',type=int,default=0)
     parser.add_argument('--out',type=Path)
     parser.add_argument('--data-dir',type=Path,default=ROOT/'docs/experiments/data/E17/d9-plain09-baseline')
     parser.add_argument('--resume',action='store_true')
+    parser.add_argument('--start',type=int,default=300)
+    parser.add_argument('--minimum-count',type=int,default=25 if platform.LINUX else 300)
+    parser.add_argument('--step-up',type=int,default=50)
     args=parser.parse_args()
+    base.BINS=args.bins.resolve()
     base.DATA=args.data_dir.resolve()
-    if not base.DATA.is_relative_to(ROOT/'docs/experiments/data/E17'):
+    if not any(base.DATA.is_relative_to(ROOT/'docs/experiments/data'/experiment) for experiment in ['E17', 'E28']):
         parser.error('data directory must remain under E17 evidence')
     base.REQUEST_PREFIX='d9-plain09-baseline'
     original=base.provenance
@@ -32,9 +49,12 @@ def main():
     base.provenance=provenance
     if args.cell:
         if not args.out: parser.error('--cell requires --out')
-        cell(args,base)
+        single_cell(args,base)
+        __import__('e11_support').pack_json(args.out)
     else:
-        args.entrypoint=Path(__file__).resolve();args.start=300;args.minimum_count=300;args.step_up=50;args.kind='E17-D9-plain09-baseline'
+        if min(args.start,args.minimum_count,args.step_up)<=0 or args.minimum_count>args.start:
+            parser.error('positive start/step and minimum no larger than start required')
+        args.entrypoint=Path(__file__).resolve();args.kind='E17-D9-plain09-baseline'
         args.workload={'layout':'D9','world_seed':12345,'cohort_seed':12345,'witness_seed':18,'pigs':256,
             'pigs_per_square':64,'interior_square_centers':'(+/-1024,+/-1024)','interior_fraction':.9,
             'crossing_fraction':'floor(N/10)','view_distance':3,'speed':4,'warmup_seconds':30,

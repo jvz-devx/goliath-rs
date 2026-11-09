@@ -23,6 +23,7 @@ from e18_process import ProcessSampler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import e11_support
+import goliath_platform as platform
 
 
 class ThreadInfo(ctypes.Structure):
@@ -32,6 +33,16 @@ class ThreadInfo(ctypes.Structure):
 
 
 def threads(pid):
+    if platform.LINUX:
+        output = {}
+        for tid in platform.thread_ids(pid):
+            try:
+                row = platform.thread_usage(pid, tid)
+                output[str(tid)] = dict(name=row['name'], user=int(row['user_cpu_s']*1e9),
+                    system=int(row['system_cpu_s']*1e9), cpu_ns=int(row['cpu_s']*1e9), is_main=row['is_main'])
+            except RuntimeError:
+                pass
+        return output
     identifiers = (ctypes.c_uint64*8192)()
     size = e11_support.LIBPROC.proc_pidinfo(pid, 6, 0, identifiers, ctypes.sizeof(identifiers))
     output = {}
@@ -105,6 +116,7 @@ def load():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    platform.cpu_options(parser)
     parser.add_argument('--bins', type=Path, default=ROOT/'.local/bin/goliath-e17-pilot')
     parser.add_argument('--bots', type=int, required=True)
     parser.add_argument('--seconds', type=float, default=30)
@@ -127,8 +139,10 @@ def main():
     parser.add_argument('--process-sample', action='store_true')
     parser.add_argument('--allow-200', action='store_true')
     args = parser.parse_args()
+    if args.sample or args.instruments:
+        platform.mac_only('sample/xctrace profiling')
     if args.quiet_marker and args.bots > 50 and not args.allow_200:
-        raise SystemExit('report the 50-player process diagnostic to the parent before allowing a 200-player cell')
+        raise SystemExit('report the 50-player process diagnostic to the reviewer before allowing a 200-player cell')
     if args.quiet_marker:
         args.process_sample = True
         if args.server_cores is None: args.server_cores = 4
@@ -341,6 +355,10 @@ def main():
                                     exported = exported.replace(str(ROOT).encode(), b'$REPO').replace(str(Path.home()).encode(), b'$HOME')
                                     (DATA/(args.name+'-'+schema+'.xml.gz')).write_bytes(gzip.compress(exported, mtime=0))
                         module.save(DATA/(args.name+'-instruments.json'), details)
+        if platform.LINUX:
+            current_usage = usage(pid)
+            current_usage.update(user_cpu_s=current_usage['user_s'], system_cpu_s=current_usage['system_s'])
+            return current_usage
         info = e11_support.TaskInfo()
         current_usage = usage(pid)
         count = e11_support.LIBPROC.proc_pidinfo(pid, 4, 0, ctypes.byref(info), ctypes.sizeof(info))
@@ -379,7 +397,7 @@ def main():
         phases = process_report['phases']
         complete = all(phases.get(name) for name in ['cold_join', 'warmup', 'steady', 'whole_cell'])
         output['measurement_valid'] = bool(complete) and output['load_start'][0] <= 4 and not process_report['error'] and all(phases[name]['no_outside_process_above_half_core'] for name in ['steady','whole_cell'])
-        output['load_rule'] = 'parent refined: start <=4; outside-process average <=0.5 core, sampled every second; fixture load is not a rejection'
+        output['load_rule'] = 'D9: start <=4; outside-process average <=0.5 core, sampled every second; fixture load is not a rejection'
         output['process_cpu'] = {key: process_report[key] for key in ['method','precision','error','roles','phases']}
         output['process_trace'] = args.name+'-processes.json'
     output['quiet_window'] = str(args.quiet_marker) if args.quiet_marker else None

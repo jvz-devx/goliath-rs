@@ -486,7 +486,7 @@ def main():
     parser.add_argument("--clock", action="store_true")
     parser.add_argument("--clock-seconds", type=int, default=300)
     parser.add_argument("--verify", type=Path)
-    parser.add_argument("--resources", type=Path, default=Path.home() / "Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3")
+    parser.add_argument("--resources", type=Path, default=__import__('goliath_platform').resources())
     args = parser.parse_args()
     args.name = args.name or ("clock" if args.clock else f"stage{args.stage}")
     if Path(args.name).name != args.name or args.crossings < 1:

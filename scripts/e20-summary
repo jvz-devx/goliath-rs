@@ -5,8 +5,10 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import gzip
 from pathlib import Path
 import e11_support as support
+from goliath_platform import thread_role
 
 loader=importlib.machinery.SourceFileLoader('e20_base_summary',str(Path(__file__).with_name('e19-capacity-summary')))
 spec=importlib.util.spec_from_loader(loader.name,loader)
@@ -18,18 +20,20 @@ if __name__=='__main__':
     parser.add_argument('raw',type=Path)
     parser.add_argument('output',type=Path)
     args=parser.parse_args()
-    raw=json.loads(args.raw.read_text())
+    raw=support.read_json(args.raw)
     result=base.summarize(raw)
     for count,cell in raw['cells'].items():
         if cell['status']!='complete':continue
         roles={}
         for thread in cell.get('proxy_thread_cpu',{}).get('threads',[]):
             name=thread['name']
-            role='IO drivers' if name.startswith('proxy-io-') else 'command workers' if name.startswith('proxy-control-') else 'terrain managers' if name=='terrain-manager' else 'wall workers' if name.startswith('wall-') else 'other matching threads'
+            role=thread_role(name)
             totals=roles.setdefault(role,dict(cores=0,user_cores=0,system_cores=0,threads=0))
             for key in ['cores','user_cores','system_cores']:totals[key]+=thread[key]
             totals['threads']+=1
         result['cells'][count]['proxy_native_role_counters']=roles
-    result.update(kind='E20-derived-frontier-cell',raw_sha256=hashlib.sha256(args.raw.read_bytes()).hexdigest())
+    raw_bytes=args.raw.read_bytes()
+    if args.raw.suffix=='.gz':raw_bytes=gzip.decompress(raw_bytes)
+    result.update(kind='E20-derived-frontier-cell',raw_sha256=hashlib.sha256(raw_bytes).hexdigest())
     support.save(args.output,result)
     print(json.dumps(result,indent=2))

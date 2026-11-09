@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from goliath_platform import LINUX
 
 ROOT = Path(__file__).resolve().parent.parent
 loader = importlib.machinery.SourceFileLoader('e25_build_tested', str(ROOT / 'scripts/e25-build'))
@@ -59,6 +60,7 @@ class Contracts(unittest.TestCase):
         self.assertEqual(template.count('#[global_allocator]'), 1)
         self.assertNotIn('MIMALLOC_', template)
 
+    @unittest.skipIf(LINUX and not (ROOT/'.local/evidence/E25/e25-preparation-r1-frozen/index').exists(), 'retained Mac reactor index is not present on this host')
     def test_template_applies_to_frozen_reactor_index(self):
         with tempfile.TemporaryDirectory(prefix='e25-contract-') as folder:
             environment = dict(__import__('os').environ, GIT_INDEX_FILE=folder + '/index')
@@ -282,6 +284,7 @@ class Contracts(unittest.TestCase):
             path.write_text(json.dumps(dict(schema='E25-latency-v1'))+'\n'+json.dumps(row))
             self.assertEqual(latency_cell.trace_rows(path,'bot-write',100,[],True),[row])
 
+    @unittest.skipIf(LINUX and not (ROOT/'.local/evidence/E25/meridian-scheduler2-base/index').exists(), 'retained Mac scheduler index is not present on this host')
     def test_zone_patch_is_small_and_applies_to_frozen_scheduler_index(self):
         patch = ROOT / 'patches/meridian-12-zone-pressure-r1.patch'
         text = patch.read_text()
@@ -300,6 +303,7 @@ class Contracts(unittest.TestCase):
             subprocess.run(['git', 'apply', '--cached', '--check', str(patch)],
                 cwd=build.SOURCE, env=environment, check=True)
 
+    @unittest.skipIf(LINUX and not (ROOT/'.local/evidence/E25/meridian-scheduler2-base/index').exists(), 'retained Mac scheduler index is not present on this host')
     def test_writev_revision_uses_the_existing_queue_element_type(self):
         patch = ROOT/'patches/meridian-11-writev64-r2.patch'
         text = patch.read_text()
@@ -313,6 +317,7 @@ class Contracts(unittest.TestCase):
             self.assertIn('struct WriteChunk {',source)
             subprocess.run(['git','apply','--cached','--check',str(patch)],cwd=build.SOURCE,env=environment,check=True)
 
+    @unittest.skipIf(LINUX and not (ROOT/'.local/evidence/E25/meridian-scheduler2-base/index').exists(), 'retained Mac scheduler index is not present on this host')
     def test_zone_wrapper_keeps_existing_forbid_and_one_scoped_exception(self):
         import tomllib
         patch = ROOT/'patches/meridian-12-zone-pressure-r2.patch'

@@ -36,7 +36,7 @@ RUNS = ROOT / '.local/runs'
 DATA = ROOT / 'docs/experiments/data/E3'
 BINS = ROOT / '.local/bin/horizon-e3'
 BASE = ROOT / '.local/bin/horizon-fc2868b2b'
-RESOURCES = Path.home() / 'Library/Application Support/horizon-launcher/versions/nightly-2026-11-05-66f3981/.local/horizon-client/26.3'
+RESOURCES = __import__('goliath_platform').resources()
 TOKEN = 'e3-local-process-a'
 sys.path.insert(0, str(ROOT / '.local/src/horizon/tools'))
 from server_transfer_e2e import read_nbt, items_in, Relay, SECRET  # MIT Horizon harness

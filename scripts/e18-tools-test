@@ -31,7 +31,7 @@ class Analysis(unittest.TestCase):
         sampler=SocketSampler(10,25565,{30001},{30001})
         owned='p10\nf1\nn127.0.0.1:50001->127.0.0.1:30001\nTST=ESTABLISHED\nf2\nn127.0.0.1:50001->127.0.0.1:30001\nTST=ESTABLISHED\nf3\nn127.0.0.1:25565->127.0.0.1:50002\nTST=ESTABLISHED\n'
         network='tcp4 0 0 127.0.0.1.50001 127.0.0.1.30001 ESTABLISHED\ntcp4 0 0 127.0.0.1.30001 127.0.0.1.50001 ESTABLISHED\ntcp4 0 0 127.0.0.1.30001 127.0.0.1.50003 TIME_WAIT\n'
-        with patch('e18_sockets.subprocess.run',return_value=SimpleNamespace(returncode=0,stdout=owned)),patch('e18_sockets.subprocess.check_output',return_value=network):
+        with patch('e18_sockets.platform.LINUX',False),patch('e18_sockets.subprocess.run',return_value=SimpleNamespace(returncode=0,stdout=owned)),patch('e18_sockets.subprocess.check_output',return_value=network):
             row=sampler.capture()
         self.assertEqual(row['proxy_tcp_fds'],3)
         self.assertEqual(row['proxy_open_tcp_sockets'],2)

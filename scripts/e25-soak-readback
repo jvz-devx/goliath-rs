@@ -4,12 +4,13 @@ import argparse
 import json
 
 import e25_soak_harness as harness
+import goliath_platform as platform
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--name',required=True)
-    parser.add_argument('--owner',choices=['E25','reviewer'],default='E25')
+    parser.add_argument('--owner',choices=sorted({'E25','reviewer',platform.window_owner('E25')}),default=platform.window_owner('E25'))
     args = parser.parse_args()
     owner = harness.ROOT / '.local/host/quiet/owner'
     if owner.exists() and owner.read_text().splitlines()[0] == args.owner:
