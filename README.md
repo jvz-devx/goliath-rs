@@ -10,11 +10,17 @@ The design copies the publicly visible behaviour of DonutSMP's Goliath system. I
 
 This is experimental, not a production-ready server. Four Horizon servers share one world through a proxy and a fenced store. M1 and M3 are complete. Crossing, terrain and vehicle checks pass with Horizon's client. A stock-client check was not run, by [D11](docs/decisions.md#d11-horizons-client-stands-in-for-the-vanilla-client). Under the matched four-core server budget, the measured frontier is 650 players against 325 on plain Horizon, or 2.0 times the baseline. The 3x target is not met. Proxy-path P95 is 7.31 ms against a 5 ms target. The tick-cost bound is unproven, and the soak stopped on lease expiry at about minute 23. See [current progress](docs/progress.md), [E20's capacity result](docs/experiments/E20-frontier.md) and [E23's closeout checks](docs/experiments/E23-closeout.md).
 
+[E28](docs/experiments/E28-linux.md) repeats the M4 measurements on a second machine, a 6-core Linux PC with the budget enforced by core pinning ([D12](docs/decisions.md#d12-second-platform-linux-with-core-pinning)). Its numbers stand beside the Mac's and replace none of them. There the plain baseline is 200 players and the cluster frontier 425, or 2.125 times its own baseline. Proxy-path P95 is under 5 ms at 425 players with pinning. The test of whether pinning removes the Mac's limiter tail was inconclusive, because the limiter never paused anything at that load. Speculative warming costs about 0.6% of the busiest tile's main-thread CPU, and the combined additions stay unproven. The 30-minute soak fails on that machine. Two bugs it exposed are fixed, and the cause of the store stalls behind the lease losses is still open. The crash campaign is in progress.
+
 Start with the [experiment index](docs/experiments/README.md) and [glossary](docs/experiments/README.md#glossary). [Design decisions](docs/decisions.md) record the scope and pass rules.
 
 ## Hardware and scope
 
-All runs used one machine. These are single-machine loopback measurements, not multi-host results. The [E2 machine record](docs/experiments/E2-real-transfer.md#commits-machine-and-resources) identifies an Apple M5 Pro with 18 CPUs and 48 GiB RAM, running macOS 26.5.2 on arm64. Capacity runs give the server fixture four aggregate cores and bots one separate core, as defined in [D9](docs/decisions.md#d9-capacity-layout-and-equal-cpu). The native measurement counters require macOS. Profiling also uses `sample`, `xctrace` and `vmmap` where the reports call for them. The standalone Rust model does not require macOS.
+Every run used one machine at a time. These are single-machine loopback measurements, not multi-host results. E1 to E27 ran on the Mac. The [E2 machine record](docs/experiments/E2-real-transfer.md#commits-machine-and-resources) identifies an Apple M5 Pro with 18 CPUs and 48 GiB RAM, running macOS 26.5.2 on arm64. Capacity runs give the server fixture four aggregate cores and bots one separate core, as defined in [D9](docs/decisions.md#d9-capacity-layout-and-equal-cpu). On the Mac a SIGSTOP limiter holds each group to its average.
+
+E28 ran on the second platform: an Intel Core i5-8400 with 6 cores, no SMT and 16 GiB RAM, running Linux 6.18 with cgroup v2. There D12 enforces the same budget by pinning. CPUs 0 to 3 run the servers, CPU 4 the bots, and CPU 5 the harness and everything else on the host. A pinned core budget and a limited average are not the same constraint, so each machine's frontier is compared only with its own baseline.
+
+The measurement scripts read their counters from libproc and mach on macOS and from `/proc` on Linux. Counters with no Linux equivalent are reported as null. Profiling with `sample`, `xctrace` and `vmmap` is macOS only. The Linux port changed scripts the Mac results came from, and those have not been rerun on the Mac since. The standalone Rust model needs neither platform's counters.
 
 ## History
 
@@ -66,6 +72,8 @@ That historical revision is outside published history. Every internal-source fil
 
 The final tile stack is FINAL-09, then `horizon-13-lease-renewal-r2.patch`, then `horizon-10-warm-tick.patch`. It runs with the bounded store from this repository and the reactor-1 proxy below.
 
+E28's `final-r2` tile adds `horizon-22-lease-read-deadline.patch` and `horizon-23-registration-refusal.patch`, in that order, for the two bugs its Linux soak exposed. It is built and gated on Linux only, and its soak has not passed.
+
 ### reactor-1 proxy
 
 Meridian is pinned to `902dcf195e0a8bbd3f39a5f560684af00e64bf5d`. Its Horizon protocol/world dependency is pinned to `0d21d5520ec26c49b774bf1533e53ea8af81278d`, as recorded in [E2](docs/experiments/E2-real-transfer.md#commits-machine-and-resources). Apply these patches in order:
@@ -82,7 +90,7 @@ The [reactor build manifest](docs/experiments/data/E18/reactor-1-build.json) rec
 
 ### Inspect evidence or repeat a run
 
-To inspect published evidence without running servers, read [E17's matched baseline](docs/experiments/E17-m4.md), [E20's staircase and reproduction rows](docs/experiments/E20-frontier.md), and [E23's closeout tables](docs/experiments/E23-closeout.md). Their `data/` records include raw counters, summaries and hash indexes. For example, `gzip -dc docs/experiments/data/E14/build10-full-off.json.gz | jq .` reads a compressed record without changing it. Check the [hash conventions](docs/experiments/README.md#evidence-conventions) before comparing digests.
+To inspect published evidence without running servers, read [E17's matched baseline](docs/experiments/E17-m4.md), [E20's staircase and reproduction rows](docs/experiments/E20-frontier.md), [E23's closeout tables](docs/experiments/E23-closeout.md), and [E28's second-platform tables](docs/experiments/E28-linux.md). Their `data/` records include raw counters, summaries and hash indexes. For example, `gzip -dc docs/experiments/data/E14/build10-full-off.json.gz | jq .` reads a compressed record without changing it. Check the [hash conventions](docs/experiments/README.md#evidence-conventions) before comparing digests.
 
 Repeating a live run is a separate task. [E17's commands](docs/experiments/E17-m4.md), [E20's commands](docs/experiments/E20-frontier.md) and [E23's commands](docs/experiments/E23-closeout.md#frozen-identities-and-reproduction) assume their prepared resources, frozen artifacts and quiet-machine conditions. They do not create all prerequisites from a fresh clone.
 
