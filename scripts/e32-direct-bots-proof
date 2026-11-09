@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Prove on the VM host that its stamped bots make no clock call with tracing off.
+
+The checks are E28's, run against the VM host's own frozen sources: the three
+stamped bot sources are rebuilt from the recorded patches, compared with the
+hashes frozen beside the bot binary, and the original bind and write guards
+run in a native probe with a counted clock.
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+
+import e11_support as support
+import e32_direct_bots as direct
+import goliath_bundle as bundle
+
+ROOT=support.ROOT
+BOT_SOURCE='crates/horizon-bots/src/'
+WORKSTATION=ROOT/'docs/experiments/data/E28/direct-bots-proof.json'
+
+
+def checks():
+    loader=importlib.machinery.SourceFileLoader('e28_direct_bots_tests',str(ROOT/'scripts/e28-direct-bots-tests'))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def stamped_sources(proof):
+    identity=bundle.validate(direct.STAMP_BUNDLE,{'stamped-bots'})
+    canonical=json.loads((direct.STAMP_BUNDLE/'canonical.json').read_text())
+    expected=canonical['projects']['horizon']['source_files']
+    patches=[entry for entry in canonical['projects']['horizon']['patches'] if 'horizon-15-' in entry['path']]
+    if len(patches)!=2:raise AssertionError('expected the stamp overlay and its Linux port')
+    plain=[entry for entry in canonical['projects']['horizon']['patches'] if 'horizon-15-' not in entry['path']]
+    with tempfile.TemporaryDirectory(prefix='E32-bot-source-proof-',dir=support.RUNS) as temporary:
+        directory=Path(temporary)
+        for name in ['main.rs','measured.rs']:
+            # The fixed tile tree keeps final's bot sources; the stamp overlays are applied here.
+            source=(ROOT/'.local/src/horizon-tiles'/(BOT_SOURCE+name)).read_bytes()
+            target=directory/(BOT_SOURCE+name);target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(source)
+        for entry in patches:
+            path=ROOT/entry['path']
+            if bundle.sha(path)!=entry['sha256']:raise AssertionError('stamp patch changed')
+            sections=re.split(r'(?=^diff --git )',path.read_text(),flags=re.MULTILINE)
+            selected=''.join(section for section in sections if section.startswith('diff --git a/'+BOT_SOURCE))
+            subprocess.run(['patch','--batch','--silent','-p1'],cwd=directory,input=selected,text=True,
+                capture_output=True,check=True)
+        result={name:(directory/(BOT_SOURCE+name)).read_text() for name in ['main.rs','measured.rs','latency_trace.rs']}
+    hashes={BOT_SOURCE+name:hashlib.sha256(text.encode()).hexdigest() for name,text in result.items()}
+    if any(expected.get(name)!=value for name,value in hashes.items()):
+        raise AssertionError('reconstructed source differs from the frozen compiled source')
+    workstation=json.loads(WORKSTATION.read_text())
+    proof.update(kind='E32-direct-bots-disabled-trace-proof',status='passed',host='vm',
+        bots_bundle='stamped-bots',bots_sha256=identity['binaries']['horizon-bots'],
+        manifest_sha256=identity['manifest_sha256'],source_sha256=hashes,patches=patches,
+        base_patches=len(plain),
+        sources_equal_workstation_proof=workstation['source_sha256']==hashes,
+        workstation_proof_sha256=bundle.sha(WORKSTATION),
+        checker_sha256=bundle.sha(Path(__file__)),
+        guard_checks_sha256=bundle.sha(ROOT/'scripts/e28-direct-bots-tests'),
+        launcher_sha256=direct.launcher_hashes(),
+        trace_enable_environment=list(direct.TRACE_ENV),
+        scope='source-hash proof and extracted native guard test, not a rebuild of the frozen bot')
+    return result
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--proof',type=Path)
+    args=parser.parse_args()
+    if bundle.HOST!='vm':raise SystemExit('the VM host platform must be selected explicitly')
+    module=checks();proof={}
+    sources=stamped_sources(proof)
+
+    class VmSourceProof(module.SourceProof):
+        @classmethod
+        def setUpClass(cls):cls.sources=sources
+
+    suite=unittest.defaultTestLoader.loadTestsFromTestCase(VmSourceProof)
+    result=unittest.TextTestRunner().run(suite)
+    if result.wasSuccessful() and result.testsRun==3:
+        proof['native_probe']=module.PROOF['native_probe']
+        if not proof['sources_equal_workstation_proof']:raise SystemExit('stamped bot sources differ from the workstation proof')
+        if args.proof:
+            if args.proof.exists():raise SystemExit('proof already exists')
+            support.save(args.proof,proof)
+        print(json.dumps({key:proof[key] for key in ['status','bots_sha256','native_probe']},indent=2))
+    raise SystemExit(0 if result.wasSuccessful() and result.testsRun==3 else 1)
+
+
+if __name__=='__main__':
+    main()

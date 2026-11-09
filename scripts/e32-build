@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+"""Rebuild and freeze the measured stack on the VM host from the E28 recipe.
+
+Pins, patch stacks, release commands and gate commands come from
+`scripts/e28-build`. This script owns only what differs on the VM host: its own
+evidence and data folders, eight build jobs, three bundles under
+`.local/bin/goliath-e32/` and a separate build manifest. Every compiled source
+tree is compared with the workstation's E28 build record before it is built.
+"""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+EVIDENCE = ROOT / '.local/evidence/E32'
+DATA = ROOT / 'docs/experiments/data/E32'
+E28 = ROOT / 'docs/experiments/data/E28'
+BUNDLES = ROOT / '.local/bin/goliath-e32'
+STAGE = BUNDLES / '.stage'
+JOBS = '8'
+STAMPS = ['horizon-15-latency-stamps-e25-stamps-lease-r2-b2',
+          'horizon-15-latency-stamps-e25-stamps-lease-r2-b2-linux']
+BOT_SOURCES = ['crates/horizon-bots/src/main.rs', 'crates/horizon-bots/src/measured.rs',
+               'crates/horizon-bots/src/latency_trace.rs']
+INTERNAL = ('crates/', '.cargo/')
+INTERNAL_FILES = ['Cargo.toml', 'Cargo.lock', 'clippy.toml']
+NOT_RUN = {
+    'plain-09': 'No plain-09 gate ran on the VM host. Its gate set was run for E28 on the workstation and on boat.',
+    'final-r2': 'Clippy, root and proxy gates did not run on the VM host. They were run for E28 on the workstation and on boat.',
+    'stamped-bots': 'No stamped-bot gate ran on the VM host. The bot tests and lints were run for E28 on the workstation.',
+}
+
+
+def recipe():
+    loader = importlib.machinery.SourceFileLoader('e28_recipe', str(ROOT / 'scripts/e28-build'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    module.EVIDENCE = EVIDENCE
+    module.DATA = DATA
+    module.SETTINGS = dict(module.SETTINGS, CARGO_BUILD_JOBS=JOBS)
+    return module
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def tree_hash(files):
+    return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+
+
+def internal_sources():
+    """The synced copy has no Git index, so walk the same paths e28-build selects."""
+    paths = [path for prefix in INTERNAL for path in (ROOT / prefix).rglob('*') if path.is_file()]
+    paths += [ROOT / name for name in INTERNAL_FILES if (ROOT / name).is_file()]
+    return {str(path.relative_to(ROOT)): sha(path) for path in sorted(paths)
+            if 'target' not in path.relative_to(ROOT).parts and '__pycache__' not in path.parts}
+
+
+def done(label):
+    path = EVIDENCE / 'commands' / (label + '.json')
+    return path.exists() and json.loads(path.read_text())['exit'] == 0
+
+
+def staged(name):
+    return (EVIDENCE / ('compiled-' + name + '.json')).exists()
+
+
+def run(source, label, directory, command):
+    if done(label):
+        source.state('Retaining completed step: ' + label)
+        return
+    if source.run(label, directory, command):
+        raise SystemExit('Step failed: ' + label)
+
+
+def same_as_e28(source, tree, record, project='horizon'):
+    """Compare the compiled inputs of a tree with a workstation build record."""
+    expected = json.loads((E28 / record).read_text())['projects'][project]['source_files']
+    actual = source.compiled_inputs(source.sources(tree))
+    different = sorted(name for name in set(expected) | set(actual) if expected.get(name) != actual.get(name))
+    row = {'tree': str(tree.relative_to(ROOT)), 'e28_record': 'docs/experiments/data/E28/' + record,
+           'files': len(actual), 'sha256': tree_hash(actual), 'e28_sha256': tree_hash(expected),
+           'match': not different, 'different': different[:20]}
+    source.state(f'{row["tree"]} against {record}: match={row["match"]}, files={row["files"]}')
+    if different:
+        raise SystemExit('Compiled sources differ from the workstation record: ' + ', '.join(different[:5]))
+    return row
+
+
+def comparisons():
+    path = EVIDENCE / 'source-comparisons.json'
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def note(source, name, row):
+    rows = comparisons()
+    rows[name] = row
+    source.write(EVIDENCE / 'source-comparisons.json', rows)
+
+
+def stage(source, name, tree, binaries, patches, tiles):
+    """Copy fresh binaries out of the target dir and record what they were compiled from."""
+    folder = STAGE / name
+    folder.mkdir(parents=True, exist_ok=True)
+    for binary in binaries:
+        shutil.copy2(tree / 'target/release' / binary, folder / (binary + '.new'))
+        os.replace(folder / (binary + '.new'), folder / binary)
+    source.write(EVIDENCE / ('compiled-' + name + '.json'), {
+        'files': source.sources(tree) if tree != ROOT else internal_sources(),
+        'patches': source.patches_for(patches, tiles=tiles),
+        'binaries': {binary: sha(folder / binary) for binary in binaries},
+        'upstream': source.git(tree, 'rev-parse', 'HEAD') if tree != ROOT else None})
+    source.state('Staged binaries and compiled sources: ' + name)
+
+
+def prepare(source):
+    for name, url, pin, patches in [
+        ('horizon', 'https://github.com/horizon-rust/horizon', source.HORIZON, source.PLAIN),
+        ('horizon-tiles', 'https://github.com/horizon-rust/horizon', source.HORIZON, source.FINAL),
+        ('meridian', 'https://github.com/Akirabane/Meridian', source.MERIDIAN, source.PROXY),
+    ]:
+        tree = ROOT / '.local/src' / name
+        if (EVIDENCE / ('source-' + name + '.json')).exists():
+            source.state('Retaining prepared checkout: ' + name)
+            continue
+        if tree.exists():
+            raise SystemExit(f'Refusing to overwrite an unrecorded checkout: {tree}')
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['git', 'clone', '--filter=blob:none', '--no-checkout', url, str(tree)], check=True)
+        subprocess.run(['git', 'checkout', '--detach', pin], cwd=tree, check=True)
+        source.state(f'Fresh upstream clone {name} at {source.git(tree, "rev-parse", "HEAD")}')
+        for patch in patches:
+            options = (['--exclude=crates/horizon-client/src/game/dedicated/status.rs']
+                       if name == 'horizon-tiles' and patch == 'horizon-04-digest' else [])
+            source.apply(tree, patch, options)
+        source.write(EVIDENCE / ('source-' + name + '.json'), {'url': url, 'pin': pin, 'files': source.sources(tree)})
+    note(source, 'plain-09', same_as_e28(source, ROOT / '.local/src/horizon', 'build-plain-09.json'))
+    note(source, 'proxy', same_as_e28(source, ROOT / '.local/src/meridian', 'build-final.json', 'meridian'))
+
+
+def versions(source):
+    for label, command in [('cargo-version', ['cargo', '-V']), ('rustc-version', ['rustc', '-Vv'])]:
+        run(source, label, '.', command)
+
+
+def build(source):
+    horizon, tiles, meridian = (ROOT / '.local/src' / name for name in ['horizon', 'horizon-tiles', 'meridian'])
+    client = ['cargo', 'build', '--locked', '--release', '--no-default-features', '-p', 'horizon-client', '--bin', 'horizon-client']
+    bots = ['-p', 'horizon-bots', '--bin', 'horizon-bots']
+    if not staged('plain-09'):
+        run(source, 'plain-release', '.local/src/horizon', client + bots)
+        stage(source, 'plain-09', horizon, ['horizon-client', 'horizon-bots'], source.PLAIN, False)
+    if not staged('shared-store'):
+        run(source, 'root-release-matched-profile', '.',
+            ['cargo', 'build', '--locked', '--release', '-p', 'goliath-store', '--bin', 'goliath-store'])
+        stage(source, 'shared-store', ROOT, ['goliath-store'], [], False)
+    if not staged('shared-proxy'):
+        run(source, 'proxy-release', '.local/src/meridian',
+            ['cargo', 'build', '--locked', '--release', '-p', 'meridian-proxy', '--bin', 'meridian',
+             '-p', 'meridian-sidecar', '--bin', 'meridian-sidecar', '-p', 'meridian-testkit', '--bin', 'e4-client'])
+        stage(source, 'shared-proxy', meridian, ['meridian', 'meridian-sidecar', 'e4-client'], source.PROXY, False)
+    applied = (EVIDENCE / 'applied-tiles.json')
+    state = json.loads(applied.read_text()) if applied.exists() else []
+    if not staged('stamped-bots'):
+        # The stamped bots are compiled from final plus the two stamp overlays,
+        # the same tree as the workstation's final-stamps bundle.
+        if state not in ([], STAMPS):
+            raise SystemExit('Tile tree is in an unexpected patch state: ' + ', '.join(state))
+        original = source.sources(tiles)
+        for patch in STAMPS[len(state):]:
+            source.apply(tiles, patch)
+            state.append(patch)
+            source.write(applied, state)
+        note(source, 'stamped-bots', same_as_e28(source, tiles, 'build-final-stamps.json'))
+        run(source, 'stamped-bots-release', '.local/src/horizon-tiles',
+            ['cargo', 'build', '--locked', '--release', '--no-default-features', *bots])
+        stage(source, 'stamped-bots', tiles, ['horizon-bots'], source.FINAL + STAMPS, True)
+        for patch in reversed(STAMPS):
+            source.apply(tiles, patch, reverse=True)
+            state.remove(patch)
+            source.write(applied, state)
+        restored = source.sources(tiles) == original
+        source.write(EVIDENCE / 'restoration-stamped-bots.json', {'exact_source_restoration': restored})
+        if not restored:
+            raise SystemExit('Tile tree did not return to final after the stamped bot build')
+    fixes = source.FINAL_R2[len(source.FINAL):]
+    if state and state != fixes:
+        raise SystemExit('Tile tree still carries an overlay: ' + ', '.join(state))
+    if not staged('final-r2'):
+        if state == []:
+            note(source, 'final', same_as_e28(source, tiles, 'build-final.json'))
+        for patch in fixes[len(state):]:
+            source.apply(tiles, patch)
+            state.append(patch)
+            source.write(applied, state)
+        note(source, 'final-r2', same_as_e28(source, tiles, 'build-final-r2.json'))
+        run(source, 'final-r2-release', '.local/src/horizon-tiles', client)
+        stage(source, 'final-r2', tiles, ['horizon-client'], source.FINAL_R2, True)
+
+
+def gates(source):
+    """The cheap tile gates only; the full sets were proven on the workstation and on boat."""
+    common = ['--locked', '--profile', 'fast', '--no-default-features']
+    tests = ['cargo', 'test', *common, '-p', 'horizon-client', '--lib']
+    for name, command in [
+        ('fmt', ['cargo', 'fmt', '--all', '--check']),
+        ('lease-tests', [*tests, 'game::dedicated::cluster::lease::']),
+        ('warm-tests', [*tests, 'game::dedicated::tile_cut::tests::']),
+        ('registration-tests', [*tests, 'game::dedicated::cluster::tests::']),
+    ]:
+        label = 'final-r2-' + name
+        if (EVIDENCE / 'commands' / (label + '.json')).exists():
+            source.state('Retaining completed gate: ' + label)
+        else:
+            source.run(label, '.local/src/horizon-tiles', command)
+
+
+def command_rows(prefixes):
+    rows = [json.loads(path.read_text()) for path in sorted((EVIDENCE / 'commands').glob('*.json'))]
+    return [row for row in rows if row['label'].startswith(tuple(prefixes))]
+
+
+def freeze(source):
+    if (DATA / 'build-manifest.json').exists():
+        raise SystemExit('The VM host manifest is already published; it is immutable')
+    compiled = {name: json.loads((EVIDENCE / ('compiled-' + name + '.json')).read_text())
+                for name in ['plain-09', 'shared-store', 'shared-proxy', 'stamped-bots', 'final-r2']}
+    matches = comparisons()
+    if not all(matches[name]['match'] for name in ['plain-09', 'proxy', 'stamped-bots', 'final', 'final-r2']):
+        raise SystemExit('A compiled tree differs from its workstation record')
+    internals = internal_sources()
+    if compiled['shared-store']['files'] != internals:
+        raise SystemExit('Root compile inputs changed after the store build')
+    sync = EVIDENCE.parent.parent / 'e32-sync.json'
+    commit = json.loads(sync.read_text()) if sync.exists() else {}
+    e28_internal = json.loads((E28 / 'build-final.json').read_text())['internal_crates']['files']
+    drift = sorted(name for name in set(e28_internal) | set(internals) if e28_internal.get(name) != internals.get(name))
+    contents = {
+        'plain-09': {'plain-09': ['horizon-client', 'horizon-bots']},
+        'stamped-bots': {'stamped-bots': ['horizon-bots']},
+        'final-r2': {'final-r2': ['horizon-client'], 'plain-09': ['horizon-bots'], 'shared-store': ['goliath-store'],
+                     'shared-proxy': ['meridian', 'meridian-sidecar', 'e4-client']},
+    }
+    stacks = {'plain-09': source.PLAIN, 'stamped-bots': source.FINAL + STAMPS, 'final-r2': source.FINAL_R2}
+    steps = {'plain-09': ['plain-release'], 'stamped-bots': ['stamped-bots-release'],
+             'final-r2': ['final-r2-', 'proxy-release', 'root-release']}
+    versions_text = {name: (EVIDENCE / 'build-logs' / (name + '.log')).read_text().strip()
+                     for name in ['cargo-version', 'rustc-version']}
+    anchor = {'schema_version': 1, 'platform': 'linux', 'host': 'vm', 'base_server_stack': 'final-r2', 'bundles': {}}
+    for label, parts in contents.items():
+        folder = BUNDLES / label
+        if folder.exists():
+            raise SystemExit('Bundle already frozen: ' + label)
+        folder.mkdir(parents=True)
+        binaries = {}
+        for part, names in parts.items():
+            for name in names:
+                shutil.copy2(STAGE / part / name, folder / name)
+                binaries[name] = sha(folder / name)
+                if binaries[name] != compiled[part]['binaries'][name]:
+                    raise SystemExit('Staged binary changed: ' + name)
+        tiles = label != 'plain-09'
+        horizon = {'upstream_url': 'https://github.com/horizon-rust/horizon', 'pin': source.HORIZON,
+                   'patches': source.patches_for(stacks[label], tiles=tiles),
+                   'source_files': source.compiled_inputs(compiled[label]['files'])}
+        projects = {'horizon': horizon}
+        if label == 'final-r2':
+            proxy = compiled['shared-proxy']
+            projects['meridian'] = {'upstream_url': 'https://github.com/Akirabane/Meridian', 'pin': source.MERIDIAN,
+                                    'horizon_dependency_pin': '0d21d5520ec26c49b774bf1533e53ea8af81278d',
+                                    'patches': proxy['patches'], 'source_files': source.compiled_inputs(proxy['files'])}
+        rows = command_rows(steps[label])
+        failed = sorted(row['label'] for row in rows if row['exit'])
+        record = {'kind': 'E32-vm-host-release', 'schema_version': 1, 'bundle': label, 'status': 'complete',
+                  'profile': 'release', 'incremental': False, 'lto': 'thin', 'codegen_units': 1,
+                  'settings': source.SETTINGS,
+                  'settings_scope': 'Horizon, bots and Meridian; the store uses its own recorded release profile with two jobs.',
+                  'directory': str(folder.relative_to(ROOT)), 'projects': projects,
+                  'internal_crates': {'commit': commit.get('commit'), 'worktree_clean': commit.get('clean'), 'files': internals},
+                  'internal_crates_against_e28': {
+                      'different': drift,
+                      'note': 'The workstation froze its store before the atomic fetch_update call in the store binary '
+                              'was renamed to try_update. The two methods are the same operation under two names.'},
+                  'source_equality': 'passed',
+                  'source_equality_scope': 'Compiled Horizon and Meridian inputs are byte-identical to the workstation\'s '
+                                           'E28 build records, checked before each build. Not binary equality.',
+                  'source_against_e28': {name: matches[name] for name in
+                                         ({'plain-09': ['plain-09'], 'stamped-bots': ['stamped-bots'],
+                                           'final-r2': ['final', 'final-r2', 'proxy']}[label])},
+                  'rustc': versions_text['rustc-version'], 'cargo': versions_text['cargo-version'],
+                  'machine': dict(source.machine(), host='the VM host', virtualization=subprocess.run(
+                      ['systemd-detect-virt'], capture_output=True, text=True).stdout.strip()),
+                  'commands': rows, 'seconds': {row['label']: round(row['seconds_including_queue'], 1) for row in rows},
+                  'verification_status': 'failed' if failed else 'passed', 'failed_gates': failed,
+                  'gates_not_run_on_this_host': NOT_RUN[label],
+                  'binaries': binaries, 'pending_gates': [],
+                  'review_status': 'awaiting independent reproduction',
+                  'patch_apply_results': {name: json.loads((EVIDENCE / ('patches-' + name + '.json')).read_text())
+                                          for name in (['horizon'] if label == 'plain-09' else ['horizon-tiles'] +
+                                                       (['meridian'] if label == 'final-r2' else []))}}
+        if label == 'final-r2':
+            shutil.copy2(ROOT / 'scripts/goliath-cluster', folder / 'cluster-launcher.py')
+            (folder / 'LEASES').touch()
+            required = ['horizon-client', 'meridian', 'meridian-sidecar', 'goliath-store', 'e4-client']
+            source.write(folder / 'manifest.json', {name: binaries[name] for name in required})
+            source.write(folder / 'FINAL.json', {
+                'schema_version': 1,
+                'binaries': {name: {'path': str((folder / name).relative_to(ROOT)), 'sha256': binaries[name]} for name in required},
+                'launcher': {'leased_marker': True, 'sha256': sha(folder / 'cluster-launcher.py')},
+                'store_binary_sha256': binaries['goliath-store']})
+        source.write(DATA / ('build-' + label + '.json'), record)
+        shutil.copy2(DATA / ('build-' + label + '.json'), folder / 'build.json')
+        canonical = {'schema_version': 1, 'platform': 'linux', 'host': 'vm', 'source_equality': 'passed',
+                     'projects': projects, 'internal_crates': record['internal_crates'], 'binaries': binaries,
+                     'review_status': record['review_status']}
+        source.write(folder / 'canonical.json', canonical)
+        if label == 'final-r2':
+            source.write(folder / 'candidate.json', canonical)
+        anchor['bundles'][label] = {'path': str(folder.relative_to(ROOT)), 'binaries': binaries,
+                                   'files': {path.name: sha(path) for path in sorted(folder.iterdir()) if path.is_file()}}
+        source.state(f'{label}: bundle frozen, failed gates={failed}')
+    source.write(DATA / 'build-manifest.json', anchor)
+    source.state('All bundle files hashed in the VM host build-manifest.json')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['all', 'prepare', 'build', 'gates', 'freeze'])
+    args = parser.parse_args()
+    os.environ.setdefault('E28_WINDOW_NAME', 'E32B')
+    source = recipe()
+    started = time.monotonic()
+    steps = {'prepare': [versions, prepare], 'build': [build], 'gates': [gates], 'freeze': [freeze],
+             'all': [versions, prepare, build, gates, freeze]}[args.action]
+    for step in steps:
+        step(source)
+    source.state(f'e32-build {args.action} finished in {time.monotonic() - started:.1f} s')
+
+
+if __name__ == '__main__':
+    main()
