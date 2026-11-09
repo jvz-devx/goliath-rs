@@ -15,9 +15,14 @@ import sys
 import tempfile
 import time
 import goliath_platform as platform
+from e11_support import sanitize
 
 ROOT=Path(__file__).resolve().parent.parent
-EVIDENCE=ROOT/'.local/evidence/E24'
+EVIDENCE=Path(os.environ.get('E24_M3_EVIDENCE',ROOT/'.local/evidence/E24'))
+
+
+def save_json(path,value):
+    path.write_text(sanitize(json.dumps(value,indent=2)).replace(sys.executable,'python3')+'\n')
 
 
 def process_audit(sampler):
@@ -91,13 +96,18 @@ class WindowBoundary(ast.NodeTransformer):
 
 
 def main():
+    global EVIDENCE
     parser=argparse.ArgumentParser(add_help=False)
     platform.cpu_options(parser)
     parser.add_argument('--bins',type=Path,default=Path(os.environ.get('GOLIATH_BIN_DIR','.local/bin/goliath-e24/lease-fixed-r2')))
+    parser.add_argument('--evidence-dir',type=Path,default=EVIDENCE)
     parser.add_argument('--data-name',default=os.environ.get('E24_M3_DATA_NAME'))
     parser.add_argument('--window-name',default=os.environ.get('E24_M3_WINDOW_NAME'))
     parser.add_argument('--budget-seconds',type=int,default=1200)
     options,remaining=parser.parse_known_args()
+    EVIDENCE=options.evidence_dir.resolve()
+    EVIDENCE.relative_to(ROOT/'.local/evidence')
+    os.environ['E24_M3_EVIDENCE']=str(EVIDENCE)
     if not remaining or '--name' not in remaining:raise ValueError('E13 case and --name required')
     case=remaining[0]
     name=simple(remaining[remaining.index('--name')+1])
@@ -118,6 +128,11 @@ def main():
     monitor=None
     finalized=False
     if not child:
+        if platform.LINUX:
+            import goliath_bundle
+            goliath_bundle.validate(bins,{'final'})
+            from e28_window import ready
+            ready()
         window=folder/(window_name+'-window')
         if window.exists():raise RuntimeError('M3 window identity already exists')
         if request.exists() and json.loads(request.read_text()).get('owner')=='E24':
@@ -130,7 +145,7 @@ def main():
                 except Exception:pass
             window.mkdir(exist_ok=True)
             metadata.update(exit=1,status='driver-failed-before-finalization',seconds=time.monotonic()-started)
-            if not (window/'window.json').exists():(window/'window.json').write_text(json.dumps(metadata,indent=2)+'\n')
+            if not (window/'window.json').exists():save_json(window/'window.json',metadata)
             if request.exists() and request.read_text()==owned_identity:request.unlink()
             owner=ROOT/'.local/host/quiet/owner'
             if owner.exists() and owner.read_text().splitlines()[0]==platform.window_owner('E24'):
@@ -172,7 +187,10 @@ def main():
                 for pid,value in row['processes'].items():
                     if pid not in owned:value['name']='outside'
                 return row
-        monitor=Sampler(observer=True).start()
+        if platform.LINUX:
+            from e28_window import WholeWindow
+            monitor=WholeWindow(observer=True).start()
+        else:monitor=Sampler(observer=True).start()
     def guard():
         if not request.exists() or request.read_text()!=os.environ['E24_M3_IDENTITY']:
             raise RuntimeError('owned M3 quiet request lost')
@@ -193,6 +211,11 @@ def main():
         trace.mkdir(parents=True,exist_ok=False)
         os.environ['GOLIATH_LEASE_TRACE_DIR']=str(trace)
         os.environ['GOLIATH_STORE_TRACE']=str(trace/'store-batches.csv')
+        if platform.LINUX:
+            from e28_log_integrity import install_cluster
+            install_cluster(support.cluster,trace/'log-integrity')
+            from e28_m3_startup import observe_clock_calls
+            observe_clock_calls(support.cluster,trace)
     transform=WindowBoundary()
     tree=ast.fix_missing_locations(transform.visit(ast.parse((ROOT/'scripts/m3-chaos').read_text())))
     if (transform.outer,transform.inner)!=(1,1):raise RuntimeError('canonical campaign loop shape changed')
@@ -232,6 +255,10 @@ def main():
             outcome.update(value)
         if case in ['partition','stale-login'] and filename==f'{name}-{seed}.json':
             value['e24_read_only_process_observation']=observed_cleanup
+        if platform.LINUX and case not in ['campaign','matrix'] and filename==f'{name}-{seed}.json':
+            from e28_log_integrity import read_trace
+            value['e28_native_lease_trace_integrity']={path.name:read_trace(path)[1] for path in sorted(trace.glob('*-lease.jsonl*'))}
+            value['e28_authority_absence_from_fault_traces_claimed']=False
         original_save(filename,value)
     ns['save']=saved
     if '--resume-from'in remaining:
@@ -254,7 +281,7 @@ def main():
             ledger=folder/(name+'-matrix.json')
             if ledger.exists():raise RuntimeError('matrix already exists')
             outcome.update(status='running',rows=plan)
-            ledger.write_text(json.dumps(outcome,indent=2)+'\n')
+            save_json(ledger,outcome)
             for row in plan:
                 guard()
                 if ns['e24_expired']():
@@ -266,11 +293,11 @@ def main():
                 with (folder/(row['name']+'-driver.log')).open('x') as stream:
                     completed=subprocess.run(command,stdout=stream,stderr=subprocess.STDOUT)
                 row.update(exit=completed.returncode,status='complete' if completed.returncode==0 else 'failed')
-                ledger.write_text(json.dumps(outcome,indent=2)+'\n')
+                save_json(ledger,outcome)
                 print(json.dumps(row),flush=True)
                 if completed.returncode:outcome['status']='failed';break
             else:outcome['status']='complete'
-            ledger.write_text(json.dumps(outcome,indent=2)+'\n')
+            save_json(ledger,outcome)
             exit_code=0 if outcome['status']=='complete' else 1
         else:exit_code=ns['main']()
         if outcome.get('status')=='paused-window':exit_code=0
@@ -287,13 +314,18 @@ def main():
         raise
     finally:
         if not child:
-            monitor.capture('cell-end');monitor.stop()
-            audit=process_audit(monitor)
+            if platform.LINUX:audit=monitor.finish()
+            else:
+                monitor.capture('cell-end');monitor.stop()
+                audit=process_audit(monitor)
             (window/'processes.json.gz').write_bytes(gzip.compress((json.dumps(audit,indent=2)+'\n').encode(),mtime=0))
             metadata.update(exit=exit_code,seconds=time.monotonic()-started,outcome=outcome.get('status'),
                 binaries_unchanged=validate_snapshot(bins)==identity,finished_wall_ns=time.time_ns(),
                 outside_noise_valid=audit['valid'],outside_maximum_cores=audit['maximum_outside_process_cores'])
-            (window/'window.json').write_text(json.dumps(metadata,indent=2)+'\n')
+            if platform.LINUX:
+                metadata.update(d12=audit['d12'],cpu_mode=options.cpu_mode,restored=audit['restored'],
+                    policy_before=audit['policy_before'],policy_after=audit['policy_after'],outside_total_cores=audit['outside_total_cores'])
+            save_json(window/'window.json',metadata)
             if request.exists() and request.read_text()==owned_identity:request.unlink()
             subprocess.run([ROOT/'.local/bin/host-window','release',platform.window_owner('E24')],check=True)
             finalized=True

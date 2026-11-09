@@ -1,0 +1,89 @@
+{
+  "kind": "E28-seed240012-Directory-response-overlap",
+  "request_id": "41732605867775767195785172",
+  "client_request_written": {
+    "wall_ns": "1794244510998067936",
+    "event": "request-written",
+    "request_id": "41732605867775767195785172",
+    "operation": "directory",
+    "attempt": "0",
+    "instant": "Instant { tv_sec: 899262, tv_nsec: 487404097 }"
+  },
+  "client_attempt_error": {
+    "wall_ns": "1794244511205677191",
+    "event": "attempt-error",
+    "request_id": "41732605867775767195785172",
+    "operation": "directory",
+    "attempt": "0",
+    "instant": "Instant { tv_sec: 899262, tv_nsec: 695013325 }"
+  },
+  "client_read_error_after_ms": 207.609228,
+  "matching_server_connection": {
+    "request_id": "41732605867775767195785172",
+    "commit": "false",
+    "wake_ms": "0.040157",
+    "write_ms": "0.043176",
+    "admission_ms": "0.120870",
+    "total_ms": "231.834837"
+  },
+  "overlapping_batches": [
+    {
+      "start_us": "11708901",
+      "count": "1",
+      "admission_max_ms": "0.006611",
+      "queue_max_ms": "1.710435",
+      "queue_mean_ms": "1.710435",
+      "collect_ms": "0.000731",
+      "execute_ms": "92.323592",
+      "barrier_ms": "92.311190",
+      "dispatch_ms": "0.006339",
+      "maintain_ms": "0.000426",
+      "background_ms": "0.000000",
+      "mutations": "1",
+      "accepted_sequence": "79",
+      "receipt_count": "79",
+      "start_after_request_written_ms": -112.718791,
+      "end_after_request_written_ms": -20.395199
+    },
+    {
+      "start_us": "11801318",
+      "count": "1",
+      "admission_max_ms": "0.006591",
+      "queue_max_ms": "10.370486",
+      "queue_mean_ms": "10.370486",
+      "collect_ms": "0.000696",
+      "execute_ms": "114.208942",
+      "barrier_ms": "114.196822",
+      "dispatch_ms": "0.071589",
+      "maintain_ms": "0.000181",
+      "background_ms": "0.000000",
+      "mutations": "1",
+      "accepted_sequence": "80",
+      "receipt_count": "80",
+      "start_after_request_written_ms": -20.301791,
+      "end_after_request_written_ms": 93.907151
+    },
+    {
+      "start_us": "11915682",
+      "count": "2",
+      "admission_max_ms": "0.120870",
+      "queue_max_ms": "93.954368",
+      "queue_mean_ms": "87.579895",
+      "collect_ms": "0.009729",
+      "execute_ms": "137.675715",
+      "barrier_ms": "137.662923",
+      "dispatch_ms": "0.005879",
+      "maintain_ms": "0.000375",
+      "background_ms": "0.000000",
+      "mutations": "1",
+      "accepted_sequence": "81",
+      "receipt_count": "81",
+      "start_after_request_written_ms": 94.062209,
+      "end_after_request_written_ms": 231.737924
+    }
+  ],
+  "diagnosis": "Directory waited about93.95ms in the store queue, then shared a batch with a137.66ms durable barrier. The server wrote the response after231.83ms, later than the207.61ms client read failure.",
+  "returning_call": "blocking TcpStream::read inside codec::read_exact while reading the Directory response",
+  "underlying_pressure": "store queue plus durable barrier, not per-user/cgroup task limits or bind/mmap",
+  "no_original_seed_replayed": true
+}

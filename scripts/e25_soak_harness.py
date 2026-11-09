@@ -14,6 +14,20 @@ DERIVED = EVIDENCE / 'soak-derived'
 DATA = ROOT / 'docs/experiments/data/E25'
 
 
+def configure(data_dir):
+    """Keep E25 defaults; E28 evidence stays in its own private namespace."""
+    global DATA,EVIDENCE,DERIVED
+    DATA=Path(data_dir).resolve()
+    DATA.relative_to(ROOT)
+    EVIDENCE=ROOT/'.local/evidence/E25'
+    DERIVED=EVIDENCE/'soak-derived'
+    if DATA != ROOT/'docs/experiments/data/E25':
+        DATA.relative_to(ROOT/'docs/experiments/data/E28')
+        EVIDENCE=ROOT/'.local/evidence/E28/soak'
+        DERIVED=EVIDENCE/'soak-derived'
+    for directory in [DATA,EVIDENCE,DERIVED]:directory.mkdir(parents=True,exist_ok=True)
+
+
 def load(name,path):
     loader = importlib.machinery.SourceFileLoader(name,str(path))
     spec = importlib.util.spec_from_loader(name,loader)
@@ -50,8 +64,8 @@ class Relocate(ast.NodeTransformer):
 
     def visit_Constant(self,node):
         if isinstance(node.value,str):
-            value = node.value.replace('.local/evidence/E24','.local/evidence/E25')
-            value = value.replace('docs/experiments/data/E24','.local/evidence/E25/soak-derived')
+            value = node.value.replace('.local/evidence/E24',str(EVIDENCE.relative_to(ROOT)))
+            value = value.replace('docs/experiments/data/E24',str(DERIVED.relative_to(ROOT)))
             return ast.copy_location(ast.Constant(value),node)
         return node
 
@@ -84,15 +98,14 @@ def execute(script,arguments,tag,owner='E25'):
 def closures(folder):
     events = []
     for path in sorted((folder/'tiles').glob('*-lease.jsonl*')):
-        opener = gzip.open if path.suffix == '.gz' else open
-        with opener(path,'rt') as source:
-            for line in source:
-                row = json.loads(line)
-                clock = row.get('data',{})
-                if row.get('event') in ['authority-stop','clock-anomaly'] or (
-                    row.get('event') == 'clock-metrics' and any(clock.get('closures_by_cause',{}).values())):
-                    events.append(dict(path=str(path.relative_to(ROOT)),record=row))
-                    break
+        from e28_log_integrity import read_trace
+        rows,_=read_trace(path)
+        for row in rows:
+            clock = row.get('data',{})
+            if row.get('event') in ['authority-stop','clock-anomaly'] or (
+                row.get('event') == 'clock-metrics' and any(clock.get('closures_by_cause',{}).values())):
+                events.append(dict(path=str(path.relative_to(ROOT)),record=row))
+                break
     return events
 
 
@@ -137,6 +150,21 @@ def readback(name):
     events = closures(EVIDENCE/name)
     data = dict(native)
     data.update(classify(native,store,events))
+    whole_path=EVIDENCE/(name+'-whole-window.json')
+    if whole_path.exists() or whole_path.with_suffix('.json.gz').exists():
+        whole=read(whole_path)
+        data.update(whole_window_d12={key:value for key,value in whole.items() if key!='samples'},
+            whole_window_evidence=digest(whole_path if whole_path.exists() else whole_path.with_suffix('.json.gz')))
+        from e28_window import minute_rss
+        origin=soak['memory'][0]['processes']['store']['at']-soak['memory'][0]['elapsed_seconds']
+        minutes=minute_rss(whole['samples'],origin)
+        data['every_process_minute_rss']=storage.save(DATA/(name+'-every-process-minute-rss.json'),minutes)
+        data['every_process_minute_rss_covered']=all(row['endpoint_covered'] for row in minutes)
+        data['rss_soak_lines_pass']=data['rss_soak_lines_pass'] and whole['valid']
+        data['verdict']='rss-lines-passed' if data['rss_soak_lines_pass'] else 'rss-lines-failed'
+        data['d9_memory_qualified']=data['d9_memory_qualified'] and whole['valid']
+    elif EVIDENCE==ROOT/'.local/evidence/E28/soak':
+        raise RuntimeError('E28 requires whole-window D12 evidence, including recovery and restoration')
     data.update(kind='E25-full-soak-readback',proxy_rss_judged=True,
         store_diagnostics=store,executed_readbacks=executed,
         authority_events=events,proxy=cell.get('proxy'),histogram=cell.get('histogram'),

@@ -73,13 +73,15 @@ def main():
     continuous=all(counts)
     noise=causal['window']['steady_noise']
     memory_pass=coverage and len([row for row in memories.values() if row['judged']])==9 and all(row['under_10_percent'] for row in memories.values() if row['judged'])
+    authority_complete=summary.get('authority_trace_complete',True) and causal.get('authority_trace_complete',True)
     passed=bool(cell['status']=='complete' and summary['binaries_unchanged'] and population and memory_pass and cargo
-        and not stops and not anomaly_count and clocks['all_valid'] and len(raw['ownership_audits'])>=29
+        and not stops and not anomaly_count and clocks['all_valid'] and authority_complete and len(raw['ownership_audits'])>=29
         and not violations and not regressions and continuous and noise['valid'])
     result=dict(kind='E24-fixed-soak-readback',name=args.name,verdict='passed' if passed else 'failed',
         runtime_status=cell['status'],runtime_error=summary.get('error'),binaries_unchanged=summary['binaries_unchanged'],
         memory_endpoint_coverage=coverage,memory_pass=memory_pass,memory=memories,proxy_rss_judged=False,
         clock_pass=clocks['all_valid'],authority_stops=stops,clock_anomalies=anomaly_count,
+        authority_trace_complete=authority_complete,authority_trace_integrity=causal.get('authority_trace_integrity'),
         loaded_clock_readback=str(clock_path.relative_to(ROOT)),
         ownership_audits=len(raw['ownership_audits']),owner_violations=violations,generation_regressions=regressions,
         cargo_conserved=cargo,cargo_items=totals,recovery=recovery,
@@ -87,7 +89,7 @@ def main():
         activations_per_minute=counts,crossings_in_every_minute=continuous,
         game_time_tps=cell.get('game_time_tps'),tick_summary=cell.get('tick_summary'),
         capacity_diagnostic_pass=cell.get('diagnostic_pass'),capacity_diagnostic_failures=cell.get('diagnostic_failures'),
-        scope='1000/100 only; minute-spaced stable-generation acting-session audits and65named items after full checkpoint/recovery, not per-action tracing',
+        scope=f'1000/100 only; minute-spaced stable-generation acting-session audits and {cell["layout"]["players"]//10} named items after full checkpoint/recovery, not per-action tracing',
         noise_valid=noise['valid'],outside_maximum_cores=noise['maximum_outside_process_cores'],
         inputs={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [raw_path,cell_path,summary_path,causal_path,clock_path]})
     output=DATA/(args.name+'-result.json')

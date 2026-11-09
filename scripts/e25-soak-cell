@@ -15,16 +15,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     platform.cpu_options(parser)
     parser.add_argument('--players', type=int, default=650)
+    parser.add_argument('--data-dir',type=Path,default=harness.DATA)
+    parser.add_argument('--direct-bots',action='store_true')
     parser.add_argument('--name',required=True)
     parser.add_argument('--bins',type=Path,required=True)
     parser.add_argument('--owner',choices=sorted({'E25','reviewer',platform.window_owner('E25')}),default=platform.window_owner('E25'))
     args = parser.parse_args()
-    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+    harness.configure(args.data_dir)
+    if not re.fullmatch(r'(?:e25-|e28-|repro-)[A-Za-z0-9_-]+',args.name):
         raise ValueError('fresh simple cell name required')
     owner = harness.ROOT / '.local/host/quiet/owner'
     if not owner.exists() or owner.read_text().splitlines()[0] != args.owner:
         raise RuntimeError('the requested owner does not hold its measurement window')
     bins = args.bins.resolve()
+    if goliath_bundle.is_e28(bins) and (not args.direct_bots or args.cpu_mode!='pin' or args.players!=425):
+        raise ValueError('E28 soak requires425players, pin and direct untraced bots')
     validate_snapshot(bins)
     fixture = validate_snapshot(goliath_bundle.BUNDLES/'final' if goliath_bundle.is_e28(bins) else harness.ROOT/'.local/bin/goliath-e24/lease-fixed-r2')
     selected = validate_snapshot(bins)
@@ -43,17 +48,19 @@ def main():
     executed = None
     try:
         executed = harness.execute('e24-run',['--name',args.name,'--bins',bins,'--host-released',
-            '--players',str(args.players),'--seconds','1800','--clock-telemetry','--soak-audit','--planning-mutation-rate','72'],args.name,owner=args.owner)
+            '--players',str(args.players),'--seconds','1800','--clock-telemetry','--soak-audit','--planning-mutation-rate','72',
+            '--cpu-mode',args.cpu_mode,*(['--direct-bots'] if args.direct_bots else [])],args.name,owner=args.owner)
     except BaseException as caught:
         error = dict(type=type(caught).__name__,message=str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME'))
     native_path = harness.DERIVED / (args.name+'-summary.json')
     native = harness.read(native_path) if native_path.exists() else {}
     events = harness.closures(harness.EVIDENCE/args.name)
-    failed = bool(error or native.get('error') or not native.get('binaries_unchanged') or native.get('cleanup_errors') or events or native.get('observed_authority_latch'))
+    failed = bool(error or native.get('error') or not native.get('binaries_unchanged') or native.get('cleanup_errors') or events or native.get('observed_authority_latch') or native.get('authority_trace_complete') is False)
     record = dict(kind='E25-full-soak-collection',name=args.name,status='failed' if failed else 'complete',
         error=error,native_error=native.get('error'),authority_events=events,executed=executed,
         native_summary=harness.digest(native_path) if native_path.exists() else None,
         binaries_unchanged=native.get('binaries_unchanged',False))
+    record.update(authority_trace_complete=native.get('authority_trace_complete'),authority_trace_integrity=native.get('authority_trace_integrity'))
     target.write_text(json.dumps(record,indent=2)+'\n')
     print(json.dumps(record,indent=2),flush=True)
     if failed:

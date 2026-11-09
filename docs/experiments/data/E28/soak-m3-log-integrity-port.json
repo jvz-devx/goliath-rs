@@ -1,0 +1,46 @@
+{
+  "kind": "E28-log-integrity-port",
+  "registered_before_builder_measurement": true,
+  "scope": "E28 soak and M3 adapters only; frozen bundles and other E28 suite kernels unchanged",
+  "reviewer_example": {
+    ".local/evidence/E28/repro-e28-latency-pin-via-r1/leases/tile-1-2099571-lease.jsonl": {
+      "complete": false,
+      "bytes": 576957,
+      "sha256": "ceb7ba5a7573ee0e4ec345b5400630ba9ca93d33577fd28d589515daaaa9eaba",
+      "complete_records": 2497,
+      "invalid_complete_lines": [],
+      "tail_bytes": 52,
+      "tail_sha256": "8fc66b6d05f8a5be2267cd5ca023a7bee526d740d6975c543479814897332030",
+      "interpretation": "only newline-terminated records decoded; any undecoded tail or malformed complete line leaves strict evidence unproven"
+    }
+  },
+  "findings": [
+    "Tile shutdown already sends console stop and waits180seconds before kill; no SIGTERM is used by this stop path.",
+    "The frozen keeper thread is detached. Its unbuffered File writes are multipart; process exit can truncate a record. No flush or keeper join guarantee is claimed.",
+    "The proxy Child previously let native stderr and a Python stdout reader write the same regular file. E28 gives stdout a separate file, leaving stderr as the sole phase-log writer.",
+    "The retained A4 failure evidence contains no offending E10_PHASE line, so its precise corruption cause is unproven. The source-level mixed-writer hazard is removed, not retrospectively asserted as that cause."
+  ],
+  "changes": [
+    "Proxy stdout kept in proxy-stdout.log with the original queue/event parsing; path-histogram reads move to that file.",
+    "Tile console stop and 180second fallback preserved; stdout reader drained before log close, every stop and forced kill recorded.",
+    "Only newline-complete JSON records decoded. Tail byte count/hash and malformed complete-line metadata retained; any missing bytes make strict authority evidence unproven.",
+    "Live phase tails get a bounded one-second completion wait with each framing snapshot retained. Malformed complete records are never skipped; failed native bytes are retained.",
+    "M3 intentional crash traces report framing separately and never claim complete authority-event absence from them; original item/fence kernels remain unchanged."
+  ],
+  "binary_changes": false,
+  "cargo_builds": 0,
+  "limitations": [
+    "No native lease-writer quiescence or join was added. A real EOF tail still fails strict soak authority qualification.",
+    "No previously failed reviewer cell is repaired or reclassified."
+  ],
+  "source_sha256": {
+    "e28_log_integrity.py": "84942cddf0a4f98ad65a4b0896a7e47c4d27f6e3004e84416a95b0d841f462e9",
+    "e28-log-integrity-tests": "fea8cf313636b997ff2c73030bd6d2f3c88c66527b471e891b00f2b5329f654b",
+    "e24-run": "61fac16eb8642ba3074cc8c00e507e403dc2b21fb74d1ed38fba75a574642a54",
+    "e24-analyse": "ff02d4ec7e7a9313b40fa4030e0a55013787a9d584452e6069e42f291e4b68f6",
+    "e24-soak-result": "48e2e8228d6e41d741b214d092844d1b9ca2421bf57de59d5dc3d9e1b7d3c205",
+    "e24-m3": "85cca9f4a0cda6415b5136ba6560bb15cc60743987e68c894afb264982804e83",
+    "e28_soak_clock.py": "b7909288e3bda205a3b811dddcd65fa5c31114a89758963bf4557d4707ccb127",
+    "e25_soak_harness.py": "7d3de4cd661b2a6566bfb7f75d6ca9f2f0cfbbd545ac077bb35ca09483b8dc16"
+  }
+}

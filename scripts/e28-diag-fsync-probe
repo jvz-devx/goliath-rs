@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Probe store-like fsync latency on the data volume against soak-like log writeback.
+
+Diagnostic only. It runs no Horizon, Meridian or store binary. The probe appends
+4 KiB and fsyncs at 25 Hz, the way the store's journal barrier does. Writers
+append unsynced log lines at the a1 soak's measured rate (about 2.9 MB/s across
+eight files). Cases: no writers, writers on the same volume, writers on tmpfs.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import e11_support as support  # noqa: E402
+import e28_window as window  # noqa: E402
+import goliath_platform as platform  # noqa: E402
+
+ROOT = support.ROOT
+DEVICE = 'dm-2'  # data-ai, the XFS volume on VDO; checked at start.
+CASES = [('idle', None), ('logs-same-volume', 'data'), ('logs-tmpfs', 'tmpfs')]
+
+
+def vdo_threads():
+    found = {}
+    for entry in Path('/proc').iterdir():
+        if entry.name.isdigit():
+            try:
+                comm = (entry/'comm').read_text().strip()
+            except OSError:
+                continue
+            if comm.startswith('vdo0:'):
+                found[int(entry.name)] = comm
+    return found
+
+
+def thread_cpu(pid):
+    try:
+        fields = (Path('/proc')/str(pid)/'stat').read_text().rsplit(')', 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+    except OSError:
+        return None
+
+
+def vmstat():
+    values = {}
+    for line in Path('/proc/vmstat').read_text().splitlines():
+        name, value = line.split()
+        if name in ('nr_dirty', 'nr_writeback'):
+            values[name] = int(value)
+    return values
+
+
+def disk():
+    fields = Path(f'/sys/block/{DEVICE}/stat').read_text().split()
+    return int(fields[6]), int(fields[8])  # sectors written, in flight
+
+
+def probe(args):
+    path = Path(args.file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    block = b'\xa5' * 4096
+    threads = vdo_threads()
+    rows = []
+    start = time.monotonic()
+    next_at = start
+    last_second = -1
+    vdo = {}
+    while time.monotonic() - start < args.seconds:
+        now = time.monotonic()
+        if now < next_at:
+            time.sleep(next_at - now)
+        began = time.perf_counter_ns()
+        os.write(fd, block)
+        os.fsync(fd)
+        latency = (time.perf_counter_ns() - began) / 1e6
+        at = time.monotonic() - start
+        memory = vmstat()
+        written, in_flight = disk()
+        row = [round(at, 4), round(latency, 4), memory['nr_dirty'], memory['nr_writeback'], written, in_flight]
+        second = int(at)
+        if second != last_second:
+            last_second = second
+            vdo = {pid: thread_cpu(pid) for pid in threads}
+            row.append(round(sum(v for v in vdo.values() if v is not None), 3))
+        else:
+            row.append(None)
+        rows.append(row)
+        next_at += 0.04
+    os.close(fd)
+    Path(args.out).write_text(json.dumps(dict(columns=['t_s', 'write_fsync_ms', 'nr_dirty_pages',
+        'nr_writeback_pages', 'device_sectors_written', 'device_in_flight', 'vdo_threads_cpu_s'],
+        rows=rows, vdo_thread_names=sorted(set(threads.values())))))
+
+
+def writer(args):
+    path = Path(args.file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    line = (b'[2026-11-09 18:35:10] E28DiagBot failed prediction (VL 1.1): moved up to 0.033 blocks off'
+        b' what its keys allow (1 tick; off -0.023 +0.000 -0.023, moved 0.200, air flying)\n')
+    chunk = line * max(1, round(args.rate * 0.01 / len(line)))
+    start = time.monotonic()
+    next_at = start
+    while time.monotonic() - start < args.seconds:
+        now = time.monotonic()
+        if now < next_at:
+            time.sleep(next_at - now)
+        os.write(fd, chunk)
+        next_at += 0.01
+    os.close(fd)
+
+
+def quantiles(values):
+    ordered = sorted(values)
+    pick = lambda q: ordered[min(len(ordered) - 1, int(q * len(ordered)))]
+    return dict(n=len(ordered), p50=pick(.5), p95=pick(.95), p99=pick(.99), p999=pick(.999), max=ordered[-1],
+        over_50ms=sum(v > 50 for v in ordered), over_100ms=sum(v > 100 for v in ordered),
+        over_200ms=sum(v > 200 for v in ordered))
+
+
+def summarize(data):
+    rows = data['rows']
+    latency = [r[1] for r in rows]
+    loaded = [r[1] for r in rows if r[0] >= 35]  # after the first 30 s expiry plus one 5 s flush period
+    slow = [dict(t_s=r[0], ms=r[1], writeback_pages=r[3], in_flight=r[5]) for r in rows if r[1] > 100]
+    sectors = rows[-1][4] - rows[0][4]
+    return dict(all=quantiles(latency), after_35s=quantiles(loaded) if loaded else None,
+        device_mib_written=round(sectors * 512 / 2**20, 1), max_writeback_pages=max(r[3] for r in rows),
+        max_dirty_pages=max(r[2] for r in rows), slow_over_100ms=slow[:40])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--seconds', type=float, default=100)
+    parser.add_argument('--writers', type=int, default=8)
+    parser.add_argument('--rate', type=float, default=360_000, help='bytes/s per writer')
+    parser.add_argument('--role', choices=['probe', 'writer'])
+    parser.add_argument('--file')
+    parser.add_argument('--out')
+    args = parser.parse_args()
+    if args.role == 'probe':
+        return probe(args)
+    if args.role == 'writer':
+        return writer(args)
+    if not args.name.startswith('e28-diag-') or any(not (c.isalnum() or c in '-_') for c in args.name):
+        raise ValueError('name must be e28-diag-*')
+    if platform.window_owner(None) != 'E28D':
+        raise RuntimeError('export GOLIATH_WINDOW_OWNER=E28D')
+    if Path(f'/sys/block/{DEVICE}/dm/name').read_text().strip() != 'data-ai':
+        raise RuntimeError('data volume device changed')
+    evidence = ROOT/'.local/evidence/E28/diag'/args.name
+    runs = ROOT/'.local/runs'/args.name
+    shm = Path('/dev/shm')/args.name
+    for folder in (evidence, runs, shm):
+        if folder.exists():
+            raise RuntimeError(f'fresh name required: {folder}')
+    evidence.mkdir(parents=True)
+    plan = dict(kind='E28-diag-fsync-probe-plan', name=args.name, cases=[c for c, _ in CASES], seconds=args.seconds,
+        writers=args.writers, bytes_per_writer_s=args.rate, probe_hz=25, probe_block_bytes=4096,
+        probe_volume='data volume (XFS on LVM on VDO), under .local/runs', placement='harness role, CPU 5',
+        sysctl={name: Path('/proc/sys/vm')/name for name in ('dirty_expire_centisecs', 'dirty_writeback_centisecs',
+            'dirty_background_ratio', 'dirty_ratio')},
+        script_sha256=hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest())
+    plan['sysctl'] = {k: int(v.read_text()) for k, v in plan['sysctl'].items()}
+    support.save(evidence/'plan.json', plan)
+    host = ROOT/'.local/bin/host-window'
+    subprocess.run([host, 'quiet', 'E28D', 'fsync/writeback diagnostic ' + args.name], check=True)
+    monitor = None
+    results = {}
+    try:
+        monitor = window.WholeWindow(observer=True).start()
+        for case, target in CASES:
+            subprocess.run(['sync'], check=True)
+            time.sleep(5)
+            monitor.capture('case-start-' + case)
+            out = evidence/(case + '-probe.json')
+            log_root = runs/('logs-' + case) if target == 'data' else shm/('logs-' + case)
+            writers = []
+            if target:
+                for index in range(args.writers):
+                    writers.append(subprocess.Popen([sys.executable, '-B', __file__, '--name', args.name,
+                        '--role', 'writer', '--file', str(log_root/f'w{index}.log'), '--rate', str(args.rate),
+                        '--seconds', str(args.seconds)]))
+            probe_process = subprocess.run([sys.executable, '-B', __file__, '--name', args.name, '--role', 'probe',
+                '--file', str(runs/('store-' + case)/'journal'), '--out', str(out), '--seconds', str(args.seconds)])
+            for process in writers:
+                process.wait()
+            monitor.capture('case-end-' + case)
+            data = json.loads(out.read_text())
+            results[case] = dict(probe_exit=probe_process.returncode, writer_exits=[p.returncode for p in writers],
+                log_target={'data': 'data volume', 'tmpfs': 'tmpfs', None: 'none'}[target], **summarize(data))
+            shutil.rmtree(runs/('logs-' + case), ignore_errors=True)
+            shutil.rmtree(runs/('store-' + case), ignore_errors=True)
+            shutil.rmtree(shm, ignore_errors=True)
+            print(json.dumps({case: results[case]['after_35s']}), flush=True)
+    finally:
+        whole = monitor.finish() if monitor else None
+        if whole:
+            support.save(evidence/'whole-window.json', whole)
+        shutil.rmtree(runs, ignore_errors=True)
+        shutil.rmtree(shm, ignore_errors=True)
+        subprocess.run([host, 'release', 'E28D'], check=True)
+    d12 = None
+    if whole:
+        d12 = dict(valid=whole['valid'], reasons=whole['d12'].get('reasons'), seconds=round(whole['seconds'], 3),
+            per_cpu_busy={str(k): round(v['busy_fraction'], 4) for k, v in (whole['d12']['per_cpu'].items() if isinstance(whole['d12']['per_cpu'], dict) else enumerate(whole['d12']['per_cpu']))},
+            swap_in_pages=whole['d12'].get('swap_in_pages'), restored=whole['restored'],
+            maximum_outside_process_cores=whole['maximum_outside_process_cores'],
+            outside_total_cores=whole['outside_total_cores'], placement_errors=len(whole['placement_errors']),
+            throttle_first=whole['host_first'].get('thermal_throttle'), throttle_last=whole['host_last'].get('thermal_throttle'),
+            frequency_khz_range=whole['frequency_khz_range'], start_load=whole['samples'][0]['host_load'])
+    support.save(evidence/'result.json', dict(kind='E28-diag-fsync-probe', name=args.name, plan=plan,
+        cases=results, d12=d12, qualification=False))
+
+
+if __name__ == '__main__':
+    main()

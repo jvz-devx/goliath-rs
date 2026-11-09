@@ -1,0 +1,500 @@
+{
+  "kind": "E28-M3-startup-and-placement-diagnosis",
+  "failed_rows_unchanged": true,
+  "seed240012": {
+    "operation": "Directory",
+    "call": "codec::read_response_before -> read_frame_before -> read_exact -> blocking TcpStream::read",
+    "request_written": true,
+    "response_read_record": false,
+    "error_read_delay_ms": 207.609228,
+    "timeout_ms": 200,
+    "attempts": 1,
+    "error": "EAGAIN / WouldBlock returned on the response-read path",
+    "excluded": [
+      "bind/port allocation",
+      "task creation limit",
+      "mmap/memlock",
+      "tile fsync as the returning call",
+      "a nonblocking read configured by the client"
+    ],
+    "upstream_maximum_store_barrier_ms": 232.99275,
+    "syscall_trace_of_original_failure_available": false,
+    "evidence": "native request-written then attempt-error with no response-read; Client::once has only response decode left and Linux SO_RCVTIMEO expiry surfaces WouldBlock"
+  },
+  "seed240011": {
+    "local_tile_a_stop": {
+      "at_ns": 10676552701,
+      "data": {
+        "accepted_counter": 39,
+        "cause": "renew-keeper-deadline",
+        "deadline_ns": 10676441580,
+        "now_ns": 10676551777
+      },
+      "event": "authority-stop",
+      "wall_ns": 1794244511557475422
+    },
+    "last_confirmed_counter": 39,
+    "clock_writer_fence": [
+      0,
+      1,
+      1
+    ],
+    "python_clock_call_server_timings": [
+      {
+        "request_id": "26492237595132858425620353626",
+        "commit": "false",
+        "wake_ms": "0.004982",
+        "write_ms": "0.026020",
+        "admission_ms": "0.070672",
+        "total_ms": "0.118226"
+      },
+      {
+        "request_id": "26492237595132858425620353627",
+        "commit": "false",
+        "wake_ms": "0.004729",
+        "write_ms": "0.019240",
+        "admission_ms": "0.047420",
+        "total_ms": "0.080322"
+      }
+    ],
+    "matched_clock_batches": [
+      {
+        "start_us": "13744991",
+        "count": "1",
+        "admission_max_ms": "0.070672",
+        "queue_max_ms": "0.013440",
+        "queue_mean_ms": "0.013440",
+        "collect_ms": "0.000714",
+        "execute_ms": "0.002917",
+        "barrier_ms": "0.000000",
+        "dispatch_ms": "0.002399",
+        "maintain_ms": "0.000306",
+        "background_ms": "0.000000",
+        "mutations": "0",
+        "accepted_sequence": "96",
+        "receipt_count": "96"
+      },
+      {
+        "start_us": "13745546",
+        "count": "1",
+        "admission_max_ms": "0.047420",
+        "queue_max_ms": "0.006313",
+        "queue_mean_ms": "0.006313",
+        "collect_ms": "0.000553",
+        "execute_ms": "0.002436",
+        "barrier_ms": "0.000000",
+        "dispatch_ms": "0.002486",
+        "maintain_ms": "0.000098",
+        "background_ms": "0.000000",
+        "mutations": "0",
+        "accepted_sequence": "96",
+        "receipt_count": "96"
+      }
+    ],
+    "original_clock_rejection_bytes": null,
+    "diagnosis": "clock initialization used tile-a authority after its renewal outage; fenced ClockSet was refused, not a bind or task-limit failure",
+    "inferred_fault": "LeaseExpired",
+    "inference_not_original_wire_capture": true,
+    "basis": "initial Clock was absent; no replacement or other clock writer existed; the two sequential Python calls returned quickly with zero accepted mutations; same-fence expired authorization is the remaining state rejection",
+    "expired_clock_control": {
+      "kind": "E28-clock-expiry-control",
+      "rows": [
+        {
+          "case": "live",
+          "clock_before_hex": "010700",
+          "clock_set_hex": "0100",
+          "clock_after_hex": "0107017e1577c1a1010000000000000000000000000000000000000000",
+          "expected": true,
+          "fence": [
+            0,
+            1,
+            1
+          ]
+        },
+        {
+          "case": "expired",
+          "clock_before_hex": "010700",
+          "clock_set_hex": "010508",
+          "clock_after_hex": "010700",
+          "expected": true,
+          "fence": [
+            0,
+            1,
+            1
+          ]
+        }
+      ],
+      "crash_seed_replayed": false,
+      "original_rejection_bytes_were_not_retained": true,
+      "interpretation": "positive live control and expired-fence rejection; original240011 response remains inferred, not fabricated"
+    }
+  },
+  "placement": {
+    "raw_errors": [
+      {
+        "at": 899230.1837170694,
+        "pid": 2259898,
+        "role": "servers",
+        "cpus_allowed_list": "5",
+        "cgroup": "/goliath-e28-2256248/servers",
+        "rss_mib": 16.10546875
+      }
+    ],
+    "original_window_status_unchanged": "invalid/unproven",
+    "diagnosis": "the unbracketed record combined pre-migration Python-wrapper allowed CPUs with later server cgroup/executable reads",
+    "source_gate_unchanged": true,
+    "gate": "synchronous checked cgroup.procs write completes before os.execvpe; native Horizon is not executed before migration",
+    "simultaneous_servers_cpuset_0_to3_and_allowed_cpu5_possible": false,
+    "historical_scheduler_trace_available": false,
+    "interpretation": "the CPU5 mask is not evidence of native server execution there; retain the old invalid row, use bracketed snapshots for fresh qualification",
+    "prospective_native_placements": 60
+  },
+  "startup_only_comparison": [
+    {
+      "jobs": 1,
+      "startups": 3,
+      "complete": 3,
+      "maximum_barrier_ms": 38.467022,
+      "last_processors": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "allowed_cpus": [
+        "0-3"
+      ],
+      "stable_native_placements": 12,
+      "clock_set_replies": [
+        "0100",
+        "0100",
+        "0100"
+      ]
+    },
+    {
+      "jobs": 4,
+      "startups": 12,
+      "complete": 12,
+      "maximum_barrier_ms": 43.852559,
+      "last_processors": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "allowed_cpus": [
+        "0-3"
+      ],
+      "stable_native_placements": 48,
+      "clock_set_replies": [
+        "0100",
+        "0100",
+        "0100",
+        "0100",
+        "0100",
+        "0100",
+        "0100",
+        "0100",
+        "0100",
+        "0100",
+        "0100",
+        "0100"
+      ]
+    }
+  ],
+  "diagnostic_window": {
+    "seconds": 84.93189063703176,
+    "d12": {
+      "cpu_mode": "pin",
+      "per_cpu": {
+        "0": {
+          "total_ticks": 8467,
+          "busy_ticks": 5020,
+          "busy_fraction": 0.592890043699067
+        },
+        "1": {
+          "total_ticks": 8465,
+          "busy_ticks": 5058,
+          "busy_fraction": 0.5975191966922623
+        },
+        "2": {
+          "total_ticks": 8470,
+          "busy_ticks": 5063,
+          "busy_fraction": 0.5977567886658796
+        },
+        "3": {
+          "total_ticks": 8469,
+          "busy_ticks": 5004,
+          "busy_fraction": 0.5908607863974495
+        },
+        "4": {
+          "total_ticks": 8459,
+          "busy_ticks": 157,
+          "busy_fraction": 0.01856011348859203
+        },
+        "5": {
+          "total_ticks": 8446,
+          "busy_ticks": 3792,
+          "busy_fraction": 0.4489699265924698
+        }
+      },
+      "throttle_delta": {},
+      "swap_in_pages": 31006,
+      "memory_available_kb_start": 11920180,
+      "memory_available_kb_end": 12116932,
+      "valid": true,
+      "reasons": []
+    },
+    "valid": true,
+    "error": null,
+    "maximum_outside_process_cores": 0.16177668831983738,
+    "outside_total_cores": 0.2599730187846879,
+    "placement_errors": [],
+    "host_first": {
+      "at": 901628.299522063,
+      "load": [
+        0.140625,
+        2.01708984375,
+        4.6455078125
+      ],
+      "cpus": {
+        "0": {
+          "total": 89985903,
+          "idle": 78249418
+        },
+        "1": {
+          "total": 90011954,
+          "idle": 83773745
+        },
+        "2": {
+          "total": 90016776,
+          "idle": 75814084
+        },
+        "3": {
+          "total": 90022825,
+          "idle": 71871901
+        },
+        "4": {
+          "total": 90025258,
+          "idle": 79555454
+        },
+        "5": {
+          "total": 90014470,
+          "idle": 71502064
+        }
+      },
+      "swap_in_pages": 3749246,
+      "memory_available_kb": 11920180,
+      "frequency_khz": {
+        "0": 800000,
+        "1": 800000,
+        "2": 800000,
+        "3": 3902560,
+        "4": 3900263,
+        "5": 3900025
+      },
+      "thermal_throttle": {
+        "cpu0/thermal_throttle/core_throttle_count": 0,
+        "cpu0/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu0/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu0/thermal_throttle/package_throttle_count": 0,
+        "cpu0/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu0/thermal_throttle/package_throttle_total_time_ms": 0,
+        "cpu1/thermal_throttle/core_throttle_count": 0,
+        "cpu1/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu1/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu1/thermal_throttle/package_throttle_count": 0,
+        "cpu1/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu1/thermal_throttle/package_throttle_total_time_ms": 0,
+        "cpu2/thermal_throttle/core_throttle_count": 0,
+        "cpu2/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu2/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu2/thermal_throttle/package_throttle_count": 0,
+        "cpu2/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu2/thermal_throttle/package_throttle_total_time_ms": 0,
+        "cpu3/thermal_throttle/core_throttle_count": 0,
+        "cpu3/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu3/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu3/thermal_throttle/package_throttle_count": 0,
+        "cpu3/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu3/thermal_throttle/package_throttle_total_time_ms": 0,
+        "cpu4/thermal_throttle/core_throttle_count": 0,
+        "cpu4/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu4/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu4/thermal_throttle/package_throttle_count": 0,
+        "cpu4/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu4/thermal_throttle/package_throttle_total_time_ms": 0,
+        "cpu5/thermal_throttle/core_throttle_count": 0,
+        "cpu5/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu5/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu5/thermal_throttle/package_throttle_count": 0,
+        "cpu5/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu5/thermal_throttle/package_throttle_total_time_ms": 0
+      },
+      "thermal_throttle_available": true
+    },
+    "host_last": {
+      "at": 901713.240875972,
+      "load": [
+        8.27783203125,
+        3.9287109375,
+        5.07275390625
+      ],
+      "cpus": {
+        "0": {
+          "total": 89994370,
+          "idle": 78252865
+        },
+        "1": {
+          "total": 90020419,
+          "idle": 83777152
+        },
+        "2": {
+          "total": 90025246,
+          "idle": 75817491
+        },
+        "3": {
+          "total": 90031294,
+          "idle": 71875366
+        },
+        "4": {
+          "total": 90033717,
+          "idle": 79563756
+        },
+        "5": {
+          "total": 90022916,
+          "idle": 71506718
+        }
+      },
+      "swap_in_pages": 3780252,
+      "memory_available_kb": 12116932,
+      "frequency_khz": {
+        "0": 800000,
+        "1": 3895441,
+        "2": 800000,
+        "3": 800000,
+        "4": 800000,
+        "5": 4000003
+      },
+      "thermal_throttle": {
+        "cpu0/thermal_throttle/core_throttle_count": 0,
+        "cpu0/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu0/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu0/thermal_throttle/package_throttle_count": 0,
+        "cpu0/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu0/thermal_throttle/package_throttle_total_time_ms": 0,
+        "cpu1/thermal_throttle/core_throttle_count": 0,
+        "cpu1/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu1/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu1/thermal_throttle/package_throttle_count": 0,
+        "cpu1/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu1/thermal_throttle/package_throttle_total_time_ms": 0,
+        "cpu2/thermal_throttle/core_throttle_count": 0,
+        "cpu2/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu2/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu2/thermal_throttle/package_throttle_count": 0,
+        "cpu2/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu2/thermal_throttle/package_throttle_total_time_ms": 0,
+        "cpu3/thermal_throttle/core_throttle_count": 0,
+        "cpu3/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu3/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu3/thermal_throttle/package_throttle_count": 0,
+        "cpu3/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu3/thermal_throttle/package_throttle_total_time_ms": 0,
+        "cpu4/thermal_throttle/core_throttle_count": 0,
+        "cpu4/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu4/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu4/thermal_throttle/package_throttle_count": 0,
+        "cpu4/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu4/thermal_throttle/package_throttle_total_time_ms": 0,
+        "cpu5/thermal_throttle/core_throttle_count": 0,
+        "cpu5/thermal_throttle/core_throttle_max_time_ms": 0,
+        "cpu5/thermal_throttle/core_throttle_total_time_ms": 0,
+        "cpu5/thermal_throttle/package_throttle_count": 0,
+        "cpu5/thermal_throttle/package_throttle_max_time_ms": 0,
+        "cpu5/thermal_throttle/package_throttle_total_time_ms": 0
+      },
+      "thermal_throttle_available": true
+    },
+    "frequency_khz_range": {
+      "0": [
+        800000,
+        3897317
+      ],
+      "1": [
+        800000,
+        3895441
+      ],
+      "2": [
+        800000,
+        3897341
+      ],
+      "3": [
+        800000,
+        3902560
+      ],
+      "4": [
+        800000,
+        3900263
+      ],
+      "5": [
+        3005368,
+        4000003
+      ]
+    },
+    "scope": "one-second and boundary snapshots, acquisition through recovery and cleanup; no outside names retained",
+    "policy_before": {
+      "slices": {
+        "init.scope": "",
+        "machine.slice": "",
+        "system.slice": "",
+        "user.slice": ""
+      },
+      "governors": {
+        "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor": "powersave",
+        "/sys/devices/system/cpu/cpufreq/policy1/scaling_governor": "powersave",
+        "/sys/devices/system/cpu/cpufreq/policy2/scaling_governor": "powersave",
+        "/sys/devices/system/cpu/cpufreq/policy3/scaling_governor": "powersave",
+        "/sys/devices/system/cpu/cpufreq/policy4/scaling_governor": "powersave",
+        "/sys/devices/system/cpu/cpufreq/policy5/scaling_governor": "powersave"
+      },
+      "turbo": {
+        "/sys/devices/system/cpu/intel_pstate/no_turbo": "0"
+      }
+    },
+    "policy_after": {
+      "slices": {
+        "init.scope": "",
+        "machine.slice": "",
+        "system.slice": "",
+        "user.slice": ""
+      },
+      "governors": {
+        "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor": "powersave",
+        "/sys/devices/system/cpu/cpufreq/policy1/scaling_governor": "powersave",
+        "/sys/devices/system/cpu/cpufreq/policy2/scaling_governor": "powersave",
+        "/sys/devices/system/cpu/cpufreq/policy3/scaling_governor": "powersave",
+        "/sys/devices/system/cpu/cpufreq/policy4/scaling_governor": "powersave",
+        "/sys/devices/system/cpu/cpufreq/policy5/scaling_governor": "powersave"
+      },
+      "turbo": {
+        "/sys/devices/system/cpu/intel_pstate/no_turbo": "0"
+      }
+    },
+    "restored": true
+  },
+  "comparison_limit": "All15startup-only cases passed; concurrency alone was not sufficient to reproduce the original full-fault-workload I/O tails. Do not claim a causal A/B result.",
+  "new_campaign_jobs": 1,
+  "jobs_reason": "one cluster has4tiles and one durable store; jobs4 runs16tiles and4durable stores on the same4cores and disk. Drop to1to remove avoidable simultaneous fsync/startup pressure. Keep native timeouts, fences, sync and fault protocol unchanged.",
+  "no_failed_crash_seed_replayed_by_diagnostics": true,
+  "source_sha256": {
+    "crates/goliath-store/src/client.rs": "4bad7fe150a14df4461078351338cda185d6e59d61671047214e112bff6e1029",
+    "crates/goliath-store/src/codec.rs": "673f323d64674f09d633e41ebc00600d39300b2d18fd563bc5a349e5ccf9b807",
+    "crates/goliath-store/src/state.rs": "d4a890d3d9330157148a76c0b3dcc67e93bec893c36394a539208e01145e2018",
+    "scripts/goliath-cluster": "167c860d2f5d12f89674cd52e2537696a351b770a1e102c03030b8b622b403e9",
+    "scripts/goliath_platform.py": "c73afde017e681245209739f941ff97b235baca1c0487f71708266f90c2ff41a",
+    "scripts/e28_window.py": "cb08d36e17cbd05da99a8016405fc6c6ecdcc46d2344d401c9f860c985da0af7",
+    "scripts/e28_m3_startup.py": "10b77666357723f966dab67f0a2f43b7fc89a435659a24876e9c68d93a5e1ad9",
+    "scripts/e28-m3-startup-diagnostic": "3646f4af199516911a32b1309d31b2938fd8b6cf886be34aa69e78598bba8894"
+  }
+}

@@ -125,7 +125,10 @@ def usage(pid, proc=PROC):
                 counters = parse_status((task / 'status').read_text())
                 switches[0] += int(counters['voluntary_ctxt_switches'])
                 switches[1] += int(counters['nonvoluntary_ctxt_switches'])
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
+                # Linux may return ESRCH, not ENOENT, after a listed worker exits.
+                # A vanished main thread still means the process counter failed.
+                if tid == pid:raise ProcessLookupError(pid)
                 continue
         # Remember observed retired threads; process stat also includes threads
         # that ran and exited entirely between samples. Never lower a total.

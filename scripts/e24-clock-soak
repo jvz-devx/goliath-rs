@@ -58,6 +58,16 @@ def main():
     path=ROOT/'.local/evidence/E24'/args.name/'clock-endpoints.json'
     if not path.exists():path=path.with_suffix('.json.gz')
     data=read(path)
+    if data.get('first') and any(row.get('schema')=='E28-boottime-authority-v1' for row in data['first']['tiles'].values()):
+        if args.partial:raise RuntimeError('Linux partial authority evidence is not a complete soak')
+        from e28_soak_clock import readback
+        result=readback(path.parent,data)
+        result.update(name=args.name,input=dict(path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+        output=args.output or ROOT/'docs/experiments/data/E24'/(args.name+'-loaded-clocks.json')
+        if output.exists():raise RuntimeError('loaded readback already exists')
+        output.write_text(json.dumps(result,indent=2)+'\n')
+        print(json.dumps(result,indent=2))
+        return
     metrics_inputs={}
     if args.partial:
         first=data['first']

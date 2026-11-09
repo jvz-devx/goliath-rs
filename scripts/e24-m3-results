@@ -21,9 +21,11 @@ def load(name,path):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--campaign-data',required=True);parser.add_argument('--campaign',required=True)
+    parser.add_argument('--evidence-dir',type=Path,default=EVIDENCE)
+    parser.add_argument('--data-dir',type=Path,default=ROOT/'docs/experiments/data/E24')
     parser.add_argument('--matrix-data',required=True);parser.add_argument('--matrix',required=True)
     parser.add_argument('--name',required=True);parser.add_argument('--pack',action='store_true');args=parser.parse_args()
-    folder=EVIDENCE/args.campaign_data;matrix_folder=EVIDENCE/args.matrix_data
+    folder=args.evidence_dir/args.campaign_data;matrix_folder=args.evidence_dir/args.matrix_data
     checker=load('e24_final_campaign_check',ROOT/'scripts/m3-check');checker.DATA=folder
     campaign=checker.campaign(args.campaign)
     if campaign['crossings']!=1000 or any(n not in [66,67]for row in campaign['coverage'].values()for n in row.values()):
@@ -32,6 +34,8 @@ def main():
     matrix=json.loads((matrix_folder/(args.matrix+'-matrix.json')).read_text())
     matrix_check=matrix_kernel.check_matrix(matrix_folder,matrix,campaign['binaries'])
     windows=[]
+    linux_bundle=bool((ROOT/'.local/bin/goliath-e28/final/horizon-client').exists()
+        and campaign['binaries'].get('horizon-client')==hashlib.sha256((ROOT/'.local/bin/goliath-e28/final/horizon-client').read_bytes()).hexdigest())
     for base in [folder,matrix_folder]:
         for path in sorted(base.glob('*-window/window.json')):
             record=json.loads(path.read_text())
@@ -39,8 +43,14 @@ def main():
                 raise ValueError('window failure/noise/binary-change: '+str(path))
             if record['seconds']>=1800:raise ValueError('M3 window reached thirty minutes')
             if record['binaries']!=campaign['binaries']:raise ValueError('window mixed binaries')
+            if linux_bundle and (record.get('d12') is None or record.get('cpu_mode')!='pin'):
+                raise ValueError('E28 M3 requires pinned whole-window D12 evidence')
+            if record.get('d12') is not None and (not record['d12']['valid'] or not record.get('restored')):
+                raise ValueError('D12 whole-window validity or restoration failed')
             windows.append(dict(path=str(path.relative_to(ROOT)),seconds=record['seconds'],
-                outside_maximum_cores=record['outside_maximum_cores'],sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+                outside_maximum_cores=record['outside_maximum_cores'],d12=record.get('d12'),restored=record.get('restored'),
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+    if not windows:raise ValueError('M3 window evidence missing')
     outcome=json.loads((folder/(args.campaign+'-campaign.json')).read_text())
     paths=sorted({folder/f'{row.get("evidence_name",args.campaign)}-{row["seed"]}.json'for row in outcome['trials']})
     archive=folder/'campaign-trials.jsonl.gz'
@@ -70,7 +80,8 @@ def main():
     result=dict(kind='E24-fixed-M3-independent-summary',verdict='passed',campaign=campaign,matrix=matrix_check,
         duplicates=0,missing=0,stale_files=0,windows=windows,trial_archive=archive_info,
         scope='1000originalE13crash kernels plus12partition and6stale-login cases, unchanged named-item accounting')
-    output=ROOT/'docs/experiments/data/E24'/(args.name+'.json')
+    args.data_dir.mkdir(parents=True,exist_ok=True)
+    output=args.data_dir/(args.name+'.json')
     if output.exists():raise RuntimeError('M3 summary already exists')
     output.write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result,indent=2))
 

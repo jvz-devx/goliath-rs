@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Check strict framing, single-writer proxy capture and graceful tile log drainage."""
+import gzip
+import io
+import json
+from pathlib import Path
+import queue
+import runpy
+import subprocess
+import tempfile
+import threading
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+import e11_support as support
+import e28_log_integrity as logs
+
+
+class Contracts(unittest.TestCase):
+    def test_non_newline_tail_is_unproven_even_if_its_json_is_valid(self):
+        rows,record=logs.framed(b'{"counter":1}\n{"counter":2}')
+        self.assertEqual(rows,[dict(counter=1)])
+        self.assertFalse(record['complete']);self.assertEqual(record['tail_bytes'],13)
+        self.assertTrue(record['tail_sha256'])
+
+    def test_bad_complete_line_is_not_dropped_to_claim_completeness(self):
+        rows,record=logs.framed(b'{"counter":1}\n{broken}\n{"counter":3}\n')
+        self.assertEqual(rows,[dict(counter=1),dict(counter=3)])
+        self.assertFalse(record['complete']);self.assertEqual(record['invalid_complete_lines'][0]['line'],2)
+
+    def test_live_phase_tail_must_complete_and_is_recorded(self):
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            folder=Path(temporary);path=folder/'proxy.log'
+            with patch.object(Path,'read_bytes',side_effect=[b'E10_PHASE {"phase":',b'E10_PHASE {"phase":"cut"}\n']),\
+                 patch.object(logs.time,'sleep'):
+                self.assertEqual(logs.phase_events(path,folder),[dict(phase='cut')])
+            record=json.loads((folder/'phase-integrity-0000.json').read_text())
+            self.assertTrue(record['complete']);self.assertGreater(record['snapshots'][0]['tail_bytes'],0)
+
+    def test_phase_errors_keep_exact_native_bytes_and_fail_strictly(self):
+        for raw in [b'E10_PHASE {"phase":',b'E10_PHASE {broken}\n']:
+            with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+                folder=Path(temporary);path=folder/'proxy.log';path.write_bytes(raw)
+                with patch.object(logs.time,'monotonic',side_effect=[0,2]):
+                    with self.assertRaisesRegex(RuntimeError,'framing unproven'):logs.phase_events(path,folder)
+                self.assertEqual(gzip.decompress((folder/'phase-integrity-0000-native.log.gz').read_bytes()),raw)
+                self.assertFalse(json.loads((folder/'phase-integrity-0000.json').read_text())['complete'])
+
+    def test_proxy_stdout_cannot_write_into_native_phase_log(self):
+        class Child:
+            def __init__(self,command,cwd,log):
+                self.log=log.open('w');self.log.write('E10_PHASE {"phase":"activation"}\n');self.log.flush()
+                self.process=SimpleNamespace(stdout=io.StringIO('E18_PATH {"count":3}\n{"kind":"ready"}\n'))
+                self.events=[];self.incoming=queue.Queue()
+                self.reader=threading.Thread(target=self.read);self.reader.start()
+            def read(self):raise AssertionError('proxy must not use the mixed-file reader')
+            def stop(self):self.reader.join(5);self.log.close()
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            folder=Path(temporary);child=logs.proxy_child_class(Child)(['/fixture/meridian'],folder,folder/'proxy.log')
+            child.stop()
+            self.assertEqual((folder/'proxy.log').read_text(),'E10_PHASE {"phase":"activation"}\n')
+            self.assertEqual((folder/'proxy-stdout.log').read_text(),'E18_PATH {"count":3}\n{"kind":"ready"}\n')
+            self.assertEqual(child.incoming.get_nowait(),dict(kind='ready'))
+
+    def test_proxy_path_histogram_reads_its_own_stdout_file(self):
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            folder=Path(temporary);path=folder/'proxy-stdout.log';path.write_text('')
+            def send(command):
+                self.assertEqual(command,'e18-path reset')
+                with path.open('a') as output:output.write('E18_PATH {"count":7}\n')
+            self.assertEqual(logs.path_command(SimpleNamespace(root=folder,proxy=SimpleNamespace(send=send)),True),dict(count=7))
+
+    def check_shutdown(self,timeout):
+        order=[]
+        class Process:
+            pid=10
+            code=None
+            def poll(self):return self.code
+            def wait(self,timeout=None):
+                order.append(('wait',timeout))
+                if timeout and fail:raise subprocess.TimeoutExpired('fixture',timeout)
+                release.set();thread.join(2);self.code=0
+            def kill(self):order.append(('kill',None))
+        class Log(io.StringIO):
+            def close(self):order.append(('close',None));super().close()
+        class Server:
+            def __init__(self):
+                nonlocal thread
+                self.log=Log();self.process=Process()
+                thread=threading.Thread(target=self._read);thread.start()
+            def _read(self):release.wait(2);order.append(('drained',None))
+            def console(self,text):order.append(('console',text))
+        fail=timeout;release=threading.Event();thread=None
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            folder=Path(temporary);server=logs.tile_server_class(Server,folder)();server.stop()
+            record=json.loads(next(folder.glob('tile-stop-*.json')).read_text())
+            self.assertEqual(record['forced_kill'],timeout);self.assertTrue(record['log_drained'])
+            self.assertFalse(record['lease_writer_joined'])
+            self.assertEqual(order[0],('console','stop'))
+            self.assertLess(order.index(('drained',None)),order.index(('close',None)))
+            if timeout:self.assertEqual(order[:3],[('console','stop'),('wait',180),('kill',None)])
+
+    def test_graceful_console_stop_drains_reader_before_close(self):self.check_shutdown(False)
+    def test_timeout_kill_is_explicit_and_still_waits_for_reader(self):self.check_shutdown(True)
+
+    def test_actual_linux_cluster_adapter_has_the_expected_server_and_child_seams(self):
+        module=runpy.run_path(str(support.ROOT/'scripts/e17-m4'))['cluster_module'](
+            support.ROOT/'.local/bin/goliath-e28/final')
+        self.assertIsInstance(module._server,type)
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            logs.install_cluster(module,Path(temporary))
+            self.assertEqual(module._server.__name__,'DrainedServer')
+            self.assertEqual(module.e2.Child.__name__,'SplitProxyChild')
+
+
+if __name__=='__main__':unittest.main()

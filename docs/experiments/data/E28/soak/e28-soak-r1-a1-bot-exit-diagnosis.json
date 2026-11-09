@@ -1,0 +1,518 @@
+{
+  "kind": "E28-soak-a1-bot-exit-diagnosis",
+  "name": "e28-soak-r1-a1",
+  "verdict": "genuine cluster failure, not bot duration or direct-bot argument loss",
+  "bot_seconds": 3300,
+  "bot_lifetime_minutes": 55,
+  "requested_host_window_minutes": 35,
+  "direct_helper": "arguments appends only handshake-host; environment removes latency tracing variables, not lifetime arguments",
+  "cached_group_a_zero_error_sample": "D9 healthy reads group logs sequentially. The error message contains an earlier A sample; final A record and child exit show96failures and exit1.",
+  "bots": [
+    {
+      "group": "a",
+      "command": [
+        "$REPO/.local/bin/goliath-e28/final-stamps/horizon-bots",
+        "--event-loop",
+        "--server",
+        "127.0.0.1:37345",
+        "--bots",
+        "96",
+        "--behaviour",
+        "route",
+        "--seconds",
+        "3300",
+        "--join-every",
+        ".25",
+        "--view-distance",
+        "3",
+        "--seed",
+        "12345",
+        "--speed",
+        "4",
+        "--height",
+        "2",
+        "--name",
+        "E17BotA",
+        "--spread",
+        "960,960,1088,1088",
+        "--handshake-host",
+        "d9-a.test"
+      ],
+      "seconds": "3300",
+      "seconds_occurrences": 1,
+      "handshake_host": "d9-a.test",
+      "failure_boundary_exit": 1,
+      "final": {
+        "elapsed": 544.63841663,
+        "online": 0,
+        "failed": 96,
+        "errors": [
+          "0: play disconnect",
+          "1: play disconnect",
+          "2: play disconnect",
+          "3: play disconnect",
+          "4: play disconnect",
+          "5: play disconnect",
+          "6: play disconnect",
+          "7: play disconnect",
+          "8: play disconnect",
+          "9: play disconnect"
+        ],
+        "rounds": 10893
+      },
+      "stderr": [
+        "horizon-bots: not all bots remained online"
+      ],
+      "native_bytes": 217794,
+      "native_sha256": "86e47838e1380f47bcca633b712113de5fc46077df763721a72e7591a757246a"
+    },
+    {
+      "group": "b",
+      "command": [
+        "$REPO/.local/bin/goliath-e28/final-stamps/horizon-bots",
+        "--event-loop",
+        "--server",
+        "127.0.0.1:37345",
+        "--bots",
+        "96",
+        "--behaviour",
+        "route",
+        "--seconds",
+        "3300",
+        "--join-every",
+        ".25",
+        "--view-distance",
+        "3",
+        "--seed",
+        "12345",
+        "--speed",
+        "4",
+        "--height",
+        "2",
+        "--name",
+        "E17BotB",
+        "--spread",
+        "-1088,960,-960,1088",
+        "--handshake-host",
+        "d9-b.test"
+      ],
+      "seconds": "3300",
+      "seconds_occurrences": 1,
+      "handshake_host": "d9-b.test",
+      "failure_boundary_exit": 1,
+      "final": {
+        "elapsed": 544.366179801,
+        "online": 0,
+        "failed": 96,
+        "errors": [
+          "0: play disconnect",
+          "1: play disconnect",
+          "2: socket closed",
+          "3: play disconnect",
+          "4: socket closed",
+          "5: play disconnect",
+          "6: socket closed",
+          "7: socket closed",
+          "8: socket closed",
+          "9: play disconnect"
+        ],
+        "rounds": 10888
+      },
+      "stderr": [
+        "horizon-bots: not all bots remained online"
+      ],
+      "native_bytes": 218287,
+      "native_sha256": "0e0f2a2621672f4417f7839ade9f2fa02d663431233377adea1ee3b280f9ce9a"
+    },
+    {
+      "group": "c",
+      "command": [
+        "$REPO/.local/bin/goliath-e28/final-stamps/horizon-bots",
+        "--event-loop",
+        "--server",
+        "127.0.0.1:37345",
+        "--bots",
+        "96",
+        "--behaviour",
+        "route",
+        "--seconds",
+        "3300",
+        "--join-every",
+        ".25",
+        "--view-distance",
+        "3",
+        "--seed",
+        "12345",
+        "--speed",
+        "4",
+        "--height",
+        "2",
+        "--name",
+        "E17BotC",
+        "--spread",
+        "-1088,-1088,-960,-960",
+        "--handshake-host",
+        "d9-c.test"
+      ],
+      "seconds": "3300",
+      "seconds_occurrences": 1,
+      "handshake_host": "d9-c.test",
+      "failure_boundary_exit": null,
+      "final": {
+        "elapsed": 573.000702109,
+        "online": 96,
+        "failed": 0,
+        "errors": [],
+        "rounds": 11461
+      },
+      "stderr": [],
+      "native_bytes": 195110,
+      "native_sha256": "8edd6373661ada7253f72c853773cfa1e74b60f36674baf951d78f63403cf774"
+    },
+    {
+      "group": "d",
+      "command": [
+        "$REPO/.local/bin/goliath-e28/final-stamps/horizon-bots",
+        "--event-loop",
+        "--server",
+        "127.0.0.1:37345",
+        "--bots",
+        "95",
+        "--behaviour",
+        "route",
+        "--seconds",
+        "3300",
+        "--join-every",
+        ".25",
+        "--view-distance",
+        "3",
+        "--seed",
+        "12345",
+        "--speed",
+        "4",
+        "--height",
+        "2",
+        "--name",
+        "E17BotD",
+        "--spread",
+        "960,-1088,1088,-960",
+        "--handshake-host",
+        "d9-d.test"
+      ],
+      "seconds": "3300",
+      "seconds_occurrences": 1,
+      "handshake_host": "d9-d.test",
+      "failure_boundary_exit": null,
+      "final": {
+        "elapsed": 573.000915598,
+        "online": 95,
+        "failed": 0,
+        "errors": [],
+        "rounds": 11461
+      },
+      "stderr": [],
+      "native_bytes": 194923,
+      "native_sha256": "74a1032659795c5eec9726cba40e3fae29c889b27fe4147126057a7bd2aa8371"
+    },
+    {
+      "group": "cross",
+      "command": [
+        "$REPO/.local/bin/goliath-e28/final-stamps/horizon-bots",
+        "--event-loop",
+        "--server",
+        "127.0.0.1:37345",
+        "--bots",
+        "42",
+        "--behaviour",
+        "route",
+        "--seconds",
+        "3300",
+        "--join-every",
+        ".25",
+        "--view-distance",
+        "3",
+        "--seed",
+        "12345",
+        "--speed",
+        "4",
+        "--height",
+        "2",
+        "--name",
+        "E17BotX",
+        "--path",
+        "-12,12;12,12;12,-12;-12,-12;12,12;-12,12;-12,-12;12,-12",
+        "--handshake-host",
+        "d9-cross.test"
+      ],
+      "seconds": "3300",
+      "seconds_occurrences": 1,
+      "handshake_host": "d9-cross.test",
+      "failure_boundary_exit": 1,
+      "final": {
+        "elapsed": 544.61394441,
+        "online": 0,
+        "failed": 42,
+        "errors": [
+          "0: socket closed",
+          "1: socket closed",
+          "2: socket closed",
+          "3: socket closed",
+          "4: socket closed",
+          "5: socket closed",
+          "6: socket closed",
+          "7: socket closed",
+          "8: socket closed",
+          "9: socket closed"
+        ],
+        "rounds": 10893
+      },
+      "stderr": [
+        "horizon-bots: not all bots remained online"
+      ],
+      "native_bytes": 191173,
+      "native_sha256": "439a2351ecbd5c28559a57f7c0846f0be9e8563fd13806a7a045720d62f4fd46"
+    }
+  ],
+  "servers": {
+    "a": {
+      "log": "server-a-900449865220572.log",
+      "native_bytes": 146265810,
+      "native_sha256": "aec31a9cb2e45c17b6b942ed399c0f495d976009e6d4d62ccbf1e3ec3e2518ba",
+      "failure_boundary_exit": 1,
+      "evidence": [
+        "cluster authority failed: new player registration failed: Fault(AlreadyExists)",
+        "[18:44:10] [Server thread/ERROR]: The server thread panicked: cluster authority failed: new player registration failed: Fault(AlreadyExists)",
+        "Horizon: the server thread panicked: cluster authority failed: new player registration failed: Fault(AlreadyExists)"
+      ]
+    },
+    "b": {
+      "log": "server-b-900451511800950.log",
+      "native_bytes": 147288583,
+      "native_sha256": "8e8fa43b7c0823046b0aa9361ce10b6d5ab63af1277cd387c58b897c3afdb9a6",
+      "failure_boundary_exit": null,
+      "evidence": [
+        "Horizon: cluster lease expired or local clock stopped; queued effects refused"
+      ]
+    }
+  },
+  "tile_b_terminal_renewal_chain": [
+    {
+      "at_ns": 548590564449,
+      "data": {
+        "accepted_counter": 2190,
+        "call_deadline_ns": 549190443777,
+        "counter": 2191,
+        "deadline_ns": 549240443777,
+        "rpc_slack_ns": 50000000,
+        "sent_ns": 548590563143
+      },
+      "event": "renew-ticket",
+      "wall_ns": 1794246249610221161
+    },
+    {
+      "at_ns": 548590633683,
+      "data": {
+        "call_deadline_ns": 549190443777,
+        "counter": 2191,
+        "request_id": "42120725363087806183621603",
+        "sent_ns": 548590563143
+      },
+      "event": "renew-send",
+      "wall_ns": 1794246249610290394
+    },
+    {
+      "at_ns": 548601820428,
+      "data": {
+        "counter": 2191,
+        "reply_ns": 548601812466,
+        "request_id": "42120725363087806183621603",
+        "result": "Ok(Leased(LeaseGrant { fence: Fence { tile: TileId(1), process: ProcessId(2), epoch: Epoch(1) }, lease_ms: 1000, counter: 2191 }))",
+        "sent_ns": 548590563143
+      },
+      "event": "renew-reply",
+      "wall_ns": 1794246249621477143
+    },
+    {
+      "at_ns": 548601891781,
+      "data": {
+        "counter": 2191,
+        "deadline_ns": 549490563143,
+        "grant_counter": 2191,
+        "observe_ns": 548601890307,
+        "previous_deadline_ns": 549240443777,
+        "reply_ns": 548601812466,
+        "sent_ns": 548590563143
+      },
+      "event": "renew-installed",
+      "wall_ns": 1794246249621548496
+    },
+    {
+      "at_ns": 548840671917,
+      "data": {
+        "accepted_counter": 2191,
+        "call_deadline_ns": 549440563143,
+        "counter": 2192,
+        "deadline_ns": 549490563143,
+        "rpc_slack_ns": 50000000,
+        "sent_ns": 548840670156
+      },
+      "event": "renew-ticket",
+      "wall_ns": 1794246249860328631
+    },
+    {
+      "at_ns": 548840741032,
+      "data": {
+        "call_deadline_ns": 549440563143,
+        "counter": 2192,
+        "request_id": "42120725363087806183621604",
+        "sent_ns": 548840670156
+      },
+      "event": "renew-send",
+      "wall_ns": 1794246249860397749
+    },
+    {
+      "at_ns": 549042637205,
+      "data": {
+        "counter": 2192,
+        "reply_ns": 549042629550,
+        "request_id": "42120725363087806183621604",
+        "result": "Err(Os { code: 11, kind: WouldBlock, message: \"Resource temporarily unavailable\" })",
+        "sent_ns": 548840670156
+      },
+      "event": "renew-reply",
+      "wall_ns": 1794246250062293920
+    },
+    {
+      "at_ns": 549092428760,
+      "data": {
+        "accepted_counter": 2191,
+        "call_deadline_ns": 549440563143,
+        "counter": 2193,
+        "deadline_ns": 549490563143,
+        "rpc_slack_ns": 50000000,
+        "sent_ns": 549092426172
+      },
+      "event": "renew-ticket",
+      "wall_ns": 1794246250112085475
+    },
+    {
+      "at_ns": 549092718258,
+      "data": {
+        "call_deadline_ns": 549440563143,
+        "counter": 2193,
+        "request_id": "42120725363087806183621605",
+        "sent_ns": 549092426172
+      },
+      "event": "renew-send",
+      "wall_ns": 1794246250112374974
+    },
+    {
+      "at_ns": 549297925347,
+      "data": {
+        "counter": 2193,
+        "reply_ns": 549297915972,
+        "request_id": "42120725363087806183621605",
+        "result": "Err(Os { code: 11, kind: WouldBlock, message: \"Resource temporarily unavailable\" })",
+        "sent_ns": 549092426172
+      },
+      "event": "renew-reply",
+      "wall_ns": 1794246250317582069
+    },
+    {
+      "at_ns": 549343174069,
+      "data": {
+        "accepted_counter": 2191,
+        "call_deadline_ns": 549440563143,
+        "counter": 2194,
+        "deadline_ns": 549490563143,
+        "rpc_slack_ns": 50000000,
+        "sent_ns": 549343172257
+      },
+      "event": "renew-ticket",
+      "wall_ns": 1794246250362830781
+    },
+    {
+      "at_ns": 549343247507,
+      "data": {
+        "call_deadline_ns": 549440563143,
+        "counter": 2194,
+        "request_id": "42120725363087806183621606",
+        "sent_ns": 549343172257
+      },
+      "event": "renew-send",
+      "wall_ns": 1794246250362904217
+    },
+    {
+      "at_ns": 549450347625,
+      "data": {
+        "counter": 2194,
+        "reply_ns": 549450339981,
+        "request_id": "42120725363087806183621606",
+        "result": "Err(Custom { kind: TimedOut, error: \"result unknown: overall client deadline elapsed\" })",
+        "sent_ns": 549343172257
+      },
+      "event": "renew-reply",
+      "wall_ns": 1794246250470004357
+    },
+    {
+      "at_ns": 549490840681,
+      "data": {
+        "accepted_counter": 2191,
+        "cause": "renew-keeper-deadline",
+        "deadline_ns": 549490563143,
+        "now_ns": 549490839433
+      },
+      "event": "authority-stop",
+      "wall_ns": 1794246250510497393
+    }
+  ],
+  "tile_a_cause": "native server panic during new player registration: Fault(AlreadyExists)",
+  "tile_b_cause": "confirmed lease deadline exhausted after twoWouldBlock reads and an overall-deadline timeout",
+  "duration_fix_needed": false,
+  "harness_duration_fault_found": false,
+  "native_registration_bug_root_cause_not_changed": true,
+  "retry_a2_registered": false,
+  "retry_a2_started": false,
+  "stop_reason": "latest instruction requires stopping and reporting if the cluster really dropped a group",
+  "m3": {
+    "status": "paused-window",
+    "completed": 72,
+    "failed": 0,
+    "window_seconds": 1209.7900441270322,
+    "d12_valid": true,
+    "restored": true,
+    "next_window_started": false,
+    "campaign": {
+      "path": ".local/evidence/E28/m3/e28-m3-j1-r2/e28-m3-j1-r2-w1-campaign.json",
+      "sha256": "a8266496bbf70ec4c9b0735fa1dccf47c0e28c7e8cbd77858df883b09a0fa32e",
+      "bytes": 8200
+    },
+    "window": {
+      "path": ".local/evidence/E28/m3/e28-m3-j1-r2/e28-m3-j1-r2-w1-window/window.json",
+      "sha256": "038e426c9ae0bebb5049ad810fe4c2d8776d80ea0a4df21e75e1559748a7b1df",
+      "bytes": 3690
+    }
+  },
+  "inputs": [
+    {
+      "path": ".local/evidence/E28/soak/e28-soak-r1-a1/e28-soak-r1-a1.json.gz",
+      "sha256": "d93596899725b156bdf39f84cd228574bea6860273e5d86744549f6c2b457a01",
+      "bytes": 7642863
+    },
+    {
+      "path": ".local/evidence/E28/soak/e28-soak-r1-a1/e28-soak-r1-a1-425-failure-native.json.gz",
+      "sha256": "73d7d3a9731a8e70014205f46dbf489ce032ea41016c585617566353fde95d43",
+      "bytes": 11228807
+    },
+    {
+      "path": ".local/evidence/E28/soak/e28-soak-r1-a1/native-logs.json.gz",
+      "sha256": "9bec30b3cfd7a0930fb827c09f2cef97045c3dd5276b54e7d6864a95d4cfca37",
+      "bytes": 1442658
+    }
+  ],
+  "source_sha256": {
+    "e28_direct_bots.py": "c31d67a8ec9962600ca9c3f8d79a59c131cf89303a047de64009290b893192ca",
+    "e24-run": "61fac16eb8642ba3074cc8c00e507e403dc2b21fb74d1ed38fba75a574642a54",
+    "e20-frontier": "af75a597c8e470dcc7dae925e8b44cb129ab52a4082d8aab80c45c8c812f02be"
+  }
+}

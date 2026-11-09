@@ -18,6 +18,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     platform.cpu_options(parser)
     parser.add_argument('--players', type=int, default=650)
+    parser.add_argument('--data-dir',type=Path,default=harness.DATA)
+    parser.add_argument('--direct-bots',action='store_true')
     parser.add_argument('--name',required=True)
     parser.add_argument('--bins',type=Path,required=True)
     parser.add_argument('--frozen-reference',action='store_true',help='approved exact 29f repeat, not a rebuilt control')
@@ -25,8 +27,9 @@ def main():
     parser.add_argument('--owner',choices=sorted({'E25','reviewer',platform.window_owner('E25')}),default=platform.window_owner('E25'))
     parser.add_argument('--collect-only',action='store_true',help='release the window and leave readback for a separate command')
     args = parser.parse_args()
+    harness.configure(args.data_dir)
     print('E25_SOAK_CONTROL_PROCESS '+str(os.getpid()),flush=True)
-    if not re.fullmatch(r'(?:e25-|repro-)[A-Za-z0-9_-]+',args.name):
+    if not re.fullmatch(r'(?:e25-|e28-|repro-)[A-Za-z0-9_-]+',args.name):
         raise ValueError('fresh simple control name required')
     target = harness.DATA / (args.name+'-plan.json')
     result_path = harness.DATA / (args.name+'-run.json')
@@ -39,6 +42,12 @@ def main():
         if args.frozen_reference:
             raise ValueError('the Mac frozen reference is not a Linux bundle')
         reference_kind = 'E28-rebuilt-reactor-control'
+        if not args.direct_bots or args.cpu_mode!='pin' or args.players!=425:
+            raise ValueError('E28 soak requires425players, pin and direct untraced bots')
+        import e28_direct_bots
+        _,bot_identity,proof=e28_direct_bots.selection()
+        from e28_window import ready
+        ready()
     elif args.frozen_reference:
         frozen = harness.ROOT/'.local/bin/meridian-e18/reactor-1'
         expected = '29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b'
@@ -63,22 +72,42 @@ def main():
         authority_event_voids_comparison=True,silent_retry=False,candidate_not_started_by_this_command=True,
         source_helpers={name:harness.digest(harness.ROOT/'scripts'/name) for name in
             ['e24-run','e23-cell','e20-frontier','e23_observe.py','e22_availability.py','e24_mutation_watch.py']})
+    if goliath_bundle.is_e28(bins):
+        plan.update(kind='E28-full-soak-plan',cargo_items=args.players//10,cpu_mode=args.cpu_mode,
+            direct_bots=True,bots_bundle=bot_identity,direct_bots_proof_sha256=proof,
+            bot_latency_trace_enabled=False,whole_window_d12_required=True)
+        plan['bundle']['bot_sha256']=bot_identity['binaries']['horizon-bots']
+        plan['source_helpers'].update({name:harness.digest(harness.ROOT/'scripts'/name) for name in
+            ['e28_window.py','e28_soak_clock.py','e28_log_integrity.py','e25_soak_harness.py','e25-soak-cell','e25-soak-control','e25-soak-readback']})
     target.write_text(json.dumps(plan,indent=2)+'\n')
     host = harness.ROOT/'.local/bin/host-window'
     subprocess.run([host,'quiet',args.owner,args.name+' full30m soak control'],check=True)
     error = None
+    whole = None
     try:
-        subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-soak-cell','--name',args.name,'--bins',bins,'--owner',args.owner,'--players',str(args.players)],cwd=harness.ROOT,check=True)
+        if goliath_bundle.is_e28(bins):
+            from e28_window import WholeWindow
+            whole=WholeWindow(observer=True).start()
+        subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-soak-cell','--name',args.name,'--bins',bins,
+            '--owner',args.owner,'--players',str(args.players),'--data-dir',harness.DATA,'--cpu-mode',args.cpu_mode,
+            *(['--direct-bots'] if args.direct_bots else [])],cwd=harness.ROOT,check=True)
     except BaseException as caught:
-        error = str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME')
+        error = str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME').replace(sys.executable,'python3')
     finally:
-        subprocess.run([host,'release',args.owner],check=True)
+        try:
+            if whole:
+                report=whole.finish()
+                harness.storage.save(harness.EVIDENCE/(args.name+'-whole-window.json'),report)
+                if not report['valid']:error=error or 'whole-window D12 validity or restoration failed'
+        finally:
+            subprocess.run([host,'release',args.owner],check=True)
     result = dict(kind='E25-full-soak-reactor-control',status='failed' if error else 'collected',error=error,plan=harness.digest(target))
     if not error and not args.collect_only:
         log = harness.EVIDENCE/(args.name+'-readback.log')
         with log.open('x') as stream:
             completed = subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-analysis-exec',sys.executable,'-B',
-                harness.ROOT/'scripts/e25-soak-readback','--name',args.name,'--owner',args.owner],cwd=harness.ROOT,stdout=stream,stderr=subprocess.STDOUT)
+                harness.ROOT/'scripts/e25-soak-readback','--name',args.name,'--owner',args.owner,
+                '--data-dir',harness.DATA],cwd=harness.ROOT,stdout=stream,stderr=subprocess.STDOUT)
         result['readback_exit'] = completed.returncode
         result['readback_log'] = harness.digest(log)
         if completed.returncode:

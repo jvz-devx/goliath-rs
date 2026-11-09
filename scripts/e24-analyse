@@ -17,7 +17,8 @@ def raw(path):
 
 
 def rows(path):
-    return [json.loads(line) for line in raw(path).splitlines() if line.strip()]
+    from e28_log_integrity import read_trace
+    return read_trace(path)[0]
 
 
 def clock_failure(data):
@@ -113,6 +114,9 @@ def main():
             minimum_installed_old_deadline_slack_ms=min(((row['data']['previous_deadline_ns']-row['data']['observe_ns'])/1e6 for row in installed),default=None),
             recent_event_chain=context,nearby_limiter_signal_call_brackets=near_signals)
     result['clients'] = {path.name:client_summary(path) for path in sorted((folder/'tiles').glob('*-client.csv*'))}
+    from e28_log_integrity import trace_integrity
+    result['authority_trace_integrity']=trace_integrity(folder)
+    result['authority_trace_complete']=bool(result['authority_trace_integrity']) and all(row['complete'] for row in result['authority_trace_integrity'].values())
     store_path = next(folder.glob('store-batches.csv*'),None)
     if store_path:
         batches = [{key:float(value) for key,value in row.items()} for row in csv.DictReader(io.StringIO(raw(store_path).decode()))]

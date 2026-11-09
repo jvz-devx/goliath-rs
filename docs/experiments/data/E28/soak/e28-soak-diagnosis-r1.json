@@ -1,0 +1,350 @@
+{
+ "kind": "E28-soak-failure-diagnosis",
+ "name": "e28-soak-diagnosis-r1",
+ "run": "e28-soak-r1-a1",
+ "qualification": false,
+ "clocks": {
+  "keeper_to_store_offset_s": 2.65591,
+  "store_origin": "store-batches.origin.json wall_before_ns",
+  "note": "store-relative = keeper trace + 2.65591 s, from renewal 2191 send/accept; wall times are UTC from the proxy log"
+ },
+ "tile_b": {
+  "cause": "durable-barrier stall in the store, made fatal by the keeper abandoning replies at a 200 ms per-phase read cap",
+  "lease": {
+   "lease_ms": 1000,
+   "margin_ms": 100,
+   "cadence_ms": 250,
+   "rpc_slack_ms": 50,
+   "keeper_client": "Client::new(address, 200 ms, 1)"
+  },
+  "renewals": [
+   {
+    "counter": 2191,
+    "sent_keeper_s": 548.590563,
+    "reply_keeper_s": 548.601812,
+    "result": "Leased",
+    "installed_deadline_keeper_s": 549.490563
+   },
+   {
+    "counter": 2192,
+    "sent_keeper_s": 548.84067,
+    "store_received_s": 551.496566,
+    "store_queue_ms": 0.01,
+    "store_batch": 25675,
+    "batch_commands": 1,
+    "barrier_ms": 409.495,
+    "store_dispatched_s": 551.90609,
+    "dispatched_keeper_s": 549.25018,
+    "client_result": "WouldBlock",
+    "client_error_keeper_s": 549.04263,
+    "call_deadline_keeper_s": 549.440563
+   },
+   {
+    "counter": 2193,
+    "sent_keeper_s": 549.092426,
+    "store_received_s": 551.750486,
+    "store_queue_ms": 157.854,
+    "store_batch": 25676,
+    "batch_commands": 6,
+    "barrier_ms": 167.484,
+    "store_dispatched_s": 552.075861,
+    "dispatched_keeper_s": 549.419951,
+    "client_result": "WouldBlock",
+    "client_error_keeper_s": 549.297916
+   },
+   {
+    "counter": 2194,
+    "sent_keeper_s": 549.343172,
+    "store_received_s": 552.008714,
+    "store_queue_ms": 67.437,
+    "store_batch": 25677,
+    "batch_commands": 5,
+    "barrier_ms": 32.887,
+    "store_dispatched_s": 552.109607,
+    "dispatched_keeper_s": 549.453697,
+    "client_result": "TimedOut: overall client deadline elapsed",
+    "client_error_keeper_s": 549.45034
+   }
+  ],
+  "authority_stop": {
+   "cause": "renew-keeper-deadline",
+   "keeper_s": 549.49084,
+   "wall_utc": "17:44:10.511",
+   "proxy": "17:44:10.511Z lost backend b, server_shutdown"
+  },
+  "store_committed_all_three": true,
+  "counterfactual": "unmeasured: had the keeper read 2192 until its call deadline, the reply at keeper 549.250 s would have installed deadline 549.741 s",
+  "keeper_side_delay": "none observed: 2192 reached the store 0.07 ms after send; reply timeouts are 201.9 and 205.2 ms after send",
+  "cpu_0_3_busy_percent_548_to_552_s": [
+   [
+    78,
+    79,
+    82,
+    78
+   ],
+   [
+    73,
+    74,
+    80,
+    78
+   ],
+   [
+    80,
+    83,
+    85,
+    82
+   ],
+   [
+    83,
+    83,
+    83,
+    88
+   ]
+  ],
+  "cpu_saturation": "not observed at 1 s resolution; no schedstat retained, so store and keeper runnable delay is unobserved"
+ },
+ "barriers": {
+  "a1": {
+   "n": 12329,
+   "p50_ms": 12.36,
+   "p95_ms": 23.54,
+   "p99_ms": 32.77,
+   "p999_ms": 97.32,
+   "max_ms": 409.49,
+   "over_100ms": 10,
+   "over_200ms": 3
+  },
+  "r1": {
+   "n": 21194,
+   "p50_ms": 12.5,
+   "p95_ms": 23.85,
+   "p99_ms": 32.9,
+   "p999_ms": 98.48,
+   "max_ms": 285.84,
+   "over_100ms": 20,
+   "over_200ms": 2,
+   "renewal_wouldblock": 8
+  },
+  "mac_reference": {
+   "e24_diagnosis_r1_max_ms": 41.18,
+   "e24_heap_control_200_r3_max_ms": 19.76,
+   "e24_r2_soak_authority_stops": 0
+  },
+  "periodicity": {
+   "period_s": 31.2,
+   "a1_cycle_maxima_ms": {
+    "220.7": 319.8,
+    "301.6": 99.0,
+    "332.9": 90.2,
+    "364.1": 141.1,
+    "395.4": 75.0,
+    "426.5": 73.7,
+    "457.9": 95.4,
+    "489.0": 59.3,
+    "520.5": 313.1,
+    "551.5": 409.5
+   },
+   "a1_over_50ms_after_150s": 37,
+   "a1_in_one_2_5s_phase_window": 26,
+   "phase_window_share_of_time": 0.08,
+   "vdo_kthread_cpu_bursts_s": [
+    302.7,
+    333.6,
+    365.0,
+    396.3,
+    427.3,
+    458.6,
+    489.6,
+    520.7,
+    552.3
+   ],
+   "vm": {
+    "dirty_expire_centisecs": 3000,
+    "dirty_writeback_centisecs": 500
+   },
+   "fixture_logs_a1_bytes": {
+    "anticheat_per_tile": [
+     235097816,
+     234224203,
+     253825462,
+     250925332
+    ],
+    "server_stderr_per_tile": [
+     146265810,
+     147288583,
+     155858804,
+     153263129
+    ],
+    "proxy": 17171599
+   },
+   "note": "the Mac ran the same default-on anticheat log; E24 records oversized anticheat files"
+  }
+ },
+ "tile_a": {
+  "cause": "Meridian fallback re-logged a crosser owned by tile B into tile A as a fresh login; registration sent CreateUuid, the store correctly refused with AlreadyExists, and the tile panicked on that refusal",
+  "not_a_retry": true,
+  "duplicate_request_ids_from_tile_a": 0,
+  "player": "E17BotX20",
+  "chain": [
+   "17:44:06.871Z handover d->b committed; store owner is tile b",
+   "17:44:10.511Z tile b drops its players (server_shutdown) after lease expiry",
+   "17:44:10.515Z proxy: lost backend b; moved to a in 1 ms (servers tried: 1)",
+   "tile a: E17BotX20 logged in at (1024.5, -60.0, 1024.5), joined, player-export ok (a read)",
+   "tile a: CreateUuid -> Fault(AlreadyExists) -> panic at dedicated.rs:1346"
+  ],
+  "code": {
+   "registration": "horizon-tiles crates/horizon-client/src/game/dedicated/cluster.rs:201-250 (match at 233-238)",
+   "panic": "horizon-tiles crates/horizon-client/src/game/dedicated.rs:1340-1346",
+   "store_refusal": "crates/goliath-store/src/state.rs:423 (CreateUuid AlreadyExists)",
+   "store_dedupe": "crates/goliath-store/src/state.rs:258-266 returns the stored reply for a repeated request id",
+   "client_retry": "crates/goliath-store/src/client.rs:94-120 and 282-297 resend the same command id",
+   "fallback_policy": "meridian crates/meridian-proxy/src/fallback.rs; defaults on-kick/on-crash true, max-attempts 3 (meridian-config fallback.rs:17-25)",
+   "harness_proxy_config": "scripts/goliath-cluster:322-327 sets no [fallback] table"
+  },
+  "platform_specific": false,
+  "note": "store rows lack operation types; which of tile a non-keeper mutations at store 552.1145, 552.1601 and 552.1706 s is the CreateUuid is inferred"
+ },
+ "diagnostic": {
+  "name": "e28-diag-fsync-r1",
+  "script": "scripts/e28-diag-fsync-probe",
+  "script_sha256": "6300cae49c848956cd9377cdb47457d5796d681e87da9aa5007e4c3671f25ed6",
+  "method": "25 Hz 4 KiB append+fsync on the data volume; eight unsynced writers at 360 kB/s each; 100 s per case; probe and writers on CPU 5 (harness role)",
+  "after_35s": {
+   "idle": {
+    "n": 1626,
+    "p50": 7.699,
+    "p95": 10.454,
+    "p99": 11.627,
+    "p999": 15.515,
+    "max": 15.604,
+    "over_50ms": 0,
+    "over_100ms": 0,
+    "over_200ms": 0
+   },
+   "logs_same_volume": {
+    "n": 1626,
+    "p50": 9.576,
+    "p95": 11.117,
+    "p99": 14.259,
+    "p999": 39.748,
+    "max": 42.478,
+    "over_50ms": 0,
+    "over_100ms": 0,
+    "over_200ms": 0
+   },
+   "logs_tmpfs": {
+    "n": 1626,
+    "p50": 7.721,
+    "p95": 10.532,
+    "p99": 12.104,
+    "p999": 19.241,
+    "max": 21.303,
+    "over_50ms": 0,
+    "over_100ms": 0,
+    "over_200ms": 0
+   }
+  },
+  "writeback_bursts_s": [
+   31.08,
+   62.32,
+   93.56
+  ],
+  "burst_dirty_pages_max": 22171,
+  "device_mib_written": {
+   "idle": 21.6,
+   "logs_same_volume": 285.1,
+   "logs_tmpfs": 21.8
+  },
+  "result": "mechanism reproduced (31.2 s bursts raise fsync tail about 2.7x); soak magnitude (59-409 ms per cycle) not reproduced on an idle host",
+  "d12": {
+   "valid": true,
+   "seconds": 317.025,
+   "cpu5_busy": 0.2438,
+   "per_cpu_busy": {
+    "0": 0.0021,
+    "1": 0.0046,
+    "2": 0.0024,
+    "3": 0.0022,
+    "4": 0.0022,
+    "5": 0.2438
+   },
+   "swap_in_pages": 1531,
+   "restored": true,
+   "maximum_outside_process_cores": 0.12986,
+   "outside_total_cores": 0.16762,
+   "placement_errors": 0,
+   "throttle_rise": false,
+   "start_load_1m": 0.28,
+   "frequency_khz_range": {
+    "0": [
+     800000,
+     3908581
+    ],
+    "1": [
+     800000,
+     3966668
+    ],
+    "2": [
+     800000,
+     3921590
+    ],
+    "3": [
+     800000,
+     3922752
+    ],
+    "4": [
+     800000,
+     3929337
+    ],
+    "5": [
+     3885084,
+     4000011
+    ]
+   }
+  }
+ },
+ "inputs_sha256": {
+  ".local/evidence/E28/soak/e28-soak-r1-a1/store-batches.requests.csv.gz": "525217e233f1409c936c486e8d63a372db6f0e88de10fd32ca20eb4f0519ffa0",
+  ".local/evidence/E28/soak/e28-soak-r1-a1/store-batches.csv.gz": "8463d54a02ba3c5575652db0471d45b1b6fe1d42fd4c92663b07bf488e601391",
+  ".local/evidence/E28/soak/e28-soak-r1-a1/tiles/tile-1-2283369-lease.jsonl.gz": "a365f8865a8131e134e90c4d74b5f3e8aa41f6592f8dd10ae695baa452be0f6d",
+  ".local/evidence/E28/soak/e28-soak-r1-a1/native-783feac6646db818.json.gz (proxy log)": "3176abd6e4196d5aa7a1da89ecd597fded071147b6131db39055762913150cdb",
+  ".local/evidence/E28/soak/e28-soak-r1-a1/native-b381c3da0ab1582d.json.gz (tile a log)": "cce81ff222ec27f717408cd1c13ed32389508a4768407ccf60a24cc50bc16d31",
+  ".local/evidence/E28/soak/e28-soak-r1-a1-whole-window.json.gz": "2e5f7a28c0c20d4e647f59efe349324ad8a9d888658e1544000a118949bd1d73",
+  ".local/evidence/E28/diag/e28-diag-fsync-r1/result.json": "1a0885bd4aa2686c96b226aee86ae0ecb0cedb449d2a5344327bda6c96eccfd1"
+ },
+ "fixes": [
+  {
+   "rank": 1,
+   "kind": "code",
+   "what": "keeper reads each renewal until its call deadline: lease.rs:215 Client::new(address, lease - margin, 1) instead of 200 ms",
+   "fixes": "tile b lease loss from one store stall under 600 ms; also the M3 240012 startup Directory read",
+   "rebuild": "horizon-client",
+   "new_bundle": true
+  },
+  {
+   "rank": 2,
+   "kind": "code",
+   "what": "registration refusal disconnects that one player instead of panicking the tile (cluster.rs:233-238)",
+   "fixes": "tile a cascade",
+   "rebuild": "horizon-client",
+   "new_bundle": true
+  },
+  {
+   "rank": 3,
+   "kind": "condition",
+   "what": "proxy config [fallback] on-kick = false, on-crash = false in the cluster fixture",
+   "fixes": "tile a cascade with the frozen bundle",
+   "rebuild": null,
+   "new_bundle": false,
+   "check": "frozen meridian --check accepts it; crossings under it not yet run"
+  },
+  {
+   "rank": 4,
+   "kind": "condition",
+   "what": "take bulk fixture logs off the store volume: anticheat log = \"\" and tile/proxy stderr to tmpfs, store journal stays on the data volume",
+   "fixes": "reduces the stall source; effect at soak load unmeasured",
+   "rebuild": null,
+   "new_bundle": false
+  }
+ ]
+}

@@ -45,26 +45,27 @@ def save(path,value):
 def authority_stops(folder):
     result = []
     for path in sorted((folder/'tiles').glob('*-lease.jsonl*')):
-        opener = gzip.open if path.suffix=='.gz' else open
-        with opener(path,'rt') as source:
-            for line in source:
-                if line.strip():
-                    row = json.loads(line)
-                    if row.get('event')=='authority-stop':
-                        result.append(dict(path=str(path.relative_to(folder)),**row))
+        from e28_log_integrity import read_trace
+        rows,_=read_trace(path)
+        for row in rows:
+            if row.get('event')=='authority-stop':
+                result.append(dict(path=str(path.relative_to(folder)),**row))
     return result
 
 
 class Retarget(ast.NodeTransformer):
     def visit_Constant(self,node):
         if isinstance(node.value,str):
-            return ast.copy_location(ast.Constant(node.value.replace('E22','E24')),node)
+            value=node.value.replace('E22','E24')
+            value=value.replace('.local/evidence/'+'E24',str(EVIDENCE.relative_to(ROOT)))
+            return ast.copy_location(ast.Constant(value),node)
         return node
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     platform.cpu_options(parser)
+    parser.add_argument('--direct-bots',action='store_true',help='E28 untraced stamped bots with no front shims')
     parser.add_argument('--name',required=True)
     parser.add_argument('--bins',type=Path,required=True)
     parser.add_argument('--host-released',action='store_true',required=True)
@@ -176,6 +177,10 @@ def main():
             original_factory = module.cluster_module
             def factory(selected):
                 result = original_factory(selected)
+                if platform.LINUX and args.direct_bots:
+                    from e28_log_integrity import install_cluster,path_command
+                    install_cluster(result,folder/'log-integrity')
+                    ns['path_command']=path_command
                 popen = result.subprocess.Popen
                 result.subprocess = scope['Proxy'](result.subprocess,Popen=lambda *a,**kw:trace.store_popen(popen,*a,**kw))
                 tile_start,tile_stop,cluster_init = result.Tile.start,result.Tile.stop,result.Cluster.__init__
@@ -251,10 +256,14 @@ def main():
     ns['ProcessSampler']=Sampler
     calls = [0]
     def clock_point(instance,mark):
-        point=dict(at=time.monotonic(),mark=mark,tiles={})
+        point=dict(at=time.monotonic(),wall_ns=time.time_ns(),mark=mark,tiles={})
         for name,tile in instance.tiles.items():
             reply=tile.ask('cluster-authority')
             data=reply.get('clock')
+            if platform.LINUX and args.direct_bots:
+                from e28_soak_clock import authority_point
+                point['tiles'][name]=authority_point(reply)
+                continue
             if not data or data.get('schema')!='E24-claim-raw-clock-v1':
                 raise RuntimeError('fixed clock telemetry missing on tile '+name)
             point['tiles'][name]=data
@@ -262,6 +271,7 @@ def main():
         clock_endpoints['last']=point
         clock_counts.append(dict(at=point['at'],mark=mark,tiles={name:{key:data[key] for key in
             ['checks','triple_reads','inconclusive_reads','resamples','closures_by_cause','dropped_widths','failure']}
+            if data.get('schema')=='E24-claim-raw-clock-v1' else data
             for name,data in point['tiles'].items()}))
         return point
     def heap_snapshot(instance,dump=False,start=False):
@@ -326,7 +336,8 @@ def main():
         return captured
     ns['failure_evidence'] = failure
     sys.argv = ['e20-frontier','--name',args.name,'--counts',str(args.players),'--bins',str(bins),
-        '--no-other-agents','--warmup','30','--seconds',str(args.seconds)]
+        '--no-other-agents','--warmup','30','--seconds',str(args.seconds),'--cpu-mode',args.cpu_mode]
+    if args.direct_bots:sys.argv.append('--direct-bots')
     error = None
     try:
         old_times = ns['game_times']
@@ -367,11 +378,14 @@ def main():
                     path.unlink()
             unchanged = validate_snapshot(bins) == identity_before
             stops = authority_stops(folder)
+            from e28_log_integrity import trace_integrity
+            integrity=trace_integrity(folder)
             summary = dict(kind='E24-step1-diagnostic',error=error,seconds=time.monotonic()-began,players=args.players,
                 rate_calibration_only=args.players==1050,
                 heap_diagnostic=args.heap,heap_started=heap_started[0],heap_dumped=heap_dumped[0],
                 observed_authority_latch=bool(trace.expiry_events or stops),authority_stop_events=stops,availability=captured,
                 binaries_unchanged=unchanged,cleanup_errors=cleanup_errors,
+                authority_trace_integrity=integrity,authority_trace_complete=bool(integrity) and all(row['complete'] for row in integrity.values()),
                 evidence={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in sorted(folder.rglob('*')) if path.is_file()},
                 interpretation='diagnostic instrumentation, not capacity qualification')

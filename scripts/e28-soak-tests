@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Resource-free contracts for E28 soak, BOOTTIME evidence and bounded M3 windows."""
+import ast
+import copy
+import gzip
+import importlib.machinery
+import importlib.util
+import json
+import os
+import errno
+import sys
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import e11_support as support
+import e25_soak_harness as harness
+import e28_soak_clock as clock
+import e28_window as window
+import goliath_platform as platform
+from e28_m3_startup import observe_clock_calls
+
+ROOT=support.ROOT
+
+
+def load(name):
+    loader=importlib.machinery.SourceFileLoader('e28_soak_test_'+name.replace('-','_'),str(ROOT/'scripts'/name))
+    spec=importlib.util.spec_from_loader(loader.name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module)
+    return module
+
+
+def lease_events():
+    def event(kind,at,**data):
+        return dict(event=kind,at_ns=at,wall_ns=10_000_000_000+at,data=data)
+    rows=[event('trace-start',0,tile=0,pid=10)]
+    for index in range(1,5):
+        sent=index*clock.PERIOD
+        rows.extend([event('renew-ticket',sent,counter=index,sent_ns=sent,deadline_ns=sent+650_000_000,
+            call_deadline_ns=sent+600_000_000),
+            event('renew-installed',sent+1_000_000,counter=index,grant_counter=index,sent_ns=sent,deadline_ns=sent+900_000_000),
+            event('renew-woke',sent+clock.PERIOD,sleep_start_ns=sent+2_000_000,
+                planned_wake_ns=sent+clock.PERIOD,period_ns=clock.PERIOD)])
+        rows.extend([event('renew-send',sent,counter=index),event('renew-reply',sent+500_000,counter=index,result='Ok(Leased(LeaseGrant))')])
+    return rows
+
+
+class Contracts(unittest.TestCase):
+    def test_linux_null_clock_needs_positive_authority(self):
+        self.assertIsNone(clock.authority_point(dict(authorized=True,leased=True,clock=None))['clock_histogram'])
+        for value in [dict(authorized=False,leased=True,clock=None),dict(authorized=True,leased=False,clock=None),
+                      dict(authorized=True,leased=True,clock={})]:
+            with self.assertRaisesRegex(RuntimeError,'authority'):clock.authority_point(value)
+
+    def result(self,events=None):
+        return clock.trace_result(events or lease_events(),10_400_000_000,11_100_000_000)
+
+    def test_native_renewal_counters_and_send_anchors(self):
+        row=self.result()
+        self.assertTrue(row['valid'])
+        self.assertEqual((row['first_counter'],row['last_counter']),(1,4))
+        self.assertEqual(row['checked_wakes'],4)
+        self.assertIsNone(row['clock_histogram'])
+
+    def test_reply_anchored_cadence_fails(self):
+        events=lease_events();events[3]['data']['planned_wake_ns']+=1_000_000
+        self.assertFalse(self.result(events)['valid'])
+
+    def test_counter_reset_or_wrong_grant_fails(self):
+        for change in ['counter','grant_counter']:
+            events=lease_events();events[7]['data'][change]=0
+            self.assertFalse(self.result(events)['valid'])
+
+    def test_native_closure_is_not_waived_by_open_endpoints(self):
+        for kind in ['authority-stop','clock-anomaly','renew-observe-refused']:
+            events=lease_events();events.append(dict(event=kind,data={},wall_ns=11_000_000_000,at_ns=1_000_000_000))
+            self.assertFalse(self.result(events)['valid'])
+
+    def test_missing_trace_span_or_extended_deadline_fails(self):
+        events=lease_events();events[2]['data']['deadline_ns']+=1
+        self.assertFalse(self.result(events)['valid'])
+        self.assertFalse(clock.trace_result(lease_events(),10_000_000_000,12_500_000_000)['valid'])
+
+    def test_known_failed_renewal_is_reported_but_missing_successful_install_fails(self):
+        events=lease_events()
+        events=[row for row in events if not(row['event']=='renew-installed' and row['data']['counter']==2)]
+        self.assertFalse(self.result(events)['valid'])
+        reply=next(row for row in events if row['event']=='renew-reply' and row['data']['counter']==2)
+        reply['data']['result']='Err(Os { kind: WouldBlock })'
+        result=self.result(events)
+        self.assertTrue(result['valid'])
+        self.assertFalse(result['all_loaded_calls_installed'])
+        self.assertEqual(len(result['non_grant_replies']),1)
+        reply['data']['result']='unknown'
+        self.assertFalse(self.result(events)['valid'])
+
+    def test_loaded_readback_requires_four_unique_full_span_traces(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'.local/runs') as temporary:
+            folder=Path(temporary);(folder/'tiles').mkdir()
+            endpoints=dict(first=dict(at=1,wall_ns=10_400_000_000,mark='steady-first',tiles={}),
+                last=dict(at=2,wall_ns=11_100_000_000,mark='steady-last',tiles={}))
+            for index,label in enumerate('abcd'):
+                point=clock.authority_point(dict(authorized=True,leased=True,clock=None,tile=index,token='same'))
+                endpoints['first']['tiles'][label]=endpoints['last']['tiles'][label]=point
+                events=lease_events();events[0]['data']['tile']=index
+                raw=''.join(json.dumps(row)+'\n' for row in events)
+                (folder/'tiles'/f'tile-{index}-lease.jsonl.gz').write_bytes(gzip.compress(raw.encode()))
+            self.assertTrue(clock.readback(folder,endpoints)['all_valid'])
+            path=folder/'tiles/tile-3-lease.jsonl.gz'
+            path.write_bytes(gzip.compress(gzip.decompress(path.read_bytes())+b'{"event":"renew-'))
+            result=clock.readback(folder,endpoints)
+            self.assertFalse(result['all_valid'])
+            self.assertGreater(result['tiles']['d']['integrity']['tail_bytes'],0)
+            (folder/'tiles/tile-3-lease.jsonl.gz').unlink()
+            with self.assertRaisesRegex(RuntimeError,'exactly one'):clock.readback(folder,endpoints)
+
+    def snapshots(self):
+        host=dict(load=[0,0,0],cpus={str(i):dict(total=100,idle=90) for i in range(6)},
+            thermal_throttle={'counter':0},thermal_throttle_available=True,swap_in_pages=0,memory_available_kb=10000)
+        last=copy.deepcopy(host)
+        for cpu in last['cpus'].values():cpu.update(total=200,idle=150)
+        return [dict(at=index*10,host=value,owned=[1],processes={
+            1:dict(cpu_s=cpu,parent=0,start_ticks=1),2:dict(cpu_s=cpu,parent=0,start_ticks=2,name='outside')},
+            descendant_placement=[dict(pid=1,role='harness',cgroup='/goliath-e28-1/harness',cpus_allowed_list='5')])
+            for index,value,cpu in [(0,host,1),(1,last,2)]]
+
+    def test_d12_uses_entire_span_and_redacts_names(self):
+        result=window.audit(self.snapshots())
+        self.assertTrue(result['valid']);self.assertEqual(result['outside_total_cores'],.1)
+        self.assertEqual(result['outside'][0]['name'],'outside')
+
+    def test_d12_rejects_busy_harness_wrong_placement_and_external_cpu(self):
+        for cause in ['busy','placement','outside','error']:
+            rows=self.snapshots()
+            if cause=='busy':rows[-1]['host']['cpus']['5']['idle']=95
+            if cause=='placement':rows[0]['descendant_placement'][0]['cpus_allowed_list']='0-5'
+            if cause=='outside':rows[-1]['processes'][2]['cpu_s']=7
+            self.assertFalse(window.audit(rows,'failed' if cause=='error' else None)['valid'],cause)
+
+    def test_server_on_harness_core_is_not_valid_fixture_placement(self):
+        rows=self.snapshots();rows[-1]['descendant_placement'][0]['role']='servers'
+        self.assertFalse(window.audit(rows)['valid'])
+
+    def test_placement_retries_migration_and_never_waives_stable_misplacement(self):
+        values=iter(['Cpus_allowed_list:\t5\n','Cpus_allowed_list:\t0-3\n',
+                     'Cpus_allowed_list:\t0-3\n','Cpus_allowed_list:\t0-3\n'])
+        def read(path,*args,**kwargs):
+            return '0::/goliath-e28-12/servers\n' if path.name=='cgroup' else next(values)
+        with patch.object(Path,'read_text',new=read),patch.object(Path,'readlink',return_value=Path('horizon-client')),\
+             patch.object(Path,'read_bytes',return_value=b'horizon-client\0'):
+            row=window.process_placement(12)
+        self.assertTrue(row['stable']);self.assertEqual(row['placement_reads'],2)
+        self.assertEqual(row['cpus_allowed_list'],'0-3')
+        rows=self.snapshots();rows[-1]['descendant_placement']=[dict(row,cpus_allowed_list='5')]
+        self.assertFalse(window.audit(rows)['valid'])
+
+    def test_unstable_placement_remains_unproven_after_bounded_reads(self):
+        rows=self.snapshots();rows[-1]['descendant_placement'][0]['stable']=False
+        self.assertFalse(window.audit(rows)['valid'])
+
+    def test_per_minute_rss_retains_driver_and_reports_missing_coverage(self):
+        rows=self.snapshots()
+        for row in rows:row['descendant_placement'][0]['rss_mib']=20
+        series=window.minute_rss(rows,0)
+        self.assertEqual(len(series),31)
+        self.assertTrue(series[0]['endpoint_covered'])
+        self.assertFalse(series[-1]['endpoint_covered'])
+        self.assertEqual(series[0]['processes'][0]['rss_mib'],20)
+
+    def test_prerequisite_prevents_queuing(self):
+        with patch.dict(os.environ,GOLIATH_WINDOW_OWNER='E28S'),patch.object(Path,'is_file',return_value=False),\
+             patch.object(window.subprocess,'check_output') as output:
+            with self.assertRaisesRegex(RuntimeError,'lite summary'):window.ready()
+            output.assert_not_called()
+        with patch.dict(os.environ,GOLIATH_WINDOW_OWNER='E28S'),patch.object(Path,'is_file',return_value=True),\
+             patch.object(window.subprocess,'check_output',return_value='window: E28R\n'):
+            with self.assertRaisesRegex(RuntimeError,'not free'):window.ready()
+
+    def test_e28_relocation_preserves_kernel_and_stays_on_data_volume(self):
+        original=(harness.DATA,harness.EVIDENCE,harness.DERIVED)
+        try:
+            harness.configure(ROOT/'docs/experiments/data/E28/soak')
+            tree=ast.fix_missing_locations(harness.Relocate('E28S').visit(ast.parse((ROOT/'scripts/e24-run').read_text())))
+            text=ast.unparse(tree);compile(tree,'e28-soak-kernel','exec')
+            self.assertIn('.local/evidence/E28/soak',text)
+            self.assertNotIn('.local/evidence/E24',text)
+            self.assertIn("owner='E28S'",text)
+            self.assertIn("sys.argv.append('--direct-bots')",text)
+            self.assertIn("'--cpu-mode', args.cpu_mode",text)
+        finally:harness.DATA,harness.EVIDENCE,harness.DERIVED=original
+
+    def test_m3_retains_fault_kernels_and_clean_pause_only(self):
+        module=load('e24-m3');source=ast.parse((ROOT/'scripts/m3-chaos').read_text())
+        kernels={node.name:ast.dump(node) for node in source.body if isinstance(node,ast.FunctionDef)
+            and node.name in {'crossing','partition','stale_login','run'}}
+        tree=module.WindowBoundary().visit(source)
+        self.assertEqual(kernels,{node.name:ast.dump(node) for node in tree.body if isinstance(node,ast.FunctionDef) and node.name in kernels})
+        text=(ROOT/'scripts/e24-m3').read_text()
+        self.assertIn("old['status']!='paused-window'",text)
+        self.assertIn('audit=monitor.finish()',text)
+        self.assertIn("E24_M3_EVIDENCE",text)
+
+    def test_m3_publication_sanitizes_commands(self):
+        module=load('e24-m3')
+        with tempfile.TemporaryDirectory(dir=ROOT/'.local/runs') as temporary:
+            target=Path(temporary)/'row.json'
+            module.save_json(target,dict(command=[sys.executable,str(ROOT/'scripts/e24-m3'),str(Path.home()/'private')]))
+            row=json.loads(target.read_text())
+            self.assertEqual(row['command'],['python3','$REPO/scripts/e24-m3','$HOME/private'])
+
+    def test_startup_clock_observation_preserves_rejection_and_adds_no_retry(self):
+        from types import SimpleNamespace
+        import struct
+        with tempfile.TemporaryDirectory(dir=ROOT/'.local/runs') as temporary:
+            calls=[]
+            def original(address,message):calls.append(message);return b'\1\5\10'
+            module=SimpleNamespace(store=SimpleNamespace(call=original))
+            observed=observe_clock_calls(module,Path(temporary))
+            request=b'\1'+bytes(16)+b'\16'+struct.pack('<QQQ',0,1,1)
+            self.assertEqual(module.store.call(('127.0.0.1',1),request),b'\1\5\10')
+            self.assertEqual(len(calls),1)
+            self.assertEqual(observed[0]['response_hex'],'010508')
+            self.assertEqual(observed[0]['fence'],[0,1,1])
+            self.assertEqual(json.loads((Path(temporary)/'clock-calls.json').read_text())['retries_added'],0)
+
+    def test_retired_worker_esrch_keeps_cpu_but_main_thread_esrch_fails(self):
+        fixture=load('e28-platform-tests')
+        with tempfile.TemporaryDirectory(dir=ROOT/'.local/runs') as temporary:
+            proc=Path(temporary);directory=proc/'12';directory.mkdir()
+            status='VmRSS:\t2048 kB\nThreads:\t2\nvoluntary_ctxt_switches:\t3\nnonvoluntary_ctxt_switches:\t2\n'
+            (directory/'stat').write_text(fixture.stat_text());(directory/'status').write_text(status)
+            for tid,cpu in [(12,300_000_000),(15,200_000_000)]:
+                task=directory/'task'/str(tid);task.mkdir(parents=True)
+                (task/'schedstat').write_text(f'{cpu} 0 0\n');(task/'status').write_text(status)
+            first=platform.usage(12,proc)
+            read=Path.read_text
+            def racing(path,*args,**kwargs):
+                if path==directory/'task/15/schedstat':raise ProcessLookupError(errno.ESRCH,'No such process')
+                return read(path,*args,**kwargs)
+            with patch.object(Path,'read_text',new=racing):
+                self.assertEqual(platform.usage(12,proc)['cpu_s'],first['cpu_s'])
+            def main_gone(path,*args,**kwargs):
+                if path==directory/'task/12/schedstat':raise ProcessLookupError(errno.ESRCH,'No such process')
+                return read(path,*args,**kwargs)
+            with patch.object(Path,'read_text',new=main_gone):
+                with self.assertRaises(ProcessLookupError):platform.usage(12,proc)
+
+
+if __name__=='__main__':unittest.main()

@@ -978,24 +978,338 @@ Both reproduced B rows pass the intrusion check, where the builder's two did not
 
 ## 30-minute soak
 
-Status: prepared, not measured. Reviewer reproduction will be required.
-The [soak and M3 protocol](data/E28/soak-m3-protocol.json) is registered before
-the builder takes a measurement window. The builder waits for the reviewer's
-lite B2 summary and a free host window.
+Status: the initial collection failed and is not a 30-minute qualification.
+The reviewer explicitly authorized the registered retry `e28-soak-r1-a1`
+for that collection crash. Its [retry registration](data/E28/soak-retry-plan-r1-a1.json)
+preserves the fixture and pass line. `e28-soak-r1` stays failed. No result is
+qualified before reviewer reproduction.
+The [soak and M3 protocol](data/E28/soak-m3-protocol.json) was registered before
+measurement. The reviewer's lite B2 summary existed and the host window was
+free before acquisition under `E28S`.
 
 The run is `e28-soak-r1`, with final servers, 425 players, pinning and direct
 final-stamps bots with tracing disabled. D9's 10% crossing cohort has 42
 players here, so the unchanged cargo fixture gives 42 unique items, not the
 Mac's 65. RSS, owner audits, cargo conservation, crossings per minute, TPS,
 authority events and long-window raw tick P99 are retained separately.
-Whole-window D12 evidence includes startup, the 30 measured minutes,
+Whole-window D12 evidence includes startup, the shortened loaded interval,
 checkpoint/recovery and cleanup. Linux clock histograms are unavailable;
 native lease traces check increasing renewal counters and send-anchored
 250 ms planned wakes without pretending to supply Darwin telemetry.
 
+Before measurement, the reviewer reported an EOF-truncated lease record and
+a malformed live phase record in its latency/lite reproductions. The
+[log-integrity port](data/E28/soak-m3-log-integrity-port.json) records the
+E28-only response. Proxy stdout gets its own file, leaving native stderr
+as the sole phase-log writer. Tile shutdown keeps console `stop` and the
+180-second kill fallback, but drains the stdout reader before closing its
+log. Every fallback is recorded. Lease writers remain detached in the frozen
+binary. A partial tail or malformed complete record makes strict authority
+evidence unproven, never a zero-event pass. Live phase tails get at most one
+second to complete, with framing snapshots retained; malformed complete
+records fail and retain their native bytes. No prior reviewer failure is
+repaired or reclassified. No frozen executable changes for this port.
+
+### Retry a1: genuine cluster loss, not bot duration
+
+The explicitly registered `e28-soak-r1-a1` also failed, at about 544 seconds
+of bot runtime. The [bot-exit diagnosis](data/E28/soak/e28-soak-r1-a1-bot-exit-diagnosis.json)
+checks actual recorded argv, archived final telemetry, stderr, native process
+exit statuses and the backend logs. All five groups have exactly one
+`--seconds 3300`, a 55-minute lifetime, plus their direct handshake host.
+The helper appends host routing without dropping duration. There is no route
+completion limit explaining this exit.
+
+The generic failure message contained an earlier cached A sample with
+`failed: 0`. Its final archived sample has 96 failures and exit 1, with stderr
+`horizon-bots: not all bots remained online`. B also exits 1 with 96 failures;
+the crossing group exits 1 with 42. C and D remain online at failure capture.
+Tile A itself exits 1 after a native panic during new-player registration,
+`Fault(AlreadyExists)`. Tile B separately exhausts its confirmed lease after
+two WouldBlock reads and an overall-deadline timeout, recording
+`renew-keeper-deadline`. No clock-anomaly event is observed. Its refused clean
+shutdown cut is retained. These are real cluster failures, not a harness timer.
+
+The retry's whole-window D12 checks pass: CPU 5 is 74.45% busy, the largest
+outside process averages 0.15894 core, no throttle counter rises and policy
+restoration is exact. The last RSS sample is at 485.153 seconds, with seven
+completed owner audits. There is no minute-30 endpoint or 30-minute pass.
+No `a2` is registered or started. The reviewer required a stop/report if the
+cluster actually dropped a group, so no further soak or M3 cell is queued.
+
+The explicitly authorized retry was executed once:
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28S
+python3 -u -B scripts/e25-soak-control --name e28-soak-r1-a1 --bins .local/bin/goliath-e28/final --data-dir docs/experiments/data/E28/soak --cpu-mode pin --direct-bots --players 425 --campaign-plan docs/experiments/data/E28/soak-retry-plan-r1-a1.json --owner E28S --collect-only
+```
+
+### Initial failed run and partial readback
+
+The [failed-run readback](data/E28/soak/e28-soak-r1-result.json) retains the
+raw row, all RSS samples, native authority traces and partial ticks. Collection
+stopped with `ProcessLookupError(3, 'No such process')`, 893.391 seconds after
+the steady-start timestamp. The last complete RSS sample is at 852.348 seconds,
+not minute 30. Fourteen ownership audits have zero violations and zero
+generation regressions, with three crossing-during-query brackets retained
+as unresolved. All 42 unique cargo items were conserved after the shortened
+run's clean all-tile checkpoint and recovery. This is not 30-minute safety
+evidence.
+
+The failure-boundary process counters contain every tile, proxy, store,
+sidecar and bot group. Bots remained online, with no reported late rounds or
+failures, and all five bot lifetimes were 3,300 seconds. Source inspection
+found that `/proc` worker reads handled `ENOENT` but not `ESRCH` when a listed
+thread exited. A regression now handles retired-worker `ESRCH` while keeping
+main-thread disappearance fatal and retaining previously observed CPU.
+The exact failing TID and stack were not captured, so that explanation is
+supported but not proved. The failed raw row and its original counter hash
+are unchanged.
+
+Fourteen complete minute buckets each have 375 to 381 activations. The final
+partial bucket has 336. Native owner-status TPS samples span 19.988 to 20.032
+on a, 19.973 to 20.021 on b, 19.960 to 20.033 on c and 19.938 to 20.051 on d.
+There is no final game-time endpoint TPS measurement. All 17,925 retained
+phase records parse with complete framing under the split-stream adapter.
+
+The table compares the actual minute-5 sample at 300.015 seconds with the last
+retained sample at 852.348 seconds. Its right column is not a minute-30 result.
+
+| Process | Minute 5 MiB | Last retained MiB | Observed change |
+| --- | ---: | ---: | ---: |
+| Proxy | 314.320 | 314.164 | -0.05% |
+| Store | 33.121 | 38.273 | +15.56% |
+| Tile a | 327.160 | 330.816 | +1.12% |
+| Tile b | 266.289 | 270.457 | +1.57% |
+| Tile c | 280.215 | 278.938 | -0.46% |
+| Tile d | 259.262 | 263.949 | +1.81% |
+| Sidecar 0 | 3.172 | 3.199 | +0.86% |
+| Sidecar 1 | 3.176 | 3.207 | +0.98% |
+| Sidecar 2 | 3.184 | 3.207 | +0.74% |
+| Sidecar 3 | 3.211 | 3.211 | 0.00% |
+
+Store RSS already exceeds +10% at the shortened endpoint. The receipt window
+first filled at loaded second 334.224, 34.287 seconds after the minute-5
+sample. Capacity stays 9,216, snapshot capacity stays 16 MiB after minute 5,
+the 72/s planning bound is not exceeded, and the retention/singleton checks
+pass. No leak cause or final minute-30 growth is established. Neither the
+baseline sample nor the memory threshold was moved.
+[Every-process minute RSS](data/E28/soak/e28-soak-r1-every-process-minute-rss.json)
+includes the collection helpers and both drivers, with missing minutes
+explicit. The original production-process judgment matches E24/E25; helper
+RSS is reported separately, including its evidence-buffer growth. All
+per-second observations remain in the raw and audit rows.
+
+Long-window raw tick P99 remains separate from the soak pass line. Only the
+17,067 ticks per tile retained before failure are available, with zero drops
+and no overlapping sequences. Their P99 is a 36.499, b 39.876, c 35.002 and
+d 38.232 ms. No 30-minute quantile is reported or inferred from them.
+
+All four original and four recovery lease logs have complete framing, with
+zero observed authority-stop or clock-anomaly records. The
+[explicit partial renewal readback](data/E28/soak/e28-soak-r1-renewal-readback-r2.json)
+checks increasing counters, original-send deadlines and 15,312 planned wakes
+anchored exactly 250 ms after their preceding original send. Observed send
+gaps range from 250.066 to 261.491 ms. The original processes' installed
+counters reach 3,835 / 3,831 / 3,827 / 3,823, including startup and shutdown.
+Eight calls return `Err(WouldBlock)` and later renewals succeed. Those errors
+are retained, not mistaken for missing successful grant installs. Every
+successful loaded grant has its install record; unknown or missing replies,
+malformed framing and authority events still fail. The earlier readback's
+stricter all-calls-installed field is retained beside this corrected ledger.
+This verifies the partial BOOTTIME run only. There is no 30-minute clock
+qualification and no real suspend test.
+
+The whole host window is 1,077.217 seconds. CPU 5 is 63.16% busy, outside CPU
+totals 0.11756 core and the largest outside process averages 0.04116 core.
+No throttle counter rises; 8,214 swap-in pages are recorded. D12 placement,
+start-load and noise checks pass. Slice, governor and turbo policies restore
+exactly. These fields cover startup through recovery/cleanup, not just the
+last successful RSS sample. They do not repair the collection failure.
+
+### Exact soak commands
+
+The builder ran this once:
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28S
+python3 -u -B scripts/e25-soak-control --name e28-soak-r1 --bins .local/bin/goliath-e28/final --data-dir docs/experiments/data/E28/soak --cpu-mode pin --direct-bots --players 425 --campaign-plan docs/experiments/data/E28/soak-m3-protocol.json --owner E28S --collect-only
+```
+
+For a fresh reviewer attempt, use the current collector with the retired-thread
+fix and the same frozen workload. This does not reproduce or reclassify the
+old collector failure. The runner acquires and releases its own window.
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28R
+.local/bin/host-window build E28R -- python3 -B scripts/e28-log-integrity-tests
+.local/bin/host-window build E28R -- python3 -B scripts/e28-soak-tests
+python3 -u -B scripts/e25-soak-control --name repro-e28-soak-r1 --bins .local/bin/goliath-e28/final --data-dir docs/experiments/data/E28/reviewer-soak --cpu-mode pin --direct-bots --players 425 --campaign-plan docs/experiments/data/E28/soak-m3-protocol.json --owner E28R --collect-only
+# Only after a full collection and release:
+python3 -B scripts/e25-soak-readback --name repro-e28-soak-r1 --data-dir docs/experiments/data/E28/reviewer-soak --owner E28R
+```
+
+Do not manufacture a final endpoint or run the full readback on a shortened
+collection. Keep every failure and use a new name for any authorized attempt.
+
+### Soak failure diagnosis
+
+Status: diagnosis by the builder, not yet reproduced by the reviewer. No
+binary, bundle or Rust source changed. The numbers are in the
+[diagnosis record](data/E28/soak/e28-soak-diagnosis-r1.json).
+
+`e28-soak-r1-a1` lost two tiles. One cause led to both losses, through two
+separate weaknesses. A slow durable barrier in the store made tile b's lease
+keeper give up on renewals the store had already granted. Tile b then
+dropped its players, as designed. The proxy's fallback sent one of b's
+crossers to tile a as a fresh login. Tile a tried to register a player the
+store already held and panicked when the store refused.
+
+**Tile b.** Times are on tile b's keeper clock. Store times are 2.656 s
+later on the store's clock.
+
+| Renewal | Sent | Store queue | Barrier | Store reply would reach b | Keeper saw |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 2191 | 548.591 | 0.0 ms | 10.7 ms | 548.602 | Granted, deadline 549.491 |
+| 2192 | 548.841 | 0.0 ms | 409.5 ms | 549.250 | `WouldBlock` at 549.043 |
+| 2193 | 549.092 | 157.9 ms | 167.5 ms | 549.420 | `WouldBlock` at 549.298 |
+| 2194 | 549.343 | 67.4 ms | 32.9 ms | 549.454 | Overall deadline at 549.450 |
+
+The keeper stopped at 549.491 with `renew-keeper-deadline`. The proxy logged
+b's shutdown kicks at the same instant. The store committed all three late
+renewals. The keeper sent on time: 2192 reached the store 0.07 ms after its
+send. Each reply was abandoned at the renewal client's 200 ms per-phase read
+cap (`lease.rs:215` in the patched tile source, applied by
+`crates/goliath-store/src/client.rs:81-84`). The schedule in
+`crates/goliath-model/src/lease.rs` already allows each call to run until its
+call deadline, 850 ms after the last granted send here. 2192's reply would
+have arrived at 549.250, before that deadline, and moved b's deadline to
+549.741. That counterfactual is computed, not measured.
+
+The 409.5 ms is time inside fsync. The batch held one command and queued for
+0.01 ms. CPUs 0-3 were 73-88% busy in the one-second samples from 548 to
+552 s, so they were not saturated at that resolution. No schedstat was
+retained, so runnable delay of the store and keeper threads is unobserved.
+The slow barriers follow a 31.2 s cycle. In a1, 26 of the 37 barriers over
+50 ms after second 150 fall in one 2.5 s slice of that cycle, which covers 8%
+of the time. Every cycle produced a slow barrier: 59 to 409 ms. CPU bursts
+of the unconfined `vdo0:*` kernel threads land on the same cycle, at 520.7
+and 552.3 s among others. r1 shows the same spacing. The kernel writes back a
+dirty file about 30 s after it is first dirtied (`dirty_expire_centisecs`
+3000, flusher every 5 s). The fixture keeps rewriting large logs on the
+store's volume. Each tile wrote about 240 MB of `anticheat.log` (bot
+prediction flags, one line per tick) and 150 MB of stderr in under ten
+minutes. The Mac ran the same default-on anticheat log, according to E24's
+evidence notes.
+
+Barrier quantiles match across both Linux attempts: p50 12.4 ms, p99 32.8 ms,
+p99.9 97 to 98 ms. r1 had a 286 ms maximum and eight `WouldBlock` renewals
+and survived. a1 had 409 ms and did not. The Mac's retained barrier maxima
+were 41.2 ms (E24 diagnosis-r1) and 19.8 ms (heap-control-200-r3), and its R2
+soak had zero authority stops in 30 minutes. E24's one comparable Mac loss
+had the same shape: a 435 ms barrier during a limiter STOP, `WouldBlock`,
+then keeper expiry. Cadence r2 fixed the scheduling and kept the 200 ms read
+cap.
+
+The diagnostic `e28-diag-fsync-r1` tested the writeback mechanism without any
+cluster binary (`scripts/e28-diag-fsync-probe`). A 25 Hz 4 KiB append and
+fsync ran on the data volume for 100 s per case. Eight unsynced writers
+appended 360 kB/s each, about the a1 log rate.
+
+| Case, after 35 s | p50 | p99 | p99.9 | Max |
+| --- | ---: | ---: | ---: | ---: |
+| No writers | 7.70 ms | 11.63 ms | 15.52 ms | 15.60 ms |
+| Writers on the data volume | 9.58 ms | 14.26 ms | 39.75 ms | 42.48 ms |
+| Writers on tmpfs | 7.72 ms | 12.10 ms | 19.24 ms | 21.30 ms |
+
+With writers on the data volume, writeback came in bursts of about 57 MB at
+31.1, 62.3 and 93.6 s, and each burst pushed fsync to 30 to 42 ms. That
+reproduces the 31.2 s cycle and its direction. On an idle host it does not
+reproduce the soak's 59 to 409 ms. What adds the rest under soak load is
+unproven. The probe and writers ran on CPU 5 in the harness role; this
+measures the disk path, not the store's CPU placement. D12 checks pass for
+the 317.025 s window: load 0.28 at start, CPU 5 24.38% busy, largest outside
+process 0.1299 core, outside total 0.1676 core, 1,531 swap-in pages, no
+throttle rise, zero placement errors and exact restoration.
+
+**Tile a.** This is not a retried request. No tile-a request id appears twice
+in the store trace. A repeated id would get the stored reply
+(`crates/goliath-store/src/state.rs:258-266`). The chain, in UTC:
+
+1. 17:44:06.871: crosser E17BotX20 finishes a d-to-b hand-over. The store
+   records tile b as its owner.
+2. 17:44:10.511: tile b kicks its players with `server_shutdown`.
+3. 17:44:10.515: the proxy logs `lost backend "b" ... moved to "a" in 1 ms
+   (servers tried: 1)`. Meridian's fallback (`meridian-proxy/src/fallback.rs`)
+   is on by default (`meridian-config/src/fallback.rs:17-25`). The fixture's
+   proxy config (`scripts/goliath-cluster:322-327`) does not set it.
+4. Tile a logs X20 as a normal login at (1024.5, -60.0, 1024.5), not a held
+   arrival. The player had no local generation there, so
+   `cluster_register_players` (`cluster.rs:201-250` in the patched tile source)
+   exported it and sent `CreateUuid` with a fresh request id.
+5. The store refused with `AlreadyExists` (`state.rs:423`), which is correct.
+   Tile a treats any reply other than `Committed(Generation(0))` as fatal
+   (`cluster.rs:233-238`) and panics in its tick prelude (`dedicated.rs:1340-1346`).
+   Its 96 bots go down with it.
+
+The store rows carry no operation type, so which tile-a mutation at store
+552.11 to 552.17 s is the `CreateUuid` is inferred. A hand-over of E17BotX4
+from b to a also completed placement on a while b's sidecar refused release
+for the expired lease. The proxy raised an ALERT. That event is retained
+and not analysed further here.
+
+**Platform.** The keeper weakness and the registration weakness exist on
+both machines. This machine exposes them because its barrier tail is long:
+it shares one slow volume (XFS on VDO) between the store's journal and about
+2.9 MB/s of fixture logs, and its 31 s writeback bursts reach hundreds of
+milliseconds. For the Mac soak to pass and this one to fail, the Mac's
+store stalls stayed under the 200 ms read cap, which its 41 ms maximum
+shows, and no tile lost its lease, so the fallback path never ran there.
+Neither Mac document records a fallback or `AlreadyExists` event.
+
+**Fixes, ranked.** None is built or measured.
+
+1. Code: give the renewal client a per-phase cap of lease minus margin
+   (900 ms) instead of 200 ms at `lease.rs:215`. The call deadline still
+   bounds every call, and grants stay anchored to their original send, so
+   authority is never extended. A renewal can then ride out a store stall
+   of up to about 600 ms. The same client makes tile startup's `Directory`
+   call (`lease.rs:219`), which covers M3 seed 240012 (231.8 ms reply against
+   a 207.6 ms read). Test: a stub store that replies after 400 ms is
+   granted before the call deadline, and one that never replies still
+   expires at the keeper deadline. This changes `horizon-client`, so it
+   needs a rebuild, a new bundle, a new soak and a fresh M3 campaign.
+2. Code: when registration is refused, disconnect that one player and keep
+   the tile running, at `cluster.rs:233-238`. Transport and authority errors
+   stay fatal. Test: a fresh login of a uuid the store already holds is
+   disconnected, and the tile keeps ticking with authority. Same rebuild as
+   fix 1.
+3. Condition: set `[fallback] on-kick = false` and `on-crash = false` in the
+   fixture's proxy config. The frozen `meridian --check` accepts both keys.
+   In a sharded world, a tile's players cannot be served by another tile
+   without a hand-over. This contains tile a's cascade with the frozen bundle,
+   but b's players are still lost. A short cell must confirm that wall
+   crossings do not use this path.
+4. Condition: take the bulk logs off the store's volume. Set the tiles'
+   `[anticheat] log = ""` (documented as no file), and send tile and proxy
+   stderr to tmpfs for collection afterwards. The journal stays on the data
+   volume under `--sync full`. In isolation this removes the burst tail
+   (p99.9 19.2 instead of 39.8 ms). Its effect at soak load is unmeasured.
+   Moving the store's directory to the root NVMe was not tried: house rules
+   keep runs on `/srv/ai`, the root volume's idle fsync tail is no better
+   (max 48 ms), and both volumes share one physical disk.
+
+Fixes 3 and 4 change no binary. The reviewer must decide whether they keep
+the cell comparable under D9 and D12. Fixes 1 and 2 address the weaknesses
+themselves. Without fix 1, any stall that holds renewal replies past 200 ms
+for about 650 ms can still end a tile, as in a1.
+
 ## M3 campaign
 
-Status: prepared, not measured. Reviewer reproduction will be required.
+Status: the original jobs-4 crash campaign failed; the serial refusal matrix
+passes. A separately registered jobs-1 campaign reached a requested clean
+pause after 72 completed trials, with no failed trial in that campaign.
+Its next window has not started. Pending reviewer reproduction.
 The campaign preserves E24's original E13 fault kernels, seed 240001,
 1,000 crossings, 12 partition cases and six stale-login cases. Jobs 4 share
 one four-core server cpuset and one client core. Each low-population fixture
@@ -1004,3 +1318,126 @@ startup pressure or a failed trial is retained, never silently retried.
 M3 uses its original direct `e4-client` path, without capacity bots or front
 shims. Resume is allowed only after a clean `paused-window`, with every
 admitted trial complete and the schedule unchanged.
+
+### Current requested pause
+
+The [startup diagnosis](data/E28/m3-startup-diagnosis.json) and
+[request-ID timing join](data/E28/m3-startup-read-overlap.json) identify
+seed 240012's EAGAIN on the blocking Directory response read. The store
+response took 231.83 ms: about 93.95 ms queued followed by a shared 137.66 ms
+durable barrier, beyond the client's 207.61 ms read failure. This is a real
+finding, not noise or a task-limit rejection. Seed 240011's clock writer
+used tile-a authority after its renewal outage; original rejection bytes
+were not retained, so expired-fence attribution is distinguished from a
+direct wire capture. Frozen-store live/expired controls confirm the expected
+fencing responses. Future startup records capture the exact clock replies.
+
+Three serial and 12 concurrent startup-only diagnostics all pass. That does
+not reproduce the original full fault workload or prove concurrency alone
+causal. All 60 stable native placements have allowed CPUs and last processor
+on 0 to 3. The old CPU-5 observation mixed reads across a wrapper migration
+and exec; the checked cgroup write completes before native exec. Its original
+invalid window is retained, not silently reclassified.
+
+The [fresh jobs-1 registration](data/E28/m3-fresh-jobs1-r2-plan.json) preserves
+the exact seed/phase/victim schedule and native binaries. It lowers avoidable
+simultaneous store/fsync pressure without changing timeouts, leases, fences
+or adding startup retries. The builder ran:
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28S
+python3 -u -B scripts/e24-m3 campaign --name e28-m3-j1-r2-w1 --data-name e28-m3-j1-r2 --window-name e28-m3-j1-r2-w1 --evidence-dir .local/evidence/E28/m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --seed 240001 --crossings 1000 --jobs 1 --budget-seconds 1200
+```
+
+Per the reviewer's subsequent instruction, this window was allowed to drain
+at its budget without being killed. It ended as a clean `paused-window`
+after 72 completed trials, zero failures, in 1,209.790 seconds. The
+[verified pause record](data/E28/m3/e28-m3-j1-r2-w1-pause.json) retains every
+completed trial hash. D12 is valid,
+CPU 5 is 36.97% busy and policy is restored. The original E13 checker verifies
+all 72 completed item audits. The other 928 seeds are not passes. No next
+window starts while the soak's actual cluster failures remain for direction.
+
+### Crash failures and refusal matrix
+
+The [complete M3 readback](data/E28/m3/e28-m3-results-r1.json) retains all
+12 admitted crash trials, including both failures, and all 18 matrix cases.
+The crash campaign stops at its first observed failed trial and drains the
+other admitted work. Ten trials complete and pass the original E13 item
+checker, covering 30 named stacks and 310 units, with zero duplicates,
+unaccounted losses or stale files. Two trials fail before their scheduled
+fault. The remaining 988 seeds are unattempted, not passes.
+
+| Seed | Scheduled fault | Outcome |
+| --- | --- | --- |
+| 240001 to 240010 | Original seeded phase/victim schedule | 10 complete recovery audits |
+| 240011 | fsync, target | Cluster-clock initialization failed before fault |
+| 240012 | install, both | Tile d exited during startup with `Resource temporarily unavailable` |
+| 240013 to 241000 | Unchanged retained schedule | Not attempted |
+
+Jobs 4 was selected to preserve E24's protocol, sharing one D12 budget rather
+than receiving four budgets. It is not qualified on this machine. The precise
+resource or timing cause of the startup failures is unproven. No failed seed
+was rerun and the campaign was not resumed. A new, separately authorized
+lower-concurrency campaign is needed to establish the 1,000-seed item.
+
+The first window also retains one placement snapshot pairing a server
+executable and server cgroup with allowed CPU 5. That raw window is invalid,
+not retroactively repaired. Placement capture had read process status,
+cgroup and executable at different instants. Future capture brackets those
+values, retries observed migration/exec transitions at most four times, and
+reports unresolved observations as unproven. A known pre-exec launcher is
+charged to its declared destination only after joining that cgroup. Stable
+wrong placement still fails. Tests cover both cases.
+
+The separate serial matrix completes all 12 partition and six stale-login
+cases. The original checker confirms zero accepted stale cuts, placements,
+CAS operations or returning logins, with the old processes still alive and
+the replacements running. Its D12 window is valid. Intentional crash/partition
+lease traces retain framing metadata without claiming zero authority events
+from such faulted processes.
+
+| Window | Seconds | CPU 5 busy | Largest outside process, cores | Swap-in pages | D12 | Restored |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| e28-m3-crash-w1 | 96.257 | 57.39% | 0.14966 | 2,720 | invalid placement snapshot | yes |
+| e28-m3-matrix-w1 | 233.324 | 42.22% | 0.14361 | 43 | valid | yes |
+
+Neither window has a throttle-counter rise. The matrix's outside total is
+0.20266 core. Native snapshots retain all six CPU counters, frequency ranges,
+memory endpoints and placements. The invalid crash row stays invalid despite
+its passing outside-CPU and thermal checks.
+
+`e24-m3-results` was run and exited 1 with `ValueError: campaign incomplete`.
+It did not pack or delete any trial. The published crash and matrix archives
+retain every original JSON byte sequence, individual SHA-256 and parsed
+record, with byte-identical base64 round-trip checks. There is no complete
+campaign result hidden behind the passing matrix.
+
+### Exact M3 commands
+
+The builder ran these commands, serially, with no resume:
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28S
+python3 -u -B scripts/e24-m3 campaign --name e28-m3-crash-w1 --data-name e28-m3-crash --window-name e28-m3-crash-w1 --evidence-dir .local/evidence/E28/m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --seed 240001 --crossings 1000 --jobs 4 --budget-seconds 1200
+python3 -u -B scripts/e24-m3 matrix --name e28-m3-matrix --data-name e28-m3-matrix --window-name e28-m3-matrix-w1 --evidence-dir .local/evidence/E28/m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --budget-seconds 1200
+.local/bin/host-window build E28S -- python3 -B scripts/e24-m3-results --evidence-dir .local/evidence/E28/m3 --data-dir docs/experiments/data/E28/m3 --campaign-data e28-m3-crash --campaign e28-m3-crash-w1 --matrix-data e28-m3-matrix --matrix e28-m3-matrix --name e28-m3-results-r1 --pack
+```
+
+Fresh reviewer commands below reproduce the same jobs-4 configuration,
+including its risk of startup failure. They are not a recommendation to
+silently replace the failed campaign with fewer jobs.
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28R
+python3 -u -B scripts/e24-m3 campaign --name repro-e28-m3-crash-w1 --data-name repro-e28-m3-crash --window-name repro-e28-m3-crash-w1 --evidence-dir .local/evidence/E28/reviewer-m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --seed 240001 --crossings 1000 --jobs 4 --budget-seconds 1200
+python3 -u -B scripts/e24-m3 matrix --name repro-e28-m3-matrix --data-name repro-e28-m3-matrix --window-name repro-e28-m3-matrix-w1 --evidence-dir .local/evidence/E28/reviewer-m3 --bins .local/bin/goliath-e28/final --cpu-mode pin --budget-seconds 1200
+# This rejects an incomplete or failed crash campaign:
+.local/bin/host-window build E28R -- python3 -B scripts/e24-m3-results --evidence-dir .local/evidence/E28/reviewer-m3 --data-dir docs/experiments/data/E28/reviewer-m3 --campaign-data repro-e28-m3-crash --campaign repro-e28-m3-crash-w1 --matrix-data repro-e28-m3-matrix --matrix repro-e28-m3-matrix --name repro-e28-m3-results-r1 --pack
+```
+
+If, and only if, a window ends as a clean `paused-window`, with all admitted
+trials complete, valid D12 evidence and restored policy, use a fresh `-w2`
+run/window name and `--resume-from` the immediately preceding campaign.
+Preserve its data name, seed, crossings, jobs and binary hashes. Do not resume
+the failed builder window or any actual failed seed.

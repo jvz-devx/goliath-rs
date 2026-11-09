@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Compare fresh startup-only fixtures, never replaying a crash seed or fault."""
+import argparse
+from concurrent.futures import ThreadPoolExecutor
+import gzip
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+import e11_support as support
+import e25_soak_harness as harness
+import e28_log_integrity as logs
+from e28_m3_startup import observe_clock_calls
+import e28_window as window
+import goliath_bundle as bundle
+import goliath_platform as platform
+
+ROOT=support.ROOT
+
+
+def child(args):
+    folder=ROOT/'.local/evidence/E28/m3-startup'/args.name/args.child
+    folder.mkdir(parents=True,exist_ok=False)
+    os.environ.update(GOLIATH_BIN_DIR=str(args.bins.resolve()),GOLIATH_LEASE_TRACE_DIR=str(folder),
+        GOLIATH_STORE_TRACE=str(folder/'store-batches.csv'))
+    module=harness.load('e28_startup_cluster',ROOT/'scripts/goliath-cluster')
+    logs.install_cluster(module,folder/'log-integrity')
+    calls=observe_clock_calls(module,folder)
+    result=dict(case=args.child,kind='startup-only',fault_seed=None,scheduled_fault=None,status='starting')
+    instance=None;temporary_path=None;began=time.monotonic()
+    try:
+        with tempfile.TemporaryDirectory(prefix='E28-startup-',dir=support.RUNS) as temporary:
+            temporary_path=Path(temporary)
+            try:
+                instance=module.Cluster.__new__(module.Cluster)
+                instance.__init__(Path(temporary),module.RESOURCES,64)
+                statuses={label:tile.ask('cluster-authority') for label,tile in instance.tiles.items()}
+                time.sleep(args.hold_seconds)
+                after={label:tile.ask('cluster-authority') for label,tile in instance.tiles.items()}
+                placement={label:window.process_placement(tile.server.process.pid) for label,tile in instance.tiles.items()}
+                for label,tile in instance.tiles.items():
+                    stat=(platform.PROC/str(tile.server.process.pid)/'stat').read_text()
+                    placement[label]['last_processor']=int(stat[stat.rindex(')')+2:].split()[36])
+                result.update(status='complete',authority_before=statuses,authority_after=after,native_placements=placement)
+                if any(row.get('authorized') is not True for phase in [statuses,after] for row in phase.values()):
+                    result.update(status='failed',error='authority closed during startup-only observation')
+            except BaseException as error:
+                result.update(status='failed',error=str(error))
+                if instance and hasattr(instance,'tiles'):
+                    result['tails']={label:tile.server.since(0)[-20:] for label,tile in instance.tiles.items() if hasattr(tile,'server')}
+            finally:
+                if instance and hasattr(instance,'tiles'):
+                    # Match the original M3 disposal: no final cut may rescue a fault.
+                    for tile in instance.tiles.values():
+                        if hasattr(tile,'server') and tile.server.process.poll() is None:
+                            tile.server.process.kill();tile.server.process.wait()
+                    instance.stop()
+    finally:
+        result.update(seconds=time.monotonic()-began,clock_calls=calls,
+            run_directory_removed=temporary_path is not None and not temporary_path.exists(),
+            authority_trace_integrity={path.name:logs.read_trace(path)[1] for path in folder.glob('*-lease.jsonl*')})
+        support.save(folder/'result.json',result)
+    return 0 if result['status']=='complete' else 1
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    platform.cpu_options(parser)
+    parser.add_argument('--name',required=True)
+    parser.add_argument('--bins',type=Path,default=bundle.BUNDLES/'final')
+    parser.add_argument('--jobs',default='1,4')
+    parser.add_argument('--waves',type=int,default=3)
+    parser.add_argument('--hold-seconds',type=float,default=1)
+    parser.add_argument('--child')
+    args=parser.parse_args()
+    if not args.name or any(not(c.isalnum() or c in '-_')for c in args.name):raise ValueError('simple diagnostic name required')
+    if args.child:
+        owner=ROOT/'.local/host/quiet/owner'
+        if not os.environ.get('GOLIATH_CPU_CGROUP') or not owner.exists() or owner.read_text().splitlines()[0]!=platform.window_owner(None):
+            raise RuntimeError('startup diagnostic child requires its owned pinned window')
+        return child(args)
+    if args.cpu_mode!='pin' or args.waves!=3 or args.jobs!='1,4':raise ValueError('registered diagnostic is pin, jobs1then4,3waves each')
+    folder=ROOT/'.local/evidence/E28/m3-startup'/args.name
+    if folder.exists():raise RuntimeError('fresh diagnostic name required')
+    identity=bundle.validate(args.bins,{'final'})
+    window.ready()
+    folder.mkdir(parents=True,exist_ok=False)
+    plan=dict(kind='E28-startup-only-diagnostic-plan',name=args.name,jobs=[1,4],waves=3,
+        hold_seconds=args.hold_seconds,crash_seeds_replayed=False,scheduled_faults=0,bundle=identity,
+        cpu_budget_shared=True,silent_retries=False,all_planned_startups_retained=True,
+        helper_sha256={name:bundle.sha(ROOT/'scripts'/name) for name in
+            ['e28-m3-startup-diagnostic','e28_m3_startup.py','e28_window.py','goliath_platform.py','goliath-cluster']})
+    support.save(folder/'plan.json',plan)
+    owner=platform.window_owner(None);host=ROOT/'.local/bin/host-window'
+    subprocess.run([host,'quiet',owner,args.name],check=True)
+    monitor=None;rows=[]
+    try:
+        monitor=window.WholeWindow(observer=True).start()
+        for jobs in [1,4]:
+            for wave in range(3):
+                def execute(index):
+                    case=f'j{jobs}-w{wave}-c{index}'
+                    command=[sys.executable,'-B',str(Path(__file__).resolve()),'--name',args.name,'--bins',str(args.bins),
+                        '--cpu-mode','pin','--hold-seconds',str(args.hold_seconds),'--child',case]
+                    with (folder/(case+'-driver.log')).open('x') as output:
+                        process=subprocess.run(command,stdout=output,stderr=subprocess.STDOUT)
+                    value=harness.read(folder/case/'result.json')
+                    return dict(case=case,jobs=jobs,wave=wave,exit=process.returncode,status=value['status'],error=value.get('error'))
+                with ThreadPoolExecutor(max_workers=jobs) as pool:
+                    completed=list(pool.map(execute,range(jobs)))
+                rows.extend(completed)
+                support.save(folder/'ledger.json',dict(rows=rows))
+                print(json.dumps(dict(jobs=jobs,wave=wave,rows=completed)),flush=True)
+    finally:
+        if monitor:harness.storage.save(folder/'whole-window.json',monitor.finish())
+        unchanged=bundle.validate(args.bins,{'final'})==identity
+        support.save(folder/'result.json',dict(kind='E28-startup-only-diagnostic',rows=rows,binaries_unchanged=unchanged,
+            no_crash_seed_or_fault_executed=True,qualification=False))
+        for path in folder.rglob('*.json'):
+            if path.stat().st_size>1_000_000:support.pack_json(path)
+        subprocess.run([host,'release',owner],check=True)
+    return 0
+
+
+if __name__=='__main__':raise SystemExit(main())
