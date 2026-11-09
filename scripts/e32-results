@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Build the E32 ledger: one summary per retained cell on the VM host, with its hashes.
+
+Reads only the published rows under docs/experiments/data/E32. It recomputes
+nothing the rows judge; it copies their verdicts and the figures the report
+quotes, and adds the longest raw tick, which the P99 rule does not show.
+"""
+import argparse
+import gzip
+import hashlib
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT/'docs/experiments/data/E32'
+
+
+def load(path):
+    stored = path.read_bytes()
+    raw = gzip.decompress(stored) if path.suffix == '.gz' else stored
+    return json.loads(raw), dict(path=str(path.relative_to(ROOT)), stored_sha256=hashlib.sha256(stored).hexdigest(),
+        decompressed_sha256=hashlib.sha256(raw).hexdigest(), decompressed_bytes=len(raw))
+
+
+def vm_block(d12):
+    if not d12:
+        return None
+    steal = {name:row['steal_fraction'] for name, row in d12.get('steal', {}).items()}
+    return dict(platform=d12.get('platform'), virtualization=d12.get('virtualization'), governor=d12.get('governor'),
+        valid=d12.get('valid'), reasons=d12.get('reasons'), steal_fraction=steal,
+        maximum_fixture_steal_fraction=d12.get('maximum_fixture_steal_fraction'),
+        busy_fraction={name:row['busy_fraction'] for name, row in d12['per_cpu'].items()},
+        harness_mean_busy_fraction=d12.get('harness_mean_busy_fraction'), swap_in_pages=d12.get('swap_in_pages'))
+
+
+def plain(row):
+    ticks = [tick['ms'] for tick in row['raw_ticks'][0]['ticks']] if row.get('raw_ticks') else []
+    return dict(kind='plain-09', players=row['bots'], repeat=row['repeat'], valid=row['valid'], passed=row['pass'],
+        reasons=row['reasons'], tps=row['tps'][0] if row.get('tps') else None,
+        raw_p99_ms=row['tick_p99_ms'][0] if row.get('tick_p99_ms') else None, longest_raw_tick_ms=max(ticks, default=None),
+        raw_ticks_over_100ms=sum(value > 100 for value in ticks), dropped_raw_ticks=row['raw_ticks'][0]['dropped'] if row.get('raw_ticks') else None,
+        server_cores=row.get('server_cpu_cores'), main_thread_cores=(row.get('main_thread_cpu_cores') or [None])[0],
+        bot_cores=row.get('bot_cpu_cores'), bot_late_rounds=row.get('bot_late_rounds'),
+        movement_fraction=row.get('bot_movement_fraction'), platform=row.get('outside_process_cpu', {}).get('platform'), d12=vm_block(row.get('outside_process_cpu', {}).get('d12')))
+
+
+def cluster(row):
+    count, cell = next(iter(row['cells'].items()))
+    tiles = cell.get('tick_summary') or {}
+    last = cell.get('bot_last') or {}
+    return dict(kind='cluster', players=int(count), server_bundle=(row.get('e28_bundle') or {}).get('bundle'),
+        bots_bundle=row.get('bots_bundle'), status=cell.get('status'), error=cell.get('error'),
+        valid=cell.get('noise_valid'), passed=cell.get('diagnostic_pass'), failures=cell.get('diagnostic_failures'),
+        tps=cell.get('game_time_tps'), raw_p99_ms={name:value['p99_ms'] for name, value in tiles.items()},
+        dropped_raw_ticks={name:value['dropped'] for name, value in tiles.items()},
+        server_cores=((cell.get('processes') or {}).get('phases', {}).get('steady') or {}).get('capped_server_cores'),
+        tile_cores=((cell.get('processes') or {}).get('phases', {}).get('steady') or {}).get('tile_cores'),
+        proxy_cores=(cell.get('proxy') or {}).get('cores'), platform=(cell.get('processes') or {}).get('platform'),
+        bot_cores=cell.get('bot_cores'), bot_late_rounds={name:value.get('late_rounds') for name, value in last.items()} if isinstance(last, dict) else None,
+        direct_bots_proof_sha256=row.get('direct_bots_proof_sha256'), d12=vm_block(cell.get('d12')))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--out', type=Path, default=DATA/'measurement-ledger.json')
+    args = parser.parse_args()
+    cells = {}
+    for folder in ['baseline', 'frontier', 'diag']:
+        for path in sorted((DATA/folder).glob('e32-*.json*')):
+            if path.name.endswith('.hash.json') or 'failure-native' in path.name:
+                continue
+            row, identity = load(path)
+            name = path.name.split('.json')[0]
+            summary = cluster(row) if 'cells' in row else plain(row)
+            native = next(iter((DATA/folder).glob(name+'-*failure-native.json.gz')), None)
+            if native:
+                summary['native_failure_evidence'] = load(native)[1]
+            cells[name] = dict(summary, folder=folder, row=identity)
+    soaks = {}
+    for path in sorted((DATA/'soak').glob('*-barriers.json')):
+        row, identity = load(path)
+        name = row['name']
+        run = load(DATA/'soak'/(name+'-run.json'))[0]
+        whole_path = next(iter(sorted((DATA/'soak').glob(name+'-whole-window.json*'))), None)
+        whole = load(whole_path)[0] if whole_path else {}
+        barriers = {key:value for key, value in row['store_barriers'].items() if key != 'over_50ms_rows'}
+        soaks[name] = dict(status=run.get('status'), store_barriers=barriers, renewal_replies=row['renewal_replies'],
+            early_renewals=row.get('early_renewals', dict(available=False)), authority_stops=row['authority_stops'],
+            whole_window=dict(seconds=whole.get('seconds'), valid=whole.get('valid'), restored=whole.get('restored'),
+                d12=vm_block(whole.get('d12'))), readback=identity)
+    result = dict(kind='E32-measurement-ledger', host='the VM host', cells=cells, soaks=soaks,
+        note='Every cell that started is here, failed and invalid ones included. Diagnostics in the diag folder ran with the '
+             'whole run folder on tmpfs, which removes every durability cost; they are not measurement rows.')
+    raw = json.dumps(result, indent=1)+'\n'
+    args.out.write_text(raw)
+    print(len(cells), 'cells,', len(soaks), 'soaks,', len(raw), 'bytes')
+
+
+if __name__ == '__main__':
+    main()
