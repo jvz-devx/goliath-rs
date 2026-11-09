@@ -21,6 +21,8 @@ FINAL = ['e2-horizon-input-trace', 'horizon-01-tile-cut', 'horizon-02-tile-owner
          'horizon-03-cluster', 'horizon-05-m2', 'horizon-06-leases', 'horizon-07-observer-status',
          'horizon-03-bots', 'horizon-04-digest', 'horizon-08-m4-measurement',
          'horizon-09-flat-light', 'horizon-13-lease-renewal-r2', 'horizon-10-warm-tick']
+# The soak-failure fixes on top of FINAL: lease read deadline, then registration refusal.
+FINAL_R2 = FINAL + ['horizon-22-lease-read-deadline', 'horizon-23-registration-refusal']
 PROXY = ['e2-meridian-client', 'meridian-01-wall-trigger', 'meridian-02-fast-crossing',
          'meridian-03-cluster', 'meridian-04-m2', 'meridian-05-proxy-cost', 'meridian-06-io-pool']
 SETTINGS = {'CARGO_INCREMENTAL': '0', 'RUSTC_WRAPPER': '', 'CARGO_BUILD_JOBS': '6',
@@ -270,7 +272,7 @@ def run(label, directory, command):
     if command[:2] == ['cargo', 'test'] and (resources / 'horizon-resources.json').is_file():
         env['HORIZON_TEST_RESOURCES'] = str(resources)
         settings['HORIZON_TEST_RESOURCES'] = sanitize(str(resources))
-    full = [str(ROOT / '.local/bin/host-window'), 'build', 'B', '--', *command]
+    full = [str(ROOT / '.local/bin/host-window'), 'build', os.environ.get('E28_WINDOW_NAME', 'B'), '--', *command]
     log = EVIDENCE / 'build-logs' / (label + '.log')
     log.parent.mkdir(parents=True, exist_ok=True)
     if log.exists():
@@ -878,6 +880,8 @@ def gates(label):
         commands += [('lease-tests', ['cargo', 'test', *common, '-p', 'horizon-client', '--lib', 'game::dedicated::cluster::lease::']),
                      ('warm-tests', ['cargo', 'test', *common, '-p', 'horizon-client', '--lib', 'game::dedicated::tile_cut::tests::']),
                      ('clippy', ['cargo', 'clippy', *common, '-p', 'horizon-client', '--lib', '--', '-D', 'warnings'])]
+        if label == 'final-r2':
+            commands += [('registration-tests', ['cargo', 'test', *common, '-p', 'horizon-client', '--lib', 'game::dedicated::cluster::tests::'])]
         if label == 'final-lite':
             commands += [('lite-tests', ['cargo', 'test', *common, '-p', 'horizon-client', '--lib', 'game::dedicated::e26_lite::tests::']),
                          ('clock-clippy', ['cargo', 'clippy', *common, '-p', 'horizon-client-render', '--example', 'e26_clock_probe', '--', '-D', 'warnings'])]
@@ -976,9 +980,98 @@ def build(label):
             raise RuntimeError('Source changed beyond the variant overlay')
 
 
+def freeze_r2(gate_records):
+    """Freeze final-r2: final's bundle with the fixed tile, every other file byte-identical."""
+    label = 'final-r2'
+    folder = ROOT / '.local/bin/goliath-e28' / label
+    if folder.exists():
+        raise RuntimeError('final-r2 is already frozen')
+    base = json.loads((DATA / 'build-final.json').read_text())
+    inputs = json.loads((DATA / 'final-r2-inputs.json').read_text())
+    anchor = json.loads((DATA / 'build-manifest.json').read_text())
+    final = anchor['bundles']['final']
+    tree = ROOT / '.local/src/horizon-tiles'
+    horizon = dict(base['projects']['horizon'], patches=patches_for(FINAL_R2, tiles=True))
+    horizon['source_files'] = dict(horizon['source_files'], **inputs['changed_source_files'])
+    if horizon['patches'][-2:] != inputs['patches'] or horizon['patches'][:-2] != base['projects']['horizon']['patches']:
+        raise RuntimeError('final-r2 patch order or bytes differ from its pinned inputs')
+    if compiled_inputs(sources(tree)) != horizon['source_files']:
+        raise RuntimeError('Tile tree is not final plus patches 22 and 23')
+    release = json.loads((EVIDENCE / 'commands' / (label + '-release.json')).read_text())
+    if release['exit'] or release['settings'] != SETTINGS:
+        raise RuntimeError('final-r2 release failed or used other settings than final')
+    gates = [json.loads(Path(path).read_text()) for path in gate_records]
+    if not gates or gates[-1]['stack'] != label or gates[-1]['status'] != 'passed':
+        raise RuntimeError('final-r2 needs a passed remote gate record')
+    if gates[-1]['source']['compiled_sources_sha256'] != hashlib.sha256(json.dumps(horizon['source_files'], sort_keys=True).encode()).hexdigest():
+        raise RuntimeError('Remote gates checked other sources than the frozen tile')
+    folder.mkdir(parents=True)
+    staged = folder / 'horizon-client.new'
+    shutil.copy2(tree / 'target/release/horizon-client', staged)
+    os.replace(staged, folder / 'horizon-client')
+    for name in ['horizon-bots', 'meridian', 'meridian-sidecar', 'goliath-store', 'e4-client', 'cluster-launcher.py']:
+        source = ROOT / final['path'] / name
+        if sha(source) != final['files'][name]:
+            raise RuntimeError('Final bundle file changed: ' + name)
+        os.link(source, folder / name)
+    (folder / 'LEASES').touch()
+    binaries = dict(base['binaries'], **{'horizon-client': sha(folder / 'horizon-client')})
+    required = ['horizon-client', 'meridian', 'meridian-sidecar', 'goliath-store', 'e4-client']
+    write(folder / 'manifest.json', {name: binaries[name] for name in required})
+    write(folder / 'FINAL.json', {'schema_version': 1,
+                                 'binaries': {name: {'path': str((folder / name).relative_to(ROOT)), 'sha256': binaries[name]} for name in required},
+                                 'launcher': {'leased_marker': True, 'sha256': sha(folder / 'cluster-launcher.py')},
+                                 'store_binary_sha256': binaries['goliath-store']})
+    keep = ['label', 'command', 'cwd', 'exit', 'seconds', 'status', 'test_results', 'passed_tests', 'expected_tests', 'log_sha256']
+    remote = [{'stack': row['stack'], 'status': row['status'], 'profile': row['profile'], 'rustc': row['rustc'],
+               'recipe_sha256': row['recipe_sha256'], 'runner_sha256': row['runner_sha256'],
+               'disposition_sha256': row['disposition_sha256'], 'resources_manifest_sha256': row.get('resources_manifest_sha256'),
+               'seconds': row['seconds'], 'source': {key: row['source'][key] for key in
+                   ['pin', 'patches', 'compiled_sources_match_e28', 'compiled_sources_sha256', 'internal_sources_sha256', 'internal_source_differences']},
+               'gates': [{key: gate.get(key) for key in keep} for gate in row['gates']]} for row in gates]
+    inherited = [row for row in base['commands'] if row['label'].startswith(('proxy-', 'root-'))]
+    failed = sorted({gate['label'] for row in gates[-1:] for gate in row['gates'] if gate['status'] == 'failed'}
+                    | set(base['failed_gates']))
+    record = {'kind': 'E28-fix-linux-release', 'schema_version': 1, 'bundle': label, 'status': 'complete',
+              'profile': 'release', 'incremental': False, 'lto': 'thin', 'codegen_units': 1, 'settings': SETTINGS,
+              'settings_scope': 'The tile only; every other bundle file is final\'s, hard-linked byte-identical.',
+              'directory': str(folder.relative_to(ROOT)), 'base_bundle': 'final',
+              'base_build_record_sha256': sha(DATA / 'build-final.json'),
+              'projects': {'horizon': horizon, 'meridian': base['projects']['meridian']},
+              'internal_crates': base['internal_crates'],
+              'internal_crates_note': 'The tile compiles the goliath-store and goliath-model libraries from these files. HEAD differs from them only in crates/goliath-store/src/main.rs, the store binary, which the tile does not compile.',
+              'internal_crates_now': {name: sha(ROOT / name) for name in base['internal_crates']['files'] if (ROOT / name).is_file()},
+              'source_equality': 'passed',
+              'source_equality_scope': 'Compiled tile inputs equal final plus patches 22 and 23, checked before freezing; other binaries are final\'s bytes.',
+              'rustc': subprocess.check_output(['rustc', '-Vv'], text=True).strip(), 'machine': machine(),
+              'cargo': subprocess.check_output(['cargo', '-V'], text=True).strip(),
+              'commands': inherited + [release], 'remote_gates': remote,
+              'remote_gates_scope': 'Tile gates on a boat sandbox with --profile fast from the pinned stack. Proxy and root gates are final\'s, inherited because those binaries are byte-identical.',
+              'verification_status': 'failed' if failed else 'passed', 'failed_gates': failed,
+              'failed_gate_note': 'Only final\'s inherited, reviewer-disposed toolchain lint drift; no final-r2 tile gate failed.',
+              'binaries': binaries, 'pending_gates': [],
+              'review_status': 'awaiting independent reproduction',
+              'linux_clocks': base['linux_clocks'],
+              'verification_limits': ['No live lease smoke, soak, M3 or frontier run in this build task.',
+                                      'Lease timing tests ran on shared sandbox vCPUs, not the measurement host.'],
+              'gate_disposition': {'path': 'docs/experiments/data/E28/gate-disposition.json',
+                                   'sha256': sha(DATA / 'gate-disposition.json')}}
+    write(DATA / ('build-' + label + '.json'), record)
+    shutil.copy2(DATA / ('build-' + label + '.json'), folder / 'build.json')
+    canonical = {'schema_version': 1, 'platform': 'linux', 'source_equality': 'passed',
+                 'projects': record['projects'], 'internal_crates': record['internal_crates'],
+                 'binaries': binaries, 'review_status': record['review_status']}
+    write(folder / 'canonical.json', canonical)
+    write(folder / 'candidate.json', canonical)
+    anchor['bundles'][label] = {'path': str(folder.relative_to(ROOT)), 'binaries': binaries,
+                               'files': {path.name: sha(path) for path in sorted(folder.iterdir()) if path.is_file()}}
+    write(DATA / 'build-manifest.json', anchor)
+    state(f'{label}: bundle frozen, horizon-client {binaries["horizon-client"]}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare', 'compare', 'run', 'apply', 'reverse', 'source', 'build', 'freeze', 'remaining', 'cleanup', 'finish-checks', 'finish-proxy-port', 'finish-store-profile', 'verify', 'dependency', 'finish-running-gate', 'fast-stamps-gates', 'update-gate-records', 'stage-shared', 'finish-proxy-release', 'proxy-fast-gates', 'restore-reactor', 'rebuild-reactor', 'reviewed-refreeze'])
+    parser.add_argument('action', choices=['prepare', 'compare', 'run', 'apply', 'reverse', 'source', 'build', 'freeze', 'remaining', 'cleanup', 'finish-checks', 'finish-proxy-port', 'finish-store-profile', 'verify', 'dependency', 'finish-running-gate', 'fast-stamps-gates', 'update-gate-records', 'stage-shared', 'finish-proxy-release', 'proxy-fast-gates', 'restore-reactor', 'rebuild-reactor', 'reviewed-refreeze', 'freeze-r2'])
     parser.add_argument('args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.action == 'prepare':
@@ -1019,6 +1112,8 @@ def main():
         rebuild_reactor()
     elif args.action == 'reviewed-refreeze':
         freeze(reviewed=True)
+    elif args.action == 'freeze-r2':
+        freeze_r2(args.args)
     elif args.action == 'remaining':
         run('cargo-version', '.', ['cargo', '-V'])
         for label in ['plain-09', 'root', 'proxy', 'final', 'final-lite', 'final-stamps']:

@@ -1,0 +1,27 @@
+{
+  "kind": "E28-final-r2-gate-inputs",
+  "schema_version": 1,
+  "base_bundle": "final",
+  "note": "Pins the two soak-failure fixes applied after the final stack, so remote gates can reconstruct final-r2 before its bundle is frozen.",
+  "patches": [
+    {
+      "path": "patches/horizon-22-lease-read-deadline.patch",
+      "sha256": "303a6fd91381c6cf6ae8ab64fd199b8ad30657f5bcf50449d70ba944dd7e64c2",
+      "apply_options": []
+    },
+    {
+      "path": "patches/horizon-23-registration-refusal.patch",
+      "sha256": "38fe9809bce252b63232d2dec91b301207264932d1edb98b89bd458d83d7f7e2",
+      "apply_options": []
+    }
+  ],
+  "changed_source_files": {
+    "crates/horizon-client/src/game/dedicated/cluster.rs": "b78fba589c4a3a8f8f7bbcca33be037744e1892df8ce63b25215c00793e84aab",
+    "crates/horizon-client/src/game/dedicated/cluster/lease.rs": "5b87ffe455794ed6ffbaba2ae5523f46f7b6a745efc94b5c031a905882f0601f"
+  },
+  "expected_tests": {
+    "final-r2-lease-tests": 9,
+    "final-r2-warm-tests": 3,
+    "final-r2-registration-tests": 2
+  }
+}

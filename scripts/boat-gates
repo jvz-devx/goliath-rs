@@ -58,8 +58,14 @@ def reconstruct(stack, source):
     plain = stack == 'plain-09'
     proxy = stack == 'proxy'
     directory = 'meridian' if proxy else 'horizon' if plain else 'horizon-tiles'
-    bundle = 'final' if proxy else stack
+    bundle = 'final' if proxy or stack == 'final-r2' else stack
     record = json.loads((DATA / ('build-' + bundle + '.json')).read_text())
+    if stack == 'final-r2':
+        # Final's pinned stack plus the two soak-failure fixes, before final-r2 is frozen.
+        inputs = json.loads((DATA / 'final-r2-inputs.json').read_text())
+        record['projects']['horizon']['patches'] = record['projects']['horizon']['patches'] + inputs['patches']
+        record['projects']['horizon']['source_files'] = dict(record['projects']['horizon']['source_files'],
+                                                             **inputs['changed_source_files'])
     # Root sync intentionally excludes .git. Internal inputs are the synced
     # crate/config files, not a Git inventory inside the sandbox.
     inputs = [ROOT / name for name in ['Cargo.toml', 'Cargo.lock', 'clippy.toml']]
@@ -72,7 +78,7 @@ def reconstruct(stack, source):
                    if internal.get(name) != historical.get(name)}
     project = record['projects']['meridian' if proxy else 'horizon']
     pin = source.MERIDIAN if proxy else source.HORIZON
-    base = source.PROXY if proxy else source.PLAIN if plain else source.FINAL
+    base = source.PROXY if proxy else source.PLAIN if plain else source.FINAL_R2 if stack == 'final-r2' else source.FINAL
     patches = project['patches']
     assert project['pin'] == pin
     assert [Path(row['path']).stem for row in patches[:len(base)]] == base
@@ -163,6 +169,8 @@ def execute(stack, commands, destination):
                CARGO_PROFILE_FAST_CODEGEN_UNITS='16', CARGO_PROFILE_FAST_DEBUG='0')
     env.setdefault('HORIZON_TEST_RESOURCES', str(Path.home() / '.local/share/goliath-resources/26.3'))
     expected = json.loads((DATA / 'build-verification.json').read_text())['native_tests_passed']
+    if stack == 'final-r2':
+        expected = dict(expected, **json.loads((DATA / 'final-r2-inputs.json').read_text())['expected_tests'])
     rows = []
     for label, directory, command in commands:
         if '--release' in command or command[:2] == ['cargo', 'build']:
@@ -199,7 +207,7 @@ def execute(stack, commands, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('stack', choices=['plain-09', 'final', 'final-lite', 'final-stamps', 'reactor-1', 'proxy', 'root'])
+    parser.add_argument('stack', choices=['plain-09', 'final', 'final-r2', 'final-lite', 'final-stamps', 'reactor-1', 'proxy', 'root'])
     parser.add_argument('--plan', action='store_true', help='print commands without resetting or building')
     parser.add_argument('--prepare-only', action='store_true')
     parser.add_argument('--output', type=Path, help='JSON under .local/boat-gates; defaults to a unique run name')

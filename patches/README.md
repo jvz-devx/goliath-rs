@@ -436,3 +436,29 @@ do not replace the accepted measurement stack or qualify an availability fix.
   dependency for Linux, and enables the decode-before-dispatch test there.
   Timing points and trace format are unchanged. Measurement only, not part of
   any production stack. See [E28](../docs/experiments/E28-linux.md).
+
+- `horizon-22-lease-read-deadline.patch`: E28's fix for the renewal read cap, applied
+  after the final stack (FINAL-09, `horizon-13-lease-renewal-r2.patch`, patch 10). The
+  lease client's per-phase cap was 200 ms, so one 409.5 ms store fsync made three
+  granted renewals look failed and tile b lost its lease in `e28-soak-r1-a1`. The cap is
+  now lease minus margin (900 ms at the defaults). A renewal call still ends at its call
+  deadline, the keeper deadline minus the 50 ms RPC slack, and a grant still counts from
+  its original send, so authority never extends past what the grant allows. The keeper
+  loop moves unchanged into its own function so tests can run it against a stub store;
+  rustfmt reformats the moved block. The same client makes the startup `Directory`,
+  `CheckLease`, `BeginTakeover` and `ClaimLease` calls, which may now wait up to 900 ms
+  per phase and 2.7 s per call. The cluster player client is separate and unchanged.
+  Tests: a 400 ms stalled grant is installed and anchored to its send, a grant after the
+  deadline is never installed, an unanswered renewal cannot hold the action gate open,
+  the generic margin guard, and a 300 ms startup `Directory` reply. See
+  [E28](../docs/experiments/E28-linux.md).
+
+- `horizon-23-registration-refusal.patch`: E28's fix for the registration panic, applied
+  after patch 22. When the store refuses a new login's `CreateUuid` with `AlreadyExists`,
+  the tile disconnects that one player (`multiplayer.disconnect.duplicate_login`), marks
+  it released and logs `E28_REGISTRATION_REFUSED`. A released player gains no generation
+  and the leave path writes no player file, stats or advancements for it. The store
+  checks the tile's fence before its player table, so this refusal does not mean lost
+  authority. Every other reply, including stale fence and expired lease, stays an error
+  that stops the tile as before. Tests cover the refused login, a registered one beside
+  it, and every other store fault.

@@ -1,0 +1,191 @@
+diff --git a/crates/horizon-client/src/game/dedicated/cluster.rs b/crates/horizon-client/src/game/dedicated/cluster.rs
+index 12f308a..a840832 100644
+--- a/crates/horizon-client/src/game/dedicated/cluster.rs
++++ b/crates/horizon-client/src/game/dedicated/cluster.rs
+@@ -1,6 +1,6 @@
+ //! Store authority checks and generation-aware player recovery for a cluster tile.
+-use goliath_store::{Blob, Client, Fence, Generation, Operation, PlayerKey, Response};
+-use horizon_client::{Result, save};
++use goliath_store::{Blob, Client, Fence, Generation, Operation, PlayerKey, Response, StoreFault};
++use horizon_client::{Result, lan::guest::Guest, save};
+ use horizon_world::nbt::{self, Limits, Tag};
+ use serde_json::{Value, json};
+ use std::{path::Path, time::Duration};
+@@ -204,19 +204,10 @@ impl crate::game::Game<'_> {
+         };
+         // Includes returning saved generations. A saved generation never grants authority.
+         require()?;
+-        let uuids: Vec<_> = self
++        let uuids = self
+             .lan
+             .as_ref()
+-            .map(|h| {
+-                h.hub
+-                    .guests
+-                    .iter()
+-                    .filter(|g| {
+-                        g.placed && !g.released && local_generation(g.saved.as_ref()).is_none()
+-                    })
+-                    .map(|g| g.uuid)
+-                    .collect()
+-            })
++            .map(|h| unregistered(&h.hub.guests))
+             .unwrap_or_default();
+         for uuid in uuids {
+             let id = horizon_protocol::crypto::uuid_string(uuid);
+@@ -228,22 +219,145 @@ impl crate::game::Game<'_> {
+                 version: 1,
+                 bytes: serde_json::to_vec(&json!({"record":reply["record"]}))?,
+             };
+-            match client.execute(Operation::CreateUuid {
++            let reply = client.execute(Operation::CreateUuid {
+                 player: PlayerKey(uuid),
+                 owner: fence,
+                 blob,
+-            })? {
+-                Response::Committed(Generation(0)) => {}
+-                other => return Err(format!("new player registration failed: {other:?}").into()),
++            })?;
++            if let Some(h) = self.lan.as_mut() {
++                settle_registration(&mut h.hub.guests, uuid, reply)?;
+             }
+-            if let Some(g) = self
+-                .lan
+-                .as_mut()
+-                .and_then(|h| h.hub.guests.iter_mut().find(|g| g.uuid == uuid))
+-            {
++        }
++        Ok(())
++    }
++}
++
++/// Placed logins this tile has not registered: no generation, and not on their way out.
++fn unregistered(guests: &[Guest]) -> Vec<u128> {
++    guests
++        .iter()
++        .filter(|g| g.placed && !g.released && local_generation(g.saved.as_ref()).is_none())
++        .map(|g| g.uuid)
++        .collect()
++}
++
++/// Applies one `CreateUuid` reply to the new login `uuid`. The store checks this tile's
++/// fence before its player table, so `AlreadyExists` refuses this player alone: a record
++/// for it exists already, owned by this or another tile. The login leaves released, so
++/// it gains no ownership and no player file or record is written for it here. Any other
++/// refusal, a stale fence or an expired lease among them, stays an error that stops the tile.
++fn settle_registration(guests: &mut [Guest], uuid: u128, reply: Response) -> Result<()> {
++    let guest = guests.iter_mut().find(|g| g.uuid == uuid);
++    match reply {
++        Response::Committed(Generation(0)) => {
++            if let Some(g) = guest {
+                 mark(&mut g.saved, 0)?;
+             }
+         }
+-        Ok(())
++        Response::Fault(StoreFault::AlreadyExists) => {
++            let id = horizon_protocol::crypto::uuid_string(uuid);
++            eprintln!(
++                "E28_REGISTRATION_REFUSED {}",
++                json!({"uuid":id,"fault":"AlreadyExists","placed":guest.is_some()})
++            );
++            if let Some(g) = guest {
++                g.released = true;
++                g.left_reason =
++                    "cluster registration refused: the store already holds this player".into();
++                g.sender.disconnect(horizon_protocol::text::translatable(
++                    "multiplayer.disconnect.duplicate_login",
++                    &[],
++                ));
++            }
++        }
++        other => return Err(format!("new player registration failed: {other:?}").into()),
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use horizon_client::lan::{Joined, Out, PlayerSender};
++    use horizon_protocol::packets::configuration::ClientInformation;
++    use std::sync::{
++        Arc,
++        atomic::AtomicI32,
++        mpsc::{Receiver, channel},
++    };
++
++    /// A placed new login with no generation, and the end of its connection.
++    fn login(uuid: u128) -> (Guest, Receiver<Out>) {
++        let (tx, rx) = channel();
++        let mut guest = Guest::new(
++            Joined {
++                conn: uuid as u32,
++                uuid,
++                name: format!("Login{uuid}"),
++                properties: Vec::new(),
++                info: ClientInformation::new(4),
++                brand: "vanilla".into(),
++                sender: PlayerSender::new(tx, Arc::default()),
++                latency: Arc::new(AtomicI32::new(0)),
++                address: "127.0.0.1:25565".parse().unwrap(),
++                expected: false,
++                configured: Default::default(),
++            },
++            uuid as i32,
++            [0.5, 64.0, 0.5],
++            4,
++        );
++        guest.placed = true;
++        (guest, rx)
++    }
++
++    fn disconnected(out: &Receiver<Out>) -> bool {
++        out.try_iter().any(|m| matches!(m, Out::Disconnect(_)))
++    }
++
++    #[test]
++    fn a_refused_registration_disconnects_only_that_login() {
++        let (held, held_out) = login(1);
++        let (fresh, fresh_out) = login(2);
++        let mut guests = vec![held, fresh];
++        assert_eq!(unregistered(&guests), [1, 2]);
++        let refused = Response::Fault(StoreFault::AlreadyExists);
++        settle_registration(&mut guests, 1, refused).unwrap();
++        settle_registration(&mut guests, 2, Response::Committed(Generation(0))).unwrap();
++        // Released: the leave path saves no player file, stats or advancements for it.
++        assert!(guests[0].released);
++        assert_eq!(local_generation(guests[0].saved.as_ref()), None);
++        assert!(disconnected(&held_out));
++        assert!(!guests[1].released);
++        assert_eq!(local_generation(guests[1].saved.as_ref()), Some(0));
++        assert!(!disconnected(&fresh_out));
++        // Neither is sent to the store again on the next tick.
++        assert!(unregistered(&guests).is_empty());
++    }
++
++    #[test]
++    fn refusals_that_are_not_about_the_player_stay_fatal() {
++        let faults = [
++            StoreFault::StaleFence,
++            StoreFault::LeaseExpired,
++            StoreFault::LeaseRequired,
++            StoreFault::LeaseDraining,
++            StoreFault::LeaseBusy,
++            StoreFault::RequestConflict,
++            StoreFault::Limit,
++            StoreFault::GenerationConflict,
++            StoreFault::MissingPlayer,
++            StoreFault::RenewalReplay,
++        ];
++        let others = [Response::Committed(Generation(1)), Response::Ok];
++        for reply in faults.map(Response::Fault).into_iter().chain(others) {
++            let (guest, out) = login(1);
++            let mut guests = vec![guest];
++            assert!(settle_registration(&mut guests, 1, reply).is_err());
++            assert!(!guests[0].released);
++            assert_eq!(local_generation(guests[0].saved.as_ref()), None);
++            assert!(!disconnected(&out));
++            assert_eq!(unregistered(&guests), [1]);
++        }
+     }
+ }

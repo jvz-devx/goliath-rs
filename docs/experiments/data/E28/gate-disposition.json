@@ -14,19 +14,19 @@
     "root-clippy": {
       "accepted": true,
       "class": "toolchain-lint",
-      "bundles": ["final", "final-lite", "final-stamps"],
+      "bundles": ["final", "final-r2", "final-lite", "final-stamps"],
       "reason": "rustc 1.99 deprecates AtomicUsize::fetch_update (renamed try_update) at crates/goliath-store/src/main.rs:345. The store is built from repository HEAD unchanged; the rename is made in the repository after the E28 binaries are frozen."
     },
     "proxy-fmt": {
       "accepted": true,
       "class": "toolchain-lint",
-      "bundles": ["final", "final-lite", "final-stamps"],
+      "bundles": ["final", "final-r2", "final-lite", "final-stamps"],
       "reason": "Whole-workspace rustfmt reports formatting in meridian-testkit/src/bin/e2-client.rs. The scoped proxy formatting gate passes."
     },
     "proxy-clippy": {
       "accepted": true,
       "class": "toolchain-lint",
-      "bundles": ["final", "final-lite", "final-stamps"],
+      "bundles": ["final", "final-r2", "final-lite", "final-stamps"],
       "reason": "rustc 1.99 deprecates fetch_update in crates/meridian-net/src/io_pool.rs from meridian-06-io-pool.patch. The rename would raise Meridian's declared MSRV, so the proxy is built from the documented reactor-1 patches without it."
     }
   }

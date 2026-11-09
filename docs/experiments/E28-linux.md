@@ -1304,6 +1304,128 @@ the cell comparable under D9 and D12. Fixes 1 and 2 address the weaknesses
 themselves. Without fix 1, any stall that holds renewal replies past 200 ms
 for about 650 ms can still end a tile, as in a1.
 
+### Fixes for the soak failure
+
+Status: built and gated by the builder, not yet reproduced by the reviewer.
+Nothing has been measured with these fixes. The soak, a fresh M3 campaign and
+a frontier check come next, on the unchanged fixture.
+
+Two tile patches follow the final stack (FINAL-09,
+`horizon-13-lease-renewal-r2.patch`, patch 10), in this order:
+
+1. `horizon-22-lease-read-deadline.patch` fixes the renewal read cap. The
+   lease client's per-phase cap goes from 200 ms to lease minus margin,
+   900 ms at the defaults. Renewals still pass `call_before` with the call
+   deadline, which is the keeper deadline minus the 50 ms RPC slack, so the
+   call deadline binds first. A grant still counts from its original send
+   (`LeaseKeeper::observe`), and the post-check still refuses a grant
+   observed after the old deadline. A slow reply can therefore install a
+   grant only inside the window that grant already allowed. The action gate
+   reads and latches the keeper deadline under the state lock, and the
+   keeper never holds that lock across store IO, so an outstanding read
+   cannot delay the latch. The renewal loop moves unchanged into its own
+   function, `keep`, so the tests can run it against a stub store. rustfmt
+   reformats the moved block; no statement changed.
+2. `horizon-23-registration-refusal.patch` fixes the registration panic.
+   When the store answers a new login's `CreateUuid` with `AlreadyExists`,
+   the tile disconnects that one player
+   (`multiplayer.disconnect.duplicate_login`), marks it released and logs
+   `E28_REGISTRATION_REFUSED`. A released player gets no generation, is not
+   sent to the store again, and the leave path writes no player file, stats
+   or advancements for it. The store checks the tile's fence before its
+   player table, so this refusal says nothing about the tile's authority.
+   Every other reply, stale fence and expired lease included, still returns
+   an error, and the tick prelude still panics on it while the local lease
+   allows actions.
+
+A refused guest leaves through the normal leave path with the same `Guest`
+value. The hub boxes it into `HostEvent::Left` (`lan/hub.rs:2323-2326`), the
+game handles that event (`game/lan.rs:2194`) and calls `save_guest`
+(`game/lan.rs:2222`). `save_guest` writes the player file, autosave and
+native save only for `placed && !released` (`game/lan.rs:1554`), and
+`save_guest_records` returns early for a released guest (`game/lan.rs:1717`).
+Tile-cut checkpoints also skip released guests (`game/dedicated/tile_cut.rs:902`).
+The tile's only player-store mutation is the `CreateUuid` in
+`cluster_register_players`, which skips released guests, so no disconnect
+path in the tile writes to the store. Hand-over writes belong to the sidecar
+and were not re-examined here. Line numbers refer to the final-r2 tree.
+
+Every user of the lease client changes. The cluster player client
+(`cluster.rs`, 3 s and 3 attempts) is a separate handle and does not.
+
+| Call | Before | After |
+| --- | --- | --- |
+| `RenewLease` | 200 ms read, then `WouldBlock` | Waits until the call deadline, at most keeper deadline minus 50 ms |
+| Startup `Directory` | 200 ms per phase, 600 ms per call | 900 ms per phase, 2.7 s per call; M3 seed 240012's 231.8 ms reply now succeeds |
+| Startup `CheckLease`, `BeginTakeover` | Same as `Directory` | Same as `Directory` |
+| `ClaimLease` | A reply after 200 ms failed and the 10 s claim loop retried | A reply before sent + 900 ms installs a grant counted from that send; later ones still fail `observe` |
+
+The tests run the real renewal loop against a loopback stub store and sample
+the action gate every millisecond. A check that allowed actions is always
+timed before the deadline, and the first refusal falls at or after it,
+within 250 ms.
+
+| Test | What it shows |
+| --- | --- |
+| `a_stalled_grant_before_the_call_deadline_counts_from_its_original_send` | A 400 ms reply is installed. Its deadline is at most the store's receive time plus 900 ms, so it counts from the send, not the reply. The old 200 ms cap would have dropped it. |
+| `a_grant_arriving_after_the_deadline_is_never_installed` | A 1,200 ms reply never moves the deadline, and the gate closes on the original deadline. |
+| `an_unanswered_renewal_cannot_hold_the_gate_open` | With a read outstanding until the call deadline, no gate check takes 50 ms or more, and the gate closes on time. |
+| `margin_guard_charges_twice_the_lease_per_thousand` | The non-macOS margin guard rejects 999,000 ns and accepts 999,001 ns for a 500 ms lease. |
+| `startup_directory_waits_past_the_old_read_cap` | A 300 ms `Directory` reply succeeds. |
+| `a_refused_registration_disconnects_only_that_login` | The refused login is released, unmarked and sent a disconnect. A login beside it registers at generation 0. Neither is retried. |
+| `refusals_that_are_not_about_the_player_stay_fatal` | Ten other store faults, `Committed(1)` and `Ok` all return an error and leave the login untouched. |
+
+The test for an outstanding read covers a read that ends at the call
+deadline. A read can outlast the keeper deadline only through a process
+pause, which no test simulates. In that case the gate still latches on its
+own clock, and the post-check refuses a grant observed late.
+
+**Gates.** `boat-home run --wait -- scripts/boat-gates final-r2` passed on a
+fork of the gate home with rustc 1.99.1 and `--profile fast`: fmt; lease
+tests, 9 passed; warm tests, 3 passed; clippy `-D warnings` on the lib, no
+diagnostics; registration tests, 2 passed. The runner rebuilt the stack from
+the pin and checked every patch hash and the compiled sources against
+[final-r2-inputs.json](data/E28/final-r2-inputs.json). Lease timing tests
+ran on shared sandbox vCPUs, not this host.
+
+**Bundle.** `.local/bin/goliath-e28/final-r2` is final's layout with a new
+`horizon-client`, built here in release with final's settings (ThinLTO, one
+codegen unit, six jobs, no incremental, empty `RUSTC_WRAPPER`; cargo took
+34 min 14 s). A first attempt was stopped by a service restart about five
+minutes in, before any binary existed; its partial target was deleted and
+the build ran once more from cold. Every other
+file is a hard link to final's bytes. The [build record](data/E28/build-final-r2.json)
+holds the pins, the ordered patch hashes, the boat gate results and the
+binary hashes. Its failed gates are final's inherited root and proxy lint
+drift. The [gate disposition](data/E28/gate-disposition.json) now lists
+final-r2 for those three entries and nothing else.
+
+| Binary | SHA-256 |
+| --- | --- |
+| `horizon-client` (final-r2) | `673fd535a946ae0b909e5ba62e897f141fccde006eb00b637058894bf06b7162` |
+| `horizon-client` (final) | `1614a5f60b87b44e1cb08c28aae6925539dc30ff5572c9fe06e723cfe3f2e9a0` |
+| Others | Unchanged from final |
+
+The final-stamps and final-lite tiles run the same keeper and registration
+code, and patches 22 and 23 touch no file those variants change. Neither
+variant was rebuilt. A latency or lite measurement under lease load would
+need them rebuilt with the fixes. The soak, frontier and slope runners name
+the `final` bundle directly, so measuring final-r2 needs runner changes,
+though no fixture change.
+
+Commands:
+
+```sh
+boat-home run --wait -- scripts/boat-gates final-r2
+boat-home done
+E28_WINDOW_NAME=E28F python3 -B scripts/e28-build run final-r2-release .local/src/horizon-tiles -- cargo build --locked --release --no-default-features -p horizon-client --bin horizon-client
+python3 -B scripts/e28-build freeze-r2 .local/evidence/E28/boat-gates/final-r2-20261109T191000Z.json
+python3 -B -c 'import sys; sys.path.insert(0, "scripts"); import goliath_bundle; print(goliath_bundle.validate(".local/bin/goliath-e28/final-r2")["binaries"]["horizon-client"])'
+```
+
+`scripts/e28-build run` builds through `.local/bin/host-window build E28F`
+with `CARGO_INCREMENTAL=0` and `RUSTC_WRAPPER=` empty.
+
 ## M3 campaign
 
 Status: the original jobs-4 crash campaign failed; the serial refusal matrix

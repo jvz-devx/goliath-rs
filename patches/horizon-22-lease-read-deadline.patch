@@ -1,0 +1,506 @@
+diff --git a/crates/horizon-client/src/game/dedicated/cluster/lease.rs b/crates/horizon-client/src/game/dedicated/cluster/lease.rs
+index f4a7d55..83ec86c 100644
+--- a/crates/horizon-client/src/game/dedicated/cluster/lease.rs
++++ b/crates/horizon-client/src/game/dedicated/cluster/lease.rs
+@@ -28,6 +28,13 @@ enum RenewalTurn {
+     },
+ }
+ 
++/// One phase of a lease-client call may wait as long as a grant can stay usable, lease
++/// minus margin. Renewals also pass their call deadline, the keeper deadline minus the
++/// RPC slack, which always binds first. A late grant still counts from its original send.
++fn read_cap(lease_ms: u64, margin: Duration) -> Duration {
++    Duration::from_millis(lease_ms).saturating_sub(margin)
++}
++
+ fn margin_sufficient(lease_ms: u64, margin: Duration) -> bool {
+     #[cfg(target_os = "macos")]
+     let allowance = clock::SUSPEND_ALLOWANCE.as_nanos();
+@@ -212,7 +219,7 @@ pub(in crate::game::dedicated) fn initialize() -> Result<()> {
+             "lease configuration cannot provide the clock margin and bounded IO window".into(),
+         );
+     }
+-    let mut client = Client::new(address, Duration::from_millis(200), 1)?;
++    let mut client = Client::new(address, read_cap(lease_ms, margin), 1)?;
+     if let Some(file) = trace::initialize(tile.0)? {
+         client.trace_calls_to(file)?;
+     }
+@@ -261,7 +268,7 @@ pub(in crate::game::dedicated) fn initialize() -> Result<()> {
+         .deadline()
+         .and_then(|deadline| deadline.checked_sub(Duration::from_millis(lease_ms) - margin))
+         .ok_or("lease claim has no original-send deadline")?;
+-    let mut schedule = RenewalSchedule::new(original_send, RENEWAL_PERIOD, RENEWAL_RPC_SLACK)
++    let schedule = RenewalSchedule::new(original_send, RENEWAL_PERIOD, RENEWAL_RPC_SLACK)
+         .ok_or("invalid renewal cadence")?;
+     trace::record(
+         "claim-installed",
+@@ -285,124 +292,165 @@ pub(in crate::game::dedicated) fn initialize() -> Result<()> {
+     // Horizon owns this thread, not the store/model libraries. No keeper lock spans store IO.
+     std::thread::Builder::new()
+         .name("goliath-lease".into())
+-        .spawn(move || {
+-            loop {
+-                let turn = {
+-                    let Ok(mut state) = authority.state.lock() else {
+-                        break;
+-                    };
+-                    let Some(now) = state.clock.advancing() else {
+-                        state.note_stop("renew-before-clock-anomaly", Instant::now());
+-                        state.keeper.stop();
+-                        break;
+-                    };
+-                    let Some(deadline)=state.keeper.deadline() else {
+-                        state.note_stop("renew-deadline-missing",now);
+-                        state.keeper.stop();
++        .spawn(move || keep(&authority, &client, schedule, lease_ms, margin))?;
++    super::super::tile_cut::claim_cluster_fence(&format!("{}:{}", fence.process.0, fence.epoch.0))?;
++    Ok(())
++}
++
++/// Renews until authority stops. The keeper lock is never held across store IO, so the
++/// action gate reads and latches the local deadline while a renewal read is outstanding.
++fn keep(
++    authority: &Authority,
++    client: &Client,
++    mut schedule: RenewalSchedule,
++    lease_ms: u64,
++    margin: Duration,
++) {
++    let fence = authority.fence;
++    loop {
++        let turn = {
++            let Ok(mut state) = authority.state.lock() else {
++                break;
++            };
++            let Some(now) = state.clock.advancing() else {
++                state.note_stop("renew-before-clock-anomaly", Instant::now());
++                state.keeper.stop();
++                break;
++            };
++            let Some(deadline) = state.keeper.deadline() else {
++                state.note_stop("renew-deadline-missing", now);
++                state.keeper.stop();
++                break;
++            };
++            match schedule.advance(now, deadline) {
++                RenewalAction::WaitUntil(when) => RenewalTurn::WaitUntil(when),
++                RenewalAction::Expired => {
++                    state.note_stop("renew-keeper-deadline", now);
++                    state.keeper.stop();
++                    break;
++                }
++                RenewalAction::SendBefore(call_deadline) => {
++                    let Some(ticket) = state.keeper.request(now) else {
++                        state.note_stop("renew-request-refused", now);
+                         break;
+                     };
+-                    match schedule.advance(now,deadline) {
+-                        RenewalAction::WaitUntil(when)=>RenewalTurn::WaitUntil(when),
+-                        RenewalAction::Expired=>{
+-                            state.note_stop("renew-keeper-deadline",now);
+-                            state.keeper.stop();
+-                            break;
+-                        }
+-                        RenewalAction::SendBefore(call_deadline)=>{
+-                            let Some(ticket) = state.keeper.request(now) else {
+-                                state.note_stop("renew-request-refused", now);
+-                                break;
+-                            };
+-                            trace::record("renew-ticket", json!({"sent_ns":trace::at(ticket.sent()),
+-                        "counter":ticket.counter(),"deadline_ns":state.keeper.deadline().and_then(trace::at),
+-                        "call_deadline_ns":trace::at(call_deadline),"rpc_slack_ns":RENEWAL_RPC_SLACK.as_nanos(),
+-                        "accepted_counter":state.accepted_counter}));
+-                            RenewalTurn::Send{ticket,call_deadline}
+-                        }
+-                    }
+-                };
+-                let (ticket,call_deadline)=match turn {
+-                    RenewalTurn::WaitUntil(when)=>{
+-                        let sleep_start=Instant::now();
+-                        std::thread::sleep(when.saturating_duration_since(sleep_start));
+-                        trace::record("renew-woke",json!({"sleep_start_ns":trace::at(sleep_start),
+-                            "planned_wake_ns":trace::at(when),"period_ns":RENEWAL_PERIOD.as_nanos()}));
+-                        continue;
++                    trace::record(
++                        "renew-ticket",
++                        json!({"sent_ns":trace::at(ticket.sent()),
++                "counter":ticket.counter(),"deadline_ns":state.keeper.deadline().and_then(trace::at),
++                "call_deadline_ns":trace::at(call_deadline),"rpc_slack_ns":RENEWAL_RPC_SLACK.as_nanos(),
++                "accepted_counter":state.accepted_counter}),
++                    );
++                    RenewalTurn::Send {
++                        ticket,
++                        call_deadline,
+                     }
+-                    RenewalTurn::Send{ticket,call_deadline}=>(ticket,call_deadline),
+-                };
+-                let command = Command {
+-                    id: request_id(),
+-                    operation: Operation::RenewLease {
+-                        fence,
+-                        counter: ticket.counter(),
+-                    },
+-                };
+-                trace::record("renew-send", json!({"request_id":command.id.0.to_string(),
+-                    "counter":ticket.counter(),"sent_ns":trace::at(ticket.sent()),
+-                    "call_deadline_ns":trace::at(call_deadline)}));
+-                let result = client.call_before(&command,call_deadline);
+-                let reply_at = Instant::now();
+-                trace::record("renew-reply", json!({"request_id":command.id.0.to_string(),
+-                    "counter":ticket.counter(),"sent_ns":trace::at(ticket.sent()),
+-                    "reply_ns":trace::at(reply_at),"result":format!("{result:?}")}));
+-                let Ok(mut state) = authority.state.lock() else {
++                }
++            }
++        };
++        let (ticket, call_deadline) = match turn {
++            RenewalTurn::WaitUntil(when) => {
++                let sleep_start = Instant::now();
++                std::thread::sleep(when.saturating_duration_since(sleep_start));
++                trace::record(
++                    "renew-woke",
++                    json!({"sleep_start_ns":trace::at(sleep_start),
++                    "planned_wake_ns":trace::at(when),"period_ns":RENEWAL_PERIOD.as_nanos()}),
++                );
++                continue;
++            }
++            RenewalTurn::Send {
++                ticket,
++                call_deadline,
++            } => (ticket, call_deadline),
++        };
++        let command = Command {
++            id: request_id(),
++            operation: Operation::RenewLease {
++                fence,
++                counter: ticket.counter(),
++            },
++        };
++        trace::record(
++            "renew-send",
++            json!({"request_id":command.id.0.to_string(),
++            "counter":ticket.counter(),"sent_ns":trace::at(ticket.sent()),
++            "call_deadline_ns":trace::at(call_deadline)}),
++        );
++        let result = client.call_before(&command, call_deadline);
++        let reply_at = Instant::now();
++        trace::record(
++            "renew-reply",
++            json!({"request_id":command.id.0.to_string(),
++            "counter":ticket.counter(),"sent_ns":trace::at(ticket.sent()),
++            "reply_ns":trace::at(reply_at),"result":format!("{result:?}")}),
++        );
++        let Ok(mut state) = authority.state.lock() else {
++            break;
++        };
++        let Some(now) = state.clock.advancing() else {
++            state.note_stop("renew-after-clock-anomaly", Instant::now());
++            state.keeper.stop();
++            break;
++        };
++        match result {
++            Ok(Response::Leased(grant)) => {
++                let previous_deadline = state.keeper.deadline();
++                if !state.keeper.observe(ticket, grant, now) {
++                    trace::record(
++                        "renew-observe-refused",
++                        json!({"counter":ticket.counter(),
++                        "grant_counter":grant.counter,"observe_ns":trace::at(now),
++                        "previous_deadline_ns":previous_deadline.and_then(trace::at),
++                        "candidate_deadline_ns":trace::at(ticket.sent()+Duration::from_millis(lease_ms)-margin)}),
++                    );
++                    state.note_stop("renew-observe-refused", now);
++                    state.keeper.stop();
+                     break;
+-                };
+-                let Some(now) = state.clock.advancing() else {
+-                    state.note_stop("renew-after-clock-anomaly", Instant::now());
++                }
++                // No action reader can see the new grant before this post-check.
++                let after = state.clock.advancing();
++                if after.is_none()
++                    || previous_deadline
++                        .is_some_and(|deadline| after.is_some_and(|now| now >= deadline))
++                {
++                    state.note_stop(
++                        if after.is_none() {
++                            "renew-post-clock-anomaly"
++                        } else {
++                            "renew-post-old-deadline"
++                        },
++                        after.unwrap_or_else(Instant::now),
++                    );
+                     state.keeper.stop();
+                     break;
+-                };
+-                match result {
+-                    Ok(Response::Leased(grant)) => {
+-                        let previous_deadline = state.keeper.deadline();
+-                        if !state.keeper.observe(ticket, grant, now) {
+-                            trace::record("renew-observe-refused", json!({"counter":ticket.counter(),
+-                                "grant_counter":grant.counter,"observe_ns":trace::at(now),
+-                                "previous_deadline_ns":previous_deadline.and_then(trace::at),
+-                                "candidate_deadline_ns":trace::at(ticket.sent()+Duration::from_millis(lease_ms)-margin)}));
+-                            state.note_stop("renew-observe-refused", now);
+-                            state.keeper.stop();
+-                            break;
+-                        }
+-                        // No action reader can see the new grant before this post-check.
+-                        let after = state.clock.advancing();
+-                        if after.is_none()
+-                            || previous_deadline
+-                                .is_some_and(|deadline| after.is_some_and(|now| now >= deadline))
+-                        {
+-                            state.note_stop(if after.is_none() { "renew-post-clock-anomaly" } else { "renew-post-old-deadline" },
+-                                after.unwrap_or_else(Instant::now));
+-                            state.keeper.stop();
+-                            break;
+-                        }
+-                        state.accepted_counter = grant.counter;
+-                        #[cfg(target_os = "macos")]
+-                        state.clock.report();
+-                        trace::record("renew-installed", json!({"counter":ticket.counter(),
+-                            "grant_counter":grant.counter,"sent_ns":trace::at(ticket.sent()),
+-                            "reply_ns":trace::at(reply_at),"observe_ns":trace::at(now),
+-                            "previous_deadline_ns":previous_deadline.and_then(trace::at),
+-                            "deadline_ns":state.keeper.deadline().and_then(trace::at)}));
+-                    }
+-                    Ok(_) => {
+-                        state.note_stop("renew-store-refused", now);
+-                        state.keeper.stop();
+-                        break;
+-                    }
+-                    Err(_) => {
+-                        if !state.keeper.may_act(now) {
+-                            state.note_stop("renew-io-deadline", now);
+-                            state.keeper.stop();
+-                            break;
+-                        }
+-                    }
+                 }
++                state.accepted_counter = grant.counter;
++                #[cfg(target_os = "macos")]
++                state.clock.report();
++                trace::record(
++                    "renew-installed",
++                    json!({"counter":ticket.counter(),
++                    "grant_counter":grant.counter,"sent_ns":trace::at(ticket.sent()),
++                    "reply_ns":trace::at(reply_at),"observe_ns":trace::at(now),
++                    "previous_deadline_ns":previous_deadline.and_then(trace::at),
++                    "deadline_ns":state.keeper.deadline().and_then(trace::at)}),
++                );
+             }
+-        })?;
+-    super::super::tile_cut::claim_cluster_fence(&format!("{}:{}", fence.process.0, fence.epoch.0))?;
+-    Ok(())
++            Ok(_) => {
++                state.note_stop("renew-store-refused", now);
++                state.keeper.stop();
++                break;
++            }
++            Err(_) => {
++                if !state.keeper.may_act(now) {
++                    state.note_stop("renew-io-deadline", now);
++                    state.keeper.stop();
++                    break;
++                }
++            }
++        }
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -497,4 +545,193 @@ mod tests {
+         assert!(!authority.check(Duration::from_secs(1)));
+         assert!(authority.check(Duration::ZERO));
+     }
++
++    #[test]
++    #[cfg(not(target_os = "macos"))]
++    fn margin_guard_charges_twice_the_lease_per_thousand() {
++        assert!(!margin_sufficient(500, Duration::from_nanos(999_000)));
++        assert!(margin_sufficient(500, Duration::from_nanos(999_001)));
++        assert!(margin_sufficient(1000, Duration::from_millis(100)));
++    }
++
++    const LEASE_MS: u64 = 1000;
++    const MARGIN: Duration = Duration::from_millis(100);
++    type Answer = fn(&Command, Fence) -> Option<(Duration, Response)>;
++
++    /// A loopback store answering each request after a delay, or holding it unanswered.
++    /// It logs every renewal counter with the instant it read the request.
++    fn stub(
++        fence: Fence,
++        answer: Answer,
++    ) -> (std::net::SocketAddr, Arc<Mutex<Vec<(u64, Instant)>>>) {
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let address = listener.local_addr().unwrap();
++        let received = Arc::new(Mutex::new(Vec::new()));
++        let log = Arc::clone(&received);
++        std::thread::spawn(move || {
++            for stream in listener.incoming() {
++                let Ok(mut stream) = stream else {
++                    return;
++                };
++                let log = Arc::clone(&log);
++                std::thread::spawn(move || {
++                    while let Ok(command) =
++                        goliath_store::read_request(&mut stream, Duration::from_secs(5))
++                    {
++                        if let Operation::RenewLease { counter, .. } = command.operation {
++                            log.lock().unwrap().push((counter, Instant::now()));
++                        }
++                        let Some((delay, response)) = answer(&command, fence) else {
++                            std::thread::sleep(Duration::from_secs(3));
++                            return;
++                        };
++                        std::thread::sleep(delay);
++                        let reply = goliath_store::write_response(
++                            &mut stream,
++                            &response,
++                            Duration::from_secs(1),
++                        );
++                        if reply.is_err() {
++                            return;
++                        }
++                    }
++                });
++            }
++        });
++        (address, received)
++    }
++
++    fn lease(counter: u64, fence: Fence) -> Response {
++        Response::Leased(LeaseGrant {
++            fence,
++            lease_ms: LEASE_MS,
++            counter,
++        })
++    }
++
++    struct Outcome {
++        original: Instant,
++        deadline: Instant,
++        accepted: u64,
++        reason: Option<&'static str>,
++        received: Vec<(u64, Instant)>,
++        last_open: Instant,
++        first_closed: Instant,
++        slowest_check: Duration,
++    }
++
++    /// Runs the real renewal loop against the stub and samples the action gate every
++    /// millisecond until the keeper has stopped and the gate has closed.
++    fn renew_against(answer: Answer) -> Outcome {
++        let sent = Instant::now();
++        let authority = Arc::new(granted(sent));
++        let original = authority.state.lock().unwrap().keeper.deadline().unwrap();
++        let (address, received) = stub(authority.fence, answer);
++        let client = Client::new(address, read_cap(LEASE_MS, MARGIN), 1).unwrap();
++        let schedule = RenewalSchedule::new(sent, RENEWAL_PERIOD, RENEWAL_RPC_SLACK).unwrap();
++        let keeper = {
++            let authority = Arc::clone(&authority);
++            std::thread::spawn(move || keep(&authority, &client, schedule, LEASE_MS, MARGIN))
++        };
++        let (mut last_open, mut first_closed) = (sent, None);
++        let mut slowest_check = Duration::ZERO;
++        let limit = sent + Duration::from_secs(10);
++        while !keeper.is_finished() || first_closed.is_none() {
++            assert!(Instant::now() < limit, "the keeper never stopped");
++            let before = Instant::now();
++            let open = authority.check(Duration::ZERO);
++            let after = Instant::now();
++            slowest_check = slowest_check.max(after - before);
++            if open {
++                assert!(first_closed.is_none(), "the gate reopened");
++                last_open = before;
++            } else if first_closed.is_none() {
++                first_closed = Some(after);
++            }
++            std::thread::sleep(Duration::from_millis(1));
++        }
++        keeper.join().unwrap();
++        let state = authority.state.lock().unwrap();
++        let received = received.lock().unwrap().clone();
++        Outcome {
++            original,
++            deadline: state.keeper.deadline().unwrap(),
++            accepted: state.accepted_counter,
++            reason: state.stopped_reason,
++            received,
++            last_open,
++            first_closed: first_closed.unwrap(),
++            slowest_check,
++        }
++    }
++
++    /// The gate never opens at or after the deadline, and closes soon after it.
++    fn closed_at(outcome: &Outcome, deadline: Instant) {
++        assert!(outcome.last_open < deadline);
++        assert!(outcome.first_closed >= deadline);
++        assert!(outcome.first_closed < deadline + Duration::from_millis(250));
++        assert!(matches!(
++            outcome.reason,
++            Some("renew-keeper-deadline" | "action-may-act-false" | "renew-io-deadline")
++        ));
++    }
++
++    #[test]
++    fn a_stalled_grant_before_the_call_deadline_counts_from_its_original_send() {
++        // The store answers renewal 1 after 400 ms, longer than the old 200 ms read cap,
++        // and never answers renewal 2.
++        let outcome = renew_against(|command, fence| match command.operation {
++            Operation::RenewLease { counter: 1, .. } => {
++                Some((Duration::from_millis(400), lease(1, fence)))
++            }
++            _ => None,
++        });
++        assert_eq!(outcome.accepted, 1);
++        let (counter, read) = outcome.received[0];
++        assert_eq!(counter, 1);
++        assert!(outcome.deadline > outcome.original);
++        // Anchored to the send: a reply-anchored grant would end 400 ms later than this.
++        assert!(outcome.deadline <= read + Duration::from_millis(LEASE_MS) - MARGIN);
++        assert!(outcome.received.len() >= 2);
++        closed_at(&outcome, outcome.deadline);
++    }
++
++    #[test]
++    fn a_grant_arriving_after_the_deadline_is_never_installed() {
++        let outcome = renew_against(|command, fence| match command.operation {
++            Operation::RenewLease { counter, .. } => {
++                Some((Duration::from_millis(1200), lease(counter, fence)))
++            }
++            _ => None,
++        });
++        assert_eq!(outcome.accepted, 0);
++        assert_eq!(outcome.deadline, outcome.original);
++        closed_at(&outcome, outcome.original);
++    }
++
++    #[test]
++    fn an_unanswered_renewal_cannot_hold_the_gate_open() {
++        let outcome = renew_against(|_, _| None);
++        assert_eq!(outcome.accepted, 0);
++        assert_eq!(outcome.deadline, outcome.original);
++        // One read stayed outstanding from about 250 ms to the call deadline.
++        assert!(outcome.received[0].1 + Duration::from_millis(500) < outcome.original);
++        // The gate never waits on the keeper thread's read.
++        assert!(outcome.slowest_check < Duration::from_millis(50));
++        closed_at(&outcome, outcome.original);
++    }
++
++    #[test]
++    fn startup_directory_waits_past_the_old_read_cap() {
++        // M3 seed 240012's Directory reply took 231.8 ms.
++        let fence = granted(Instant::now()).fence;
++        let (address, _) = stub(fence, |_, _| {
++            Some((Duration::from_millis(300), Response::Directory(Vec::new())))
++        });
++        let client = Client::new(address, read_cap(LEASE_MS, MARGIN), 1).unwrap();
++        assert!(matches!(
++            client.execute(Operation::Directory),
++            Ok(Response::Directory(entries)) if entries.is_empty()
++        ));
++    }
+ }
