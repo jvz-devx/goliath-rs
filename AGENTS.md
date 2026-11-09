@@ -31,6 +31,8 @@ Follow the `rust-project-architecture` skill.
 
 ## Gates
 
+- With `$HOME/.config/boat-home/goliath-rs.env` configured, run heavy gates as `boat-home run --wait -- scripts/boat-gates <stack>` and finish with `boat-home done`. Horizon and Meridian gates use `--profile fast`; frozen measured binaries must be built locally under the host-window lock. Root workspace gates may stay local.
+
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings

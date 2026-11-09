@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+"""Reconstruct pinned E28 stacks and run gates, never measured release builds."""
+import argparse
+import fcntl
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = ROOT / 'docs/experiments/data/E28'
+WORK = ROOT / '.local/boat-gates'
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def clean(text):
+    return text.replace(str(ROOT), '$REPO').replace(str(Path.home()), '$HOME')
+
+
+def recipe():
+    loader = importlib.machinery.SourceFileLoader('e28_recipe', str(ROOT / 'scripts/e28-build'))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    # Collect the existing recipe's commands without running its host builds,
+    # copying binaries, or consulting historical completed-command markers.
+    module.EVIDENCE = WORK / 'unused-command-markers'
+    module.snapshot = lambda *args: None
+    return module
+
+
+def plan(stack, source):
+    commands = []
+    source.run = lambda label, directory, command: commands.append(
+        (label, directory, source.fast_gate(command))) or 0
+    if stack in ['proxy', 'root']:
+        source.build(stack)
+        commands = [row for row in commands if '--profile' not in row[2]
+                    or row[2][1] != 'build']
+        if stack == 'proxy':
+            historical = json.loads((ROOT / 'docs/experiments/data/E18/reactor-1-build.json').read_text())
+            commands.insert(1, ('proxy-scoped-fmt', '.local/src/meridian',
+                                historical['gates']['commands'][0]['command']))
+    else:
+        source.gates(stack)
+    return commands
+
+
+def reconstruct(stack, source):
+    plain = stack == 'plain-09'
+    proxy = stack == 'proxy'
+    directory = 'meridian' if proxy else 'horizon' if plain else 'horizon-tiles'
+    bundle = 'final' if proxy else stack
+    record = json.loads((DATA / ('build-' + bundle + '.json')).read_text())
+    # Root sync intentionally excludes .git. Internal inputs are the synced
+    # crate/config files, not a Git inventory inside the sandbox.
+    inputs = [ROOT / name for name in ['Cargo.toml', 'Cargo.lock', 'clippy.toml']]
+    inputs += [path for name in ['crates', '.cargo'] for path in (ROOT / name).rglob('*')
+               if path.is_file() and not {'target', '.git', '__pycache__'} & set(path.relative_to(ROOT).parts)]
+    internal = {str(path.relative_to(ROOT)): digest(path) for path in sorted(inputs) if path.is_file()}
+    historical = record['internal_crates']['files']
+    differences = {name: {'worktree': internal.get(name), 'e28': historical.get(name)}
+                   for name in sorted(internal.keys() | historical.keys())
+                   if internal.get(name) != historical.get(name)}
+    project = record['projects']['meridian' if proxy else 'horizon']
+    pin = source.MERIDIAN if proxy else source.HORIZON
+    base = source.PROXY if proxy else source.PLAIN if plain else source.FINAL
+    patches = project['patches']
+    assert project['pin'] == pin
+    assert [Path(row['path']).stem for row in patches[:len(base)]] == base
+    tree = ROOT / '.local/src' / directory
+    owner = tree / '.git/goliath-gates-owned'
+    unchanged = {}
+    directories = {}
+    if tree.exists():
+        if tree.is_symlink() or not owner.is_file():
+            raise RuntimeError('Refusing to reset an unowned checkout: ' + directory)
+        if subprocess.check_output(['git', 'remote', 'get-url', 'origin'], cwd=tree, text=True).strip() != project['upstream_url']:
+            raise RuntimeError('Checkout origin changed: ' + directory)
+        for name, expected in project['source_files'].items():
+            path = tree / name
+            if path.is_file() and digest(path) == expected:
+                unchanged[name] = path.stat()
+                for folder in path.parents:
+                    directories.setdefault(folder, folder.stat())
+                    if folder == tree:
+                        break
+    else:
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['git', 'clone', '--filter=blob:none', '--no-checkout',
+                        project['upstream_url'], str(tree)], check=True)
+        owner.touch()
+    subprocess.run(['git', 'reset', '--hard', pin], cwd=tree, check=True)
+    subprocess.run(['git', 'clean', '-fd', '-e', 'target/'], cwd=tree, check=True)
+    checked = []
+    for row in patches:
+        patch = ROOT / row['path']
+        if digest(patch) != row['sha256']:
+            raise RuntimeError('Patch differs from E28: ' + row['path'])
+        command = ['git', 'apply', *row['apply_options']]
+        subprocess.run([*command, '--check', str(patch)], cwd=tree, check=True)
+        subprocess.run([*command, str(patch)], cwd=tree, check=True)
+        checked.append(dict(row, check_exit=0))
+    expected = project['source_files']
+    actual = source.compiled_inputs(source.sources(tree))
+    if actual != expected:
+        raise RuntimeError('Reconstructed compiled sources differ from E28: ' + directory)
+    # Reset/reapply proves provenance but needlessly changes mtimes. Restore
+    # timestamps only for byte-identical inputs so Cargo keeps valid warmth.
+    for name, stat in unchanged.items():
+        os.utime(tree / name, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    if len(unchanged) == len(expected):
+        for folder, stat in directories.items():
+            os.utime(folder, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    return {'directory': str(tree.relative_to(ROOT)), 'pin': pin, 'patches': checked,
+            'compiled_sources_match_e28': True, 'internal_sources_match_e28': not differences,
+            'internal_source_differences': differences,
+            'internal_sources_sha256': hashlib.sha256(json.dumps(internal, sort_keys=True).encode()).hexdigest(),
+            'unchanged_source_mtimes_restored': len(unchanged),
+            'compiled_sources_sha256': hashlib.sha256(json.dumps(actual, sort_keys=True).encode()).hexdigest()}
+
+
+def accepted(label, code, output):
+    if re.search(r'SIGBUS|SIGKILL|signal:|Bus error|internal compiler error|panicked at|rustc-LLVM ERROR|IO failure|os error 10[37]|No space left on device', output):
+        return False
+    disposition = json.loads((DATA / 'gate-disposition.json').read_text())
+    row = disposition['gates'].get(label, {})
+    if not row.get('accepted') or row.get('class') != 'toolchain-lint':
+        return False
+    if label in ['plain-09-fmt', 'proxy-fmt']:
+        suffix = ('crates/horizon-client/src/lan/hub.rs' if label == 'plain-09-fmt'
+                  else 'crates/meridian-testkit/src/bin/e2-client.rs')
+        paths = re.findall(r'^Diff in (.+):\d+:$', output, re.MULTILINE)
+        return code == 1 and bool(paths) and all(path.endswith('/' + suffix) for path in paths) and not re.search(r'^error(?:\[.*?\])?:', output, re.MULTILINE)
+    errors = []
+    for line in output.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if message.get('reason') == 'compiler-message' and message['message']['level'] == 'error':
+            errors.append(message['message'])
+    suffix = 'crates/goliath-store/src/main.rs' if label == 'root-clippy' else 'crates/meridian-net/src/io_pool.rs'
+    return code == 101 and bool(errors) and all(
+        (error.get('code') or {}).get('code') == 'deprecated' and 'fetch_update' in error['message']
+        and any(span['file_name'] == suffix and span['is_primary'] for span in error['spans'])
+        for error in errors)
+
+
+def execute(stack, commands, destination):
+    env = {key: value for key, value in os.environ.items()
+           if key not in ['CI', 'CARGO_TARGET_DIR'] and not key.startswith('CARGO_PROFILE_')}
+    env.update(CARGO_INCREMENTAL='0', RUSTC_WRAPPER='', CARGO_BUILD_JOBS=os.environ.get('JOBS', '8'),
+               CARGO_PROFILE_FAST_INHERITS='release', CARGO_PROFILE_FAST_LTO='false',
+               CARGO_PROFILE_FAST_CODEGEN_UNITS='16', CARGO_PROFILE_FAST_DEBUG='0')
+    env.setdefault('HORIZON_TEST_RESOURCES', str(Path.home() / '.local/share/goliath-resources/26.3'))
+    expected = json.loads((DATA / 'build-verification.json').read_text())['native_tests_passed']
+    rows = []
+    for label, directory, command in commands:
+        if '--release' in command or command[:2] == ['cargo', 'build']:
+            raise RuntimeError('Measured builds are forbidden in remote gates')
+        if command[:2] == ['cargo', 'clippy']:
+            command = command.copy()
+            command.insert(command.index('--'), '--message-format=json')
+        log = destination.parent / (destination.stem + '-' + label + '.log')
+        print(label + ': ' + ' '.join(command), flush=True)
+        started = time.monotonic()
+        with log.open('w') as stream:
+            result = subprocess.run(command, cwd=ROOT / directory, env=env,
+                                    stdout=stream, stderr=subprocess.STDOUT)
+        output = log.read_text(errors='replace')
+        results = re.findall(r'^test result: .*', output, re.MULTILINE)
+        count = sum(int(match.group(1)) for line in results
+                    if (match := re.search(r'(\d+) passed;', line)))
+        reference = 'plain-09-integration-resources' if label == 'plain-09-integration' else label
+        tests_match = not command[:2] == ['cargo', 'test'] or (
+            reference in expected and count == expected[reference] and bool(results)
+            and all('test result: ok.' in line for line in results))
+        status = ('passed' if tests_match else 'failed') if result.returncode == 0 else (
+            'accepted-toolchain-lint' if accepted(label, result.returncode, output) else 'failed')
+        rows.append({'label': label, 'command': command, 'cwd': directory, 'exit': result.returncode,
+                     'seconds': round(time.monotonic() - started, 3), 'status': status,
+                     'test_results': results, 'passed_tests': count, 'expected_tests': expected.get(reference),
+                     'log': str(log.relative_to(ROOT)), 'log_sha256': digest(log)})
+        print(f'{label}: {status}, exit={result.returncode}, {rows[-1]["seconds"]}s, tests={count}', flush=True)
+        if status == 'failed':
+            print(clean(output[-8000:]), flush=True)
+            break
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('stack', choices=['plain-09', 'final', 'final-lite', 'final-stamps', 'reactor-1', 'proxy', 'root'])
+    parser.add_argument('--plan', action='store_true', help='print commands without resetting or building')
+    parser.add_argument('--prepare-only', action='store_true')
+    parser.add_argument('--output', type=Path, help='JSON under .local/boat-gates; defaults to a unique run name')
+    args = parser.parse_args()
+    stack = 'proxy' if args.stack == 'reactor-1' else args.stack
+    source = recipe()
+    commands = plan(stack, source)
+    if args.plan:
+        print(json.dumps(commands, indent=2))
+        return 0
+    if not (Path.home() / '.boat-goliath-gates').is_file():
+        parser.error('run inside the configured gate sandbox; local sources must not be reset')
+    if subprocess.check_output(['rustc', '-V'], text=True).split()[1] != '1.99.1':
+        parser.error('E28 gates require rustc 1.99.1')
+    WORK.mkdir(parents=True, exist_ok=True)
+    destination = args.output or WORK / (stack + '-' + time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + '.json')
+    destination = destination.resolve()
+    if not destination.is_relative_to(WORK.resolve()) or destination.exists():
+        parser.error('output must be new and under .local/boat-gates')
+    # One gate job per sandbox, including resets; separate worktrees use forks.
+    with (WORK / 'lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = time.monotonic()
+        record = {'schema_version': 1, 'stack': args.stack, 'status': 'failed', 'profile': 'fast',
+                  'rustc': subprocess.check_output(['rustc', '-Vv'], text=True).strip(),
+                  'recipe_sha256': digest(ROOT / 'scripts/e28-build'),
+                  'runner_sha256': digest(Path(__file__)),
+                  'disposition_sha256': digest(DATA / 'gate-disposition.json'), 'gates': []}
+        resources = Path(os.environ.get('HORIZON_TEST_RESOURCES',
+                         str(Path.home() / '.local/share/goliath-resources/26.3')))
+        if (resources / 'horizon-resources.json').is_file():
+            record['resources_manifest_sha256'] = digest(resources / 'horizon-resources.json')
+        try:
+            if stack != 'root':
+                record['source'] = reconstruct(stack, source)
+            if not args.prepare_only:
+                record['gates'] = execute(stack, commands, destination)
+            record['status'] = 'prepared' if args.prepare_only else (
+                'passed' if len(record['gates']) == len(commands)
+                and all(row['status'] != 'failed' for row in record['gates']) else 'failed')
+        except (RuntimeError, subprocess.CalledProcessError) as error:
+            record['error'] = clean(str(error))
+            print(record['error'], flush=True)
+        finally:
+            record['seconds'] = round(time.monotonic() - started, 3)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(clean(json.dumps(record, indent=2)) + '\n')
+            print(clean(str(destination)) + ': ' + record['status'], flush=True)
+        return int(record['status'] == 'failed')
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
