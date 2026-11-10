@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Resource-free tests for the plateau probes and lossless disk console history."""
+import ast
+import io
+import os
+from pathlib import Path
+import tempfile
+import threading
+from types import SimpleNamespace
+import unittest
+
+import e33_memory as memory
+from e28_soak_memory import Rule
+
+
+class Contracts(unittest.TestCase):
+    def test_console_history_keeps_absolute_marks_without_retaining_lines(self):
+        class Base:
+            def __init__(self, path, content):
+                self.lock=threading.Lock()
+                self.lines=[]
+                self.log=path.open('w',encoding='utf-8')
+                self.process=SimpleNamespace(stdout=io.StringIO(content))
+                self._read()
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent.parent/'.local/runs') as folder:
+            path=Path(folder)/'native.log'
+            rows=[f'line {i} café' for i in range(10000)]
+            server=memory.disk_history_class(Base)(path,'\n'.join(rows)+'\n')
+            self.assertEqual(server.count(),len(rows))
+            self.assertEqual(server.lines,[])
+            self.assertLessEqual(len(server.history_offsets),11)
+            for start in [0,1,1023,1024,1025,9999,10000,10001,-2]:
+                self.assertEqual(server.since(start),rows[start:])
+            server.log.close()
+            self.assertEqual(server.since(9997),rows[9997:])
+            self.assertEqual(path.read_text(),'\n'.join(rows)+'\n')
+
+    def test_detail_reads_real_proc_without_modifying_process(self):
+        if not Path('/proc/self/smaps_rollup').exists():
+            self.skipTest('Linux only')
+        row=memory.process_detail(os.getpid())
+        self.assertGreater(row['smaps_rollup_kib']['Rss'],0)
+        self.assertGreaterEqual(row['minor_faults'],0)
+        self.assertGreaterEqual(row['major_faults'],0)
+        self.assertEqual(sum(row['thread_names'].values()),int(row['status']['Threads']))
+        self.assertGreaterEqual(row['file_backed_rss_kib'],0)
+
+    def test_fixed_plateau_duration_preserves_the_25_minute_rule(self):
+        rule=Rule('unused',last_baseline_minute=35,run_cap_minutes=120,minimum_loaded_seconds=7200)
+        self.assertEqual(rule.extension(),5400)
+        rule.baseline=dict(minute=23)
+        self.assertEqual(rule.extension(),5400)
+        self.assertEqual(rule.record()['judged_seconds'],1500)
+        self.assertEqual(rule.record()['minimum_loaded_seconds'],7200)
+
+    def test_standard_memory_duration_is_unchanged(self):
+        rule=Rule('unused')
+        self.assertEqual(rule.extension(),0)
+        rule.baseline=dict(minute=15)
+        self.assertEqual(rule.extension(),600)
+        rule=Rule('unused',last_baseline_minute=35,run_cap_minutes=60)
+        rule.baseline=dict(minute=23)
+        self.assertEqual(rule.extension(),1080)
+
+    def test_long_flag_reaches_all_three_runners_and_bots(self):
+        root=Path(__file__).resolve().parent
+        for name in ['e25-soak-control','e25-soak-cell','e24-run']:
+            text=(root/name).read_text()
+            ast.parse(text)
+            self.assertIn("'--plateau-minutes'",text)
+        text=(root/'e24-run').read_text()
+        self.assertIn("'10800' if args.plateau_minutes",text)
+        self.assertIn('9000 if args.plateau_minutes',text)
+        self.assertIn('minimum_loaded_seconds=(args.plateau_minutes or 30)*60',text)
+
+    def test_tile_thp_switch_is_scoped_and_recorded(self):
+        root=Path(__file__).resolve().parent
+        run=(root/'e24-run').read_text()
+        self.assertIn("**({'MIMALLOC_ALLOW_THP':'0'} if args.tile_thp_disabled else {})",run)
+        self.assertIn("or key=='MIMALLOC_ALLOW_THP'",run)
+        self.assertIn("'-diag-thp' in args.name",run)
+        for name in ['e25-soak-control','e25-soak-cell']:
+            text=(root/name).read_text()
+            self.assertIn("*(['--tile-thp-disabled'] if args.tile_thp_disabled else [])",text)
+        self.assertIn('transparent_hugepage=thp_settings()', (root/'e28_window.py').read_text())
+
+    def test_host_thp_settings_include_every_khugepaged_value(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sys=Path(folder);base=sys/'kernel/mm/transparent_hugepage'
+            (base/'khugepaged').mkdir(parents=True)
+            (base/'enabled').write_text('always [madvise] never\n')
+            (base/'defrag').write_text('always defer [madvise] never\n')
+            (base/'khugepaged/pages_to_scan').write_text('4096\n')
+            row=memory.thp_settings(sys)
+            self.assertEqual(row['enabled'],'always [madvise] never')
+            self.assertEqual(row['khugepaged/pages_to_scan'],'4096')
+
+    def test_restore_compares_thp_settings_but_not_cumulative_counters(self):
+        from e28_window import same_policy
+        before=dict(transparent_hugepage={'enabled':'[madvise]','khugepaged/full_scans':'1','khugepaged/pages_collapsed':'2'})
+        after=dict(transparent_hugepage={'enabled':'[madvise]','khugepaged/full_scans':'3','khugepaged/pages_collapsed':'4'})
+        self.assertTrue(same_policy(before,after))
+        after['transparent_hugepage']['enabled']='[never]'
+        self.assertFalse(same_policy(before,after))
+
+
+if __name__=='__main__':
+    unittest.main()

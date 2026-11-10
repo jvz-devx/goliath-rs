@@ -22,8 +22,9 @@ def configure(data_dir):
     EVIDENCE=ROOT/'.local/evidence/E25'
     DERIVED=EVIDENCE/'soak-derived'
     if DATA != ROOT/'docs/experiments/data/E25':
-        DATA.relative_to(ROOT/'docs/experiments/data/E28')
-        EVIDENCE=ROOT/'.local/evidence/E28/soak'
+        experiment=DATA.relative_to(ROOT/'docs/experiments/data').parts[0]
+        if experiment not in ('E28','E29','E33'):raise ValueError('soak data belongs under the E25, E28, E29 or E33 data folder')
+        EVIDENCE=ROOT/'.local/evidence'/experiment/'soak'
         DERIVED=EVIDENCE/'soak-derived'
     for directory in [DATA,EVIDENCE,DERIVED]:directory.mkdir(parents=True,exist_ok=True)
 
@@ -109,6 +110,23 @@ def closures(folder):
     return events
 
 
+def collection(name,error,executed,note=None):
+    """Judge one collected soak from its retained evidence. The summary may be stored compressed."""
+    native_path = DERIVED / (name+'-summary.json')
+    if not native_path.exists() and native_path.with_suffix('.json.gz').exists():
+        native_path = native_path.with_suffix('.json.gz')
+    native = read(native_path) if native_path.exists() else {}
+    events = closures(EVIDENCE/name)
+    failed = bool(error or native.get('error') or not native.get('binaries_unchanged') or native.get('cleanup_errors') or events or native.get('observed_authority_latch') or native.get('authority_trace_complete') is False)
+    record = dict(kind='E25-full-soak-collection',name=name,status='failed' if failed else 'complete',
+        error=error,native_error=native.get('error'),authority_events=events,executed=executed,
+        native_summary=digest(native_path) if native_path.exists() else None,
+        binaries_unchanged=native.get('binaries_unchanged',False))
+    record.update(authority_trace_complete=native.get('authority_trace_complete'),authority_trace_integrity=native.get('authority_trace_integrity'))
+    if note:record['recollected']=note
+    return record,failed
+
+
 def publication_check(value):
     if isinstance(value,dict):
         for key,item in value.items():
@@ -124,7 +142,11 @@ def publication_check(value):
 
 
 def classify(native,store,authority_events):
+    ruled = native.get('memory_ruled')
     proxy_pass = bool(native['memory_endpoint_coverage'] and native['memory']['proxy']['growth_fraction'] < .1)
+    if ruled:
+        # Linux: resident plus swapped over the ruled window, as for every other process.
+        proxy_pass = bool(ruled['endpoint_coverage'] and ruled['every_swap_sampled'] and ruled['processes']['proxy']['growth_fraction'] < .1)
     d9 = bool(native['capacity_diagnostic_pass'] and native['noise_valid'])
     rss = bool(native['verdict'] == 'passed' and proxy_pass and store['qualified'] and not authority_events)
     return dict(native_soak_verdict=native['verdict'],non_proxy_memory_pass=native['memory_pass'],
@@ -150,6 +172,11 @@ def readback(name):
     events = closures(EVIDENCE/name)
     data = dict(native)
     data.update(classify(native,store,events))
+    plan=read(DATA/(name+'-plan.json'))
+    if plan.get('not_m4_soak_row'):
+        data.update(kind='E33-labelled-soak-readback',not_m4_soak_row=True,
+            m4_qualified=False,interpretation='labelled diagnostic or long soak; does not replace or decide the 30-minute M4 memory line',
+            tile_allocator_environment=plan.get('tile_allocator_environment'))
     whole_path=EVIDENCE/(name+'-whole-window.json')
     if whole_path.exists() or whole_path.with_suffix('.json.gz').exists():
         whole=read(whole_path)
@@ -157,13 +184,13 @@ def readback(name):
             whole_window_evidence=digest(whole_path if whole_path.exists() else whole_path.with_suffix('.json.gz')))
         from e28_window import minute_rss
         origin=soak['memory'][0]['processes']['store']['at']-soak['memory'][0]['elapsed_seconds']
-        minutes=minute_rss(whole['samples'],origin)
+        minutes=minute_rss(whole['samples'],origin,30+round((native.get('memory_rule') or {}).get('extension_seconds',0)/60))
         data['every_process_minute_rss']=storage.save(DATA/(name+'-every-process-minute-rss.json'),minutes)
         data['every_process_minute_rss_covered']=all(row['endpoint_covered'] for row in minutes)
         data['rss_soak_lines_pass']=data['rss_soak_lines_pass'] and whole['valid']
         data['verdict']='rss-lines-passed' if data['rss_soak_lines_pass'] else 'rss-lines-failed'
         data['d9_memory_qualified']=data['d9_memory_qualified'] and whole['valid']
-    elif EVIDENCE==ROOT/'.local/evidence/E28/soak':
+    elif EVIDENCE!=ROOT/'.local/evidence/E25':
         raise RuntimeError('E28 requires whole-window D12 evidence, including recovery and restoration')
     data.update(kind='E25-full-soak-readback',proxy_rss_judged=True,
         store_diagnostics=store,executed_readbacks=executed,

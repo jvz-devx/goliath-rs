@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Restore a D12 CPU window after a killed measurement driver."""
+"""Restore a D12 CPU window after a killed measurement driver, or undo leftover narrowing."""
 import argparse
-from goliath_platform import restore
+import json
+from goliath_platform import restore, widen
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('action', choices=['restore'])
-parser.parse_args()
-restore()
-print('D12 slices, governors and cgroups restored')
+parser.add_argument('action', choices=['restore', 'widen'])
+args = parser.parse_args()
+if args.action == 'widen':
+    print(json.dumps(dict(widened=widen())))
+else:
+    restore()
+    print('D12 slices, governors and cgroups restored')

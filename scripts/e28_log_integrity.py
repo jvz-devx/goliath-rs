@@ -2,6 +2,7 @@
 import gzip
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import threading
@@ -128,11 +129,99 @@ def tile_server_class(base,evidence):
     return DrainedServer
 
 
+def filesystem(path):
+    """The filesystem type of the mount holding path."""
+    path=Path(path).resolve();best=('',None)
+    for line in (platform.PROC/'self/mounts').read_text().splitlines():
+        _,mount,kind=line.split()[:3]
+        mount=mount.replace('\\040',' ')
+        if (str(path)==mount or str(path).startswith(mount.rstrip('/')+'/')) and len(mount)>len(best[0]):best=(mount,kind)
+    return best[1]
+
+
+def memory_available_kb():
+    return next(int(line.split()[1]) for line in (platform.PROC/'meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))
+
+
+class BulkLogs:
+    """Opt-in diagnostic: each tile's stdout/stderr log and anticheat log live on tmpfs,
+    behind symlinks at their usual paths. Nothing durable moves and no reader changes."""
+    ESTIMATE_BYTES=6*1024**3
+    HEADROOM_KB=3*1024**2
+
+    def __init__(self,name,base=Path('/dev/shm')):
+        if not name or any(not(c.isalnum() or c in '-_') for c in name):raise ValueError('simple run name required')
+        if filesystem(base)!='tmpfs':raise RuntimeError('bulk log diagnostic needs a tmpfs directory')
+        free=os.statvfs(base);free=free.f_bavail*free.f_frsize
+        available=memory_available_kb()
+        if free<self.ESTIMATE_BYTES+1024**3 or available<self.ESTIMATE_BYTES//1024+self.HEADROOM_KB:
+            raise RuntimeError('bulk logs would not fit in memory for the whole window')
+        self.target=base/('goliath-e28-logs-'+name)
+        self.target.mkdir(mode=0o700)
+        self.links={};self.report=dict(directory=str(self.target),filesystem='tmpfs',estimate_bytes=self.ESTIMATE_BYTES,
+            tmpfs_free_bytes_before=free,memory_available_kb_before=available,
+            moved='each tile stdout/stderr log and logs/anticheat.log',
+            unchanged='store journal and snapshots, worlds, tile cuts, proxy and sidecar state, lease and store traces')
+
+    def link(self,path,name):
+        path=Path(path)
+        if path.is_symlink():
+            if self.links.get(path)!=path.resolve():raise RuntimeError('bulk log links somewhere else: '+path.name)
+            return
+        if path.exists():raise RuntimeError('bulk log already exists on its original volume: '+path.name)
+        real=self.target/name
+        real.touch(exist_ok=False)
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.symlink_to(real)
+        self.links[path]=real.resolve()
+
+    def server_class(self,base):
+        owner=self
+        class BulkLogServer(base):
+            def __init__(self,command,directory,log_path,*args,**kwargs):
+                owner.link(log_path,Path(log_path).name)
+                owner.link(Path(directory)/'logs/anticheat.log',Path(directory).name+'-anticheat.log')
+                super().__init__(command,directory,log_path,*args,**kwargs)
+        return BulkLogServer
+
+    def install(self,module):
+        # After install_cluster, so the drained tile server keeps its own seam.
+        module._server=self.server_class(module._server)
+
+    def observe(self,root):
+        """Sizes at the end of a cluster, read through the usual paths. A replaced link fails the diagnostic."""
+        rows=[];replaced=[]
+        for path,real in sorted(self.links.items()):
+            if not path.is_relative_to(root):continue
+            intact=path.is_symlink() and path.resolve()==real
+            if not intact:replaced.append(str(path.relative_to(root)))
+            rows.append(dict(path=str(path.relative_to(root)),link_intact=intact,bytes=real.stat().st_size,
+                bytes_read_through_usual_path=path.stat().st_size if path.exists() else None))
+        used=sum(item.stat().st_size for item in self.target.iterdir())
+        self.report.setdefault('clusters',[]).append(dict(files=rows,replaced_links=replaced,tmpfs_bytes=used,
+            memory_available_kb=memory_available_kb()))
+        if replaced:raise RuntimeError('a tile replaced its bulk log link: '+', '.join(replaced))
+
+    def finish(self):
+        if self.target.exists():
+            self.report.update(tmpfs_bytes_at_end=sum(item.stat().st_size for item in self.target.iterdir()),
+                memory_available_kb_at_end=memory_available_kb())
+            self.remove()
+            self.report.update(removed=not self.target.exists(),memory_available_kb_after_removal=memory_available_kb())
+        return self.report
+
+    def remove(self):
+        if self.target.exists():
+            for item in self.target.iterdir():item.unlink()
+            self.target.rmdir()
+
+
 def install_cluster(module,evidence):
     evidence.mkdir(parents=True,exist_ok=True)
     module.e2.Child=proxy_child_class(module.e2.Child)
     # The Linux cgroup wrapper resolves this original class when it launches a tile.
-    module._server=tile_server_class(module._server,evidence)
+    from e33_memory import disk_history_class
+    module._server=tile_server_class(disk_history_class(module._server),evidence)
     module.phase_events=lambda path:phase_events(path,evidence)
 
 

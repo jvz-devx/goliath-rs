@@ -26,6 +26,37 @@ def endpoints(levels, baseline=None):
         result.update(baseline=baseline,ratio_to_baseline=frontier/baseline if frontier else None)
     return result
 
+def cluster_loss(cell):
+    """A loss of players or a server inside the measured span of an otherwise valid window.
+
+    The frontier rule says players stay online, so this is a failed step. A
+    fault before the measured span or while collecting stays a missing
+    measurement. Returns None, or the evidence for the classification.
+    """
+    report=cell.get('processes') or {}
+    samples=report.get('samples') or []
+    marks=[sample.get('mark') for sample in samples]
+    if 'steady-first' not in marks or 'steady-last' in marks:return None
+    processes=(cell.get('failure_evidence') or {}).get('processes',{})
+    servers=sorted(role for role,row in processes.items() if row.get('exit') is not None and role.startswith(('tile-','proxy','store','sidecar-')))
+    error=cell.get('error') or ''
+    if 'D9 bot exit/drop' not in error and not servers:return None
+    start=samples[0]['at'];duration=samples[-1]['at']-start;outside={}
+    for sample in samples:
+        for pid,seconds in sample.get('outside_cpu_s_delta',{}).items():outside[pid]=outside.get(pid,0)+seconds
+    worst=max(outside.values(),default=0)/duration if duration>0 else None
+    d12=cell.get('d12')
+    reasons=[]
+    if cell['load_start'][0]>4:reasons.append('start load above 4')
+    if report.get('error'):reasons.append('outside-process sampler failed')
+    if worst is None or worst>.5:reasons.append('outside process above 0.5 core')
+    if d12 is not None and not d12['valid']:reasons+=d12['reasons']
+    first=next(sample['at'] for sample in samples if sample.get('mark')=='steady-first')
+    return dict(valid=not reasons,invalid_reasons=reasons,seconds_into_measured_span=samples[-1]['at']-first,
+        servers_exited=servers,bot_groups_exited=sorted(role for role,row in processes.items() if role.startswith('bots-') and row.get('exit') is not None),
+        outside_max_process_cores=worst)
+
+
 def ledger(prefix, baseline=None):
     rows=[];levels={};modes=set()
     pattern=re.compile(re.escape(prefix)+r'-(\d+)-r(\d+)(?:-a(\d+))?\.json(?:\.gz)?$')
@@ -41,7 +72,14 @@ def ledger(prefix, baseline=None):
         cell=data['cells'][str(count)]
         raw=path.read_bytes();raw=gzip.decompress(raw) if path.suffix=='.gz' else raw
         row=dict(count=count,repeat=repeat,attempt=attempt,path=str(path.relative_to(ROOT)),sha256=hashlib.sha256(raw).hexdigest(),status=cell['status'],
-            valid=False,passed=False,failures=[cell.get('error',data.get('error','incomplete cell'))])
+            valid=False,passed=False,failures=[cell.get('error',data.get('error','incomplete cell'))],
+            classification='invalid: startup or collection fault, no measurement')
+        loss=cluster_loss(cell) if cell['status']!='complete' else None
+        if loss:
+            # Counted against the step: valid, not passed.
+            row.update(valid=loss['valid'],cluster_loss=loss,classification='failed: cluster lost players or a server in the measured span'
+                if loss['valid'] else 'invalid: cluster loss in a window that was not valid')
+            if loss['valid']:levels.setdefault(count,[]).append(row)
         if cell['status']=='complete':
             steady=cell['processes']['phases']['steady']
             cpu={name:value['cores'] for name,value in steady['fixture'].items()}
@@ -56,6 +94,9 @@ def ledger(prefix, baseline=None):
                 load_start=cell['load_start'][0],outside_max_steady=steady['outside_max_process_cores'],
                 outside_max_whole=cell['processes']['phases']['whole_cell']['outside_max_process_cores'],
                 quiet_seconds=data['seconds'],binaries=data['binaries'])
+            row['classification']=('passed' if row['passed'] else 'failed: frontier rule') if row['valid'] else 'invalid: window validity'
+            d12=cell.get('d12') or {}
+            if d12.get('cpu5_busy_fraction'):row.update(cpu5_busy_fraction=d12['cpu5_busy_fraction'],server_cpus=d12.get('server_cpus'))
             levels.setdefault(count,[]).append(row)
         rows.append(row)
     rows.sort(key=lambda row:(row['count'],row['repeat'],row['attempt']))
@@ -73,6 +114,6 @@ def main():
     (DATA/(args.prefix+'-staircase.json')).write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps({key:value for key,value in result.items() if key!='rows'},indent=2))
     for row in result['rows']:
-        print(json.dumps({key:row.get(key) for key in ['count','repeat','passed','valid','server_cores','proxy_cores','tile_tps','tile_p99_ms','failures']}))
+        print(json.dumps({key:row.get(key) for key in ['count','repeat','passed','valid','classification','server_cores','proxy_cores','tile_tps','tile_p99_ms','failures']}))
 
 if __name__=='__main__':main()

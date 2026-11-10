@@ -18,6 +18,7 @@ import e11_support as support
 import e25_soak_harness as harness
 import e28_soak_clock as clock
 import e28_window as window
+import goliath_bundle as bundle
 import goliath_platform as platform
 from e28_m3_startup import observe_clock_calls
 
@@ -247,4 +248,380 @@ class Contracts(unittest.TestCase):
                 with self.assertRaises(ProcessLookupError):platform.usage(12,proc)
 
 
-if __name__=='__main__':unittest.main()
+    def test_server_stack_guard_accepts_final_and_final_r2_only(self):
+        bundles=ROOT/'.local/bin/goliath-e28'
+        manifest=json.loads(bundle.MANIFEST.read_text())['bundles']
+        for name in ['final','final-r2']:
+            identity=bundle.validate_server_stack(bundles/name)
+            self.assertEqual(identity['bundle'],name)
+            self.assertEqual(identity['binaries'],manifest[name]['binaries'])
+            self.assertEqual(identity,bundle.validate(bundles/name))
+        for name in ['final-lite','final-stamps','plain-09']:
+            with self.assertRaisesRegex(ValueError,'wrong E28 bundle'):bundle.validate_server_stack(bundles/name)
+        base=manifest['final']['binaries'];fixed=manifest['final-r2']['binaries']
+        self.assertEqual({name for name in base if base[name]!=fixed[name]},{'horizon-client'})
+
+    def test_final_r2_may_differ_from_final_in_the_tile_only(self):
+        base=dict(bundle='final',binaries={'horizon-client':'a','meridian':'b','goliath-store':'c'})
+        def identities(fixed):
+            return lambda directory,expected=None:base if Path(directory).name=='final' else dict(bundle='final-r2',binaries=fixed)
+        with patch.object(bundle,'validate',new=identities(dict(base['binaries'],**{'horizon-client':'z'}))):
+            self.assertEqual(bundle.validate_server_stack('final-r2')['bundle'],'final-r2')
+        for fixed in [dict(base['binaries']),dict(base['binaries'],**{'horizon-client':'z','goliath-store':'y'}),
+                dict(base['binaries'],**{'horizon-client':'z','extra':'x'}),{'horizon-client':'z','meridian':'b'}]:
+            with patch.object(bundle,'validate',new=identities(fixed)):
+                with self.assertRaisesRegex(ValueError,'horizon-client only'):bundle.validate_server_stack('final-r2')
+
+    def test_runners_select_server_stacks_through_the_strict_guard(self):
+        control=(ROOT/'scripts/e25-soak-control').read_text()
+        self.assertIn('linux_identity = goliath_bundle.validate_server_stack(bins)',control)
+        self.assertIn("name=linux_identity['bundle']",control)
+        cell=(ROOT/'scripts/e25-soak-cell').read_text()
+        self.assertIn("rebuilt = goliath_bundle.rebuilt_since_final(goliath_bundle.validate_server_stack(bins)['bundle']) if goliath_bundle.is_e28(bins) else {'meridian'}",cell)
+        self.assertIn('if name not in rebuilt',cell)
+        m3=(ROOT/'scripts/e24-m3').read_text()
+        self.assertIn('linux_identity=goliath_bundle.validate_server_stack(bins)',m3)
+        self.assertIn("metadata.update(bundle=linux_identity['bundle']",m3)
+        self.assertIn("binaries_unchanged=validate_snapshot(bins)==identity",m3)
+        self.assertIn("for stack in ['final','final-r2']",(ROOT/'scripts/e24-m3-results').read_text())
+        # The lite kernel widens exactly one final-only guard in the frontier runner; keep that seam.
+        frontier=ast.unparse(ast.parse((ROOT/'scripts/e20-frontier').read_text()))
+        self.assertEqual(frontier.count("goliath_bundle.validate(bins, {'final'})"),1)
+        self.assertIn("goliath_bundle.validate_server_stack(bins) if bins.name in goliath_bundle.DERIVED else goliath_bundle.validate(bins, {'final'})",frontier)
+        self.assertIn("if bins.name in goliath_bundle.CANDIDATE_STACKS:\n            goliath_bundle.validate_candidate_stack(bins)",frontier)
+        self.assertIn('if goliath_bundle.validate(bins) != linux_identity',frontier)
+
+    def test_soak_cell_guard_passes_server_stacks_and_rejects_other_bundles(self):
+        cell=load('e25-soak-cell')
+        class Reached(Exception):pass
+        with tempfile.TemporaryDirectory(dir=ROOT/'.local/runs') as temporary:
+            host=Path(temporary)/'.local/host/quiet';host.mkdir(parents=True);(host/'owner').write_text('E28R2\n')
+            def run(name,execute):
+                argv=['e25-soak-cell','--name','e28-guard-test','--bins',str(ROOT/'.local/bin/goliath-e28'/name),
+                    '--owner','E28R2','--players','425','--cpu-mode','pin','--direct-bots','--data-dir',str(Path(temporary)/'data')]
+                with patch.object(sys,'argv',argv),patch.object(cell.harness,'ROOT',Path(temporary)),\
+                     patch.object(cell.harness,'configure'),patch.object(cell.harness,'execute',execute),\
+                     patch.object(cell.harness,'digest',lambda path:dict(sha256=bundle.sha(path))),\
+                     patch.object(cell.harness,'EVIDENCE',unittest.mock.Mock(mkdir=unittest.mock.Mock(side_effect=Reached))):
+                    cell.main()
+            with patch.dict(os.environ,GOLIATH_WINDOW_OWNER='E28R2'):
+                cell=load('e25-soak-cell')
+                execute=unittest.mock.Mock()
+                for name in ['final','final-r2']:
+                    with self.assertRaises(Reached):run(name,execute)
+                for name in ['final-lite','final-stamps']:
+                    with self.assertRaisesRegex(ValueError,'wrong E28 bundle'):run(name,execute)
+                execute.assert_not_called()
+
+
+class DerivedStacks(unittest.TestCase):
+    """E29 and E30 bundles: final-r2 with exactly one executable replaced."""
+    BASE={'horizon-client':'a','meridian':'b','goliath-store':'c','e4-client':'d'}
+
+    def identities(self,name,binaries):
+        r2=dict(self.BASE,**{'horizon-client':'z'})
+        table={'final':self.BASE,'final-r2':r2,name:binaries}
+        def validate(directory,expected=None):
+            found=Path(directory).name
+            if expected and found not in expected:raise ValueError('wrong E28 bundle for this runner: '+found)
+            return dict(bundle=found,binaries=table[found])
+        return patch.object(bundle,'validate',new=validate),r2
+
+    def test_e29_stack_may_differ_from_final_r2_in_the_store_only(self):
+        context,r2=self.identities('final-r2-e29',None)
+        for binaries,ok in [(dict(r2,**{'goliath-store':'y'}),True),(dict(r2),False),(dict(r2,**{'goliath-store':'y','meridian':'x'}),False),
+                (dict(self.BASE,**{'goliath-store':'y'}),False)]:
+            context,_=self.identities('final-r2-e29',binaries)
+            with context:
+                if ok:self.assertEqual(bundle.validate_server_stack('final-r2-e29')['bundle'],'final-r2-e29')
+                else:
+                    with self.assertRaisesRegex(ValueError,'final-r2-e29 must differ from final-r2 in goliath-store only'):bundle.validate_server_stack('final-r2-e29')
+        self.assertEqual(bundle.rebuilt_since_final('final-r2-e29'),{'horizon-client','goliath-store'})
+        self.assertEqual(bundle.rebuilt_since_final('final-r2'),{'horizon-client'});self.assertEqual(bundle.rebuilt_since_final('final'),set())
+
+    def test_park_stack_is_a_frontier_candidate_and_never_a_soak_stack(self):
+        context,r2=self.identities('final-r2-park',dict(self.BASE,**{'horizon-client':'z','meridian':'p'}))
+        with context:
+            self.assertEqual(bundle.validate_candidate_stack('final-r2-park')['bundle'],'final-r2-park')
+            with self.assertRaisesRegex(ValueError,'wrong E28 bundle'):bundle.validate_server_stack('final-r2-park')
+            with self.assertRaisesRegex(ValueError,'wrong E28 bundle'):bundle.validate_candidate_stack('final-r2')
+        context,_=self.identities('final-r2-park',dict(self.BASE,**{'horizon-client':'z','meridian':'p','goliath-store':'y'}))
+        with context:
+            with self.assertRaisesRegex(ValueError,'must differ from final-r2 in meridian only'):bundle.validate_candidate_stack('final-r2-park')
+
+    def test_barrier_renewals_is_an_opt_in_named_control(self):
+        control=(ROOT/'scripts/e25-soak-control').read_text();cell=(ROOT/'scripts/e25-soak-cell').read_text();run=(ROOT/'scripts/e24-run').read_text()
+        self.assertIn("if args.store_renewals and not (linux_identity['bundle']=='final-r2-e29' and '-barrier' in args.name):",control)
+        for source in [control,cell]:
+            self.assertIn("parser.add_argument('--store-renewals',choices=['barrier']",source)
+            self.assertIn("*(['--store-renewals',args.store_renewals] if args.store_renewals else [])",source)
+            self.assertIn("(?:e25-|e28-|e29-|repro-)",source)
+        self.assertIn("result.Cluster.store_arguments=('--renewals',args.store_renewals)",run)
+        self.assertIn("store_renewals=args.store_renewals or 'default'",run)
+        launcher=(ROOT/'scripts/goliath-cluster').read_text()
+        self.assertIn('    store_arguments = ()\n',launcher)
+        self.assertIn("'--sync','full',*self.store_arguments]",launcher)
+
+    def test_soak_evidence_namespaces(self):
+        before=(harness.DATA,harness.EVIDENCE,harness.DERIVED)
+        try:
+            harness.configure(ROOT/'docs/experiments/data/E29')
+            self.assertEqual(harness.EVIDENCE,ROOT/'.local/evidence/E29/soak')
+            harness.configure(ROOT/'docs/experiments/data/E28/soak')
+            self.assertEqual(harness.EVIDENCE,ROOT/'.local/evidence/E28/soak')
+            with self.assertRaisesRegex(ValueError,'soak data belongs under'):harness.configure(ROOT/'docs/experiments/data/E30')
+        finally:
+            harness.DATA,harness.EVIDENCE,harness.DERIVED=before
+
+
+class MemoryRule(unittest.TestCase):
+    """Resident plus swapped, from a baseline after the store's receipt window is full."""
+    HEADER='at_ns,event,accepted,receipts,window_full_at_ns\n'
+
+    def test_baseline_waits_for_the_window_and_extends_the_run(self):
+        import e28_soak_memory as memory
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            trace=Path(temporary)/'store-batches.memory.csv';trace.write_text(self.HEADER+'1,sample,5,5,-1\n')
+            rule=memory.Rule(trace)
+            for elapsed in [0.,120.5,299.,300.4,301.5]:rule.sample(elapsed)
+            self.assertIsNone(rule.baseline);self.assertEqual(rule.extension(),0.);self.assertEqual([row['minute'] for row in rule.checks],[5])
+            # A torn last line is never read as a row.
+            with trace.open('a') as stream:stream.write('2,window-full,9300,9216,333000000000\n3,sample,93')
+            rule.sample(359.9);self.assertIsNone(rule.baseline)
+            rule.sample(360.2)
+            self.assertEqual((rule.baseline['minute'],rule.baseline['fill_detected'],rule.baseline['window_full_at_store_ns'],rule.baseline['receipts']),(6,True,333000000000,9216))
+            self.assertEqual(rule.extension(),60.)
+            rule.sample(420.);self.assertEqual(len(rule.checks),2)
+            self.assertEqual(rule.record()['extension_seconds'],60.)
+
+    def test_no_fill_by_the_last_baseline_minute_falls_back_to_minute_five_and_says_so(self):
+        import e28_soak_memory as memory
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            trace=Path(temporary)/'store-batches.memory.csv';trace.write_text(self.HEADER+'1,sample,5,812,-1\n')
+            rule=memory.Rule(trace)
+            for minute in range(5,16):rule.sample(minute*60+.3)
+            self.assertEqual((rule.baseline['minute'],rule.baseline['fill_detected'],rule.baseline['receipts']),(5,False,812))
+            self.assertIn('not full by minute 15',rule.baseline['fallback']);self.assertEqual(rule.extension(),0.)
+            missing=memory.Rule(Path(temporary)/'absent.csv');missing.sample(300.1)
+            self.assertEqual((missing.baseline['minute'],missing.baseline['fill_detected']),(5,False))
+            self.assertIn('could not be read',missing.baseline['fallback'])
+            full=memory.Rule(trace);trace.write_text(self.HEADER+'1,window-full,9300,9216,7\n');full.sample(300.1)
+            self.assertEqual((full.baseline['minute'],full.extension()),(5,0.))
+
+    def test_a_registered_long_soak_waits_to_minute_35_and_otherwise_runs_to_its_cap(self):
+        import e28_soak_memory as memory
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            trace=Path(temporary)/'store-batches.memory.csv';trace.write_text(self.HEADER+'1,sample,5,812,-1\n')
+            late=memory.Rule(trace,last_baseline_minute=35,run_cap_minutes=60)
+            for minute in range(5,23):late.sample(minute*60+.3)
+            self.assertIsNone(late.baseline)
+            trace.write_text(self.HEADER+'9,window-full,9300,9216,8\n');late.sample(23*60+.2)
+            # Fill at minute 22.4: baseline minute 23, judged to minute 48, so 18 minutes past minute 30.
+            self.assertEqual((late.baseline['minute'],late.extension(),late.record()['ran_to_cap_without_fill']),(23,1080.,False))
+            trace.write_text(self.HEADER+'1,sample,5,812,-1\n')
+            never=memory.Rule(trace,last_baseline_minute=35,run_cap_minutes=60)
+            for minute in range(5,36):never.sample(minute*60+.3)
+            self.assertEqual((never.baseline['minute'],never.baseline['fill_detected'],never.extension()),(5,False,1800.))
+            self.assertIn('continues to its 60-minute cap',never.baseline['fallback']);self.assertTrue(never.record()['ran_to_cap_without_fill'])
+        control=(ROOT/'scripts/e25-soak-control').read_text()
+        self.assertIn("if args.extended_memory_window and not (harness.DATA/(args.name+'-registration.json')).is_file():",control)
+        for source in [control,(ROOT/'scripts/e25-soak-cell').read_text()]:
+            self.assertIn("*(['--extended-memory-window'] if args.extended_memory_window else [])",source)
+
+    def test_memory_by_kind_is_read_from_smaps_rollup(self):
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            (Path(temporary)/'7').mkdir()
+            (Path(temporary)/'7/smaps_rollup').write_text('55d0-7ffd ---p 00000000 00:00 0  [rollup]\nRss:   348600 kB\nPss_Anon:   300000 kB\nPss_File:  48000 kB\nSwap:  0 kB\nVmFlags: rd\n')
+            self.assertEqual(platform.smaps_rollup(7,Path(temporary)),dict(Rss=348600,Pss_Anon=300000,Pss_File=48000,Swap=0))
+        self.assertGreater(platform.smaps_rollup(os.getpid())['Rss'],0)
+
+    def test_the_line_is_judged_on_resident_plus_swapped_over_the_ruled_window(self):
+        import e28_soak_memory as memory
+        def sample(elapsed,rss,swap,store):
+            return dict(elapsed_seconds=elapsed,processes={'tile-a':dict(rss_mb=rss,swap_mb=swap),'store':dict(rss_mb=store,swap_mb=0.)})
+        # The tile's resident size halves while it is swapped out; the store fills until minute 6.
+        rows=[sample(300.2,1000.,0.,33.),sample(360.1,900.,110.,38.),sample(1800.3,500.,520.,38.),sample(1860.4,480.,560.,38.5)]
+        record=dict(baseline=dict(minute=6,fill_detected=True))
+        ruled=memory.ruled(rows,record)
+        self.assertEqual(ruled['window_seconds'],[360,1860]);self.assertTrue(ruled['endpoint_coverage']);self.assertTrue(ruled['every_swap_sampled'])
+        tile=ruled['processes']['tile-a']
+        self.assertAlmostEqual(tile['growth_fraction'],1040/1010-1);self.assertAlmostEqual(tile['rss_growth_fraction'],480/900-1);self.assertTrue(tile['under_10_percent'])
+        self.assertAlmostEqual(ruled['processes']['store']['growth_fraction'],38.5/38-1)
+        legacy,covered=memory.growth(rows,300,1800)
+        self.assertAlmostEqual(legacy['store']['rss_growth_fraction'],38/33-1);self.assertFalse(legacy['store']['under_10_percent']);self.assertTrue(covered)
+        # No swap figure (an old row): resident alone is used and the row says swap was not sampled.
+        old=[dict(elapsed_seconds=300.,processes={'store':dict(rss_mb=10.)}),dict(elapsed_seconds=1800.,processes={'store':dict(rss_mb=12.)})]
+        unsampled=memory.ruled(old,None)
+        self.assertFalse(unsampled['every_swap_sampled']);self.assertFalse(unsampled['processes']['store']['under_10_percent'])
+
+    def test_readback_judges_the_ruled_window_and_keeps_the_old_figure(self):
+        result=(ROOT/'scripts/e24-soak-result').read_text()
+        for text in ['ruled=e28_soak_memory.ruled(memory,rule)','minute5_to30_pass=memory_pass',
+                "memory_pass=bool(ruled['endpoint_coverage'] and ruled['every_swap_sampled'] and len(judged)==9 and all(row['under_10_percent'] for row in judged))",
+                'memory_pass_minute5_to30_rss=minute5_to30_pass','counts=[0]*minutes']:
+            self.assertIn(text,result)
+        native=dict(memory_endpoint_coverage=True,memory={'proxy':dict(growth_fraction=-.4)},capacity_diagnostic_pass=True,noise_valid=True,verdict='passed',memory_pass=True,
+            memory_ruled=dict(endpoint_coverage=True,every_swap_sampled=True,processes={'proxy':dict(growth_fraction=.12)}))
+        self.assertFalse(harness.classify(native,dict(qualified=True),[])['proxy_rss_line_pass'])
+        native['memory_ruled']['processes']['proxy']['growth_fraction']=.02
+        self.assertTrue(harness.classify(native,dict(qualified=True),[])['rss_soak_lines_pass'])
+        del native['memory_ruled'];self.assertTrue(harness.classify(native,dict(qualified=True),[])['proxy_rss_line_pass'])
+        rows=[dict(at=60.*minute,host=dict(swap_in_pages=minute,swap_out_pages=2*minute,memory_available_kb=9),
+            descendant_placement=[dict(pid=1,role='servers',rss_mib=5.,swap_mib=1.)]) for minute in range(33)]
+        minutes=window.minute_rss(rows,0.,32)
+        self.assertEqual(len(minutes),33);self.assertEqual(minutes[32]['host'],dict(swap_in_pages=32,swap_out_pages=64,memory_available_kb=9))
+        self.assertEqual(minutes[0]['processes'][0]['swap_mib'],1.);self.assertEqual(len(window.minute_rss(rows,0.)),31)
+
+
+class SoakObserverMemory(unittest.TestCase):
+    """The live observer: real /proc readers, the rule's baseline and the run extension."""
+    def test_observer_samples_swap_and_host_and_extends_for_a_late_fill(self):
+        import e23_observe as observe
+        import e28_soak_memory as memory
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            trace=Path(temporary)/'store-batches.memory.csv';trace.write_text('at_ns,event,accepted,receipts,window_full_at_ns\n1,sample,5,5,-1\n')
+            me=SimpleNamespace(process=SimpleNamespace(pid=os.getpid()))
+            tile=SimpleNamespace(server=me,cut=Path(temporary),ask=lambda command:dict(ticks=[],digests=[],dropped=0))
+            instance=SimpleNamespace(proxy=me,store_process=me.process,tiles={'a':tile},sidecars=[me])
+            saved={}
+            soak=observe.Soak('fixture',dict(e23_native_counter=platform.usage),dict(monitor=SimpleNamespace(roles={'bots-a':os.getpid()})))
+            soak.instance=instance;soak.audit=lambda *a:None;soak.memory_rule=memory.Rule(trace);soak.memory_detail=True
+            for second in range(0,1921,2):
+                if second==330:trace.write_text('at_ns,event,accepted,receipts,window_full_at_ns\n9,window-full,9300,9216,8\n')
+                soak.sample(dict(at=1000.+second))
+            self.assertEqual((soak.memory_rule.baseline['minute'],soak.memory_rule.extension()),(6,60.))
+            row=soak.memory[-1]
+            self.assertIsInstance(row['processes']['store']['swap_mb'],float);self.assertGreater(row['processes']['store']['memory_mb'],0)
+            self.assertEqual(set(row['host']),{'swap_in_pages','swap_out_pages','memory_available_kb','swap_free_kb'})
+            with patch.object(observe,'save',new=lambda path,value:saved.update(value)):soak.finish()
+            self.assertEqual(saved['memory_rule']['baseline']['minute'],6);self.assertEqual(saved['memory_ruled']['window_seconds'],[360,1860])
+            self.assertTrue(saved['memory_ruled']['endpoint_coverage']);self.assertTrue(saved['memory_ruled']['every_swap_sampled'])
+            self.assertEqual(set(saved['memory_ruled']['processes']),{'proxy','store','tile-a','sidecar-0'})
+            self.assertIn('bots-a',saved['helper_memory_ruled']['processes']);self.assertIn('store',saved['minute5_to30'])
+            self.assertEqual([row['minute'] for row in saved['smaps_rollup_minutes']],list(range(33)))
+            self.assertEqual(set(saved['smaps_rollup_minutes'][0]['processes']),{'store','tile-a'});self.assertGreater(saved['smaps_rollup_minutes'][0]['processes']['store']['Rss'],0)
+            json.dumps(saved)
+
+    def test_kernel_hands_the_rule_its_trace_and_the_frontier_loop_its_extension(self):
+        run=(ROOT/'scripts/e24-run').read_text()
+        for text in ["soak.memory_rule=Rule(trace.store_trace.with_suffix('.memory.csv'),","ns['extension']=soak.memory_rule.extension",
+                "4500 if args.extended_memory_window else 3300 if args.soak_audit and platform.LINUX else 2700) if args.seconds>1200 else 1500",
+                "'4500' if args.extended_memory_window else '3300')","soak.memory_detail=args.extended_memory_window",
+                "dict(last_baseline_minute=35,run_cap_minutes="]:
+            self.assertIn(text,run)
+        frontier=ast.unparse(ast.parse((ROOT/'scripts/e20-frontier').read_text()))
+        self.assertIn('while time.monotonic() < until + extension():',frontier)
+        self.assertEqual((ROOT/'scripts/e24-run').read_text().count("'store-batches.csv'"),1)
+
+
+class CollectionReaders(unittest.TestCase):
+    """The first E29 soak ran to the end and was marked failed by two readers; both are pinned here."""
+    def test_idle_spacing_of_a_quiet_store_is_counted_not_listed(self):
+        import e22_availability as availability
+        header='start_us,execute_ms,barrier_ms,queue_max_ms\n'
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            path=Path(temporary)/'store-batches.csv'
+            # 150 batches 300 ms apart, one of them with a 350 ms barrier.
+            path.write_text(header+''.join(f'{index*300000},{351.0 if index==70 else 1.0},{350.0 if index==70 else 0.5},0.1\n' for index in range(150)))
+            quiet=availability.batches(path)
+            self.assertEqual(quiet['spacing_only_gaps_over_200ms'],dict(count=148,max_ms=300.,listed=False))
+            self.assertEqual([gap['index'] for gap in quiet['gaps_over_200ms']],[70]);self.assertEqual(quiet['maxima_ms']['barrier_ms'],350.)
+            self.assertLess(len(json.dumps(quiet)),5000)
+            # An older store: a handful of spacing gaps stay listed exactly as before.
+            path.write_text(header+''.join(f'{index*(300000 if index<4 else 50000)},1.0,0.5,0.1\n' for index in range(150)))
+            busy=availability.batches(path)
+            self.assertTrue(busy['spacing_only_gaps_over_200ms']['listed']);self.assertEqual(len(busy['gaps_over_200ms']),busy['spacing_only_gaps_over_200ms']['count'])
+
+    def test_a_compressed_native_summary_is_read_not_taken_for_a_missing_one(self):
+        before=(harness.DATA,harness.EVIDENCE,harness.DERIVED)
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            root=Path(temporary);harness.EVIDENCE,harness.DERIVED=root,root/'derived'
+            try:
+                (root/'derived').mkdir();(root/'run/tiles').mkdir(parents=True)
+                summary=dict(error=None,binaries_unchanged=True,cleanup_errors=[],observed_authority_latch=False,authority_trace_complete=True,authority_trace_integrity={})
+                with patch.object(harness,'digest',new=lambda path:dict(path=path.name)):
+                    self.assertEqual(harness.collection('run',None,None)[0]['status'],'failed')
+                    (root/'derived/run-summary.json.gz').write_bytes(gzip.compress(json.dumps(summary).encode()))
+                    record,failed=harness.collection('run',None,None)
+                    self.assertFalse(failed);self.assertEqual((record['status'],record['native_summary']),('complete',dict(path='run-summary.json.gz')))
+                    self.assertTrue(harness.collection('run','runner error',None)[1])
+                    (root/'derived/run-summary.json.gz').write_bytes(gzip.compress(json.dumps(dict(summary,observed_authority_latch=True)).encode()))
+                    self.assertTrue(harness.collection('run',None,None)[1])
+            finally:
+                harness.DATA,harness.EVIDENCE,harness.DERIVED=before
+        self.assertIn('record,failed = harness.collection(args.name,error,executed)',(ROOT/'scripts/e25-soak-cell').read_text())
+        recollect=(ROOT/'scripts/e25-soak-recollect').read_text()
+        self.assertIn("if first['status'] != 'failed' or first['error'] or first['native_summary']:",recollect);self.assertIn('ran_nothing=True',recollect)
+
+
+class EarlyRenewals(unittest.TestCase):
+    """The E29 store answers granted renewals outside the batch and request traces."""
+    def folder(self,root,early,journaled,lost=()):
+        (root/'tiles').mkdir()
+        (root/'store-batches.origin.json').write_text(json.dumps(dict(native_instant='Instant { tv_sec: 5, tv_nsec: 0 }',wall_before_ns=1_000_000_000,wall_after_ns=1_000_000_100)))
+        # Loaded second 0 is store second 9. One barrier of 450 ms inside, one of 900 ms before it.
+        (root/'store-batches.csv').write_text('start_us,count,barrier_ms\n2000000,1,900.0\n10000000,1,450.0\n11000000,1,60.0\n12000000,1,0.0\n')
+        (root/'store-batches.requests.csv').write_text('request_id,received_ns\n'+''.join(f'{request},1\n' for request in journaled))
+        if early is not None:
+            (root/'store-batches.renewals.csv').write_text('request_id,accepted_ns,received_ns,answered_ns\n'+''.join(
+                f'{request},{10_000_000_000+index},{10_002_000_000+index},{10_002_500_000+index}\n' for index,request in enumerate(early)))
+        requests=list(early or [])+list(journaled)+list(lost)
+        for tile in range(4):
+            rows=[dict(event='trace-start',at_ns=0,wall_ns=9_000_000_000,data=dict(tile=tile,pid=tile))]
+            for index,request in enumerate(requests[tile::4]):
+                sent=1_500_000_000+index*250_000_000;took=300_000_000 if request in lost else 5_000_000
+                rows.append(dict(event='renew-send',at_ns=sent,wall_ns=0,data=dict(counter=index,request_id=request,sent_ns=sent)))
+                rows.append(dict(event='renew-reply',at_ns=sent+took,wall_ns=0,data=dict(counter=index,request_id=request,sent_ns=sent,reply_ns=sent+took,
+                    result='Err(WouldBlock)' if request in lost else 'Ok(Leased(LeaseGrant { counter: 1 }))')))
+            (root/'tiles'/f'tile-{tile}-{tile}-lease.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in rows))
+        return root
+
+    def test_every_tile_renewal_is_found_in_one_store_trace_or_named(self):
+        import e29_renewals
+        early=[f'e{index}' for index in range(8)]
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            report=e29_renewals.report(self.folder(Path(temporary),early,['j0'],['lost0']),10_000_000_000,20_000_000_000,'default')
+        self.assertTrue(report['complete'],report['problems'])
+        self.assertEqual({key:report['accounting'][key] for key in ['tile_sends','answered_early','journaled','in_neither_trace']},
+            dict(tile_sends=10,answered_early=8,journaled=1,in_neither_trace=1))
+        self.assertEqual(report['accounting']['in_neither_trace_rows'][0]['result'],'Err(WouldBlock)')
+        self.assertEqual((report['early_renewals']['answered_in_loaded_interval'],report['early_renewals']['answer_ms']['max_ms'],report['early_renewals']['receive_ms']['max_ms']),(8,.5,2.))
+        self.assertEqual({key:report['barriers'][key] for key in ['count','over_50ms','over_100ms','over_200ms','over_400ms','max_ms']},
+            dict(count=2,over_50ms=2,over_100ms=1,over_200ms=1,over_400ms=1,max_ms=450.))
+        self.assertTrue(report['barriers']['contains_barrier_over_400ms'])
+        self.assertEqual((report['tile_renewals']['over_200ms'],report['tile_renewals']['max_ms']),(1,300.))
+        self.assertIsNone(report['store_memory'])
+
+    def test_store_memory_reports_when_the_receipt_window_filled(self):
+        import e29_renewals
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            header='at_ns,event,accepted,receipts,receipt_blob_bytes,receipt_inline_bytes,player_blob_bytes,snapshot_len,window_full_at_ns\n'
+            rows=[(second,second*6,min(second*6,3000),min(second*6,3000)*5000,1,2,3,-1 if second*6<3000 else 500_000_000_000+9_000_000_000) for second in range(0,901,10)]
+            (Path(temporary)/'store-batches.memory.csv').write_text(header+''.join(
+                f'{(9+second)*1_000_000_000},sample,{accepted},{receipts},{blob},{inline},{player},{snapshot},{full}\n' for second,accepted,receipts,blob,inline,player,snapshot,full in rows))
+            memory=e29_renewals.store_memory(Path(temporary),9.,900.)
+        self.assertEqual(memory['window_full_at_loaded_s'],500.);self.assertEqual(memory['receipt_capacity'],3000)
+        self.assertEqual([row['minute'] for row in memory['every_five_minutes']],[0,5,10,15]);self.assertEqual(memory['every_five_minutes'][1]['receipt_blob_bytes'],9_000_000)
+        self.assertAlmostEqual(memory['receipts_per_second'],6.)
+
+    def test_a_reader_never_counts_zero_early_renewals_silently(self):
+        import e29_renewals
+        with tempfile.TemporaryDirectory(dir=support.RUNS) as temporary:
+            (Path(temporary)/'a').mkdir();report=e29_renewals.report(self.folder(Path(temporary)/'a',None,['j0','j1','j2','j3']),10_000_000_000,20_000_000_000,'default')
+            self.assertFalse(report['complete']);self.assertIsNone(report['early_renewals'])
+            self.assertIn('the store wrote no renewals.csv',report['problems'][0]);self.assertIn('default mode but no tile renewal was found in renewals.csv',report['problems'])
+            (Path(temporary)/'b').mkdir();barrier=e29_renewals.report(self.folder(Path(temporary)/'b',[],['j0','j1','j2','j3']),10_000_000_000,20_000_000_000,'barrier')
+            self.assertTrue(barrier['complete'],barrier['problems']);self.assertEqual(barrier['early_renewals']['answered_whole_run'],0)
+            (Path(temporary)/'c').mkdir();mixed=e29_renewals.report(self.folder(Path(temporary)/'c',['e0'],['j0','j1','j2']),10_000_000_000,20_000_000_000,'barrier')
+            self.assertIn('barrier mode but renewals were answered early',mixed['problems'])
+            (Path(temporary)/'d').mkdir();folder=self.folder(Path(temporary)/'d',['e0','e1','e2','e3'],[])
+            (folder/'store-batches.renewals.csv').write_text('request_id,accepted_ns,received_ns,answered_ns\n')
+            missing=e29_renewals.report(folder,10_000_000_000,20_000_000_000,'default')
+            self.assertIn('a renewal a tile saw granted is in neither store trace',missing['problems'])
+            self.assertIn('NO: no barrier over 400 ms',e29_renewals.report(folder,11_500_000_000,20_000_000_000,'default')['barriers']['tested_the_change'])
+
+
+if __name__=='__main__':
+    support.RUNS.mkdir(parents=True,exist_ok=True)
+    unittest.main()

@@ -143,6 +143,11 @@ class Soak:
         self.origin = None
         self.last_drain = self.last_audit = 0
         self.recovery = None
+        # Linux only: the memory rule that picks the baseline minute while the run is going.
+        self.memory_rule = None
+        # Opt-in: once a minute, the store's and tiles' memory by kind, to tell what a step allocated.
+        self.memory_detail = False
+        self.rollups,self.rollup_minute = [],-1
 
     def cluster(self,module):
         ask,stop = module.Tile.ask,module.Cluster.stop
@@ -201,6 +206,21 @@ class Soak:
             if role.startswith(('bots-','shim-')) or role=='observer-and-driver'}
         self.memory.append(dict(elapsed_seconds=elapsed,processes={role:self.ns['e23_native_counter'](pid) for role,pid in pids.items()},
             helper_processes={role:self.ns['e23_native_counter'](pid) for role,pid in helper_pids.items()}))
+        if self.memory_rule:
+            import goliath_platform
+            self.memory[-1]['host']=goliath_platform.memory_snapshot()
+            self.memory_rule.sample(elapsed)
+            if self.memory_detail and int(elapsed//60)>self.rollup_minute:
+                self.rollup_minute=int(elapsed//60)
+                began=time.monotonic()
+                from e33_memory import process_detail, thp_counters
+                details={role:process_detail(pid) for role,pid in pids.items() if role=='store' or role.startswith('tile-')}
+                # Reuse the detailed sample; retain the old rollup field for existing readers.
+                kinds={role:row['smaps_rollup_kib'] for role,row in details.items()}
+                cuts={name:{part:((tile.cut/part).stat().st_size if (tile.cut/part).exists() else None)
+                    for part in ['LOG','BASE']} for name,tile in instance.tiles.items()}
+                self.rollups.append(dict(minute=self.rollup_minute,elapsed_seconds=elapsed,read_seconds=time.monotonic()-began,
+                    processes=kinds,process_details=details,host_thp=thp_counters(),cut_file_bytes=cuts))
         if elapsed-self.last_drain>=60:
             for name,tile in instance.tiles.items():
                 # Call through the wrapper only while no prior batch is attached.
@@ -288,6 +308,12 @@ class Soak:
                     before_mb=left['rss_mb'],after_mb=right['rss_mb'],growth_fraction=growth,under_10_percent=growth<.10)
             coverage = abs(a['elapsed_seconds']-300)<2 and abs(b['elapsed_seconds']-1800)<2
             result['memory_endpoint_coverage'] = coverage
+            if self.memory_rule:
+                import e28_soak_memory
+                result['memory_rule'] = self.memory_rule.record()
+                result['memory_ruled'] = e28_soak_memory.ruled(self.memory,result['memory_rule'])
+                result['helper_memory_ruled'] = e28_soak_memory.ruled(self.memory,result['memory_rule'],'helper_processes')
+                if self.memory_detail:result['smaps_rollup_minutes'] = self.rollups
             result['helper_minute5_to30'] = {role:dict(before_mb=left['rss_mb'],after_mb=b['helper_processes'][role]['rss_mb'],
                 growth_fraction=b['helper_processes'][role]['rss_mb']/left['rss_mb']-1)
                 for role,left in a['helper_processes'].items()}

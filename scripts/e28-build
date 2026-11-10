@@ -1069,9 +1069,144 @@ def freeze_r2(gate_records):
     state(f'{label}: bundle frozen, horizon-client {binaries["horizon-client"]}')
 
 
+def freeze_derived(label, tree=None):
+    """Freeze final-r2 with one executable replaced: the E29 store or the E30 park proxy.
+
+    Every other file is final-r2's, hard-linked byte-identical. The replaced
+    executable must come from the recorded release command, from sources that
+    match the pinned inputs, with a gate record for exactly those sources.
+    """
+    import goliath_bundle
+    base_name, only = goliath_bundle.DERIVED[label]
+    if base_name != 'final-r2':
+        raise RuntimeError('only stacks derived from final-r2 are frozen here')
+    folder = ROOT / '.local/bin/goliath-e28' / label
+    if folder.exists():
+        raise RuntimeError(label + ' is already frozen')
+    base = json.loads((DATA / 'build-final-r2.json').read_text())
+    anchor = json.loads((DATA / 'build-manifest.json').read_text())
+    r2 = anchor['bundles'][base_name]
+    projects, internal = dict(base['projects']), base['internal_crates']
+    keep = ['label', 'command', 'cwd', 'exit', 'seconds', 'status', 'test_results', 'passed_tests', 'expected_tests', 'log_sha256']
+    if label == 'final-r2-park':
+        out = ROOT / 'docs/experiments/data/E30'
+        tree = ROOT / '.local/src/meridian'
+        inputs = json.loads((out / 'reactor-2-inputs.json').read_text())
+        meridian = dict(projects['meridian'], patches=patches_for(PROXY + ['meridian-13-manager-park']))
+        meridian['source_files'] = dict(meridian['source_files'], **inputs['changed_source_files'])
+        if meridian['patches'] != projects['meridian']['patches'] + inputs['patches']:
+            raise RuntimeError('park patch order or bytes differ from the pinned inputs')
+        if compiled_inputs(sources(tree)) != meridian['source_files']:
+            raise RuntimeError('Proxy tree is not reactor-1 plus patch 13')
+        projects['meridian'] = meridian
+        release = json.loads((EVIDENCE / 'commands/final-r2-park-proxy-release.json').read_text())
+        if release['exit'] or release['settings'] != SETTINGS:
+            raise RuntimeError('park proxy release failed or used other settings than final')
+        gate = json.loads((out / 'reactor-2-gates.json').read_text())
+        if gate['stack'] != 'reactor-2' or gate['status'] != 'passed':
+            raise RuntimeError('the park proxy needs a passed remote gate record')
+        if gate['source']['compiled_sources_sha256'] != hashlib.sha256(json.dumps(meridian['source_files'], sort_keys=True).encode()).hexdigest():
+            raise RuntimeError('Remote gates checked other sources than the frozen proxy')
+        binary = tree / 'target/release/meridian'
+        # The same cargo command also rebuilt the sidecar and the test client from unchanged sources.
+        siblings = {name: sha(tree / 'target/release' / name) == r2['files'][name] for name in ['meridian-sidecar', 'e4-client']}
+        gates = [{'stack': gate['stack'], 'status': gate['status'], 'profile': gate['profile'], 'rustc': gate['rustc'],
+                  'record': 'docs/experiments/data/E30/reactor-2-gates.json', 'record_sha256': sha(out / 'reactor-2-gates.json'),
+                  'compiled_sources_sha256': gate['source']['compiled_sources_sha256'],
+                  'gates': [{key: row.get(key) for key in keep} for row in gate['gates']]}]
+        failed = sorted(base['failed_gates'])
+        scope = 'The proxy only, with final\'s proxy settings; every other bundle file is final-r2\'s, hard-linked byte-identical.'
+        extra = {'sibling_reproduction': siblings,
+                 'sibling_reproduction_note': 'The release command also rebuilt meridian-sidecar and e4-client from unchanged sources; true means the rebuilt file is byte-identical to the frozen one. The frozen files are kept.',
+                 'gates_scope': 'Reactor-2 gates on a boat sandbox with --profile fast: reactor-1\'s set plus rustfmt and Clippy on the changed files and the new tests. The two failed proxy gates are reactor-1\'s accepted lint drift, unchanged by patch 13.'}
+        limits = ['No load, crossing check or soak ran in this build task.', 'The park proxy is a frontier candidate only; it is not a soak or M3 stack.']
+    elif label == 'final-r2-e29':
+        out = ROOT / 'docs/experiments/data/E29'
+        tree = Path(tree).resolve()
+        release = json.loads((ROOT / '.local/evidence/E29/commands/final-r2-e29-store-release.json').read_text())
+        store_settings = base.get('store_build_settings') or json.loads((DATA / 'build-final.json').read_text())['store_build_settings']
+        if release['exit'] or release['settings'] != store_settings:
+            raise RuntimeError('E29 store release failed or used other settings than final\'s store')
+        source = release['source']
+        # Untracked files outside the build inputs do not reach cargo; anything else around the build blocks.
+        stray = [line for line in (source['dirty'] + '\n' + source['dirty_after']).splitlines() if line.strip()]
+        if source['commit'] != source['commit_after'] or any(not line.startswith('?? ')
+                or line[3:].startswith(('crates/', '.cargo/', 'Cargo', 'clippy.toml', 'build.rs')) for line in stray):
+            raise RuntimeError('the store worktree was not clean around the release build')
+        # The worktree may have moved on since; the built sources must equal the commit's own blobs.
+        files = {name: hashlib.sha256(subprocess.check_output(['git', 'show', source['commit'] + ':' + name], cwd=tree)).hexdigest()
+                 for name in source['files']}
+        if files != source['files']:
+            raise RuntimeError('store sources differ from the commit that was built')
+        rows = [json.loads((ROOT / '.local/evidence/E29/commands' / ('final-r2-e29-commit-' + name + '.json')).read_text()) for name in ['fmt', 'clippy', 'test']]
+        if any(row['commit'] != source['commit'] or not row['sources_match_release_build'] for row in rows):
+            raise RuntimeError('root gates ran on other sources than the frozen store')
+        internal = {'path': 'the e29-lease-renewal branch of this repository', 'commit': source['commit'], 'branch': source['branch'],
+                    'files': files, 'base_commit_of_final_r2_store_sources': git(tree, 'merge-base', 'HEAD', git(ROOT, 'rev-parse', 'HEAD'))}
+        binary = tree / 'target/release/goliath-store'
+        if sha(binary) != release['binary_sha256']:
+            raise RuntimeError('store executable changed since its release build')
+        gates = [{'stack': 'root', 'status': 'passed' if not any(row['exit'] for row in rows) else 'failed', 'profile': 'dev',
+                  'where': 'this host, between measurement windows, on a git archive export of the built commit',
+                  'gates': [{key: row.get(key) for key in ['label', 'command', 'cwd', 'exit', 'test_results', 'log_sha256', 'settings']} for row in rows]}]
+        # final's root-clippy drift was in the old store source; the proxy drift is inherited with the unchanged proxy.
+        failed = sorted({gate for gate in base['failed_gates'] if gate != 'root-clippy'} | {row['label'] for row in rows if row['exit']})
+        scope = 'The store only, with final\'s store recipe (no profile overrides, two jobs); every other bundle file is final-r2\'s, hard-linked byte-identical.'
+        extra = {'worktree_status_around_build': {'before': source['dirty'], 'after': source['dirty_after'],
+                                                  'note': 'Only untracked files outside the build inputs; every built source equals the commit blob.'},
+                 'gates_scope': 'Root workspace gates (fmt, clippy, tests) on the frozen commit, run locally. The model sweep and the reviewer\'s own gate reproduction are separate.'}
+        limits = ['No load ran in this build task.', 'Root gates ran on this host in the dev profile, not on a sandbox.',
+                  'The store change itself is described and argued in E29-lease-renewal.md on its branch; this record only pins what was built.']
+    else:
+        raise RuntimeError('unknown derived stack: ' + label)
+    folder.mkdir(parents=True)
+    staged = folder / (only + '.new')
+    shutil.copy2(binary, staged)
+    os.replace(staged, folder / only)
+    for name in ['horizon-client', 'horizon-bots', 'meridian', 'meridian-sidecar', 'goliath-store', 'e4-client', 'cluster-launcher.py']:
+        if name == only:
+            continue
+        source_file = ROOT / r2['path'] / name
+        if sha(source_file) != r2['files'][name]:
+            raise RuntimeError('final-r2 bundle file changed: ' + name)
+        os.link(source_file, folder / name)
+    (folder / 'LEASES').touch()
+    binaries = dict(base['binaries'], **{only: sha(folder / only)})
+    required = ['horizon-client', 'meridian', 'meridian-sidecar', 'goliath-store', 'e4-client']
+    write(folder / 'manifest.json', {name: binaries[name] for name in required})
+    write(folder / 'FINAL.json', {'schema_version': 1,
+                                 'binaries': {name: {'path': str((folder / name).relative_to(ROOT)), 'sha256': binaries[name]} for name in required},
+                                 'launcher': {'leased_marker': True, 'sha256': sha(folder / 'cluster-launcher.py')},
+                                 'store_binary_sha256': binaries['goliath-store']})
+    record = {'kind': 'E28-derived-linux-release', 'schema_version': 1, 'bundle': label, 'status': 'complete',
+              'profile': 'release', 'incremental': False, 'settings': release['settings'], 'settings_scope': scope,
+              'directory': str(folder.relative_to(ROOT)), 'base_bundle': base_name, 'replaced_executable': only,
+              'base_build_record_sha256': sha(DATA / 'build-final-r2.json'),
+              'projects': projects, 'internal_crates': internal, 'source_equality': 'passed',
+              'source_equality_scope': 'Inputs of the replaced executable equal the pinned ones, checked before freezing; other binaries are final-r2\'s bytes.',
+              'rustc': release.get('rustc') or subprocess.check_output(['rustc', '-Vv'], text=True).strip(), 'machine': machine(),
+              'cargo': release.get('cargo') or subprocess.check_output(['cargo', '-V'], text=True).strip(),
+              'commands': [{key: value for key, value in release.items() if key != 'source'}], 'gates': gates,
+              'verification_status': 'failed' if failed else 'passed', 'failed_gates': failed,
+              'failed_gate_note': 'Only inherited, reviewer-disposed toolchain lint drift of unchanged binaries, unless a gate of the replaced executable is named here.',
+              'binaries': binaries, 'pending_gates': [], 'review_status': 'awaiting independent reproduction',
+              'linux_clocks': base['linux_clocks'], 'verification_limits': limits,
+              'gate_disposition': {'path': 'docs/experiments/data/E28/gate-disposition.json', 'sha256': sha(DATA / 'gate-disposition.json')}, **extra}
+    write(out / ('build-' + label + '.json'), record)
+    shutil.copy2(out / ('build-' + label + '.json'), folder / 'build.json')
+    canonical = {'schema_version': 1, 'platform': 'linux', 'source_equality': 'passed', 'projects': projects,
+                 'internal_crates': internal, 'binaries': binaries, 'review_status': record['review_status']}
+    write(folder / 'canonical.json', canonical)
+    write(folder / 'candidate.json', canonical)
+    anchor['bundles'][label] = {'path': str(folder.relative_to(ROOT)), 'binaries': binaries,
+                               'files': {path.name: sha(path) for path in sorted(folder.iterdir()) if path.is_file()}}
+    write(DATA / 'build-manifest.json', anchor)
+    state(f'{label}: bundle frozen, {only} {binaries[only]}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare', 'compare', 'run', 'apply', 'reverse', 'source', 'build', 'freeze', 'remaining', 'cleanup', 'finish-checks', 'finish-proxy-port', 'finish-store-profile', 'verify', 'dependency', 'finish-running-gate', 'fast-stamps-gates', 'update-gate-records', 'stage-shared', 'finish-proxy-release', 'proxy-fast-gates', 'restore-reactor', 'rebuild-reactor', 'reviewed-refreeze', 'freeze-r2'])
+    parser.add_argument('action', choices=['prepare', 'compare', 'run', 'apply', 'reverse', 'source', 'build', 'freeze', 'remaining', 'cleanup', 'finish-checks', 'finish-proxy-port', 'finish-store-profile', 'verify', 'dependency', 'finish-running-gate', 'fast-stamps-gates', 'update-gate-records', 'stage-shared', 'finish-proxy-release', 'proxy-fast-gates', 'restore-reactor', 'rebuild-reactor', 'reviewed-refreeze', 'freeze-r2', 'freeze-derived'])
     parser.add_argument('args', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.action == 'prepare':
@@ -1114,6 +1249,8 @@ def main():
         freeze(reviewed=True)
     elif args.action == 'freeze-r2':
         freeze_r2(args.args)
+    elif args.action == 'freeze-derived':
+        freeze_derived(*args.args)
     elif args.action == 'remaining':
         run('cargo-version', '.', ['cargo', '-V'])
         for label in ['plain-09', 'root', 'proxy', 'final', 'final-lite', 'final-stamps']:

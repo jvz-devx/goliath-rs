@@ -83,7 +83,10 @@ def parse_stat(text, hz=None):
         user_s=int(fields[11])/hz, system_s=int(fields[12])/hz,
         faults=int(fields[7])+int(fields[9]),
         start_ticks=int(fields[19]), threads=int(fields[17]),
-        rss_mb=int(fields[21])*os.sysconf('SC_PAGE_SIZE')/1048576)
+        rss_mb=int(fields[21])*os.sysconf('SC_PAGE_SIZE')/1048576,
+        # PF_KTHREAD marks a kernel thread; processor is the CPU it last ran on.
+        kernel=bool(int(fields[6]) & 0x00200000),
+        processor=int(fields[36]) if len(fields) > 36 else None)
 
 
 def parse_status(text):
@@ -102,10 +105,13 @@ def thread_usage(pid, tid, proc=PROC):
     try:
         directory = proc / str(pid) / 'task' / str(tid)
         value = parse_stat((directory / 'stat').read_text())
-        total = int((directory / 'schedstat').read_text().split()[0])/1e9
+        schedule = (directory / 'schedstat').read_text().split()
+        total = int(schedule[0])/1e9
         name = (directory / 'comm').read_text().rstrip('\n')
+        # schedstat: on-CPU ns, run-queue wait ns, timeslices run.
         return dict(id=tid, name=name, is_main=tid == pid, at=time.monotonic(),
             user_cpu_s=value['user_s'], system_cpu_s=value['system_s'], cpu_s=total,
+            run_delay_s=int(schedule[1])/1e9, timeslices=int(schedule[2]),
             cpu_precision='schedstat ns; user/system split in clock ticks')
     except (FileNotFoundError, ProcessLookupError) as error:
         raise RuntimeError('native thread identity disappeared') from error
@@ -139,8 +145,10 @@ def usage(pid, proc=PROC):
             total = max(value['user_s']+value['system_s'], retired+sum(live.values()), previous)
             _cpu_cache[key] = (live, retired, total)
         rss = float(status['VmRSS'].split()[0])/1024 if 'VmRSS' in status else value['rss_mb']
+        # The host swaps to compressed memory under load, so resident alone understates use.
+        swap = float(status['VmSwap'].split()[0])/1024 if 'VmSwap' in status else None
         return dict(at=time.monotonic(), cpu_s=total, user_s=value['user_s'], system_s=value['system_s'],
-            rss_mb=rss, threads=int(status['Threads']), voluntary_context_switches=switches[0],
+            rss_mb=rss, swap_mb=swap, memory_mb=rss+(swap or 0), threads=int(status['Threads']), voluntary_context_switches=switches[0],
             faults=value['faults'],
             involuntary_context_switches=switches[1], context_switches=sum(switches),
             unix_syscalls=None, mach_syscalls=None, pageins=None, cow=None,
@@ -160,7 +168,8 @@ def process_snapshot(proc=PROC):
         try:
             value = parse_stat((path / 'stat').read_text())
             rows[int(path.name)] = dict(parent=value['parent'], name='outside',
-                cpu_s=value['user_s']+value['system_s'], start_ticks=value['start_ticks'])
+                cpu_s=value['user_s']+value['system_s'], start_ticks=value['start_ticks'],
+                kernel=value['kernel'], processor=value['processor'])
         except (FileNotFoundError, ProcessLookupError, PermissionError):
             pass
     return rows
@@ -174,7 +183,8 @@ def parse_cpu_stat(text):
             continue
         ticks = list(map(int, fields[1:]))
         # guest and guest_nice are already included in user/nice.
-        result[fields[0][3:]] = dict(total=sum(ticks[:8]), idle=ticks[3]+ticks[4])
+        result[fields[0][3:]] = dict(total=sum(ticks[:8]), idle=ticks[3]+ticks[4],
+            irq=ticks[5] if len(ticks) > 5 else 0, softirq=ticks[6] if len(ticks) > 6 else 0)
     return result
 
 
@@ -187,9 +197,29 @@ def host_snapshot(proc=PROC, cpu=SYS_CPU):
     for path in sorted(cpu.glob('cpu[0-9]*/cpufreq/scaling_cur_freq')):
         frequency[path.parent.parent.name[3:]] = int(path.read_text())
     return dict(at=time.monotonic(), load=os.getloadavg(), cpus=parse_cpu_stat((proc / 'stat').read_text()),
-        swap_in_pages=int(vm['pswpin']), memory_available_kb=int(memory['MemAvailable'].split()[0]),
+        swap_in_pages=int(vm['pswpin']), swap_out_pages=int(vm.get('pswpout', 0)), memory_available_kb=int(memory['MemAvailable'].split()[0]),
         frequency_khz=frequency, thermal_throttle=throttle,
         thermal_throttle_available=bool(throttle))
+
+
+def smaps_rollup(pid, proc=PROC):
+    """One process's memory by kind, in kB. Costs a walk of its page tables, so sample it sparingly."""
+    rows = {}
+    for line in (proc / str(pid) / 'smaps_rollup').read_text().splitlines()[1:]:
+        key, _, value = line.partition(':')
+        fields = value.split()
+        if len(fields) == 2 and fields[1] == 'kB':
+            rows[key] = int(fields[0])
+    return rows
+
+
+def memory_snapshot(proc=PROC):
+    """Host swap counters and available memory, cheap enough for every soak sample."""
+    vm = dict(line.split() for line in (proc / 'vmstat').read_text().splitlines())
+    memory = parse_status((proc / 'meminfo').read_text())
+    return dict(swap_in_pages=int(vm['pswpin']), swap_out_pages=int(vm.get('pswpout', 0)),
+        memory_available_kb=int(memory['MemAvailable'].split()[0]),
+        swap_free_kb=int(memory['SwapFree'].split()[0]) if 'SwapFree' in memory else None)
 
 
 def host_delta(first, last):
@@ -199,6 +229,9 @@ def host_delta(first, last):
         total = end['total']-start['total']
         busy[name] = dict(total_ticks=total, busy_ticks=total-(end['idle']-start['idle']),
             busy_fraction=(total-end['idle']+start['idle'])/total if total else None)
+        if 'irq' in end and 'irq' in start:
+            interrupts = end['irq']-start['irq']+end['softirq']-start['softirq']
+            busy[name].update(irq_softirq_ticks=interrupts, irq_softirq_fraction=interrupts/total if total else None)
     rising = {name: value-first['thermal_throttle'].get(name, value)
         for name, value in last['thermal_throttle'].items()
         if value > first['thermal_throttle'].get(name, value)}
@@ -215,6 +248,7 @@ def host_delta(first, last):
         reasons.append('thermal throttle counters unavailable')
     return dict(cpu_mode=cpu_mode(), per_cpu=busy, throttle_delta=rising,
         swap_in_pages=last['swap_in_pages']-first['swap_in_pages'],
+        swap_out_pages=last['swap_out_pages']-first['swap_out_pages'] if 'swap_out_pages' in last and 'swap_out_pages' in first else None,
         memory_available_kb_start=first['memory_available_kb'], memory_available_kb_end=last['memory_available_kb'],
         valid=not reasons, reasons=reasons)
 
@@ -257,11 +291,131 @@ def slice_command(unit, cpus):
     return ['sudo', '-n', 'systemctl', 'set-property', '--runtime', unit, 'AllowedCPUs='+cpus]
 
 
+def slice_units(cgroup=None):
+    cgroup = cgroup or CGROUP
+    return sorted(path.name for path in cgroup.iterdir() if path.name.endswith('.slice') or path.name == 'init.scope')
+
+
+def release_slice(unit, previous, cgroup=None, run=None, write=None):
+    """Give a slice its earlier AllowedCPUs back and check that the kernel agrees.
+
+    systemd stops managing a cpuset when AllowedCPUs is cleared and leaves the
+    last kernel value behind, so a cleared property alone keeps the slice on
+    CPU 5. The kernel refuses to empty the cpuset of a populated cgroup, so
+    write every CPU the root allows instead, then compare the effective CPUs.
+    """
+    cgroup = cgroup or CGROUP
+    (run or subprocess.run)(slice_command(unit, previous), check=True)
+    limit = cgroup/unit/'cpuset.cpus'
+    everything = (cgroup/'cpuset.cpus.effective').read_text().strip()
+    if not previous and limit.exists() and limit.read_text().strip() not in ('', everything):
+        (write or sudo_write)(limit, everything)
+    effective = cgroup/unit/'cpuset.cpus.effective'
+    if effective.exists():
+        expected = previous or everything
+        actual = effective.read_text().strip()
+        if actual != expected:
+            raise RuntimeError(f'{unit} still runs on CPUs {actual}, expected {expected}')
+
+
+def stale_narrowing(cgroup=None, show=None):
+    """Slices whose kernel cpuset is narrower than their systemd setting says."""
+    show = show or (lambda unit: subprocess.check_output(['systemctl', 'show', unit, '-p', 'AllowedCPUs', '--value'], text=True).strip())
+    cgroup = cgroup or CGROUP
+    rows = []
+    for unit in slice_units(cgroup):
+        limit = cgroup/unit/'cpuset.cpus'
+        kernel = limit.read_text().strip() if limit.exists() else ''
+        if kernel and kernel != (cgroup/'cpuset.cpus.effective').read_text().strip() and not show(unit):
+            rows.append(dict(unit=unit, kernel_cpus=kernel))
+    return rows
+
+
+def widen(path=STATE):
+    """Undo narrowing an earlier window left in the kernel. Never during a window."""
+    if path.exists() or (ROOT/'.local/host/quiet/owner').exists():
+        raise RuntimeError('a D12 window is open or its journal exists; restore that first')
+    stale = stale_narrowing()
+    for row in stale:
+        release_slice(row['unit'], '')
+    return stale
+
+
 def save_state(state, path=STATE):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(state, indent=2)+'\n')
     temporary.replace(path)
+
+
+def own_cgroup(proc=PROC):
+    return next(line.split('::', 1)[1] for line in (proc/'self/cgroup').read_text().splitlines() if line.startswith('0::'))
+
+
+def recovery_targets(recorded, fixture, own, cgroup=None):
+    """Where a surviving process may go, in order: its recorded cgroup, then fallbacks.
+
+    A transient scope vanishes once it is empty, so the recorded cgroup can be
+    gone by the time a killed window is restored. The restoring process's own
+    cgroup comes next (the user's session scope when run by hand), unless that
+    is the fixture itself, then the nearest surviving ancestor of the recorded
+    cgroup, ending at the root of its slice and the root cgroup.
+    """
+    cgroup = cgroup or CGROUP
+    targets = [recorded]
+    if own and not (cgroup/own.lstrip('/')).resolve().is_relative_to(Path(fixture).resolve()):
+        targets.append(own)
+    parent = Path(recorded)
+    while parent != parent.parent:
+        parent = parent.parent
+        targets.append(str(parent))
+    return [target for index, target in enumerate(targets) if target not in targets[:index]]
+
+
+def move_to_recovery(member, state, path, write=None, cgroup=None, own=None):
+    """Move one process out of the fixture; journal any fallback that was needed."""
+    write = write or sudo_write
+    cgroup = cgroup or CGROUP
+    recorded = state.get('recovery_cgroup') or state.get('driver_cgroup')
+    failures = []
+    for target in recovery_targets(recorded, state['cgroup'], own_cgroup() if own is None else own, cgroup):
+        directory = cgroup/target.lstrip('/')
+        if not directory.is_dir():
+            failures.append(target+': no longer exists')
+            continue
+        try:
+            write(directory/'cgroup.procs', member)
+        except Exception as error:
+            failures.append(target+': '+str(error))
+            continue
+        if target != recorded:
+            state.setdefault('recovery_fallbacks', []).append(dict(pid=int(member), recorded=recorded, used=target, skipped=failures))
+            save_state(state, path)
+            print(f'D12 restore: cgroup {recorded} is unavailable; moved {member} to {target}', file=sys.stderr, flush=True)
+        return target
+    raise RuntimeError('no recovery cgroup accepts process '+str(member)+': '+'; '.join(failures))
+
+
+def unnarrowed_cgroups(fixture=None, cgroup=None):
+    """Top-level cgroups that still allow CPUs 0 to 4 and hold processes. Reported, not judged."""
+    rows = []
+    cgroup = cgroup or CGROUP
+    fixture = Path(fixture).name if fixture else None
+    for directory in sorted(path for path in cgroup.iterdir() if path.is_dir()):
+        if directory.name == fixture:
+            continue
+        try:
+            limit = directory/'cpuset.cpus.effective'
+            # Without the file the cpuset controller does not constrain this cgroup at all.
+            effective = limit.read_text().strip() if limit.exists() else 'unconstrained'
+            if effective == '5':
+                continue
+            processes = sum(len(group.read_text().split()) for group in directory.rglob('cgroup.procs'))
+        except OSError:
+            continue
+        if processes:
+            rows.append(dict(cgroup=directory.name, cpus_effective=effective, processes=processes))
+    return rows
 
 
 def restore(path=STATE):
@@ -272,7 +426,7 @@ def restore(path=STATE):
     errors = []
     for unit, previous in list(state['slices'].items()):
         try:
-            subprocess.run(slice_command(unit, previous), check=True)
+            release_slice(unit, previous)
             del state['slices'][unit]
             save_state(state, path)
         except Exception as error:
@@ -290,7 +444,7 @@ def restore(path=STATE):
         try:
             process = PROC/str(state['pid'])/'stat'
             if process.exists() and parse_stat(process.read_text())['start_ticks'] == state.get('driver_start_ticks'):
-                sudo_write(CGROUP / state['driver_cgroup'].lstrip('/') / 'cgroup.procs', state['pid'])
+                move_to_recovery(state['pid'], state, path)
             state['driver_cgroup'] = None
             save_state(state, path)
         except Exception as error:
@@ -307,7 +461,7 @@ def restore(path=STATE):
                     if members and not recovery_group:
                         raise RuntimeError('recovery cgroup missing for surviving processes')
                     for member in members:
-                        sudo_write(CGROUP/recovery_group.lstrip('/')/'cgroup.procs', member)
+                        move_to_recovery(member, state, path)
                     subprocess.run(['sudo', '-n', 'rmdir', str(group)], check=True)
                 except Exception as error:
                     errors.append(str(error))
@@ -345,13 +499,15 @@ class CpuWindow:
         if (SYS_CPU/'online').read_text().strip() != '0-5':
             raise RuntimeError('D12 requires exactly CPUs 0-5 online')
         base = CGROUP / ('goliath-e28-'+str(os.getpid()))
-        original = next(line.split('::', 1)[1] for line in (PROC/'self/cgroup').read_text().splitlines() if line.startswith('0::'))
+        original = own_cgroup()
         state = dict(pid=os.getpid(), driver_start_ticks=parse_stat((PROC/'self/stat').read_text())['start_ticks'],
             cgroup=str(base), driver_cgroup=original, recovery_cgroup=original, slices={}, governors={})
         # Collect the complete undo journal before the first mutation.
-        units = sorted(path.name for path in CGROUP.iterdir() if path.name.endswith('.slice') or path.name == 'init.scope')
+        units = slice_units()
         for unit in units:
             state['slices'][unit] = subprocess.check_output(['systemctl', 'show', unit, '-p', 'AllowedCPUs', '--value'], text=True).strip()
+        # Narrowing an earlier window left behind; restore clears it with the rest.
+        state['stale_narrowing_at_start'] = stale_narrowing()
         for governor in sorted(SYS_CPU.glob('cpufreq/policy*/scaling_governor')):
             state['governors'][str(governor)] = governor.read_text().strip()
         if not state['governors']:
@@ -359,7 +515,9 @@ class CpuWindow:
         save_state(state)
         self.owner = True
         atexit.register(self.stop)
-        for sig in [signal.SIGINT, signal.SIGTERM, signal.SIGHUP]:
+        # Every signal whose default action ends Python without running atexit.
+        for sig in [signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT,
+                signal.SIGUSR1, signal.SIGUSR2, signal.SIGALRM]:
             self.previous_handlers[sig] = signal.getsignal(sig)
             signal.signal(sig, self.interrupted)
         try:

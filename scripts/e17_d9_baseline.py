@@ -86,6 +86,12 @@ def cell(args,base):
             for command in ['gamerule spawn_mobs false','gamerule advance_weather false','gamerule advance_time false',
                     'gamerule random_tick_speed 3','gamerule respawn_radius 0','time set day','kill @e[type=!minecraft:player]']:
                 engine.console(command)
+            # E31 workload variant, default off: a changed workload, never a baseline row.
+            row['variants']={'locator_bar_off':bool(getattr(args,'locator_bar_off',False)),'changed_workload':bool(getattr(args,'locator_bar_off',False))}
+            if row['variants']['locator_bar_off']:
+                row['locator_bar']={'set':engine.console('gamerule locator_bar false'),'query':engine.console('gamerule locator_bar')}
+                if 'false' not in json.dumps(row['locator_bar']['query']).lower():
+                    raise RuntimeError('the engine did not confirm gamerule locator_bar false')
             for group in layout['groups']:
                 command=[str(base.BINS/'horizon-bots'),'--event-loop','--server',f'127.0.0.1:{engine.port}',
                     '--bots',str(group['count']),'--behaviour','route','--seconds','7200','--join-every','.25',
@@ -187,6 +193,9 @@ def cell(args,base):
                 row.update({'pass':False,'valid':False});row['reasons']+=sorted(set(reasons))
             a,b=samples[0]['main_threads'][0],samples[-1]['main_threads'][0]
             row['main_thread_cpu_cores']=[(b['cpu_s']-a['cpu_s'])/(b['at']-a['at'])]
+            if 'run_delay_s' in a and 'run_delay_s' in b:
+                # Linux: run-queue wait of the main thread over the same span, as cores.
+                row['main_thread_run_delay_cores']=[(b['run_delay_s']-a['run_delay_s'])/(b['at']-a['at'])]
             row['process_cpu_cores']={'engine':row['server_cpu_cores'],**{group['label']:
                 (samples[-1]['bot_process_usage'][group['label']]['cpu_s']-samples[0]['bot_process_usage'][group['label']]['cpu_s'])/wall
                 for group in layout['groups']}}

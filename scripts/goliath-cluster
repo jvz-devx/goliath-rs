@@ -265,6 +265,8 @@ class Tile:
 
 
 class Cluster:
+    store_arguments = ()
+
     def __init__(self, root, resources, edge, normal=False, tile_env=None, store_routes=None, store_binary=None, leased=None, max_players=128, max_expected=None):
         self.root, self.resources, self.edge = root, resources, edge
         self.leased=(BINS/'LEASES').exists() if leased is None else leased
@@ -280,7 +282,9 @@ class Cluster:
         self.proxy = None
         self.store_binary = Path(store_binary) if store_binary is not None else BINS/'goliath-store'
         self.store_log = (root/'store.log').open('w+')
-        self.store_process = subprocess.Popen(platform.launch_command([self.store_binary,'--dir',root/'store','--listen','127.0.0.1:0','--sync','full'], 'servers'),stdout=self.store_log,stderr=subprocess.STDOUT)
+        # Opt-in extra store arguments, empty by default; a runner that sets them records them in its row.
+        self.store_command = [self.store_binary,'--dir',root/'store','--listen','127.0.0.1:0','--sync','full',*self.store_arguments]
+        self.store_process = subprocess.Popen(platform.launch_command(self.store_command, 'servers'),stdout=self.store_log,stderr=subprocess.STDOUT)
         deadline = time.monotonic()+10
         while True:
             text = (root/'store.log').read_text().rpartition('\n')[0]

@@ -130,7 +130,7 @@ def main():
     if not child:
         if platform.LINUX:
             import goliath_bundle
-            goliath_bundle.validate(bins,{'final'})
+            linux_identity=goliath_bundle.validate_server_stack(bins)
             from e28_window import ready
             ready()
         window=folder/(window_name+'-window')
@@ -188,6 +188,7 @@ def main():
                     if pid not in owned:value['name']='outside'
                 return row
         if platform.LINUX:
+            metadata.update(bundle=linux_identity['bundle'],bundle_manifest_sha256=linux_identity['manifest_sha256'])
             from e28_window import WholeWindow
             monitor=WholeWindow(observer=True).start()
         else:monitor=Sampler(observer=True).start()

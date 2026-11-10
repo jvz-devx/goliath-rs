@@ -39,6 +39,14 @@ def main():
         memories[role]=dict(from_seconds=first['elapsed_seconds'],to_seconds=last['elapsed_seconds'],
             before_mib=left['rss_mb'],after_mib=right['rss_mb'],growth_fraction=growth,
             judged=judged,under_10_percent=growth<.1 if judged else None)
+    # Linux soaks carry the memory rule: resident plus swapped, from the ruled baseline.
+    rule=raw.get('memory_rule');ruled=None
+    if rule:
+        import e28_soak_memory
+        ruled=e28_soak_memory.ruled(memory,rule)
+        for role,row in ruled['processes'].items():
+            row['judged']=role!='proxy'
+            if role=='proxy':row['under_10_percent']=None
     violations=[];regressions=[];previous={}
     for audit in raw['ownership_audits']:
         acting={}
@@ -66,13 +74,18 @@ def main():
     anomaly_count=sum(row['clock_anomaly_count'] for row in causal['tiles'].values())
     populations=[sum(group['online'] for group in row['groups'].values()) for row in cell.get('bot_samples',[])]
     population=bool(populations and min(populations)==max(populations)==cell['layout']['players'])
-    counts=[0]*30
+    minutes=30+round((rule or {}).get('extension_seconds',0)/60)
+    counts=[0]*minutes
     for row in cell.get('activations_in_window',[]):
         index=int((row['ns']-cell['start_ns'])/60_000_000_000)
-        if 0<=index<30:counts[index]+=1
+        if 0<=index<minutes:counts[index]+=1
     continuous=all(counts)
     noise=causal['window']['steady_noise']
     memory_pass=coverage and len([row for row in memories.values() if row['judged']])==9 and all(row['under_10_percent'] for row in memories.values() if row['judged'])
+    minute5_to30_pass=memory_pass
+    if ruled:
+        judged=[row for row in ruled['processes'].values() if row['judged']]
+        memory_pass=bool(ruled['endpoint_coverage'] and ruled['every_swap_sampled'] and len(judged)==9 and all(row['under_10_percent'] for row in judged))
     authority_complete=summary.get('authority_trace_complete',True) and causal.get('authority_trace_complete',True)
     passed=bool(cell['status']=='complete' and summary['binaries_unchanged'] and population and memory_pass and cargo
         and not stops and not anomaly_count and clocks['all_valid'] and authority_complete and len(raw['ownership_audits'])>=29
@@ -80,6 +93,9 @@ def main():
     result=dict(kind='E24-fixed-soak-readback',name=args.name,verdict='passed' if passed else 'failed',
         runtime_status=cell['status'],runtime_error=summary.get('error'),binaries_unchanged=summary['binaries_unchanged'],
         memory_endpoint_coverage=coverage,memory_pass=memory_pass,memory=memories,proxy_rss_judged=False,
+        memory_rule=rule,memory_ruled=ruled,memory_pass_minute5_to30_rss=minute5_to30_pass,
+        memory_judged_on='resident plus swapped over the ruled window' if ruled else 'resident, minute 5 to minute 30',
+        activation_minutes=minutes,
         clock_pass=clocks['all_valid'],authority_stops=stops,clock_anomalies=anomaly_count,
         authority_trace_complete=authority_complete,authority_trace_integrity=causal.get('authority_trace_integrity'),
         loaded_clock_readback=str(clock_path.relative_to(ROOT)),

@@ -39,6 +39,64 @@ class Contract(unittest.TestCase):
                 [(1,0,False,['startup failure']),(1,1,False,['startup failure'])])
             self.assertIsNone(ledger['frontier'])
 
+    def test_cluster_loss_in_the_measured_span_is_a_failed_step_not_a_missing_one(self):
+        results=frontier.load('e20_loss_test_results',frontier.ROOT/'scripts/e20-results')
+        def cell(marks,error,d12=True,outside=0.,load=1.,exits=None):
+            samples=[dict(at=10.*index,mark=mark,outside_cpu_s_delta={'77':outside*10} if index else {}) for index,mark in enumerate(marks)]
+            return dict(status='failed',error=error,load_start=[load,0,0],processes=dict(error=None,samples=samples),
+                d12=dict(valid=d12,reasons=[] if d12 else ['CPU 5 busy fraction at least 95%']),
+                failure_evidence=dict(processes=exits or {'bots-a':dict(pid=1,exit=1),'tile-a':dict(pid=2,exit=None)}))
+        measured=['cell-start','joined','steady-first',None,'failure-before-cleanup'];drop="RuntimeError('D9 bot exit/drop: ...')"
+        with tempfile.TemporaryDirectory(dir=frontier.support.RUNS) as temporary:
+            data=Path(temporary)
+            rows={'loss-450-r0':cell(measured,drop),                                   # players dropped in a valid window
+                'loss-450-r1':cell(['cell-start','joined','failure-before-cleanup'],drop),   # dropped while joining: startup fault
+                'loss-475-r0':cell(measured,drop,d12=False),                            # dropped, but the window was not valid
+                'loss-475-r1':cell(measured,drop,outside=.6),                           # an outside process above half a core
+                'loss-500-r0':cell(measured,"RuntimeError('quiet identity lost')"),      # harness fault inside the span
+                'loss-500-r1':cell(measured,'ProcessLookupError(5)',exits={'proxy':dict(pid=5,exit=-11)})}  # a server died
+            for name,value in rows.items():(data/(name+'.json')).write_text(json.dumps(dict(cells={name.split('-')[1]:value})))
+            with patch.object(results,'DATA',data):ledger=results.ledger('loss',200)
+        got={(row['count'],row['repeat']):(row['valid'],row['passed'],row['classification'].split(':')[0]) for row in ledger['rows']}
+        self.assertEqual(got,{(450,0):(True,False,'failed'),(450,1):(False,False,'invalid'),(475,0):(False,False,'invalid'),
+            (475,1):(False,False,'invalid'),(500,0):(False,False,'invalid'),(500,1):(True,False,'failed')})
+        loss=next(row for row in ledger['rows'] if (row['count'],row['repeat'])==(450,0))['cluster_loss']
+        self.assertEqual((loss['bot_groups_exited'],loss['servers_exited'],loss['seconds_into_measured_span']),(['bots-a'],[],20.))
+        # One counted failure at 450 beside one invalid row: the step is not stable either way.
+        self.assertEqual((ledger['stable_failing_counts'],ledger['frontier']),([],None))
+
+    def test_e28_bundle_needs_direct_bots_unless_shims_are_asked_for(self):
+        with tempfile.TemporaryDirectory(dir=frontier.support.RUNS) as temporary:
+            argv=['e20-frontier','--name','fresh','--counts','100','--data-dir',temporary,'--cpu-mode','pin']
+            with patch.object(frontier.goliath_bundle,'is_e28',return_value=True),patch.object(frontier.goliath_bundle,'validate',return_value=dict(bundle='final')),patch.object(frontier.platform,'LINUX',True):
+                with patch.object(frontier.os.sys,'argv',argv):
+                    with self.assertRaisesRegex(SystemExit,'needs --direct-bots'):frontier.main()
+                # With --shims the refusal is passed; the next check is the frozen-artifact read.
+                with patch.object(frontier.os.sys,'argv',argv+['--shims']),patch.object(Path,'read_bytes',side_effect=KeyError('past the shim guard')):
+                    with self.assertRaisesRegex(KeyError,'past the shim guard'):frontier.main()
+            with patch.object(frontier.goliath_bundle,'is_e28',return_value=False),patch.object(frontier.os.sys,'argv',argv+['--proxy-terrain-poll']):
+                with self.assertRaisesRegex(SystemExit,'control arm of the park proxy only'):frontier.main()
+
+    def test_tick_time_splits_into_cpu_run_queue_wait_and_a_blocked_remainder(self):
+        a=dict(at=0.,cpu_s=1.,user_cpu_s=1.,system_cpu_s=0.,name='horizon-client',is_main=True,run_delay_s=2.,timeslices=100)
+        b=dict(at=60.,cpu_s=25.,user_cpu_s=20.,system_cpu_s=5.,name='horizon-client',is_main=True,run_delay_s=8.,timeslices=12100)
+        with patch.object(frontier.platform,'LINUX',True):
+            main=frontier.thread_deltas({'a':{'9':a}},{'a':{'9':b}})['a']['main']
+        self.assertAlmostEqual(main['cores'],.4);self.assertAlmostEqual(main['run_delay_cores'],.1);self.assertAlmostEqual(main['timeslices_per_s'],200)
+        # 20 TPS, mean tick 30 ms: 20 ms CPU, 5 ms waiting for a CPU, 5 ms neither.
+        split=frontier.tick_schedule(main,[dict(ms=20),dict(ms=40)],20.)
+        self.assertAlmostEqual(split['main_cpu_ms_per_tick'],20);self.assertAlmostEqual(split['run_delay_ms_per_tick'],5)
+        self.assertAlmostEqual(split['blocked_ms_per_tick'],5);self.assertAlmostEqual(split['tick_wall_cores'],.6)
+        self.assertAlmostEqual(split['blocked_cores'],.1);self.assertAlmostEqual(split['timeslices_per_tick'],10)
+        # No schedstat (the Mac): the fields are absent, never zero.
+        plain={key:value for key,value in a.items() if key not in ['run_delay_s','timeslices']}
+        self.assertEqual(frontier.schedule_delta(plain,b),{});self.assertIsNone(frontier.tick_schedule(dict(cores=.4),[dict(ms=20)],20.))
+        rows=[dict(name='proxy-io-1',cores=.2,run_delay_cores=.01,timeslices_per_s=900.),dict(name='proxy-io-2',cores=.1,run_delay_cores=.02,timeslices_per_s=800.),
+            dict(name='terrain-manager',cores=.001,run_delay_cores=.003,timeslices_per_s=50.),dict(name='old',cores=1.)]
+        roles=frontier.role_schedule(rows)
+        self.assertEqual(roles['IO drivers']['threads'],2);self.assertAlmostEqual(roles['IO drivers']['run_delay_cores'],.03)
+        self.assertEqual(set(roles),{'IO drivers','terrain managers'});self.assertEqual(frontier.extension(),0.)
+
     def test_compressed_frontier_cell_cannot_be_overwritten(self):
         with tempfile.TemporaryDirectory(dir=frontier.support.RUNS) as temporary:
             data=Path(temporary)

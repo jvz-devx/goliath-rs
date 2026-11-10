@@ -25,6 +25,24 @@ def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def pending_gates_cleared(name, directory, build):
+    """A frozen build record may list gates that had not run yet. They must have passed since.
+
+    The later record is the committed build-<bundle>.json beside the manifest.
+    It counts only when it names this exact frozen build.json, has nothing
+    pending and shows exit 0 for every gate the frozen record left open.
+    """
+    pending = build.get('pending_gates') or []
+    if not pending:
+        return
+    later = MANIFEST.parent / ('build-' + name + '.json')
+    record = json.loads(later.read_text()) if later.is_file() else {}
+    passed = {row.get('label') for row in record.get('commands', []) if row.get('exit') == 0}
+    if (record.get('frozen_bundle_build_record_sha256') != sha(Path(directory) / 'build.json')
+            or record.get('pending_gates') or not set(pending) <= passed):
+        raise ValueError('E28 bundle has gates that never ran: ' + ', '.join(pending))
+
+
 def is_e28(directory):
     return Path(directory).resolve().parent == BUNDLES.resolve()
 
@@ -82,6 +100,7 @@ def validate(directory, expected=None):
         raise ValueError('E28 build gates did not pass: '+', '.join(blocking))
     if build.get('verification_status', 'passed') != 'passed' and not build.get('failed_gates'):
         raise ValueError('E28 build verification did not pass')
+    pending_gates_cleared(name, directory, build)
     for metadata in [canonical, build]:
         if any(metadata['binaries'].get(key) != digest for key, digest in binaries.items()):
             raise ValueError('E28 binary mapping differs between build records')
@@ -90,3 +109,47 @@ def validate(directory, expected=None):
             if sha(ROOT/patch['path']) != patch['sha256']:
                 raise ValueError('E28 source patch changed: '+patch['path'])
     return dict(bundle=name, manifest_sha256=sha(MANIFEST), binaries=binaries, files=files)
+
+
+# The measured server stacks. Each later stack is an earlier one with exactly one
+# executable replaced; every other executable is the base's bytes.
+#   final-r2      final with the two soak fixes in the tile
+#   final-r2-e29  final-r2 with the store that answers granted renewals early (E29)
+#   final-r2-park final-r2 with the proxy that parks idle terrain managers (E30)
+DERIVED = {'final-r2': ('final', 'horizon-client'), 'final-r2-e29': ('final-r2', 'goliath-store'),
+           'final-r2-park': ('final-r2', 'meridian')}
+SERVER_STACKS = ('final', 'final-r2', 'final-r2-e29')
+# Frontier cells only; not a soak or M3 stack until it has passed the crossing checks.
+CANDIDATE_STACKS = ('final-r2-park',)
+
+
+def check_derivation(identity):
+    """Walk a derived stack down to final, allowing one named executable per step."""
+    name, binaries = identity['bundle'], identity['binaries']
+    while name in DERIVED:
+        base_name, only = DERIVED[name]
+        base = validate(BUNDLES / base_name, {base_name})['binaries']
+        changed = {key for key in set(base) | set(binaries) if base.get(key) != binaries.get(key)}
+        if changed != {only}:
+            raise ValueError(f'E28 {name} must differ from {base_name} in {only} only')
+        name, binaries = base_name, base
+    return identity
+
+
+def validate_server_stack(directory):
+    """Validate a measured server bundle against the strict one-executable rule."""
+    return check_derivation(validate(directory, set(SERVER_STACKS)))
+
+
+def validate_candidate_stack(directory):
+    """Validate a frontier-only candidate bundle under the same rule."""
+    return check_derivation(validate(directory, set(CANDIDATE_STACKS)))
+
+
+def rebuilt_since_final(name):
+    """The executables a stack may differ from final in, summed along its derivation."""
+    names = set()
+    while name in DERIVED:
+        name, only = DERIVED[name]
+        names.add(only)
+    return names

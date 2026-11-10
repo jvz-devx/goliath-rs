@@ -32,12 +32,13 @@ def main():
     parser.add_argument('--data-dir',type=Path,default=ROOT/'docs/experiments/data/E17/d9-plain09-baseline')
     parser.add_argument('--resume',action='store_true')
     parser.add_argument('--start',type=int,default=300)
+    parser.add_argument('--locator-bar-off',action='store_true',help='E31 workload variant, default off; single cells only')
     parser.add_argument('--minimum-count',type=int,default=25 if platform.LINUX else 300)
     parser.add_argument('--step-up',type=int,default=50)
     args=parser.parse_args()
     base.BINS=args.bins.resolve()
     base.DATA=args.data_dir.resolve()
-    if not any(base.DATA.is_relative_to(ROOT/'docs/experiments/data'/experiment) for experiment in ['E17', 'E28']):
+    if not any(base.DATA.is_relative_to(ROOT/'docs/experiments/data'/experiment) for experiment in ['E17', 'E28', 'E31']):
         parser.error('data directory must remain under E17 evidence')
     base.REQUEST_PREFIX='d9-plain09-baseline'
     original=base.provenance
@@ -47,6 +48,8 @@ def main():
             result[name+'_sha256']=base.digest(ROOT/'scripts'/name)
         return result
     base.provenance=provenance
+    if args.locator_bar_off and not (args.cell and base.DATA.is_relative_to(ROOT/'docs/experiments/data/E31')):
+        parser.error('the locator-bar variant is a single labelled cell under the E31 data folder')
     if args.cell:
         if not args.out: parser.error('--cell requires --out')
         single_cell(args,base)

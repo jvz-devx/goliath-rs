@@ -36,8 +36,13 @@ def batches(path):
         if spacing is not None and spacing>200:reasons.append('batch-start-spacing-ms')
         if reasons:gaps.append(dict(index=index,reasons=reasons,start_spacing_ms=spacing,
             context=rows[max(0,index-1):min(len(rows),index+2)]))
+    # A store that answers renewals without a batch is idle between hand-overs, so spacing
+    # alone is no longer rare. Past 100 such gaps they are counted, not listed.
+    idle=[gap for gap in gaps if gap['reasons']==['batch-start-spacing-ms']]
+    spacing=dict(count=len(idle),max_ms=max((gap['start_spacing_ms'] for gap in idle),default=None),listed=len(idle)<=100)
+    if not spacing['listed']:gaps=[gap for gap in gaps if gap['reasons']!=['batch-start-spacing-ms']]
     return dict(rows=len(rows),time_scope='store-relative Instant microseconds; startup origin is separately bracketed, not exact',
-        incomplete_tail_bytes=len(text)-len(complete),
+        incomplete_tail_bytes=len(text)-len(complete),spacing_only_gaps_over_200ms=spacing,
         gap_threshold_ms=200,gap_note='batch spacing can be idle time; it is not by itself a stall',
         maxima_ms={field:max(row.get(field,0) for row in rows) for field in fields},gaps_over_200ms=gaps)
 

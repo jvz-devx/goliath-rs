@@ -75,6 +75,11 @@ def main():
     parser.add_argument('--clock-telemetry',action='store_true',help='require fixed-tile raw-clock counters and retain loaded endpoints')
     parser.add_argument('--soak-audit',action='store_true',help='retain E23 cargo, ownership and all-tile checkpoint/recovery audit')
     parser.add_argument('--planning-mutation-rate',type=int)
+    parser.add_argument('--bulk-logs-tmpfs',action='store_true',help='diagnostic only, default off: tile stdout/stderr and anticheat logs on tmpfs')
+    parser.add_argument('--store-renewals',choices=['barrier'],help='control only, default off: start the store with --renewals barrier')
+    parser.add_argument('--extended-memory-window',action='store_true',help='registered long soak, default off: wait up to minute 35 for the store receipt window, run at most 60 minutes')
+    parser.add_argument('--plateau-minutes',type=int,choices=[120],help='registered labelled plateau soak, not the M4 row')
+    parser.add_argument('--tile-thp-disabled',action='store_true',help='diagnostic only: MIMALLOC_ALLOW_THP=0 in tile environments only')
     args = parser.parse_args()
     if not all(c.isalnum() or c in '-_' for c in args.name) or not args.name:
         raise ValueError('simple fresh attempt name required')
@@ -82,11 +87,23 @@ def main():
         raise ValueError('at most one 45-minute diagnostic window')
     if args.soak_audit and ((args.players!=650 and not platform.LINUX) or args.seconds!=1800 or not args.clock_telemetry):
         raise ValueError('fixed soak is 650 players for1800seconds with clock telemetry')
+    if args.bulk_logs_tmpfs and not (platform.LINUX and args.direct_bots and '-diag-' in args.name):
+        raise ValueError('bulk logs on tmpfs is a named Linux diagnostic, never the standard fixture')
+    if args.extended_memory_window and not (platform.LINUX and args.soak_audit):
+        raise ValueError('the extended memory window belongs to a Linux soak')
+    if args.plateau_minutes and not (platform.LINUX and args.soak_audit and args.extended_memory_window):
+        raise ValueError('the plateau soak needs Linux soak auditing and the extended memory probes')
+    if args.tile_thp_disabled and not (platform.LINUX and args.soak_audit and args.extended_memory_window and '-diag-thp' in args.name):
+        raise ValueError('tile THP off belongs to a labelled Linux extended diagnostic')
     bins = args.bins.resolve()
     identity_before = validate_snapshot(bins)
     DATA.mkdir(parents=True,exist_ok=True)
     folder = EVIDENCE/args.name
     folder.mkdir(parents=True,exist_ok=False)
+    bulk = None
+    if args.bulk_logs_tmpfs:
+        from e28_log_integrity import BulkLogs
+        bulk = BulkLogs(args.name)
     target = folder/(args.name+'.json')
     if (DATA/(args.name+'-summary.json')).exists():
         raise RuntimeError('attempt already exists')
@@ -118,14 +135,17 @@ def main():
 
         def visit_Constant(self,node):
             if node.value == '900':
-                return ast.copy_location(ast.Constant('3300'),node)
+                # Bot lifetime in seconds: longer than the longest loaded run plus join and warmup.
+                return ast.copy_location(ast.Constant('10800' if args.plateau_minutes else '4500' if args.extended_memory_window else '3300'),node)
             if isinstance(node.value,str):
                 return ast.copy_location(ast.Constant(node.value.replace('E20-D9-','E24-D9-')),node)
             return node
     tree = ast.fix_missing_locations(Adapter().visit(ast.parse((ROOT/'scripts/e20-frontier').read_text())))
     executed = ast.unparse(tree)+'\n'
     (folder/'executed-cell.py').write_text(executed)
-    ns = dict(__name__='e24_d9_base',__file__=str(ROOT/'scripts/e20-frontier'),E23_WINDOW_SECONDS=2700 if args.seconds>1200 else 1500)
+    # A Linux soak may run up to ten minutes longer when the memory baseline moves past minute 5.
+    ns = dict(__name__='e24_d9_base',__file__=str(ROOT/'scripts/e20-frontier'),
+        E23_WINDOW_SECONDS=(9000 if args.plateau_minutes else 4500 if args.extended_memory_window else 3300 if args.soak_audit and platform.LINUX else 2700) if args.seconds>1200 else 1500)
     exec(compile(tree,str(folder/'executed-cell.py'),'exec'),ns)
     ns['DATA'] = folder
     availability_tree = ast.fix_missing_locations(Retarget().visit(ast.parse((ROOT/'scripts/e22_availability.py').read_text())))
@@ -158,7 +178,15 @@ def main():
         observer.save=saved_soak
         soak=observer.Soak(args.name,ns,holder)
         soak.count = args.players
+        if platform.LINUX:
+            from e28_soak_memory import Rule
+            soak.memory_rule=Rule(trace.store_trace.with_suffix('.memory.csv'),
+                **(dict(last_baseline_minute=35,run_cap_minutes=args.plateau_minutes or 60,
+                    minimum_loaded_seconds=(args.plateau_minutes or 30)*60) if args.extended_memory_window else {}))
+            soak.memory_detail=args.extended_memory_window
+            ns['extension']=soak.memory_rule.extension
     heap_samples = []
+    store_arguments = []
     clock_endpoints = {'first':None,'last':None}
     clock_counts = []
     heap_started = [False]
@@ -177,9 +205,12 @@ def main():
             original_factory = module.cluster_module
             def factory(selected):
                 result = original_factory(selected)
+                if args.store_renewals:
+                    result.Cluster.store_arguments=('--renewals',args.store_renewals)
                 if platform.LINUX and args.direct_bots:
                     from e28_log_integrity import install_cluster,path_command
                     install_cluster(result,folder/'log-integrity')
+                    if bulk:bulk.install(result)
                     ns['path_command']=path_command
                 popen = result.subprocess.Popen
                 result.subprocess = scope['Proxy'](result.subprocess,Popen=lambda *a,**kw:trace.store_popen(popen,*a,**kw))
@@ -188,7 +219,8 @@ def main():
                 cluster_stop = result.Cluster.stop
                 def start(tile):
                     previous = tile.cluster.tile_env
-                    tile.cluster.tile_env = dict(previous,GOLIATH_LEASE_TRACE_DIR=str(folder/'tiles'))
+                    tile.cluster.tile_env = dict(previous,GOLIATH_LEASE_TRACE_DIR=str(folder/'tiles'),
+                        **({'MIMALLOC_ALLOW_THP':'0'} if args.tile_thp_disabled else {}))
                     try:
                         value = tile_start(tile)
                     finally:
@@ -217,11 +249,15 @@ def main():
                 def initialize(instance,*a,**kw):
                     holder['instance'] = instance
                     value = cluster_init(instance,*a,**kw)
+                    store_arguments[:]=[str(word) for word in instance.store_command[1:]]
+                    if args.store_renewals and store_arguments[-2:]!=['--renewals',args.store_renewals]:
+                        raise RuntimeError('the store was not started in the requested renewal mode')
                     save(folder/'environment.json',dict(uname=list(os.uname()),load_start=os.getloadavg(),
+                        store_arguments=store_arguments,
                         binary_directory=str(bins),lease_ms=1000,margin_ms=100,renewal_ms=250,
                         server_core_cap=4,bot_core_cap=1,
                         tile_environment={name:{key:value for key,value in tile.env.items()
-                            if key.startswith(('GOLIATH_','HORIZON_TILE','HORIZON_E3_','HORIZON_E11_'))}
+                            if key.startswith(('GOLIATH_','HORIZON_TILE','HORIZON_E3_','HORIZON_E11_')) or key=='MIMALLOC_ALLOW_THP'}
                             for name,tile in instance.tiles.items()}))
                     return value
                 def stop_cluster(instance):
@@ -242,6 +278,7 @@ def main():
                                     sha256=hashlib.sha256(content).hexdigest(),bytes=len(content),
                                     base64=base64.b64encode(content).decode())
                         save(folder/'native-logs.json.gz',dict(encoding='base64-or-archive',files=logs))
+                        if bulk:bulk.observe(instance.root)
                 result.Tile.start,result.Tile.stop,result.Tile.ask,result.Cluster.__init__,result.Cluster.stop = start,stop,asked,initialize,stop_cluster
                 if soak:result=soak.cluster(result)
                 return result
@@ -376,6 +413,7 @@ def main():
                     if gzip.decompress(compressed.read_bytes()) != raw:
                         raise RuntimeError('trace compression differs')
                     path.unlink()
+            if bulk:save(folder/'bulk-logs-tmpfs.json',bulk.finish())
             unchanged = validate_snapshot(bins) == identity_before
             stops = authority_stops(folder)
             from e28_log_integrity import trace_integrity
@@ -385,6 +423,9 @@ def main():
                 heap_diagnostic=args.heap,heap_started=heap_started[0],heap_dumped=heap_dumped[0],
                 observed_authority_latch=bool(trace.expiry_events or stops),authority_stop_events=stops,availability=captured,
                 binaries_unchanged=unchanged,cleanup_errors=cleanup_errors,
+                bulk_logs_tmpfs=bulk.report if bulk else None,
+                store_renewals=args.store_renewals or 'default',store_arguments=store_arguments,
+                memory_rule=soak.memory_rule.record() if soak and soak.memory_rule else None,
                 authority_trace_integrity=integrity,authority_trace_complete=bool(integrity) and all(row['complete'] for row in integrity.values()),
                 evidence={str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest()
                     for path in sorted(folder.rglob('*')) if path.is_file()},
@@ -393,6 +434,7 @@ def main():
         finally:
             if request.exists() and request.read_text() == identity:
                 request.unlink()
+            if bulk:bulk.remove()
             if target.exists() and target.stat().st_size>1_000_000:
                 raw = target.read_bytes()
                 target.with_suffix('.json.gz').write_bytes(gzip.compress(raw,mtime=0))

@@ -25,11 +25,16 @@ def main():
     parser.add_argument('--frozen-reference',action='store_true',help='approved exact 29f repeat, not a rebuilt control')
     parser.add_argument('--campaign-plan',type=Path,default=harness.DATA/'e25-memory-next-plan-r3.json')
     parser.add_argument('--owner',choices=sorted({'E25','reviewer',platform.window_owner('E25')}),default=platform.window_owner('E25'))
+    parser.add_argument('--bulk-logs-tmpfs',action='store_true',help='diagnostic only, default off: tile stdout/stderr and anticheat logs on tmpfs')
+    parser.add_argument('--extended-memory-window',action='store_true',help='registered long soak, default off')
+    parser.add_argument('--plateau-minutes',type=int,choices=[120],help='registered labelled long soak, not the M4 row')
+    parser.add_argument('--tile-thp-disabled',action='store_true',help='labelled diagnostic only; host, store and proxy unchanged')
+    parser.add_argument('--store-renewals',choices=['barrier'],help='control only, default off: the store journals every renewal as before E29')
     parser.add_argument('--collect-only',action='store_true',help='release the window and leave readback for a separate command')
     args = parser.parse_args()
     harness.configure(args.data_dir)
     print('E25_SOAK_CONTROL_PROCESS '+str(os.getpid()),flush=True)
-    if not re.fullmatch(r'(?:e25-|e28-|repro-)[A-Za-z0-9_-]+',args.name):
+    if not re.fullmatch(r'(?:e25-|e28-|e29-|repro-)[A-Za-z0-9_-]+',args.name):
         raise ValueError('fresh simple control name required')
     target = harness.DATA / (args.name+'-plan.json')
     result_path = harness.DATA / (args.name+'-run.json')
@@ -37,8 +42,23 @@ def main():
         raise RuntimeError('control already exists')
     bins = args.bins.resolve()
     identity = validate_snapshot(bins)
+    if args.bulk_logs_tmpfs and not (goliath_bundle.is_e28(bins) and '-diag-' in args.name):
+        raise ValueError('bulk logs on tmpfs is a named E28 diagnostic, never the soak row')
     if goliath_bundle.is_e28(bins):
-        goliath_bundle.validate(bins, {'final'})
+        linux_identity = goliath_bundle.validate_server_stack(bins)
+        if args.extended_memory_window and not (harness.DATA/(args.name+'-registration.json')).is_file():
+            raise ValueError('a long soak needs its registration record first')
+        if args.plateau_minutes:
+            registration=harness.read(harness.DATA/(args.name+'-registration.json'))
+            if not (args.extended_memory_window and registration.get('name')==args.name
+                    and registration.get('loaded_seconds')==7200 and registration.get('players')==425
+                    and registration.get('bundle')=='final-r2-e29' and linux_identity['bundle']=='final-r2-e29'
+                    and registration.get('not_m4_soak_row') is True):
+                raise ValueError('the labelled plateau soak needs an exact 7200-second registration on final-r2-e29')
+        if args.tile_thp_disabled and not (args.extended_memory_window and '-diag-thp' in args.name and linux_identity['bundle']=='final-r2-e29'):
+            raise ValueError('tile THP off belongs to the labelled E29 extended diagnostic')
+        if args.store_renewals and not (linux_identity['bundle']=='final-r2-e29' and '-barrier' in args.name):
+            raise ValueError('barrier renewals is a named control on the E29 store, never the soak row')
         if args.frozen_reference:
             raise ValueError('the Mac frozen reference is not a Linux bundle')
         reference_kind = 'E28-rebuilt-reactor-control'
@@ -48,6 +68,12 @@ def main():
         _,bot_identity,proof=e28_direct_bots.selection()
         from e28_window import ready
         ready()
+    elif args.plateau_minutes:
+        raise ValueError('the plateau soak belongs to the Linux E29 store bundle')
+    elif args.tile_thp_disabled:
+        raise ValueError('tile THP off belongs to the labelled Linux diagnostic')
+    elif args.store_renewals:
+        raise ValueError('barrier renewals is a named control on the E29 store')
     elif args.frozen_reference:
         frozen = harness.ROOT/'.local/bin/meridian-e18/reactor-1'
         expected = '29f1ff02614019aaccd2303ea0ad300c19f632c861174ced92ec009f7903a53b'
@@ -75,10 +101,28 @@ def main():
     if goliath_bundle.is_e28(bins):
         plan.update(kind='E28-full-soak-plan',cargo_items=args.players//10,cpu_mode=args.cpu_mode,
             direct_bots=True,bots_bundle=bot_identity,direct_bots_proof_sha256=proof,
+            store_renewals=args.store_renewals or 'default',
+            memory_window='extended: the baseline may be as late as minute 35 and the run is capped at 60 minutes' if args.extended_memory_window else 'standard: baseline no later than minute 15',
+            memory_rule='resident plus swapped; baseline at the later of minute 5 and the first per-minute sample after the store receipt window is full; 25-minute judged window; the run is extended to match',
             bot_latency_trace_enabled=False,whole_window_d12_required=True)
         plan['bundle']['bot_sha256']=bot_identity['binaries']['horizon-bots']
+        plan['bundle'].update(name=linux_identity['bundle'],manifest_sha256=linux_identity['manifest_sha256'])
+        from e33_memory import thp_settings
+        plan.update(transparent_hugepage=thp_settings(),tile_allocator_environment=
+            {'MIMALLOC_ALLOW_THP':'0'} if args.tile_thp_disabled else {'MIMALLOC_ALLOW_THP':os.environ.get('MIMALLOC_ALLOW_THP')})
+        if args.tile_thp_disabled:
+            plan.update(kind='E33-tile-THP-disabled-diagnostic-plan',not_m4_soak_row=True,
+                diagnostic='tiles alone use MIMALLOC_ALLOW_THP=0; mimalloc disables THP per process with prctl; wrapper, host and binaries unchanged')
+        if args.plateau_minutes:
+            plan.update(kind='E33-labelled-plateau-soak-plan',not_m4_soak_row=True,
+                loaded_seconds=args.plateau_minutes*60,bot_lifetime_seconds=10800,
+                memory_window='120 loaded minutes; the unchanged ruled window is reported separately; last60/30-minute growth diagnoses the plateau',
+                registration=harness.digest(harness.DATA/(args.name+'-registration.json')))
+        if args.bulk_logs_tmpfs:
+            plan.update(kind='E28-diagnostic-soak-plan',diagnostic=dict(not_the_soak_row=True,
+                bulk_logs='each tile stdout/stderr log and anticheat log on tmpfs; everything durable unchanged'))
         plan['source_helpers'].update({name:harness.digest(harness.ROOT/'scripts'/name) for name in
-            ['e28_window.py','e28_soak_clock.py','e28_log_integrity.py','e25_soak_harness.py','e25-soak-cell','e25-soak-control','e25-soak-readback']})
+            ['e28_window.py','e28_soak_clock.py','e28_log_integrity.py','e28_soak_memory.py','e33_memory.py','e18_process.py','goliath_platform.py','goliath_bundle.py','goliath-cluster','e25_soak_harness.py','e25-soak-cell','e25-soak-control','e25-soak-readback']})
     target.write_text(json.dumps(plan,indent=2)+'\n')
     host = harness.ROOT/'.local/bin/host-window'
     subprocess.run([host,'quiet',args.owner,args.name+' full30m soak control'],check=True)
@@ -90,7 +134,11 @@ def main():
             whole=WholeWindow(observer=True).start()
         subprocess.run([sys.executable,'-B',harness.ROOT/'scripts/e25-soak-cell','--name',args.name,'--bins',bins,
             '--owner',args.owner,'--players',str(args.players),'--data-dir',harness.DATA,'--cpu-mode',args.cpu_mode,
-            *(['--direct-bots'] if args.direct_bots else [])],cwd=harness.ROOT,check=True)
+            *(['--direct-bots'] if args.direct_bots else []),*(['--bulk-logs-tmpfs'] if args.bulk_logs_tmpfs else []),
+            *(['--store-renewals',args.store_renewals] if args.store_renewals else []),
+            *(['--extended-memory-window'] if args.extended_memory_window else []),
+            *(['--plateau-minutes',str(args.plateau_minutes)] if args.plateau_minutes else []),
+            *(['--tile-thp-disabled'] if args.tile_thp_disabled else [])],cwd=harness.ROOT,check=True)
     except BaseException as caught:
         error = str(caught).replace(str(harness.ROOT),'$REPO').replace(str(Path.home()),'$HOME').replace(sys.executable,'python3')
     finally:

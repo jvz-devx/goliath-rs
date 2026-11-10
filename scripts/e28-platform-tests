@@ -54,12 +54,18 @@ class CounterTests(unittest.TestCase):
             self.assertTrue(thread['is_main'])
             self.assertEqual(thread['name'],'horizon-client')
             self.assertAlmostEqual(thread['cpu_s'],.300000001)
+            # schedstat's second and third fields: run-queue wait in ns, timeslices.
+            self.assertAlmostEqual(thread['run_delay_s'],8e-9);self.assertEqual(thread['timeslices'],9)
+            self.assertIsNone(row['swap_mb']);self.assertEqual(row['memory_mb'],2)
+            (directory/'status').write_text(status+'VmSwap:\t1024 kB\n')
+            swapped=platform.usage(12,proc)
+            self.assertEqual((swapped['rss_mb'],swapped['swap_mb'],swapped['memory_mb']),(2,1,3))
             self.assertEqual(platform.thread_ids(12,proc),[12,15])
             self.assertEqual(platform.process_snapshot(proc)[12]['name'],'outside')
 
     def test_proc_cpu_excludes_guest_double_counting(self):
         parsed=platform.parse_cpu_stat('cpu 1 2 3 4\ncpu0 100 2 30 400 20 5 6 7 50 1\nintr 50\n')
-        self.assertEqual(parsed,{'0':dict(total=570,idle=420)})
+        self.assertEqual(parsed,{'0':dict(total=570,idle=420,irq=5,softirq=6)})
 
     def host(self):
         return dict(at=1.,load=[0.,0.,0.],cpus={str(i):dict(total=100,idle=90) for i in range(6)},
@@ -95,6 +101,74 @@ class CounterTests(unittest.TestCase):
         self.assertEqual(platform.thread_role('terrain-manager'),'terrain managers')
         self.assertEqual(platform.thread_role('proxy-control-1'),'command workers')
         self.assertEqual(platform.thread_role('proxy-io-1234567'),'IO drivers')
+
+
+class SamplerTests(unittest.TestCase):
+    """The D12 report: the 95% rule on the measured span, the server CPUs and placement by role."""
+    def host(self,at,busy5,busy03=.5):
+        ticks=round(at*100)
+        cpus={str(cpu):dict(total=ticks,idle=round(ticks*(1-(busy5 if cpu==5 else busy03))),irq=0,softirq=round(ticks*.05) if cpu<4 else 0) for cpu in range(6)}
+        return dict(at=at,load=[0.,0.,0.],cpus=cpus,swap_in_pages=0,swap_out_pages=0,memory_available_kb=1,
+            thermal_throttle={'cpu0/thermal_throttle/core_throttle_count':2},thermal_throttle_available=True)
+
+    def sampler(self,rows,roles):
+        from e18_process import ProcessSampler
+        sampler=ProcessSampler(observer=True);sampler.roles=dict(roles)
+        sampler.rows=rows;sampler.marks={row['mark']:row for row in rows if row['mark']}
+        return sampler
+
+    def row(self,at,mark,host,placement,processes=None):
+        return dict(at=at,sent=at,received=at,mark=mark,host_load=[0,0,0],host=host,placement=placement,processes=processes or {})
+
+    def test_cpu5_rule_applies_to_the_measured_span_and_both_figures_are_published(self):
+        good=dict(driver=dict(pid=1,cpus_allowed_list='5',cgroup='/goliath-e28-1/harness'))
+        # CPU 5: 50% busy for 100 s of join and warmup, then 100% busy for the measured 60 s. Whole cell 68.75%.
+        first=self.host(100,.5);middle=self.host(200,.5);last=self.host(260,.5)
+        last['cpus']['5'].update(idle=middle['cpus']['5']['idle'])
+        for cpu in '0123':last['cpus'][cpu].update(idle=middle['cpus'][cpu]['idle']+1500,softirq=middle['cpus'][cpu]['softirq']+300)
+        rows=[self.row(100,'cell-start',first,good,{1:dict(cpu_s=0,start_ticks=1),9:dict(cpu_s=0,start_ticks=1)}),
+            self.row(200,'steady-first',middle,good,{1:dict(cpu_s=1,start_ticks=1),9:dict(cpu_s=10,start_ticks=1)}),
+            self.row(260,'steady-last',last,good,{1:dict(cpu_s=2,start_ticks=1),9:dict(cpu_s=130,start_ticks=1)})]
+        with patch.object(platform,'LINUX',True),patch.object(platform,'cpu_mode',return_value='pin'):
+            sampler=self.sampler(rows,{'driver':1,'tile-a':9});rows[0]['placement']=dict(good,**{'tile-a':dict(pid=9,cpus_allowed_list='0-3',cgroup='/goliath-e28-1/servers')})
+            d12=sampler.report()['d12']
+        self.assertAlmostEqual(d12['cpu5_busy_fraction']['whole_cell'],.6875)
+        self.assertEqual(d12['cpu5_busy_fraction']['steady'],1.0)
+        self.assertEqual(d12['reasons'],['CPU 5 busy fraction at least 95% over the measured span']);self.assertFalse(d12['valid'])
+        # CPUs 0 to 3 were 75% busy each; the one registered server accounts for 2.0 cores of the 3.0.
+        self.assertAlmostEqual(d12['server_cpus']['server_cpus_busy_cores'],3.0)
+        self.assertAlmostEqual(d12['server_cpus']['registered_server_cores'],2.0)
+        self.assertAlmostEqual(d12['server_cpus']['unaccounted_cores'],1.0)
+        self.assertAlmostEqual(d12['server_cpus']['irq_softirq_cores'],.2)
+        # The tile exited before the end mark; its last placement record is still checked.
+        self.assertEqual(d12['placement']['tile-a']['expected_group'],'servers')
+
+    def test_a_role_in_the_wrong_group_or_never_seen_invalidates(self):
+        import e18_process
+        self.assertEqual([e18_process.expected_group(role) for role in ['tile-a','proxy','store','sidecar-2','engine-0','clock-probe','bots-a','bots','shim-a','observer-and-driver','tap-backend-a']],
+            ['servers']*6+['bots']*2+['harness']*3)
+        placement={'observer-and-driver':dict(pid=1,cpus_allowed_list='5',cgroup='/goliath-e28-1/harness'),
+            'tile-a':dict(pid=2,cpus_allowed_list='5',cgroup='/goliath-e28-1/harness'),
+            'bots-a':dict(pid=3,cpus_allowed_list='4',cgroup='/goliath-e28-1/bots')}
+        rows=[self.row(100,'cell-start',self.host(100,.5),placement),self.row(160,None,self.host(160,.5),placement)]
+        with patch.object(platform,'LINUX',True),patch.object(platform,'cpu_mode',return_value='pin'):
+            d12=self.sampler(rows,{'observer-and-driver':1,'tile-a':2,'bots-a':3,'proxy':4}).report()['d12']
+        self.assertEqual(d12['reasons'],['fixture CPU placement mismatch: tile-a','fixture CPU placement never observed: proxy'])
+        self.assertEqual(d12['cpu5_busy_fraction'],dict(whole_cell=.5,steady=None))
+
+    def test_kernel_thread_cpu_is_reported_by_last_cpu(self):
+        import e18_process
+        rows=[dict(at=0.,processes={7:dict(cpu_s=1.,start_ticks=1,kernel=True,processor=2),8:dict(cpu_s=5.,start_ticks=1,kernel=False,processor=2)}),
+            dict(at=10.,processes={7:dict(cpu_s=2.,start_ticks=1,kernel=True,processor=2),8:dict(cpu_s=9.,start_ticks=1,kernel=False,processor=2),
+                9:dict(cpu_s=.5,start_ticks=4,kernel=True,processor=5)})]
+        report=e18_process.kernel_thread_cores(rows)
+        self.assertEqual(report['by_last_cpu_cores'],{'2':.1,'5':.05})
+        self.assertAlmostEqual(report['cpus_0_to_4_cores'],.1);self.assertAlmostEqual(report['total_cores'],.15)
+
+    def test_the_plain_driver_counts_as_outside_on_both_platforms(self):
+        source=(platform.ROOT/'scripts/e18_process.py').read_text()
+        self.assertEqual(source.count("fixture_pids = {pid for role, pid in self.roles.items() if role != 'measurement-driver'}"),2)
+        self.assertNotIn('set(self.roles.values()) if platform.LINUX',source)
 
 
 class PlacementTests(unittest.TestCase):
@@ -175,7 +249,8 @@ class PlacementTests(unittest.TestCase):
             state=Path(temporary)/'restore.json'
             platform.save_state(dict(pid=0,cgroup=str(Path(temporary)/'absent'),driver_cgroup=None,
                 slices={'system.slice':'0-5','user.slice':''},governors={'/fixture/governor':'powersave'}),state)
-            with patch.object(platform.subprocess,'run') as run,patch.object(platform,'sudo_write') as write:
+            (Path(temporary)/'cpuset.cpus.effective').write_text('0-5\n')
+            with patch.object(platform.subprocess,'run') as run,patch.object(platform,'sudo_write') as write,patch.object(platform,'CGROUP',Path(temporary)):
                 platform.restore(state);platform.restore(state)
             self.assertEqual(run.call_count,2);write.assert_called_once_with('/fixture/governor','powersave')
             self.assertFalse(state.exists())
@@ -185,11 +260,59 @@ class PlacementTests(unittest.TestCase):
             path=Path(temporary)/'restore.json'
             platform.save_state(dict(pid=0,cgroup=str(Path(temporary)/'absent'),driver_cgroup=None,
                 slices={'system.slice':'','user.slice':''},governors={}),path)
-            with patch.object(platform.subprocess,'run',side_effect=[RuntimeError('failed'),None]):
+            (Path(temporary)/'cpuset.cpus.effective').write_text('0-5\n')
+            with patch.object(platform.subprocess,'run',side_effect=[RuntimeError('failed'),None]),patch.object(platform,'CGROUP',Path(temporary)):
                 with self.assertRaisesRegex(RuntimeError,'restore incomplete'):platform.restore(path)
             self.assertEqual(json.loads(path.read_text())['slices'],{'system.slice':''})
-            with patch.object(platform.subprocess,'run') as run:platform.restore(path)
+            with patch.object(platform.subprocess,'run') as run,patch.object(platform,'CGROUP',Path(temporary)):platform.restore(path)
             self.assertEqual(run.call_count,1)
+
+    def test_cleared_setting_must_also_widen_the_kernel_cpuset(self):
+        # systemd clears AllowedCPUs and leaves cpuset.cpus=5 behind; the kernel refuses an empty write.
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root=Path(temporary);(root/'user.slice').mkdir();(root/'cpuset.cpus.effective').write_text('0-5\n')
+            (root/'user.slice/cpuset.cpus').write_text('5\n');(root/'user.slice/cpuset.cpus.effective').write_text('5\n')
+            writes=[]
+            def write(path,value):
+                writes.append((path.name,value));path.write_text(value+'\n');(path.parent/'cpuset.cpus.effective').write_text(value+'\n')
+            self.assertEqual(platform.stale_narrowing(root,show=lambda unit:''),[dict(unit='user.slice',kernel_cpus='5')])
+            platform.release_slice('user.slice','',root,run=lambda *a,**k:None,write=write)
+            self.assertEqual(writes,[('cpuset.cpus','0-5')])
+            self.assertEqual(platform.stale_narrowing(root,show=lambda unit:''),[])
+            (root/'user.slice/cpuset.cpus.effective').write_text('5\n');(root/'user.slice/cpuset.cpus').write_text('0-5\n')
+            with self.assertRaisesRegex(RuntimeError,'still runs on CPUs 5'):
+                platform.release_slice('user.slice','',root,run=lambda *a,**k:None,write=lambda *a:None)
+
+    def test_restore_falls_back_when_the_recorded_cgroup_is_gone(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root=Path(temporary);(root/'user.slice/session.scope').mkdir(parents=True);(root/'goliath-e28-1/harness').mkdir(parents=True)
+            journal=root/'restore.json'
+            state=dict(cgroup=str(root/'goliath-e28-1'),recovery_cgroup='/user.slice/gone.scope')
+            writes=[]
+            used=platform.move_to_recovery(41,state,journal,write=lambda path,value:writes.append(path),cgroup=root,own='/user.slice/session.scope')
+            self.assertEqual(used,'/user.slice/session.scope');self.assertEqual(writes,[root/'user.slice/session.scope/cgroup.procs'])
+            saved=json.loads(journal.read_text())['recovery_fallbacks'][0]
+            self.assertEqual((saved['pid'],saved['recorded'],saved['used']),(41,'/user.slice/gone.scope','/user.slice/session.scope'))
+            # The restoring process may itself sit in the fixture; then the surviving ancestor is used.
+            self.assertEqual(platform.recovery_targets('/user.slice/gone.scope',root/'goliath-e28-1','/goliath-e28-1/harness',root),
+                ['/user.slice/gone.scope','/user.slice','/'])
+            def refuse(path,value):
+                if path.parent.name=='user.slice':raise OSError('busy')
+                writes.append(path)
+            self.assertEqual(platform.move_to_recovery(42,state,journal,write=refuse,cgroup=root,own='/goliath-e28-1/harness'),'/')
+            self.assertEqual(platform.move_to_recovery(43,dict(state,recovery_cgroup='/user.slice/session.scope'),journal,write=lambda *a:None,cgroup=root,own=''),'/user.slice/session.scope')
+
+    def test_window_unwinds_on_every_terminating_signal_and_reports_unnarrowed_groups(self):
+        source=(platform.ROOT/'scripts/goliath_platform.py').read_text()
+        for name in ['SIGINT','SIGTERM','SIGHUP','SIGQUIT','SIGUSR1','SIGUSR2','SIGALRM']:
+            self.assertIn('signal.'+name,source.split('previous_handlers[sig]')[0].rsplit('for sig in',1)[1])
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root=Path(temporary)
+            for name,cpus,members in [('system.slice','5','7\n'),('stray','0-5','8\n9\n'),('empty.slice','0-5',''),('goliath-e28-1','0-5','3\n')]:
+                (root/name).mkdir();(root/name/'cpuset.cpus.effective').write_text(cpus+'\n');(root/name/'cgroup.procs').write_text(members)
+            (root/'nolimit').mkdir();(root/'nolimit/cgroup.procs').write_text('4\n')
+            self.assertEqual(platform.unnarrowed_cgroups(root/'goliath-e28-1',root),
+                [dict(cgroup='nolimit',cpus_effective='unconstrained',processes=1),dict(cgroup='stray',cpus_effective='0-5',processes=2)])
 
     def test_cli_mode_propagates_to_nested_kernels(self):
         with patch.dict(os.environ,{},clear=True),patch.object(platform,'LINUX',True):
@@ -221,6 +344,26 @@ class IdentityTests(unittest.TestCase):
                 (directory/'extra').unlink()
                 (directory/'horizon-client').write_text('changed')
                 with self.assertRaisesRegex(ValueError,'frozen file changed'):bundle.validate(directory)
+
+    def test_gates_that_never_ran_block_until_a_later_record_shows_them_passed(self):
+        with tempfile.TemporaryDirectory(dir=RUNS) as temporary:
+            root=Path(temporary);directory=root/'final-stamps';directory.mkdir()
+            build=dict(pending_gates=['stamps-clippy','stamps-tests']);(directory/'build.json').write_text(json.dumps(build))
+            later=root/'build-final-stamps.json'
+            with patch.object(bundle,'MANIFEST',root/'build-manifest.json'):
+                bundle.pending_gates_cleared('final-stamps',directory,dict(pending_gates=[]))
+                with self.assertRaisesRegex(ValueError,'gates that never ran: stamps-clippy, stamps-tests'):bundle.pending_gates_cleared('final-stamps',directory,build)
+                good=dict(frozen_bundle_build_record_sha256=bundle.sha(directory/'build.json'),pending_gates=[],
+                    commands=[dict(label='stamps-clippy',exit=0),dict(label='stamps-tests',exit=0)])
+                for broken in [dict(good,frozen_bundle_build_record_sha256='0'*64),dict(good,pending_gates=['stamps-tests']),
+                        dict(good,commands=[dict(label='stamps-clippy',exit=0),dict(label='stamps-tests',exit=101)]),dict(good,commands=good['commands'][:1])]:
+                    later.write_text(json.dumps(broken))
+                    with self.assertRaisesRegex(ValueError,'gates that never ran'):bundle.pending_gates_cleared('final-stamps',directory,build)
+                later.write_text(json.dumps(good));bundle.pending_gates_cleared('final-stamps',directory,build)
+        # The live case: final-stamps was frozen with five gates open and validates only through its later record.
+        frozen=json.loads((bundle.BUNDLES/'final-stamps/build.json').read_text())
+        self.assertEqual(len(frozen['pending_gates']),5)
+        self.assertEqual(bundle.validate(bundle.BUNDLES/'final-stamps')['bundle'],'final-stamps')
 
 
 if __name__=='__main__':

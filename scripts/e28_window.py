@@ -20,14 +20,27 @@ def ready():
 
 
 def policy():
+    from e33_memory import thp_settings
     units = sorted(path.name for path in platform.CGROUP.iterdir()
         if path.name.endswith('.slice') or path.name == 'init.scope')
-    return dict(slices={unit:subprocess.check_output(
+    return dict(transparent_hugepage=thp_settings(),slices={unit:subprocess.check_output(
         ['systemctl', 'show', unit, '-p', 'AllowedCPUs', '--value'], text=True).strip() for unit in units},
+        # The kernel value, because a cleared systemd setting leaves the cpuset behind.
+        kernel_cpus={unit:(platform.CGROUP/unit/'cpuset.cpus.effective').read_text().strip() for unit in units
+            if (platform.CGROUP/unit/'cpuset.cpus.effective').exists()},
         governors={str(path):path.read_text().strip()
             for path in sorted(platform.SYS_CPU.glob('cpufreq/policy*/scaling_governor'))},
         turbo={str(path):path.read_text().strip() for path in
             [platform.SYS_CPU/'intel_pstate/no_turbo',platform.SYS_CPU/'cpufreq/boost'] if path.exists()})
+
+
+def same_policy(before, after):
+    """Compare settings, not khugepaged's read-only cumulative counters."""
+    def settings(value):
+        return {key:({name:item for name,item in row.items()
+                     if name not in ['khugepaged/full_scans','khugepaged/pages_collapsed']}
+                     if key=='transparent_hugepage' else row) for key,row in value.items()}
+    return settings(before)==settings(after)
 
 
 def process_placement(pid):
@@ -51,9 +64,9 @@ def process_placement(pid):
                 destination=Path(last_group).name
                 if destination in {'servers','bots','harness'}:
                     role=destination;wrapper=True
-        rss=last.get('VmRSS')
+        rss=last.get('VmRSS');swap=last.get('VmSwap')
         record=dict(pid=pid,role=role,cpus_allowed_list=last['Cpus_allowed_list'],cgroup=last_group,
-            rss_mib=int(rss.split()[0])/1024 if rss else None,
+            rss_mib=int(rss.split()[0])/1024 if rss else None,swap_mib=int(swap.split()[0])/1024 if swap else None,
             stable=stable,placement_reads=attempt+1,pre_exec_wrapper=wrapper)
         if stable:return record
     return record
@@ -95,14 +108,16 @@ def audit(rows, error=None):
         scope='one-second and boundary snapshots, acquisition through recovery and cleanup; no outside names retained')
 
 
-def minute_rss(rows,origin):
+def minute_rss(rows,origin,minutes=30):
     result=[]
-    for minute in range(31):
+    for minute in range(minutes+1):
         target=origin+minute*60
         row=min(rows,key=lambda value:abs(value['at']-target))
+        host=row.get('host') or {}
         result.append(dict(minute=minute,elapsed_seconds=row['at']-origin,
             endpoint_covered=abs(row['at']-target)<2,
-            processes=[dict(pid=entry['pid'],role=entry['role'],rss_mib=entry.get('rss_mib'))
+            host={key:host.get(key) for key in ['swap_in_pages','swap_out_pages','memory_available_kb']},
+            processes=[dict(pid=entry['pid'],role=entry['role'],rss_mib=entry.get('rss_mib'),swap_mib=entry.get('swap_mib'))
                 for entry in row['descendant_placement']]))
     return result
 
@@ -143,6 +158,6 @@ class WholeWindow(ProcessSampler):
         restored = policy()
         result['policy_before'] = self.original_policy
         result['policy_after'] = restored
-        result['restored'] = self.original_policy == restored and not platform.STATE.exists()
+        result['restored'] = same_policy(self.original_policy,restored) and not platform.STATE.exists()
         result['valid'] = result['valid'] and result['restored']
         return result

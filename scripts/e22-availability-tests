@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -101,12 +102,18 @@ class Availability(unittest.TestCase):
             self.assertTrue(trace.finish(raw)['complete'])
 
     def test_frozen_store_supports_existing_trace_flag(self):
+        binary=ROOT/'.local/bin/meridian-e22/current-1/goliath-store'
+        if not binary.exists() and sys.platform.startswith('linux'):
+            import goliath_bundle
+            frozen=goliath_bundle.BUNDLES/'final-r2-e29'
+            goliath_bundle.validate_server_stack(frozen)
+            binary=frozen/'goliath-store'
         loader=importlib.machinery.SourceFileLoader('e22_store_wire',str(ROOT/'scripts/e5-store.py'))
         spec=importlib.util.spec_from_loader(loader.name,loader);wire=importlib.util.module_from_spec(spec);loader.exec_module(wire)
         with tempfile.TemporaryDirectory(prefix='E22-frozen-store-trace-',dir=ROOT/'.local/runs') as folder:
             root=Path(folder);log=root/'store.log';trace=root/'trace.csv'
             with log.open('w') as output:
-                process=subprocess.Popen([ROOT/'.local/bin/meridian-e22/current-1/goliath-store','--dir',root/'store','--listen','127.0.0.1:0','--sync','full'],stdout=output,stderr=subprocess.STDOUT,env=dict(os.environ,GOLIATH_STORE_TRACE=str(trace)))
+                process=subprocess.Popen([binary,'--dir',root/'store','--listen','127.0.0.1:0','--sync','full'],stdout=output,stderr=subprocess.STDOUT,env=dict(os.environ,GOLIATH_STORE_TRACE=str(trace)))
                 try:
                     def address():
                         for line in log.read_text().splitlines():
