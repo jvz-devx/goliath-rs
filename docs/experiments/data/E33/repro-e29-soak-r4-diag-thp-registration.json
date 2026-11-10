@@ -1,0 +1,23 @@
+{
+  "name": "repro-e29-soak-r4-diag-thp",
+  "kind": "E33-registered-tile-THP-diagnostic",
+  "bundle": "final-r2-e29",
+  "players": 425,
+  "cpu_mode": "pin",
+  "direct_bots": true,
+  "not_m4_soak_row": true,
+  "registered_before_start": true,
+  "loaded_seconds": "receipt-fill baseline plus 1500 seconds, normally 2880; capped at 3600",
+  "baseline": "first per-minute sample after the receipt window is full, no earlier than minute 5",
+  "tile_environment": {
+    "MIMALLOC_ALLOW_THP": "0"
+  },
+  "host_thp_setting_changed": false,
+  "standard_fixture": true,
+  "logs": "unchanged data-volume paths",
+  "hypothesis": "Disabling THP in the tile processes removes the anonymous-memory steps; check THP_enabled, AnonHugePages, Rss and Anonymous each minute.",
+  "compare_with": "e29-soak-r2, including tile tick time, process CPU, driver memory and host swap",
+  "silent_retry": false,
+  "reviewer_reproduction": "this run",
+  "reproduces": "e29-soak-r4-diag-thp"
+}

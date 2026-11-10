@@ -1,0 +1,363 @@
+{
+  "kind": "E29-soak-store-renewals",
+  "store_renewals": "default",
+  "loaded_seconds": 7201.631883119,
+  "barriers": {
+    "count": 43873,
+    "p50_ms": 13.158579,
+    "p99_ms": 40.108798,
+    "max_ms": 539.982783,
+    "over_50ms": 258,
+    "over_100ms": 51,
+    "over_200ms": 17,
+    "over_400ms": 3,
+    "scope": "batches with a durable barrier that started inside the loaded interval",
+    "contains_barrier_over_400ms": true,
+    "tested_the_change": "yes: the run contains a barrier over 400 ms"
+  },
+  "tile_renewals": {
+    "tiles": {
+      "a": {
+        "sent": 28764,
+        "replies": 28764,
+        "granted": 28764,
+        "errors": 0,
+        "reply_ms": {
+          "count": 28764,
+          "p50_ms": 0.369843,
+          "p99_ms": 3.257187,
+          "max_ms": 11.601368,
+          "over_200ms": 0
+        },
+        "trace_complete": true,
+        "path": "tile-0-3464093-lease.jsonl.gz"
+      },
+      "b": {
+        "sent": 28764,
+        "replies": 28764,
+        "granted": 28764,
+        "errors": 0,
+        "reply_ms": {
+          "count": 28764,
+          "p50_ms": 0.370151,
+          "p99_ms": 3.307352,
+          "max_ms": 15.773211,
+          "over_200ms": 0
+        },
+        "trace_complete": true,
+        "path": "tile-1-3464143-lease.jsonl.gz"
+      },
+      "c": {
+        "sent": 28763,
+        "replies": 28763,
+        "granted": 28763,
+        "errors": 0,
+        "reply_ms": {
+          "count": 28763,
+          "p50_ms": 0.370764,
+          "p99_ms": 3.328522,
+          "max_ms": 25.2853,
+          "over_200ms": 0
+        },
+        "trace_complete": true,
+        "path": "tile-2-3464194-lease.jsonl.gz"
+      },
+      "d": {
+        "sent": 28764,
+        "replies": 28764,
+        "granted": 28764,
+        "errors": 0,
+        "reply_ms": {
+          "count": 28764,
+          "p50_ms": 0.370197,
+          "p99_ms": 3.297572,
+          "max_ms": 22.927771,
+          "over_200ms": 0
+        },
+        "trace_complete": true,
+        "path": "tile-3-3464244-lease.jsonl.gz"
+      }
+    },
+    "sent": 115055,
+    "replies": 115055,
+    "over_200ms": 0,
+    "max_ms": 25.2853
+  },
+  "early_renewals": {
+    "answered_whole_run": 116267,
+    "answered_in_loaded_interval": 115055,
+    "answer_ms": {
+      "count": 115055,
+      "p50_ms": 0.003207,
+      "p99_ms": 0.008186,
+      "max_ms": 23.422387,
+      "over_1ms": 17,
+      "over_10ms": 7,
+      "over_50ms": 0
+    },
+    "receive_ms": {
+      "count": 115055,
+      "p50_ms": 0.006546,
+      "p99_ms": 0.023577,
+      "max_ms": 3.695708,
+      "over_1ms": 16,
+      "over_10ms": 0,
+      "over_50ms": 0
+    },
+    "scope": "answer is store receipt to answer; receive is connection accept to receipt"
+  },
+  "accounting": {
+    "tile_sends": 115055,
+    "answered_early": 115055,
+    "journaled": 0,
+    "in_neither_trace": 0,
+    "in_neither_trace_rows": [],
+    "rule": "every renewal a tile sent in the loaded interval is looked up by request id in renewals.csv and in the request trace"
+  },
+  "store_memory": {
+    "window_full_at_loaded_s": 1342.3012896680002,
+    "receipt_capacity": 9216,
+    "every_five_minutes": [
+      {
+        "minute": 0,
+        "accepted": 751,
+        "receipts": 751,
+        "receipt_blob_bytes": 2478248,
+        "receipt_inline_bytes": 132176,
+        "player_blob_bytes": 913206,
+        "snapshot_len": 0
+      },
+      {
+        "minute": 5,
+        "accepted": 2643,
+        "receipts": 2643,
+        "receipt_blob_bytes": 12544396,
+        "receipt_inline_bytes": 465168,
+        "player_blob_bytes": 913373,
+        "snapshot_len": 10533428
+      },
+      {
+        "minute": 10,
+        "accepted": 4530,
+        "receipts": 4530,
+        "receipt_blob_bytes": 22588886,
+        "receipt_inline_bytes": 797280,
+        "player_blob_bytes": 913600,
+        "snapshot_len": 21670058
+      },
+      {
+        "minute": 15,
+        "accepted": 6424,
+        "receipts": 6424,
+        "receipt_blob_bytes": 32682639,
+        "receipt_inline_bytes": 1130624,
+        "player_blob_bytes": 913925,
+        "snapshot_len": 32820257
+      },
+      {
+        "minute": 20,
+        "accepted": 8311,
+        "receipts": 8311,
+        "receipt_blob_bytes": 42739369,
+        "receipt_inline_bytes": 1462736,
+        "player_blob_bytes": 913771,
+        "snapshot_len": 43972616
+      },
+      {
+        "minute": 25,
+        "accepted": 10210,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49089219,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913721,
+        "snapshot_len": 49548801
+      },
+      {
+        "minute": 30,
+        "accepted": 12094,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49106102,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913757,
+        "snapshot_len": 51098702
+      },
+      {
+        "minute": 35,
+        "accepted": 13984,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49116720,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913913,
+        "snapshot_len": 51114874
+      },
+      {
+        "minute": 40,
+        "accepted": 15881,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49116828,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913733,
+        "snapshot_len": 51116995
+      },
+      {
+        "minute": 45,
+        "accepted": 17771,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49116832,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913755,
+        "snapshot_len": 51116888
+      },
+      {
+        "minute": 50,
+        "accepted": 19669,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49116658,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913803,
+        "snapshot_len": 51116933
+      },
+      {
+        "minute": 55,
+        "accepted": 21553,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49116858,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913935,
+        "snapshot_len": 51116813
+      },
+      {
+        "minute": 60,
+        "accepted": 23443,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49116799,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913735,
+        "snapshot_len": 51116909
+      },
+      {
+        "minute": 65,
+        "accepted": 25338,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49116798,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913725,
+        "snapshot_len": 51117087
+      },
+      {
+        "minute": 70,
+        "accepted": 27227,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49116735,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913785,
+        "snapshot_len": 51116976
+      },
+      {
+        "minute": 75,
+        "accepted": 29116,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49116817,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913891,
+        "snapshot_len": 51116927
+      },
+      {
+        "minute": 80,
+        "accepted": 31007,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49116908,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913715,
+        "snapshot_len": 51116901
+      },
+      {
+        "minute": 85,
+        "accepted": 32905,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49121616,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913992,
+        "snapshot_len": 51121043
+      },
+      {
+        "minute": 90,
+        "accepted": 34794,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49134422,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 914160,
+        "snapshot_len": 51127733
+      },
+      {
+        "minute": 95,
+        "accepted": 36681,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49150103,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 914244,
+        "snapshot_len": 51143721
+      },
+      {
+        "minute": 100,
+        "accepted": 38574,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49170709,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 914185,
+        "snapshot_len": 51163432
+      },
+      {
+        "minute": 105,
+        "accepted": 40468,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49192241,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 914201,
+        "snapshot_len": 51186807
+      },
+      {
+        "minute": 110,
+        "accepted": 42359,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49209379,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 914403,
+        "snapshot_len": 51207729
+      },
+      {
+        "minute": 115,
+        "accepted": 44244,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49221113,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 914419,
+        "snapshot_len": 51220734
+      },
+      {
+        "minute": 120,
+        "accepted": 46142,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49231949,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 914380,
+        "snapshot_len": 51232194
+      }
+    ],
+    "receipts_per_second": 6.304302892875468,
+    "scope": "receipts held, their blob bytes and the snapshot buffer, from the store memory trace"
+  },
+  "authority_events": [],
+  "complete": true,
+  "problems": [],
+  "name": "e29-soak-r3-long",
+  "loaded_interval_complete": true,
+  "store_arguments": [
+    "--dir",
+    "$REPO/.local/runs/E24-D9-nk4ezbq2/store",
+    "--listen",
+    "127.0.0.1:0",
+    "--sync",
+    "full"
+  ]
+}

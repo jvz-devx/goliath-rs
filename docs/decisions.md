@@ -120,3 +120,11 @@ An independent audit of the Linux harness led to three changes in how a cell is 
 - A cell is invalid when CPU 5 is 95% busy over the measured span or over the whole cell. Both figures are published. Before this the rule used the whole cell only, which join and warmup dilute.
 - A cell in which the cluster loses players inside a valid measured span is a failed step, not an invalid cell.
 - After a window the kernel cpusets of the system slices are restored and checked, not only the service manager's setting. Clearing the setting alone had left the slices on CPU 5 between windows.
+
+### D12 addendum: the tiles' allocator does not request huge pages on Linux
+
+On Linux the Horizon processes run with `MIMALLOC_ALLOW_THP=0`, the allocator's documented switch, on both sides of a comparison: the tiles and the plain baseline. No binary changes and the host's own huge-page setting is left alone.
+
+The reason is E33. With the allocator's default, the kernel promotes each tile's memory to huge pages once, at a different minute for each tile, and its resident size steps up by about 60 MiB. The soak's memory line then passed or failed by where those steps happened to fall: it passed in the builder's 48-minute run and failed in the reviewer's. With the switch set, the tiles stay within about 1% across the judged window in both the builder's and the reviewer's run, use about 100 MiB less each, and show no tick cost. A two-hour soak with the default showed that each tile climbs once and then holds, so the step was never a leak, but a line judged over 25 minutes can't tell that apart from one.
+
+Capacity rows measured before this setting are rechecked with it at the frontier steps.
