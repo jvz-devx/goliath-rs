@@ -1,0 +1,228 @@
+{
+  "kind": "E29-soak-store-renewals",
+  "store_renewals": "default",
+  "loaded_seconds": 2881.344632669,
+  "barriers": {
+    "count": 18089,
+    "p50_ms": 12.961363,
+    "p99_ms": 40.875542,
+    "max_ms": 358.339801,
+    "over_50ms": 112,
+    "over_100ms": 24,
+    "over_200ms": 5,
+    "over_400ms": 0,
+    "scope": "batches with a durable barrier that started inside the loaded interval",
+    "contains_barrier_over_400ms": false,
+    "tested_the_change": "NO: no barrier over 400 ms in this run, so it did not test renewals against a long stall"
+  },
+  "tile_renewals": {
+    "tiles": {
+      "a": {
+        "sent": 11507,
+        "replies": 11507,
+        "granted": 11507,
+        "errors": 0,
+        "reply_ms": {
+          "count": 11507,
+          "p50_ms": 0.369631,
+          "p99_ms": 3.248411,
+          "max_ms": 20.06383,
+          "over_200ms": 0
+        },
+        "trace_complete": true,
+        "path": "tile-0-3085902-lease.jsonl.gz"
+      },
+      "b": {
+        "sent": 11507,
+        "replies": 11507,
+        "granted": 11507,
+        "errors": 0,
+        "reply_ms": {
+          "count": 11507,
+          "p50_ms": 0.370829,
+          "p99_ms": 3.435905,
+          "max_ms": 10.315793,
+          "over_200ms": 0
+        },
+        "trace_complete": true,
+        "path": "tile-1-3085964-lease.jsonl.gz"
+      },
+      "c": {
+        "sent": 11507,
+        "replies": 11507,
+        "granted": 11507,
+        "errors": 0,
+        "reply_ms": {
+          "count": 11507,
+          "p50_ms": 0.371009,
+          "p99_ms": 3.259702,
+          "max_ms": 10.893762,
+          "over_200ms": 0
+        },
+        "trace_complete": true,
+        "path": "tile-2-3086060-lease.jsonl.gz"
+      },
+      "d": {
+        "sent": 11508,
+        "replies": 11508,
+        "granted": 11508,
+        "errors": 0,
+        "reply_ms": {
+          "count": 11508,
+          "p50_ms": 0.372422,
+          "p99_ms": 3.311518,
+          "max_ms": 12.381323,
+          "over_200ms": 0
+        },
+        "trace_complete": true,
+        "path": "tile-3-3086125-lease.jsonl.gz"
+      }
+    },
+    "sent": 46029,
+    "replies": 46029,
+    "over_200ms": 0,
+    "max_ms": 20.06383
+  },
+  "early_renewals": {
+    "answered_whole_run": 47166,
+    "answered_in_loaded_interval": 46029,
+    "answer_ms": {
+      "count": 46029,
+      "p50_ms": 0.003074,
+      "p99_ms": 0.008123,
+      "max_ms": 10.133096,
+      "over_1ms": 6,
+      "over_10ms": 1,
+      "over_50ms": 0
+    },
+    "receive_ms": {
+      "count": 46029,
+      "p50_ms": 0.00648,
+      "p99_ms": 0.023549,
+      "max_ms": 2.495031,
+      "over_1ms": 5,
+      "over_10ms": 0,
+      "over_50ms": 0
+    },
+    "scope": "answer is store receipt to answer; receive is connection accept to receipt"
+  },
+  "accounting": {
+    "tile_sends": 46029,
+    "answered_early": 46029,
+    "journaled": 0,
+    "in_neither_trace": 0,
+    "in_neither_trace_rows": [],
+    "rule": "every renewal a tile sent in the loaded interval is looked up by request id in renewals.csv and in the request trace"
+  },
+  "store_memory": {
+    "window_full_at_loaded_s": 1342.2636793089998,
+    "receipt_capacity": 9216,
+    "every_five_minutes": [
+      {
+        "minute": 0,
+        "accepted": 751,
+        "receipts": 751,
+        "receipt_blob_bytes": 2475898,
+        "receipt_inline_bytes": 132176,
+        "player_blob_bytes": 913214,
+        "snapshot_len": 0
+      },
+      {
+        "minute": 5,
+        "accepted": 2639,
+        "receipts": 2639,
+        "receipt_blob_bytes": 12520762,
+        "receipt_inline_bytes": 464464,
+        "player_blob_bytes": 913357,
+        "snapshot_len": 10531078
+      },
+      {
+        "minute": 10,
+        "accepted": 4534,
+        "receipts": 4534,
+        "receipt_blob_bytes": 22607856,
+        "receipt_inline_bytes": 797984,
+        "player_blob_bytes": 913603,
+        "snapshot_len": 21667720
+      },
+      {
+        "minute": 15,
+        "accepted": 6421,
+        "receipts": 6421,
+        "receipt_blob_bytes": 32664323,
+        "receipt_inline_bytes": 1130096,
+        "player_blob_bytes": 913939,
+        "snapshot_len": 32817920
+      },
+      {
+        "minute": 20,
+        "accepted": 8311,
+        "receipts": 8311,
+        "receipt_blob_bytes": 42737044,
+        "receipt_inline_bytes": 1462736,
+        "player_blob_bytes": 913771,
+        "snapshot_len": 43970304
+      },
+      {
+        "minute": 25,
+        "accepted": 10208,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49089226,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913705,
+        "snapshot_len": 49546476
+      },
+      {
+        "minute": 30,
+        "accepted": 12099,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49106173,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913757,
+        "snapshot_len": 51098740
+      },
+      {
+        "minute": 35,
+        "accepted": 13985,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49122475,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 914143,
+        "snapshot_len": 51117312
+      },
+      {
+        "minute": 40,
+        "accepted": 15879,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49132356,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913949,
+        "snapshot_len": 51130118
+      },
+      {
+        "minute": 45,
+        "accepted": 17773,
+        "receipts": 9216,
+        "receipt_blob_bytes": 49142104,
+        "receipt_inline_bytes": 1622016,
+        "player_blob_bytes": 913955,
+        "snapshot_len": 51140646
+      }
+    ],
+    "receipts_per_second": 6.304560403457353,
+    "scope": "receipts held, their blob bytes and the snapshot buffer, from the store memory trace"
+  },
+  "authority_events": [],
+  "complete": true,
+  "problems": [],
+  "name": "repro-e29-soak-r2",
+  "loaded_interval_complete": true,
+  "store_arguments": [
+    "--dir",
+    "$REPO/.local/runs/E24-D9-lmew5e7z/store",
+    "--listen",
+    "127.0.0.1:0",
+    "--sync",
+    "full"
+  ]
+}

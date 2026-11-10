@@ -2,9 +2,11 @@
 
 Status: accounting done from source and retained data. One patch is written and
 gated, `patches/meridian-13-manager-park.patch`. It stops the per-player terrain
-manager from polling at 50 Hz when it has nothing to do. Nothing is measured yet:
-no release binary was built and no cell ran. The reviewer runs the cells in the
-[measurement plan](#measurement-plan). No frontier or milestone claim is made.
+manager from polling at 50 Hz when it has nothing to do. The paired cost cells
+have run, pending reviewer reproduction: the patch saves what it was expected to
+save, and it does not qualify, because the tile P99 line of the rule fails in one
+of the two pairs. See [Measurements](#measurements). No frontier or milestone
+claim is made.
 
 Line references are to the reactor-1 source: Meridian
 `902dcf195e0a8bbd3f39a5f560684af00e64bf5d` plus `e2-meridian-client` and
@@ -385,10 +387,151 @@ runner's `E18_PATH_TIMING` line disabled for that run. It bounds how much of the
 proxy cost is the latency histogram. It is a diagnostic, not a frontier cell,
 because the runner reads those histograms.
 
+## Measurements
+
+Builder results, pending reviewer reproduction. Four cells, all valid, all on
+the harness that records run-queue wait per thread and applies the 95% rule
+for CPU 5 to the measured minute.
+
+### The binary
+
+Bundle `final-r2-park` is `final-r2` with `meridian` replaced and nothing
+else. The guard accepts it for frontier cells only, when it differs from
+`final-r2` in that one executable. It is not accepted as a soak or M3 stack.
+
+| Item | Value |
+| --- | --- |
+| Source | reactor-1 plus `meridian-13-manager-park.patch`; all 270 compiled inputs match [reactor-2-inputs.json](data/E30/reactor-2-inputs.json) |
+| Build | final's proxy command and settings: `cargo build --locked --release -p meridian-proxy --bin meridian -p meridian-sidecar --bin meridian-sidecar -p meridian-testkit --bin e4-client`, thin LTO, one codegen unit, `CARGO_INCREMENTAL=0`, empty `RUSTC_WRAPPER` |
+| `meridian` SHA-256 | `eeffb50a1a82da8ce36b467f779567e5724dd12321251aa883f53a5191350b39` |
+| Reproducibility check | the same command rebuilt `meridian-sidecar` and `e4-client` from unchanged sources, byte-identical to the frozen ones |
+| Failed gates | `proxy-fmt`, `proxy-clippy` and `root-clippy`: final's accepted lint drift, nothing new |
+| Record | [build-final-r2-park.json](data/E30/build-final-r2-park.json) |
+
+The poll arm is this binary with `E30_TERRAIN_POLL=1`. The runner sets it with
+`--proxy-terrain-poll`, reads the proxy's `/proc/<pid>/environ` in every cell
+and refuses a cell whose proxy does not match the requested arm. The value it
+read is in each row under `proxy_environment`.
+
+### Paired cost at 425
+
+In the planned order. Cores are averages over the measured 60 s.
+
+| Cell | Arm | Frontier rule | Proxy cores | Manager cores | Proxy switches a second | Worst tile P99 ms | Tile run-queue wait, ms a tick |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| `e30-poll-425-r0` | poll | pass | 0.7199 | 0.0903 | 26,141 | 38.5 | 5.33 to 5.62 |
+| `e30-park-425-r0` | park | pass | 0.6481 | 0.0234 | 7,752 | 36.2 | 5.24 to 5.58 |
+| `e30-park-425-r1` | park | pass | 0.6520 | 0.0239 | 7,713 | 39.8 | 6.94 to 9.20 |
+| `e30-poll-425-r1` | poll | pass | 0.7119 | 0.0901 | 25,929 | 36.1 | 5.12 to 6.16 |
+
+Per-tile P99 in the same order of cells: 37.5, 36.5, 36.1, 38.5; then 35.4,
+32.3, 36.2, 32.6; then 39.8, 35.6, 38.9, 38.9; then 36.1, 34.3, 31.0, 35.5.
+
+The poll arm matches reactor-1. Today's two `final-r2` cells at 425 on the same
+harness measured the proxy at 0.6986 and 0.7020 core, the managers at 0.0893
+and 0.0892, and 25,793 and 26,108 switches a second.
+
+Other figures that did not move: 876 or 877 proxy threads in every cell, 308 to
+312 MiB resident, 384 to 390 hand-overs in the measured minute, one proxy
+warning line in each cell.
+
+### The qualifying rule
+
+Fixed in the plan above before any cell ran.
+
+| Line | Pair 0 (poll r0, park r0) | Pair 1 (park r1, poll r1) | Holds |
+| --- | --- | --- | --- |
+| Every cell valid and passing the frontier rule | yes | yes | yes |
+| Manager cores fall by at least 0.05 | 0.0669 | 0.0662 | yes |
+| Whole-proxy cores fall by at least 0.05 | 0.0718 | 0.0599 | yes |
+| Proxy switches fall by at least 15,000 a second | 18,389 | 18,216 | yes |
+| Worst tile P99 in the park arm at most 2 ms above the poll arm | 2.3 ms lower | 3.7 ms higher | **no** |
+
+**Patch 13 does not qualify.** The three cost lines hold in both pairs with
+room to spare. The P99 line fails in the second pair.
+
+I would not read that failure as the patch slowing the tiles. The worst tile
+P99 moved by 2.4 ms between the two poll cells and by 3.6 ms between the two
+park cells, and today's unchanged `final-r2` cells at 425 gave 33.0 and
+40.7 ms. A 2 ms line is inside that spread, so this rule could not have been
+passed reliably by a patch that changes nothing in the tiles. But the rule
+was fixed first, and by it the patch fails.
+
+The saving is what the accounting predicted: 0.066 to 0.067 core of managers
+against an expected 0.06 to 0.075, and 18,200 to 18,400 fewer switches against
+an expected 19,000. Park-arm managers still wake 3,737 times a second in
+total. That fits 383 settled managers at four a second and 42 near a wall at
+fifty.
+
+### The run-queue hypothesis
+
+The reason to measure this patch at all was a guess: if a tile's off-CPU tick
+time is run-queue wait behind the managers' 21,000 wakes a second, parking
+them should cut the tile's wait by more than the CPU saved.
+
+It did not.
+
+| Arm, cell | Tile main threads, run-queue wait as cores | Mean tick ms | IO drivers, run-queue wait as cores |
+| --- | --- | --- | ---: |
+| poll r0 | 0.107 to 0.112 | 20.9 to 23.4 | 0.718 |
+| park r0 | 0.105 to 0.112 | 20.4 to 22.1 | 0.639 |
+| park r1 | 0.139 to 0.184 | 20.7 to 26.9 | 0.853 |
+| poll r1 | 0.102 to 0.123 | 20.6 to 23.4 | 0.766 |
+
+One park cell equals the poll cells and the other is worse. Removing three
+quarters of the proxy's wake-ups left the tiles waiting just as long for a
+CPU. The managers' own wait fell from 3.3 to 0.7 core-equivalents, which is
+their wake-ups going away and nothing more.
+
+What the tiles wait behind is therefore something else. The IO drivers are the
+obvious next suspect: four threads that use 0.6 core and wait 0.64 to 0.85
+core-equivalents for a CPU, more than they run. The tiles' own network
+threads are the other. E31's measurements have the tile side.
+
+### Steps not run
+
+- Step 2, 450 and 475 on the park bundle. Its condition was qualification, or
+  a P99 gain of 3 ms in both pairs. Neither holds.
+- Step 3, crossing behaviour and a soak. The patch has not qualified, so it
+  enters no stack.
+- Step 4, the path-timing ablation.
+
+### Files
+
+[e30-poll-425-r0](data/E30/e30-poll-425-r0.json.gz),
+[e30-park-425-r0](data/E30/e30-park-425-r0.json.gz),
+[e30-park-425-r1](data/E30/e30-park-425-r1.json.gz),
+[e30-poll-425-r1](data/E30/e30-poll-425-r1.json.gz). Each has a `.hash.json`
+beside it with the hash of its decompressed bytes.
+
+### Reproduction
+
+These create only reviewer-owned `repro-*` rows. The builder has not run them.
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28R
+for row in "poll r0 --proxy-terrain-poll" "park r0" "park r1" "poll r1 --proxy-terrain-poll"; do
+  set -- $row
+  label="repro-e30-$1-425-$2"
+  .local/bin/host-window quiet E28R "$label"
+  python3 -B scripts/e20-frontier --bins .local/bin/goliath-e28/final-r2-park \
+    --data-dir docs/experiments/data/E30 --cpu-mode pin --direct-bots --counts 425 $3 --name "$label"
+  .local/bin/host-window release E28R
+done
+```
+
+Read each row's `cells.425.proxy`, `proxy_thread_schedule`, `tick_summary` and
+`tile_main_schedule`. Keep invalid and failed rows. If a run is killed, run
+`python3 -B scripts/goliath-cpu restore` before removing stale locks.
+
 ## Unproven
 
-- Any saving. No cell ran. The expected numbers come from per-thread counters of
-  the unpatched proxy.
+- That the patch is safe near a wall under load. Hand-overs continued at the
+  usual rate in both park cells, which is a smoke signal, not the E12 and E10
+  checks.
+- Whether the tile P99 difference in the second pair is anything but spread.
+  Two pairs can't tell, and the rule did not allow for the spread.
+- What the tile main threads wait behind, now that the managers are ruled out.
 - That the cheapest 383 managers are the interior players.
 - Behaviour with a real cluster: no manager thread ran against tiles in the
   gates. The crossing suite in step 3 is what covers it.

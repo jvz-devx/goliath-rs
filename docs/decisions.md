@@ -112,3 +112,11 @@ Two things about the 30-minute soak's memory line needed a ruling once it ran on
 
 - Memory is resident plus swapped. This host swaps to compressed memory under soak load, so a process's resident size can fall while its real use doesn't. The line is judged on resident plus swap for each process, and both are published.
 - The baseline is taken at the later of minute 5 and the first sample after the store's receipt window is full, and the judged window runs 25 minutes from there. The store keeps a bounded window of retry receipts. At the Mac's 650 players it filled before minute 5. At this machine's 425 players it fills about 30 seconds after, so the store appeared to grow 14 to 16% and then stayed flat. Growth from minute 5 to minute 30 is still published beside the ruled figure.
+
+### D12 addendum: validity and restore, after the audit
+
+An independent audit of the Linux harness led to three changes in how a cell is judged and cleaned up.
+
+- A cell is invalid when CPU 5 is 95% busy over the measured span or over the whole cell. Both figures are published. Before this the rule used the whole cell only, which join and warmup dilute.
+- A cell in which the cluster loses players inside a valid measured span is a failed step, not an invalid cell.
+- After a window the kernel cpusets of the system slices are restored and checked, not only the service manager's setting. Clearing the setting alone had left the slices on CPU 5 between windows.

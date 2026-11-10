@@ -1,9 +1,12 @@
 # E31. Why a tile's tick costs what it does
 
-Status: analysis from retained data and source. The builder ran no load,
-cluster or build, and made no patch. Every estimate below needs the
-reviewer's measurement before it counts. Nothing was committed or sent
-upstream. No GPL source or excluded research was read.
+Status: analysis from retained data and source, and since then the two
+no-build measurements from its plan, D1 and Q1, in
+[Measurements](#measurements). Those are builder results, pending reviewer
+reproduction. In short: a tile's off-CPU tick time is waiting for a CPU,
+not blocking, and switching the locator bar off saves 42% of plain's main
+thread at 200 players and 23% of a tile's at 425. No patch was made. Nothing
+was committed or sent upstream. No GPL source or excluded research was read.
 
 ## Question
 
@@ -442,11 +445,185 @@ crossing checks, the digest fixture.
 Order: D1 and Q1 first. They cost six cells, need no build, and decide
 between the two large candidates.
 
+## Measurements
+
+Builder results, pending reviewer reproduction. Thirteen cells and two
+smokes on one harness, the one that records run-queue wait per thread and
+applies the 95% rule for CPU 5 to the measured minute. All are pinned, with
+direct bots, 30 s warm-up and 60 s measured.
+
+### D1. What the tile's main thread does when it is not running
+
+Bundle `final-r2`, unchanged workload. The frontier runner now reads the
+second field of `/proc/<pid>/task/<tid>/schedstat`, the time a thread spent
+runnable and waiting for a CPU, at the same two instants as its CPU time.
+Per tile it reports CPU, that wait and the tick's wall time. Ranges are over
+the four tiles.
+
+| Cell | Rule | Tile P99 ms | Main CPU, cores | Run-queue wait, cores | Mean tick ms | CPU ms a tick | Wait ms a tick | Tick minus CPU ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `e31-rundelay-425-r0` | pass | 31.5 to 33.0 | 0.383 to 0.394 | 0.106 to 0.112 | 20.7 to 21.4 | 19.2 to 19.7 | 5.3 to 5.6 | 1.5 to 1.7 |
+| `e31-rundelay-425-r1` | pass | 35.0 to 40.7 | 0.376 to 0.395 | 0.111 to 0.114 | 20.6 to 21.9 | 18.8 to 19.7 | 5.5 to 5.7 | 1.8 to 2.2 |
+| `e31-rundelay-450-r0` | fail | 46.0 to 50.8 | 0.439 to 0.456 | 0.158 to 0.181 | 26.1 to 29.1 | 21.9 to 22.8 | 7.9 to 9.1 | 4.2 to 6.4 |
+| `e31-rundelay-450-r1` | fail | 46.6 to 51.5 | 0.431 to 0.444 | 0.138 to 0.151 | 24.4 to 26.3 | 21.6 to 22.2 | 6.9 to 7.5 | 2.8 to 4.3 |
+
+"Tick minus CPU" is the least time a tick spent off the CPU. In every one of
+the 16 tile rows the main thread's run-queue wait is larger than that: 5.3
+to 5.7 ms against 1.5 to 2.2 at 425, and 6.9 to 9.1 against 2.8 to 6.4 at
+450. Waiting for a CPU can pay for all of the tile's off-CPU tick time, and
+nothing is left over that blocking would have to explain. The remainder the
+runner prints, tick time minus CPU minus wait, is negative in every row,
+between -2.7 and -4.1 ms.
+
+Why it is negative, and the limit of this reading: the counters cover the
+whole thread, not only its ticks. The main thread also waits for a CPU when
+it wakes for the next tick. That wait delays the tick's start and is not in
+its duration. So the split shows that waiting is large enough, not that all
+of it falls inside ticks.
+
+Plain Horizon has none of this. Its main thread waited 0.00003 to 0.00004
+core in the four plain cells below, against 0.11 to 0.18 for a tile.
+
+Where the waiting sits, from the same rows:
+
+| | 425 | 450 |
+| --- | --- | --- |
+| Server CPUs 0 to 3 busy, cores | 2.907, 2.918 | 3.289, 3.233 |
+| Registered server processes, cores | 2.620, 2.631 | 2.992, 2.932 |
+| Interrupt and softirq time on CPUs 0 to 3, cores | 0.245, 0.243 | 0.265, 0.262 |
+| Tile main thread, timeslices a tick | 47 to 51 | 55 to 66 |
+| All eight tile network threads: CPU, wait | 0.212, 0.51 to 0.54 | 0.234 to 0.236, 0.62 to 0.76 |
+| Four proxy IO drivers: CPU, wait | 0.587 to 0.589, 0.70 to 0.75 | 0.652 to 0.681, 0.87 to 1.05 |
+
+Three things stand out.
+
+- The four server CPUs are 73% busy at 425 and 81 to 82% at 450. About 0.3
+  core of that is in no registered process, and 0.24 to 0.27 of it is
+  interrupt and softirq time, which is loopback networking.
+- The main thread runs in about 50 to 60 pieces a tick. Each time it comes
+  back it can queue. I did not split those into times it gave the CPU up and
+  times it was pushed off.
+- The network threads and the proxy's IO drivers wait two to three times as
+  long as they run.
+
+So candidate 2 is live in the sense the analysis meant: the tail is CPU
+queueing on four busy cores, with the core budget binding through waiting
+long before average use reaches four. What does not follow is that thinning
+out wake-ups helps. E30 took 18,000 proxy wake-ups a second off these cores
+and the tiles waited just as long (see E30's measurements). The priority
+variant Q3 is the direct test and has not run.
+
+### Q1. Locator bar off
+
+A changed workload on both sides. These are variant rows, labelled as such
+in each row (`variants.locator_bar_off`, `changed_workload`). They replace
+no baseline and no frontier. The runners set `gamerule locator_bar false` on
+the plain server and on all four tiles, query it back and refuse the cell
+unless every server answers `false`. Both replies are in each row.
+
+Plain-09:
+
+| Cell | Players | Rule | TPS | P99 ms | Main thread, cores |
+| --- | ---: | --- | ---: | ---: | ---: |
+| `e31-nolocator-plain-200-r0` | 200 | pass | 19.993 | 28.5 | 0.473 |
+| `e31-nolocator-plain-200-r1` | 200 | pass | 19.993 | 29.8 | 0.488 |
+| `e31-nolocator-plain-225-r0` | 225 | pass | 19.993 | 31.4 | 0.529 |
+| `e31-nolocator-plain-225-r1` | 225 | pass | 19.993 | 32.2 | 0.543 |
+| Unchanged, builder and reviewer rows | 200 | pass | 19.993 | 46.1 to 47.9 | 0.822 to 0.840 |
+| Unchanged, builder and reviewer rows | 225 | fail | 19.45 to 19.67 | 55.7 to 57.8 | 0.996 |
+
+Cluster, `final-r2`:
+
+| Cell | Players | Rule | Tile P99 ms | Tile main thread, cores | Server CPUs busy |
+| --- | ---: | --- | --- | --- | ---: |
+| `e31-nolocator-425-r0` | 425 | pass | 23.7 to 27.1 | 0.297 to 0.307 | 2.529 |
+| `e31-nolocator-425-r1` | 425 | **invalid** | 27.7 to 30.8 | 0.305 to 0.322 | 2.654 |
+| `e31-nolocator-425-r1-a1` | 425 | pass | 24.4 to 26.8 | 0.293 to 0.307 | 2.519 |
+| `e31-nolocator-450-r0` | 450 | pass | 30.9 to 32.8 | 0.324 to 0.334 | 2.776 |
+| `e31-nolocator-450-r1` | 450 | pass | 30.5 to 34.5 | 0.327 to 0.337 | 2.790 |
+| Unchanged, the D1 cells above | 425 | pass | 31.5 to 40.7 | 0.376 to 0.395 | 2.907, 2.918 |
+| Unchanged, the D1 cells above | 450 | fail | 46.0 to 51.5 | 0.431 to 0.456 | 3.289, 3.233 |
+
+`e31-nolocator-425-r1` is invalid and kept. It started as another soak
+released the host, an outside process used 0.65 core, and CPU 5 was 100%
+busy for the whole cell. Both the whole-cell and the measured-minute rule
+caught it. `-a1` is its one named retry.
+
+What the rows say:
+
+- Plain at 200 drops from 0.826 core to 0.480, by 0.346 core or 42%. That
+  is 17.3 ms of a 41.3 ms tick.
+- A tile at 425 drops from 0.389 core to 0.300, by 0.089 or 23%, which is
+  4.4 ms a tick. At 450 it drops from 0.441 to 0.330, by 0.111 or 25%.
+- Plain gains about four times as much per process as a tile, as the square
+  law said it would.
+- With the rule off, plain passes 225 and the cluster passes 450, twice
+  each. Unchanged, both fail there.
+
+Against the predictions fixed in the plan: the tile figure, 0.30, is inside
+the predicted 0.23 to 0.31. Plain's, 0.47 to 0.49, is above the predicted
+0.13 to 0.43, so the waypoint manager costs plain less than the fit's upper
+reading and the rest of the square term is elsewhere. The kill line was a
+plain saving under 0.08 core. The saving is 0.35, so candidate 1 stands.
+
+The tiles also wait less with the rule off: 3.9 to 4.7 ms a tick at 425 and
+5.2 to 6.2 at 450, against 5.3 to 5.7 and 6.9 to 9.1. Less work on the same
+cores, shorter queues.
+
+What these rows do not give is a frontier or a ratio. Neither side has a
+failing step under the variant, so neither bracket is closed. Plain gains
+more than the tiles at equal counts, which points to a lower ratio, and how
+much lower needs staircase Q2 on both sides.
+
+### Smokes and files
+
+`e31-smoke-nolocator-100-r0` (cluster, 100 players) and
+`e31-smoke-nolocator-plain-50-r0` checked the rule's console reply before
+the variant cells. They are not measurements.
+
+Rows are under [data/E31](data/E31), one `.json` or `.json.gz` a cell, the
+compressed ones with a `.hash.json` of their decompressed bytes.
+
+### Reproduction
+
+These create only reviewer-owned `repro-*` rows. The builder has not run
+them.
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28R
+cell() { label=$1; shift; .local/bin/host-window quiet E28R "$label"; "$@"; .local/bin/host-window release E28R; }
+frontier="python3 -B scripts/e20-frontier --bins .local/bin/goliath-e28/final-r2 --data-dir docs/experiments/data/E31 --cpu-mode pin --direct-bots"
+plain="python3 -B scripts/e17-d9-baseline --bins .local/bin/goliath-e28/plain-09 --data-dir docs/experiments/data/E31 --cpu-mode pin --locator-bar-off"
+for repeat in 0 1; do
+  for count in 425 450; do
+    cell "repro-e31-rundelay-$count-r$repeat" $frontier --counts $count --name "repro-e31-rundelay-$count-r$repeat"
+    cell "repro-e31-nolocator-$count-r$repeat" $frontier --locator-bar-off --counts $count --name "repro-e31-nolocator-$count-r$repeat"
+  done
+  for count in 200 225; do
+    cell "repro-e31-nolocator-plain-$count-r$repeat" $plain --cell $count --repeat $repeat \
+      --out "docs/experiments/data/E31/repro-e31-nolocator-plain-$count-r$repeat.json"
+  done
+done
+```
+
+Read `cells.<n>.tile_main_schedule`, `tile_thread_cpu`,
+`proxy_thread_schedule` and `d12.server_cpus` in a cluster row, and
+`main_thread_cpu_cores` and `main_thread_run_delay_cores` in a plain row.
+Keep invalid and failed rows. Start no cell while another run's readback is
+still working on the host. If a run is killed, run
+`python3 -B scripts/goliath-cpu restore` before removing stale locks.
+
 ## Unproven
 
-- The waypoint share on Linux. It rests on a Mac occupancy sample, the
-  shape of the plain fit and the source. Q1 settles it.
-- That off-CPU time is run-queue delay. D1 settles it.
+- How much of the main thread's run-queue wait falls inside ticks. The
+  counters bound it and do not split it.
+- Why the main thread runs in 50 to 60 pieces a tick, and what it queues
+  behind. The proxy's terrain managers are ruled out by E30.
+- That a priority setting shortens the wait. Q3 has not run.
+- The rest of plain's square term. The waypoint manager is 17 ms of plain's
+  41 ms tick at 200, less than the fit's upper reading.
+- The frontier and the ratio with the locator bar off. No step fails yet on
+  either side.
 - The cause of the extra CPU in the slowest ticks.
 - Every saving figure above, and every frontier forecast. The step
   estimates assume P99 moves about twice as far as CPU per tick, which is

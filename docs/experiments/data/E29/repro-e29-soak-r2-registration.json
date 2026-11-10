@@ -1,0 +1,39 @@
+{
+  "kind": "E29-long-soak-registration",
+  "schema_version": 1,
+  "name": "e29-soak-r2",
+  "registered_before_measurement": true,
+  "bundle": "final-r2-e29",
+  "players": 425,
+  "fixture": "the standard soak fixture: pinned, direct untraced bots, bulk logs on the store's volume, store in its default renewal mode",
+  "reason": [
+    "e29-soak-r1 showed that with renewals out of the journal the store's receipt window fills with commit receipts only, at minute 22.4 of the load, so a baseline at minute 5 reads the fill as growth.",
+    "It also showed that tiles make a one-time allocation at different times: tile a before minute 5, tile b at minutes 18 to 23."
+  ],
+  "memory_rule": {
+    "measure": "resident plus swapped memory of every process",
+    "baseline": "the first per-minute sample after the store's receipt window is full, and no earlier than minute 5; fill is read from the store's own memory trace (window_full_at_ns on its last complete row)",
+    "judged_window_seconds": 1500,
+    "run_length": "the load ends 25 minutes after the baseline; expected baseline near minute 23 and a load of about 48 minutes",
+    "cap": "the baseline may be no later than minute 35 and the load is capped at 60 minutes; if the window is not full by minute 35 the row says so, the run continues to the cap and minute 5 is used as the baseline",
+    "also_published": "growth from minute 5 to minute 30 as before, and the per-minute series of the store and all four tiles"
+  },
+  "pass_line": "unchanged apart from the memory window: no authority stop or clock anomaly, all players online, owner audits clean, cargo conserved after checkpoint and recovery, crossings in every minute, 20 TPS, D12 valid over the whole window, every judged process under 10% growth",
+  "extra_recording": "once a minute, /proc/<pid>/smaps_rollup of the store and the four tiles, to name what a step allocated",
+  "control": "no barrier-mode control on this machine unless this run contains a barrier over 600 ms",
+  "retries": "none planned; a failed or invalid run is kept under this name",
+  "command": "python3 -u -B scripts/e25-soak-control --name e29-soak-r2 --bins .local/bin/goliath-e28/final-r2-e29 --data-dir docs/experiments/data/E29 --cpu-mode pin --direct-bots --players 425 --extended-memory-window --campaign-plan docs/experiments/data/E28/soak-m3-protocol.json --owner E28Q --collect-only",
+  "harness_sha256": {
+    "e25-soak-control": "8f01ab631a08f9f384ed2a5f820d35ade7b737f8a9b0dad17f337b247916752f",
+    "e25-soak-cell": "3ca4cda2ac198f6da66dcb57c48e579ba4bb3fd4fe8665b1f35372315e66a733",
+    "e24-run": "c6df02cebf9205b46587c8698b2d47229969ebf4faef6cd1c3c3b993ec0eda2d",
+    "e23_observe.py": "ccd8c27b3419cc358de6751d3a66a0379be08f4fe019b09f9a1a57520998a9fb",
+    "e28_soak_memory.py": "6c01dabc8e1f362fe6cd3d9e595589f3bcfa889fe4e8ed7e8caf7caf98273aa1",
+    "e29_renewals.py": "f8a28fed13b103e78c58d73fef17932cf9dbbd4c6a4e0f08f9f58967e0d863f1",
+    "e20-frontier": "8311bc98be9e8d4fc080031e4b0ba96494603124f86a51983090b7132e2fc190",
+    "e18_process.py": "44eb2b7b503e65e5debfcb1393dad21b9a68c6af8c2072f044c7468c53b40679",
+    "goliath_platform.py": "680a574fa65118becb4c0adf3bbb82cdbcf0e2c72457e3293e1106b6100c391f",
+    "goliath_bundle.py": "afe987d7308603c43504ccabf3c0fcfd1d6d8d470dc62411bb488464bd237377",
+    "goliath-cluster": "705faecbf4fc1776442805812c4eb12f78bdd01d9489232545e052d170ebd403"
+  }
+}
