@@ -474,3 +474,92 @@ python3 -B -c "import sys; sys.path.insert(0, 'scripts'); import goliath_bundle 
 
 Keep failed and invalid rows. If a run is killed, run
 `python3 -B scripts/goliath-cpu restore` before removing stale locks.
+
+## M3 on final-r2-e29
+
+Status: stopped at a clean pause after **234 of 1,000 verified seeds, zero campaign failures**. Seeds 240001 through 240234 completed; 766 seeds are not run. The matrix is not run. The labelled jobs-2 pilot passed 16 trials but contributes no campaign seeds. The separate store-restart probe has one retained setup failure and one named collection retry with completed lease checks. No complete M3 result or milestone is claimed; campaign reviewer reproduction is not run.
+
+The [registration](data/E29/e29-m3-registration.json) precedes all of these windows. The bundle guard already accepts `final-r2-e29` only when the store is its sole difference from `final-r2`; no relaxation was needed. The campaign keeps E24's original phase/victim schedule, seed 240001, 1,000 trials and direct `e4-client` path. Concurrent clusters share CPUs 0 to 3; their clients share CPU 4. These are the original low-population M3 fault fixtures, not extra copies of the 425-player soak.
+
+### Jobs-2 pilot
+
+`e29-m3-pilot-j2` ran 16 original crash kernels, including every one of the 15 phase/victim combinations. All 16 item audits complete, with zero duplicates, unaccounted losses or stale files. These are pilot trials only; none counts toward the fresh campaign.
+
+| Field | Result |
+| --- | --- |
+| Trials | 16 complete, independently checked |
+| Wall time | 176.59 s |
+| Individual trial time | 17.97 to 20.60 s |
+| D12 | Valid, restored, binaries unchanged |
+| CPU 5 | 42.59% busy |
+| Largest outside process | 0.146 core |
+| Selection | Jobs 2, provisional until the full campaign completes |
+
+The [pilot archive](data/E29/e29-m3-pilot-j2.json) retains every original trial byte sequence, its hash, parsed contents and window record. It demonstrates a short jobs-2 fault workload on this bundle. It does not isolate concurrency from the newer read deadline and early-renewal store, and it is not a 1,000-seed result.
+
+### Fresh campaign, paused at w2
+
+The project stopped after `e29-m3-crash-w2` reached its ordinary clean pause. Automatic continuation was stopped without interrupting that window. No w3 was created. Both windows retain valid D12 evidence, restored policy and unchanged binaries. All 234 original trial files were independently checked again, including their schedule and the unchanged hashes of the first window's rows.
+
+| Window | Cumulative verified seeds | Seconds | CPU 5 busy | Largest outside process, core | D12 / restored |
+| --- | ---: | ---: | ---: | ---: | --- |
+| e29-m3-crash-w1 | 116 | 1,207.39 | 42.29% | 0.13743 | valid / yes |
+| e29-m3-crash-w2 | 234 | 1,217.94 | 45.38% | 0.14563 | valid / yes |
+
+The prefix covers every phase/victim pair 15 or 16 times, 702 named stacks and 7,254 item units. It has zero duplicates, missing units or stale files. Every captured Horizon process has `THP_enabled=0` and `AnonHugePages=0` under the newly adopted D12 condition. The pilot and directed restart attempts preceded that addendum and remain labelled with their original condition.
+
+The [paused archive](data/E29/e29-m3-paused-w2.json.gz) retains every completed trial's exact original bytes, parsed row, hash, coverage and both window records. Original native trial files remain in place for resumption; they were not packed away or deleted. Jobs 2 was selected from the 16-trial pilot, rather than silently resuming the older failed jobs-4 campaign.
+
+Not run: the remaining 766 seeds, all 12 partition and six stale-login matrix cases, `e24-m3-results`, and reviewer campaign reproduction. This prefix cannot establish the 1,000-seed gate.
+
+### Separate store restart
+
+`e29-m3-store-restart` fails before either planned store crash. Its observer read a new player's store record immediately after login, before the first cut/export had created it. This is a setup/collection fault. All four retained lease traces are fully framed and contain no authority-stop or clock-anomaly event, but the intended crash test was not reached. The [failed row](data/E29/e29-m3-store-restart.json) remains failed.
+
+Exactly one collection retry, `e29-m3-store-restart-a1`, was declared before it ran. Setup now waits for the first real wall-arrival acknowledgement, then reads the registered player. A test checks this ordering. The [retry](data/E29/e29-m3-store-restart-a1.json) completes its lease observations in a valid, restored window. No failed campaign seed was resumed, and this case is outside the 1,000-seed count.
+
+| Observation | Retry result |
+| --- | --- |
+| Fixture | Four moving real clients, original four-tile M3 cluster |
+| First crash | All four tile processes retain authorization after the store restarts; replacement attempts refused |
+| Second crash | Tile a intentionally killed; the other three keep their processes and authorization |
+| Store downtime upper bounds | 95.25 and 95.54 ms |
+| Ownership observations | 63, zero observed violations |
+| Replacement fence | Tile a, process 5, epoch 2, lease 1,000 ms, counter 0 |
+| First observed replacement grant | 1,104.90 ms after spawn, 1,026.06 ms after listener observation |
+| Recovery completion bracket | 78.84 ms from spawn to observed listener; grant follows a full lease even from the later bound |
+| Early renewals | Recorded in all three store instances, 146 / 48 / 36 rows |
+| Window | 21.97 s, D12 valid and restored, CPU 5 26.46% busy |
+
+The first crash exercises live client traffic and unjournaled renewals. The second checks quarantine and replacement with the old owner dead. All four clients exit after the intentional tile-a kill, so that replacement phase does not establish client continuity under continuing player load. The surviving tiles keep renewing, but their worlds are then empty. Both the exits and repeated exit observations remain in the raw row.
+
+These are finite observations and claim attempts, not continuous per-action auditing. The later-bound timing gives evidence for the full recovery lease before the observed grant. It does not measure the exact instant at which an unattempted claim would first have succeeded, nor does it test a power cut. The early-renewal traces show that lease renewal traffic was present before and after the crashes; the separate E29 model supplies the argument about renewals lost from volatile state.
+
+### Commands
+
+Builder commands, each run once except the explicitly declared collection retry:
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28T
+python3 -u -B scripts/e24-m3 campaign --name e29-m3-pilot-j2 --data-name e29-m3-pilot-j2 --window-name e29-m3-pilot-j2 --evidence-dir .local/evidence/E29/m3 --bins .local/bin/goliath-e28/final-r2-e29 --cpu-mode pin --seed 240001 --crossings 16 --jobs 2 --budget-seconds 300
+python3 -u -B scripts/e24-m3 store-restart --name e29-m3-store-restart --data-name e29-m3-store-restart --window-name e29-m3-store-restart --evidence-dir .local/evidence/E29/m3 --bins .local/bin/goliath-e28/final-r2-e29 --cpu-mode pin --seed 290001 --budget-seconds 300
+python3 -u -B scripts/e24-m3 store-restart --name e29-m3-store-restart-a1 --data-name e29-m3-store-restart-a1 --window-name e29-m3-store-restart-a1 --evidence-dir .local/evidence/E29/m3 --bins .local/bin/goliath-e28/final-r2-e29 --cpu-mode pin --seed 290001 --budget-seconds 300
+```
+
+Reviewer commands, not run by the builder:
+
+```sh
+export GOLIATH_WINDOW_OWNER=E28R
+python3 -u -B scripts/e24-m3 campaign --name repro-e29-m3-pilot-j2 --data-name repro-e29-m3-pilot-j2 --window-name repro-e29-m3-pilot-j2 --evidence-dir .local/evidence/E29/reviewer-m3 --bins .local/bin/goliath-e28/final-r2-e29 --cpu-mode pin --seed 240001 --crossings 16 --jobs 2 --budget-seconds 300
+python3 -u -B scripts/e24-m3 store-restart --name repro-e29-m3-store-restart --data-name repro-e29-m3-store-restart --window-name repro-e29-m3-store-restart --evidence-dir .local/evidence/E29/reviewer-m3 --bins .local/bin/goliath-e28/final-r2-e29 --cpu-mode pin --seed 290001 --budget-seconds 300
+```
+
+### Exact later resume command
+
+Only after a new authorization to continue, use this command. It preserves the original seed/count/jobs and resumes at seed 240235 through the retained schedule. Do not change `--seed` to the next seed or `--crossings` to 766. Do not restart the terminated automatic driver, which was configured for a fresh campaign.
+
+```sh
+GOLIATH_WINDOW_OWNER=E28T python3 -u -B scripts/e24-m3 campaign --name e29-m3-crash-w3 --data-name e29-m3-crash --window-name e29-m3-crash-w3 --evidence-dir .local/evidence/E29/m3 --bins .local/bin/goliath-e28/final-r2-e29 --cpu-mode pin --seed 240001 --crossings 1000 --jobs 2 --budget-seconds 1200 --resume-from e29-m3-crash-w2
+```
+
+If another clean pause occurs, use a fresh next window name and resume only the immediately preceding verified pause. Never resume a failed seed. The matrix and full-campaign readback are not run; they need separate authorization after completion. Host restoration was checked after stopping: window free, user slice `0-5`, no fixture cgroup, no run folder and no restore journal. Final harness verification passes all 29 suites, 380 tests, with no functional script changes after `CAPACITY FLAG READY`.

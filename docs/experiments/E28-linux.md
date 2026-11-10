@@ -9,6 +9,11 @@ and deferred on `final-r2`. An independent audit found harness defects; none
 changes the baseline, the frontier or the ratio. They are listed under
 [Harness defects found by audit](#harness-defects-found-by-audit).
 
+After this report closed, the soak was met on this machine with the store from
+E29 and the huge-page setting from E33: see [E29's measurements](E29-measurements.md)
+and [E33](E33-tile-memory.md). M3 on that bundle is paused at 234 of 1,000 seeds
+with no failures. [Progress](../progress.md) holds the current state.
+
 ## Question
 
 Do the M4 results hold on a second machine, with the CPU budget enforced by core pinning instead of the SIGSTOP limiter? What is this machine's frontier-to-baseline ratio?

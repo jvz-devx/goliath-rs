@@ -1,9 +1,35 @@
 """Low-frequency Linux memory probes and disk-backed tile console history."""
 from collections import Counter
 import itertools
+import os
 from pathlib import Path
 
 import goliath_platform as platform
+
+
+def horizon_environment(disabled):
+    """Apply D12's allocator condition to Horizon, never to other fixture processes."""
+    if not disabled:
+        return {}
+    if any(key in os.environ for key in ['MIMALLOC_ALLOW_THP','mimalloc_allow_thp']):
+        raise ValueError('unset global allocator THP overrides before using the Horizon-only flag')
+    return {'MIMALLOC_ALLOW_THP':'0'}
+
+
+def horizon_thp_observation(pid, disabled, proc=platform.PROC):
+    directory=proc/str(pid)
+    environment={key:None for key in ['MIMALLOC_ALLOW_THP','mimalloc_allow_thp']}
+    for entry in (directory/'environ').read_bytes().split(b'\0'):
+        key,separator,value=entry.partition(b'=')
+        if separator and key.decode(errors='replace') in environment:
+            environment[key.decode()]=value.decode(errors='replace')
+    status=platform.parse_status((directory/'status').read_text())
+    huge=platform.smaps_rollup(pid,proc).get('AnonHugePages')
+    observation=dict(environment=environment,THP_enabled=status.get('THP_enabled'),AnonHugePages=huge,smaps_unit='KiB')
+    if disabled and (environment['MIMALLOC_ALLOW_THP']!='0' or environment['mimalloc_allow_thp'] is not None
+                     or observation['THP_enabled']!='0' or huge!=0):
+        raise RuntimeError('Horizon-only THP disable was not effective before measurement')
+    return observation
 
 
 def process_detail(pid, proc=platform.PROC):

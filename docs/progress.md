@@ -11,7 +11,41 @@ How to keep this file:
 
 ## Current state
 
-M1 and M3 are complete, and M2 is complete except the stock-client check, which is not run by decision D11. Four Horizon servers share one world through a proxy and a fenced store. Walking crossings, terrain past the wall, vehicles and Horizon's physics client all pass on the final stack. Under the matched four-core server budget the capacity frontier is 650 players against 325 on plain Horizon, 2.0 times the baseline (E20). The 3x target is not met (D10). Open M4 items: proxy latency (7.31 ms P95 against 5 ms, E23), the tick-cost bound (unproven, E23), and the 30-minute soak, which stopped on a lease expiry at about minute 23. E24 found that the tile's clock-anomaly check can latch on an ordinary clock adjustment, and is qualifying a fix.
+As of 2026-11-10, when work paused. M1 and M3 are complete, and M2 is complete except the stock-client check, which is not run by decision D11. Four Horizon servers share one world through a proxy and a fenced store. Walking crossings, terrain past the wall, vehicles and Horizon's physics client all pass on the Mac's final stack.
+
+M4 has been measured on two machines. Each machine's cluster is compared only with its own plain baseline.
+
+| M4 item | Mac (Apple M5 Pro, D9 limiter) | Linux (Intel i5-8400, D12 pinning) |
+| --- | --- | --- |
+| Plain baseline | 325 players | 200 players |
+| Cluster frontier | 650 players | 425 players |
+| Ratio (target 3x) | 2.0x, not met | 2.125x, not met |
+| Proxy path P95 (target under 5 ms) | not met: 11.16 and 5.72 ms, tail tied to limiter pauses | 4.60 and 3.20 ms at 425 players |
+| Tick cost of our additions (5% line) | warming 0.38%; combined unproven | warming about 0.6%; combined unproven |
+| 30-minute soak | met at 650 | met at 425 on the final Linux stack, in 48-minute runs judged under the D12 memory ruling |
+| Crash campaign (M3) on the final stack | 1,000 seeds, 12 partition and 6 stale-login cases pass | paused at 234 of 1,000 seeds with zero failures; matrix not run |
+
+The Linux numbers are the reviewer's reproductions, except the crash campaign, which is a builder result.
+
+The final Linux stack is the `final-r2` tiles (patches `horizon-22` and `horizon-23`), the store that answers lease renewals from memory (branch `e29-lease-renewal`, not merged), the reactor-1 proxy, and the Horizon processes run with `MIMALLOC_ALLOW_THP=0` (D12 addendum). The Linux soak found three things the Mac had not shown: a lease client that gave up on renewals after 200 ms, a tile that panicked on a refused registration, and lease renewals that waited behind the store's durable write. All three are fixed. See [E28](experiments/E28-linux.md), [E29's measurements](experiments/E29-measurements.md) and [E33](experiments/E33-tile-memory.md).
+
+## Where to pick up
+
+Open work, most important first.
+
+1. **Finish M3 on the final Linux bundle, then merge the store change.** The campaign on `final-r2-e29` is paused cleanly at 234 of 1,000 seeds; the partition and stale-login matrix has not run. The resume command is in [E29's measurements](experiments/E29-measurements.md). When it passes, merge branch `e29-lease-renewal` (reviewed, modelled, gates pass), rebuild the store and compare it with the measured binary.
+2. **Finish the capacity recheck with huge pages off.** One of eight cells has run (plain 200 passes). Plain 225 and cluster 425 and 450, two each, plus the second plain 200, are left. Commands are in [E33](experiments/E33-tile-memory.md).
+3. **Capacity, towards 3x.** The measured leads, none of them qualified yet:
+   - The locator bar is the largest single main-thread cost: with it off, plain Horizon's main thread falls 42% at 200 players and a tile's 23% at 425 ([E31](experiments/E31-tile-cost.md)). A constant-time lookup on both stacks needs new brackets on both sides.
+   - A tile's main thread waits 5 to 9 ms a tick for a core inside the four-core budget. Thread placement or priority inside the budget needs a decision first, because D12 defines the budget as cpusets only.
+   - Patch `meridian-13` saves 0.066 core and 18,000 context switches a second in the proxy, and failed its tick-P99 line in one of two pairs ([E30](experiments/E30-proxy-cost.md)). More pairs would settle it.
+   - The store's receipt cap is larger than it needs to be now that renewals are not journaled; a cap of 2,304 is proposed in E29's measurements.
+4. **Playability.** Nothing here has been played by a person with a stock client. A first session needs that test, one command that starts a cluster outside the test harness, and chat and the tab list across tiles (E10 lists them as not implemented).
+5. **Known gaps in what was measured.**
+   - The Linux port changed scripts the Mac results came from, and they have not been rerun on a Mac.
+   - Hand-overs wait for the store's durable write by design, so a disk that stalls for seconds drops crossing players even with the new store (seen on the VM host in E32).
+   - Five older real-process tests in `goliath-store` depend on wall-clock timing.
+   - The VM host (branch `e32-vm-host`) is parked: its disk fails a durable-write probe.
 
 ## M0. First evidence
 
@@ -179,3 +213,4 @@ The baseline is one plain Horizon process with the same seed, view distance, bot
 - 2026-11-10: E31, builder results. A tile's off-CPU tick time is run-queue wait: 5.3 to 5.7 ms a tick at 425 players and 6.9 to 9.1 at 450, where plain Horizon's main thread waits almost nothing. With the locator bar off on both sides (variant rows of a changed workload, not a new baseline or frontier), plain's main thread falls 42% at 200 players and a tile's 23% at 425, and both sides pass one step higher (plain 225, cluster 450).
 - 2026-11-10: Harness fixes from the audit are in with tests (measured-span CPU 5 rule, role placement check, lost-cluster cells as failed steps, more unwind signals, pending gates in the bundle guard). Recomputing the measured-span CPU 5 figure for all 85 committed E28 rows found ten at or above 95%: nine superseded shim rows and one latency row that had already failed its tick gate. No baseline, v3 frontier, lite or reviewer row is affected. A restore gap was found and fixed: the system slices' kernel cpusets had stayed on CPU 5 between windows, so builds and other work between cells ran on one core; fixture cgroups were separate, so cells were not affected.
 - 2026-11-10: E33, the soak's memory line on the second platform. The tiles' one-time memory step is the kernel promoting the allocator's memory to huge pages, which the allocator requests by default on Linux. With that request switched off for the tiles (`MIMALLOC_ALLOW_THP=0`, no binary change), a 48-minute soak at 425 players on `final-r2-e29` passes every line in the builder's run and in the reviewer's reproduction: no lease lost, all 46,036 renewals answered from memory (slowest 15 ms), 47 clean owner audits, cargo conserved, crossings in every minute, 20.0 TPS, long-window raw tick P99 of 37 to 39 ms, and memory under the D12 ruling within +1.1% for tiles, +5.1% for the store and -0.1% for the proxy. A two-hour soak with the default setting (builder result) shows each tile climbing once and then holding within 3% over the last hour, with three store barriers over 400 ms (longest 540 ms) and all 115,055 renewals still answered early. The setting is recorded as a D12 addendum; the capacity brackets are being rechecked with it, and M3 on this bundle is running. Data: `data/E33/`.
+- 2026-11-10: Work paused here. M3 on the final Linux bundle (`final-r2-e29`, two clusters at a time, huge pages off) stopped at a clean pause with 234 of 1,000 seeds verified and zero failures; the partition and stale-login matrix was not run. A store-restart probe shows every tile keeping its authorization across a store kill and restart, and a replacement owner granted only after a full lease (builder result; the first attempt failed on a setup fault and is kept). The capacity recheck with huge pages off ran one of eight cells (plain 200 passes). All 29 harness suites (380 tests) and the root gates pass on the reviewer's rerun. Branches `e29-lease-renewal` and `e32-vm-host` are published unmerged. "Current state" and "Where to pick up" above describe what is done and what is left.

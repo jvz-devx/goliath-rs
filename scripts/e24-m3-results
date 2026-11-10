@@ -78,6 +78,11 @@ def main():
         if checker.campaign(args.campaign)!=campaign:raise ValueError('independent check differs after packing')
         archive_info=dict(path=str(archive.relative_to(ROOT)),sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
             trials=len(paths),original_bytes_recoverable=True,roundtrip='byte-identical')
+        digest=hashlib.sha256();raw_bytes=0
+        with gzip.open(archive,'rb') as stream:
+            for chunk in iter(lambda:stream.read(1024*1024),b''):
+                digest.update(chunk);raw_bytes+=len(chunk)
+        archive_info.update(raw_sha256=digest.hexdigest(),raw_bytes=raw_bytes,raw_hash_scope='decompressed bytes')
     result=dict(kind='E24-fixed-M3-independent-summary',verdict='passed',campaign=campaign,matrix=matrix_check,
         duplicates=0,missing=0,stale_files=0,windows=windows,trial_archive=archive_info,
         scope='1000originalE13crash kernels plus12partition and6stale-login cases, unchanged named-item accounting')

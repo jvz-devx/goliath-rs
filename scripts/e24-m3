@@ -201,10 +201,20 @@ def main():
     support=load('m3_chaos_support',ROOT/'scripts/m3_chaos_support.py')
     sys.modules['m3_chaos_support']=support
     support.DATA=folder
+    horizon_observations={}
+    if platform.LINUX:
+        from e33_memory import horizon_environment,horizon_thp_observation
+        metadata['horizon_allocator_environment']=horizon_environment(True)
+        metadata['horizon_helper_sha256']=hashlib.sha256((ROOT/'scripts/e33_memory.py').read_bytes()).hexdigest()
     original_init=support.cluster.Cluster.__init__
     def cluster_init(instance,*args,**kwargs):
         kwargs['tile_env']=dict(kwargs.get('tile_env') or {},GOLIATH_LEASE_TRACE_DIR=os.environ['GOLIATH_LEASE_TRACE_DIR'])
-        return original_init(instance,*args,**kwargs)
+        if platform.LINUX:kwargs['tile_env'].update(horizon_environment(True))
+        result=original_init(instance,*args,**kwargs)
+        if platform.LINUX:
+            horizon_observations.update({label:horizon_thp_observation(tile.server.process.pid,True)
+                                         for label,tile in instance.tiles.items()})
+        return result
     support.cluster.Cluster.__init__=cluster_init
     seed=int(remaining[remaining.index('--seed')+1]) if '--seed'in remaining else 0
     if case not in ['campaign','matrix']:
@@ -223,6 +233,11 @@ def main():
     ns=dict(__name__='e24_m3_kernel',__file__=str(Path(__file__).resolve()),
         e24_expired=lambda:time.monotonic()>=float(os.environ['E24_M3_DEADLINE']))
     exec(compile(tree,str(ROOT/'scripts/m3-chaos'),'exec'),ns)
+    if case=='store-restart':
+        from e29_m3_restart import run as store_restart
+        ns['supervisor']=store_restart
+        helper=ROOT/'scripts/e29_m3_restart.py'
+        metadata['case_helper']=dict(path=str(helper.relative_to(ROOT)),sha256=hashlib.sha256(helper.read_bytes()).hexdigest())
     class LoggedChildren:
         def __getattr__(self,key):return getattr(subprocess,key)
         def run(self,command,*args,**kwargs):
@@ -250,6 +265,8 @@ def main():
             finally:observed_cleanup['old_tile_alive_after_test']=old_tile.server.process.poll() is None
         ns[key]=observed_case
     def saved(filename,value):
+        if platform.LINUX and filename==f'{name}-{seed}.json':
+            value['d12_horizon_thp']=dict(horizon_observations)
         if filename==name+'-campaign.json':
             if value['status']!='complete' and all(row['status']=='complete' for row in value['trials']) and ns['e24_expired']():
                 value.update(status='paused-window',reason='trial admission budget ended; every in-flight trial completed')
@@ -269,7 +286,8 @@ def main():
             raise RuntimeError('only a clean window-boundary pause may resume, never failed seeds')
     if not child:
         (window/'executed-kernel.py').write_text(ast.unparse(tree)+'\n')
-    sys.argv=[str(Path(__file__)),*remaining]
+    kernel_arguments=['supervisor',*remaining[1:]] if case=='store-restart' else remaining
+    sys.argv=[str(Path(__file__)),*kernel_arguments]
     exit_code=1
     try:
         if case=='matrix':
@@ -319,7 +337,10 @@ def main():
             else:
                 monitor.capture('cell-end');monitor.stop()
                 audit=process_audit(monitor)
-            (window/'processes.json.gz').write_bytes(gzip.compress((json.dumps(audit,indent=2)+'\n').encode(),mtime=0))
+            audit_bytes=(json.dumps(audit,indent=2)+'\n').encode()
+            (window/'processes.json.gz').write_bytes(gzip.compress(audit_bytes,mtime=0))
+            metadata['process_evidence']=dict(path=str((window/'processes.json.gz').relative_to(ROOT)),
+                raw_bytes=len(audit_bytes),sha256=hashlib.sha256(audit_bytes).hexdigest(),hash_scope='decompressed bytes')
             metadata.update(exit=exit_code,seconds=time.monotonic()-started,outcome=outcome.get('status'),
                 binaries_unchanged=validate_snapshot(bins)==identity,finished_wall_ns=time.time_ns(),
                 outside_noise_valid=audit['valid'],outside_maximum_cores=audit['maximum_outside_process_cores'])

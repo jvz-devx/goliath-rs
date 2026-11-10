@@ -33,18 +33,24 @@ def main():
     parser.add_argument('--resume',action='store_true')
     parser.add_argument('--start',type=int,default=300)
     parser.add_argument('--locator-bar-off',action='store_true',help='E31 workload variant, default off; single cells only')
+    parser.add_argument('--horizon-thp-disabled',action='store_true',help='D12 Linux allocator condition: MIMALLOC_ALLOW_THP=0 on the plain Horizon process only')
     parser.add_argument('--minimum-count',type=int,default=25 if platform.LINUX else 300)
     parser.add_argument('--step-up',type=int,default=50)
     args=parser.parse_args()
     base.BINS=args.bins.resolve()
     base.DATA=args.data_dir.resolve()
-    if not any(base.DATA.is_relative_to(ROOT/'docs/experiments/data'/experiment) for experiment in ['E17', 'E28', 'E31']):
+    if not any(base.DATA.is_relative_to(ROOT/'docs/experiments/data'/experiment) for experiment in ['E17', 'E28', 'E31', 'E33']):
         parser.error('data directory must remain under E17 evidence')
+    if args.horizon_thp_disabled:
+        if not platform.LINUX or not args.cell:
+            parser.error('the D12 Horizon allocator condition requires a single Linux cell')
+        from e33_memory import horizon_environment
+        horizon_environment(True)
     base.REQUEST_PREFIX='d9-plain09-baseline'
     original=base.provenance
     def provenance():
         result=original()
-        for name in ['e17-d9-baseline','e17_d9_baseline.py','e18_d9_layout.py']:
+        for name in ['e17-d9-baseline','e17_d9_baseline.py','e18_d9_layout.py']+(['e33_memory.py'] if args.horizon_thp_disabled else []):
             result[name+'_sha256']=base.digest(ROOT/'scripts'/name)
         return result
     base.provenance=provenance

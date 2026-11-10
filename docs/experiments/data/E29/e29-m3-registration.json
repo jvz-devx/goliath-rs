@@ -1,0 +1,16 @@
+{
+  "kind": "E29-fresh-M3-registration",
+  "registered_before_start": true,
+  "bundle": "final-r2-e29",
+  "strict_derivation": "final-r2 with goliath-store alone replaced",
+  "cpu_mode": "pin",
+  "server_cpus": "0-3 shared by all concurrent clusters",
+  "client_cpu": "4",
+  "harness_and_outside_cpu": "5",
+  "pilot": {"name": "e29-m3-pilot-j2", "seed": 240001, "crossings": 16, "jobs": 2, "budget_seconds": 300, "counts_towards_campaign": false},
+  "campaign": {"data_name": "e29-m3-crash", "first_name": "e29-m3-crash-w1", "seed": 240001, "crossings": 1000, "jobs": "decided after pilot", "budget_seconds_per_window": 1200},
+  "matrix": {"name": "e29-m3-matrix", "partition_cases": 12, "stale_login_cases": 6, "protocol": "unchanged E24 seeds and fault kernels"},
+  "separate_restart": {"name": "e29-m3-store-restart", "seed": 290001, "case": "store-restart", "counts_towards_campaign": false, "fixture": "original four-tile low-population M3 cluster, four moving real clients", "crashes": 2},
+  "resume_rule": "only an all-complete paused-window with valid restored D12 evidence; never resume or silently rerun a failed seed",
+  "reviewer_reproduction": "pending"
+}

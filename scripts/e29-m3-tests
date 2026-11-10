@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Wire and command contracts for the separate store-restart observation."""
+import struct
+from types import SimpleNamespace
+import unittest
+
+from e29_m3_restart import claim_result, restart_command, establish_player
+
+
+class Contracts(unittest.TestCase):
+    def test_restart_keeps_the_store_directory_and_changes_only_the_listen_address(self):
+        command=['store','--dir','run/store','--listen','127.0.0.1:0','--sync','full']
+        result=restart_command(command,('127.0.0.1',1234))
+        self.assertEqual(result,['store','--dir','run/store','--listen','127.0.0.1:1234','--sync','full'])
+        self.assertEqual(command[4],'127.0.0.1:0')
+
+    def test_busy_is_a_refusal_not_a_grant(self):
+        self.assertEqual(claim_result(bytes.fromhex('010507')),dict(busy=True))
+
+    def test_grant_requires_a_complete_fence_lease_and_counter(self):
+        response=b'\x01\x08'+struct.pack('<QQQQQ',0,42,3,1000,0)
+        self.assertEqual(claim_result(response),dict(busy=False,tile=0,process=42,epoch=3,lease_ms=1000,counter=0))
+        for invalid in [response[:-1],bytes.fromhex('010508'),b'']:
+            with self.assertRaisesRegex(RuntimeError,'unexpected claim'):claim_result(invalid)
+
+    def test_player_record_is_read_only_after_a_completed_crossing(self):
+        calls=[]
+        client=SimpleNamespace(send=lambda text:calls.append(('send',text)))
+        def chat(child,text,began,seconds):
+            self.assertIs(child,client);self.assertGreater(began,0);self.assertEqual(seconds,20)
+            calls.append(('chat',text))
+        def player(uuid):
+            self.assertEqual(calls[-1],('chat','E4 wall arrived b'))
+            calls.append(('player',uuid));return dict(generation=1,owner=1)
+        self.assertEqual(establish_player(SimpleNamespace(player=player),client,'uuid',2,chat),dict(generation=1,owner=1))
+        self.assertEqual(calls,[('send','walk before2 -1 1'),('chat','E4 wall arrived b'),('player','uuid')])
+
+
+if __name__=='__main__':
+    unittest.main()

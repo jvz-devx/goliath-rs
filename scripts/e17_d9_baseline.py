@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import goliath_platform as platform
+from e33_memory import horizon_environment,horizon_thp_observation,thp_settings
 from e11_support import ROOT,RUNS,Engine,CpuBudget,usage,private_env,save,sanitize,wait,complete_json_lines
 from e18_process import ProcessSampler
 from e18_d9_layout import plan
@@ -78,8 +79,13 @@ def cell(args,base):
                 'servers':[{'command':[str(base.BINS/'horizon-client'),'--resources','{resources}',
                     '--control-socket','{endpoint}','--dedicated','--nogui'],
                     'properties':{'difficulty':'peaceful','pause-when-empty-seconds':-1}}]}
+            if getattr(args,'horizon_thp_disabled',False):
+                config['servers'][0]['env']=horizon_environment(True)
+                row.update(horizon_thp_disabled=True,host_transparent_hugepage_before=thp_settings())
             row['config']=config
             engine=Engine(folder/'engine',config)
+            if getattr(args,'horizon_thp_disabled',False):
+                row['horizon_thp']=horizon_thp_observation(engine.pid,True)
             monitor.register('engine-0',engine.pid)
             main_id=engine.pid if platform.LINUX else min(thread_ids(engine.pid))
             limits.append(CpuBudget([engine.pid],4).start())
@@ -221,6 +227,8 @@ def cell(args,base):
             for phase in process_report['phases'].values():
                 if phase: phase['server_cores']=phase['fixture'].get('engine-0',{}).get('cores',0)
             row['outside_process_cpu']=process_report
+            if getattr(args,'horizon_thp_disabled',False):
+                row['host_transparent_hugepage_after']=thp_settings()
             valid,reasons=outside_validity(process_report)
             if not valid:
                 row.update({'pass':False,'valid':False});row['reasons']+=reasons

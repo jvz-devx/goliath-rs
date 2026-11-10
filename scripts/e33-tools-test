@@ -8,6 +8,7 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import e33_memory as memory
 from e28_soak_memory import Rule
@@ -85,7 +86,7 @@ class Contracts(unittest.TestCase):
         self.assertIn('transparent_hugepage=thp_settings()', (root/'e28_window.py').read_text())
 
     def test_host_thp_settings_include_every_khugepaged_value(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent.parent/'.local/runs') as folder:
             sys=Path(folder);base=sys/'kernel/mm/transparent_hugepage'
             (base/'khugepaged').mkdir(parents=True)
             (base/'enabled').write_text('always [madvise] never\n')
@@ -102,6 +103,42 @@ class Contracts(unittest.TestCase):
         self.assertTrue(same_policy(before,after))
         after['transparent_hugepage']['enabled']='[never]'
         self.assertFalse(same_policy(before,after))
+
+    def test_horizon_environment_is_opt_in_and_does_not_change_global_environment(self):
+        with patch.dict(memory.os.environ,{},clear=True):
+            self.assertEqual(memory.horizon_environment(False),{})
+            self.assertEqual(memory.horizon_environment(True),{'MIMALLOC_ALLOW_THP':'0'})
+            self.assertNotIn('MIMALLOC_ALLOW_THP',memory.os.environ)
+        for key in ['MIMALLOC_ALLOW_THP','mimalloc_allow_thp']:
+            with patch.dict(memory.os.environ,{key:'0'},clear=True):
+                with self.assertRaisesRegex(ValueError,'unset global'):memory.horizon_environment(True)
+
+    def test_horizon_probe_checks_effect_and_never_returns_unrelated_environment(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent.parent/'.local/runs') as folder:
+            proc=Path(folder);pid=proc/'1';pid.mkdir()
+            (pid/'environ').write_bytes(b'UNRELATED=not-retained\0MIMALLOC_ALLOW_THP=0\0')
+            (pid/'status').write_text('THP_enabled:\t0\n')
+            (pid/'smaps_rollup').write_text('0000-ffff [rollup]\nAnonHugePages: 0 kB\n')
+            row=memory.horizon_thp_observation(1,True,proc)
+            self.assertEqual(row,dict(environment={'MIMALLOC_ALLOW_THP':'0','mimalloc_allow_thp':None},THP_enabled='0',AnonHugePages=0,smaps_unit='KiB'))
+            (pid/'smaps_rollup').write_text('0000-ffff [rollup]\nAnonHugePages: 2048 kB\n')
+            with self.assertRaisesRegex(RuntimeError,'not effective'):memory.horizon_thp_observation(1,True,proc)
+            (pid/'smaps_rollup').write_text('0000-ffff [rollup]\nAnonHugePages: 0 kB\n')
+            (pid/'status').write_text('THP_enabled:\t1\n')
+            with self.assertRaisesRegex(RuntimeError,'not effective'):memory.horizon_thp_observation(1,True,proc)
+            (pid/'status').write_text('THP_enabled:\t0\n')
+            (pid/'environ').write_bytes(b'MIMALLOC_ALLOW_THP=1\0')
+            with self.assertRaisesRegex(RuntimeError,'not effective'):memory.horizon_thp_observation(1,True,proc)
+
+    def test_both_capacity_runners_expose_the_same_horizon_only_flag(self):
+        root=Path(__file__).resolve().parent
+        for name in ['e17-d9-baseline','e20-frontier']:
+            text=(root/name).read_text();ast.parse(text)
+            self.assertIn("parser.add_argument('--horizon-thp-disabled',action='store_true'",text)
+        plain=(root/'e17_d9_baseline.py').read_text()
+        self.assertIn("config['servers'][0]['env']=horizon_environment(True)",plain)
+        cluster=(root/'e20-frontier').read_text()
+        self.assertIn("tile_environment={'HORIZON_E11_MEASURE':'1',**horizon_environment(args.horizon_thp_disabled)}",cluster)
 
 
 if __name__=='__main__':
